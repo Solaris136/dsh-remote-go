@@ -7,7 +7,7 @@
 
 ## 0. 结论先行
 
-1. **它基本就是我们的设计，而且走得更远。** 本地 DSH 里一个浮动 target rail + 主区全屏 iframe，iframe 里是远端 profile 的**官方 DSH UI 原件**（含第三方 UI 插件）；远端数据（workspace/session/日志）权威；模型来源可选「本机模型经反向隧道」或「远端自己的模型」。这正是 `dsh-remote-viewport` 想做的事。
+1. **它基本就是我们的设计，而且走得更远。** 本地 DSH 里一个浮动 target rail + 主区全屏 iframe，iframe 里是远端 profile 的**官方 DSH UI 原件**（含第三方 UI 插件）；远端数据（workspace/session/日志）权威；模型来源可选「本机模型经反向隧道」或「远端自己的模型」。这正是 `dsh-remote-go` 想做的事。
 2. **它已经解决了我们最大的 V0 风险**：用 **同源 portal 反向代理**（剥 client cookie、注入 profile cookie、不转发 Set-Cookie、token 不进入 URL）把远端 UI 挂到本地 origin 下，从而绕过 `SameSite=Strict` + authority 绑定的跨站 iframe 问题。这恰是 dsh-remote-dsh 评估「工作量 3–4 倍」而放弃的方案。
 3. **代价是远端更重**：每个 client 在服务器上有一个专用 DSH profile + 专属 server 插件 + 独立 Node/DSH runtime（`~/.dsh/remote-window/<clientId>/runtime`），不是「零远端组件」。
 4. **成熟度：工程质量高，但真实环境验证不足。** alpha.6（2026-11-09），client 626 tests / server 69 tests 声称通过，兼容表有生成门禁，文档/QA 很完整；但 server README 明说 alpha.6「real-host run pending」，v2 QA 报告状态是 NOT RUN，v3 的浏览器 E2E 用 fake sshd + fake LLM + headless Chrome 完成，**真实服务器 + 真实模型 + 真实网络仍待验证**。
@@ -150,7 +150,7 @@ server（SSH 目标机）
 
 ## 7. 与我们的设计对比
 
-| 维度 | dsh-remote-window | 我们（dsh-remote-viewport 设计） |
+| 维度 | dsh-remote-window | 我们（dsh-remote-go 设计） |
 |---|---|---|
 | 远端依赖 | 专用 profile + server 插件 + 独立 runtime（重） | 原设计：零远端专属组件（轻） |
 | 客户端工作量 | 很大：SSH/provision/portal/P1/model bridge（host 378KB + client 145KB 的构建产物） | 小：SSH + 全局面板 + 状态 |
@@ -173,7 +173,7 @@ server（SSH 目标机）
    - **路线 B（差异化）**：坚持「零远端组件 + 轻量」：不装 server 插件、不建 per-client profile，只用远端现有 `dsh web` + SSH 隧道；但要自己解决同源 portal（或接受「外部窗口打开」降级）。
    - **路线 C（换形态）**：做多机分屏/团队共享/移动端等它明确不做的方向。
 3. **本轮只做了只读调研，未安装**（按你的要求）。如果之后允许，建议用隔离 `DSH_HOME` + 现有服务器做真机验证，重点看：真实 SSH/网络、真实模型、审批、断线重连、Alpha 的 profile 残留。
-4. **命名**：如果继续自研且想保留「窗口」意象，可考虑 `dsh-remote-viewfinder`、`dsh-remote-windowpane` 等（npm/GitHub 未占用）；否则保留现有的 `dsh-remote-viewport`。
+4. **命名**：如果继续自研且想保留「窗口」意象，可考虑 `dsh-remote-viewfinder`、`dsh-remote-windowpane` 等（npm/GitHub 未占用）；否则保留现有的 `dsh-remote-go`。
 
 ---
 

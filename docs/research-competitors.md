@@ -1,6 +1,6 @@
 # DSH 远程类插件 · 同类项目调研与需求/注意点总结
 
-> 调研时间：2026-11-10 · 面向项目：`dsh-remote-viewport`（DSH 远程视窗，薄客户端方案）
+> 调研时间：2026-11-10 · 面向项目：`dsh-remote-go`（DSH 远程入口，薄客户端方案）
 > 方法：GitHub README/源码 + npm registry + 本地 clone（`_research/vendor/dsh-remote-gui`、`_design/research/incoming/`）。
 > 目的：从同类项目提取**需求**与**踩坑点**，反哺我们自己的设计，不评价项目优劣。
 
@@ -52,9 +52,9 @@
 
 ## 2. 需求清单（从同类项目反推）
 
-> 标记：**采纳** = 进入 `dsh-remote-viewport` 需求；**参考** = 记录但不进 V1；**不做** = 与薄客户端定位冲突。
+> 标记：**采纳** = 进入 `dsh-remote-go` 需求；**参考** = 记录但不进 V1；**不做** = 与薄客户端定位冲突。
 
-| ID | 需求 | 来源项目 | 对 dsh-remote-viewport 的取舍 |
+| ID | 需求 | 来源项目 | 对 dsh-remote-go 的取舍 |
 |---|---|---|---|
 | R1 | SSH 主机：自动发现 `~/.ssh/config` 别名；手动填写地址/端口/用户/工作目录；多主机与每主机独立配置 | dsh-remote-tunnel、dsh-ssh-desktop、Golden-Pigeon | **采纳**（自动发现 + 手动表单都进 V1；哈希 known_hosts 条目只统计跳过数，不猜） |
 | R2 | 远端就绪探测：keys / Node / dsh / pnpm / systemd / 磁盘 / 模型凭据；缺什么列什么 | dsh-remote-tunnel、dsh-remote-explorer、Golden-Pigeon | **采纳**（向导第 3 步已有，补充「远端桌面功能干扰」检查） |
