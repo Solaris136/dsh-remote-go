@@ -2,7 +2,7 @@
 
 > 在本地 DSH 里，通过 SSH 整页打开服务器上的 DSH。本地只负责连接、视窗与状态。
 
-**状态：设计阶段** —— 产品与内容设计 v0.5 已定稿（含同类项目调研与 V0 可行性闸门），尚未开始实现。设计文档见 [docs/design.md](docs/design.md)，同类项目调研见 [docs/research-competitors.md](docs/research-competitors.md)。
+**状态：设计阶段** —— 产品与内容设计 v0.6 已定稿（含同类项目调研、V0 可行性闸门、远端自举/版本一致/存活策略/远端插件与设置管理），尚未开始实现。设计文档见 [docs/design.md](docs/design.md)，同类项目调研见 [docs/research-competitors.md](docs/research-competitors.md) 与 [docs/research-dsh-remote-window.md](docs/research-dsh-remote-window.md)。
 
 ## 它是什么
 
