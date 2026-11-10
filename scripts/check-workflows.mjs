@@ -18,8 +18,17 @@ const candidates = [
 ].filter(Boolean)
 
 let parse = null
+// Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).
+try {
+  const module = await import('js-yaml')
+  const yaml = /** @type {any} */ (module).default ?? module
+  parse = (text) => yaml.load(text)
+  console.log('[check-workflows] using js-yaml devDependency')
+} catch {
+  /* fall through to local desktop copy / python */
+}
 for (const candidate of candidates) {
-  if (!candidate || !existsSync(candidate)) continue
+  if (parse || !candidate || !existsSync(candidate)) continue
   try {
     const require = createRequire(import.meta.url)
     const yaml = require(candidate)
