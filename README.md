@@ -2,7 +2,7 @@
 
 > 在本地 DSH 里，通过 SSH 整页打开服务器上的 DSH。本地只负责连接、视窗与状态。
 
-**状态：设计阶段** —— 产品与内容设计 v0.4 已定稿，尚未开始实现。设计文档见 [docs/design.md](docs/design.md)。
+**状态：设计阶段** —— 产品与内容设计 v0.5 已定稿（含同类项目调研与 V0 可行性闸门），尚未开始实现。设计文档见 [docs/design.md](docs/design.md)，同类项目调研见 [docs/research-competitors.md](docs/research-competitors.md)。
 
 ## 它是什么
 
@@ -36,8 +36,9 @@
 ## 仓库结构
 
 ```
-docs/design.md   产品与内容设计（v0.4）
-README.md        本文件
+docs/design.md              产品与内容设计（v0.5）
+docs/research-competitors.md 同类项目调研与需求/注意点
+README.md                   本文件
 ```
 
 ## License
