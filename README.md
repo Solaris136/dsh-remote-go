@@ -36,9 +36,10 @@
 ## 仓库结构
 
 ```
-docs/design.md              产品与内容设计（v0.5）
-docs/research-competitors.md 同类项目调研与需求/注意点
-README.md                   本文件
+docs/design.md                  产品与内容设计（v0.5）
+docs/research-competitors.md    同类项目调研与需求/注意点
+docs/research-dsh-remote-window.md  dsh-remote-window 专项调研（最接近项目）
+README.md                       本文件
 ```
 
 ## License

@@ -4,7 +4,7 @@
 > 项目：`dsh-remote-viewport`（中文名「DSH 远程视窗」）· 仓库计划位置 `C:\Work\dsh-remote-viewport`
 > 范围：**只定义插件提供什么内容、长什么样、怎么用**；不含架构、接口、代码、部署。
 > 替代关系：本版取代 v0.2「全控制台」方案（已归档到 `_design/archive/DSH远程控制台-全控制台方案-v0.2.md`）。
-> 关联调研：同类项目与需求/注意点汇总见 `_design/research/同类项目调研与需求注意点.md`。
+> 关联调研：同类项目与需求/注意点汇总见 `_design/research/同类项目调研与需求注意点.md`；最接近项目 `dsh-remote-window` 的专项调研见 `_design/research/dsh-remote-window-调研.md`。
 
 ---
 
@@ -366,7 +366,7 @@
 - 计划目录：`C:\Work\dsh-remote-viewport`
 - 本文件在仓库中的位置：`docs/design.md`
 - 命名备选（均查过 npm 与 GitHub 无同名项目）：`dsh-remote-frame`、`dsh-remote-embed`、`dsh-remote-lens`
-- 已排除：`dsh-remote-window`（npm 已被占用，GitHub 上也有同类项目 graydovee/dsh-remote-window）、`dsh-remote-portal`（GitHub 已有同名项目）、`dsh-remote-console`（已有同名插件）
+- 已排除：`dsh-remote-window`（npm 已被占用，GitHub 上 graydovee/dsh-remote-window 就是同类完整实现，2026-11-10 调研确认）、`dsh-remote-portal`（GitHub 已有同名项目）、`dsh-remote-console`（已有同名插件）
 - 调研文档：`_design/research/同类项目调研与需求注意点.md`（回环规则、iframe cookie、token 发现、远端桌面功能等坑）
 
 ---
@@ -401,8 +401,9 @@
 ### 15.3 结论
 
 - 方向成立：dsh-remote-dsh 证明「回环 + 整页嵌入远端 GUI」可行；dsh-remote-gui 证明「本地只管隧道/凭据、界面交给远端或重写」两条路都存在。
-- 我们的组合（全局面板 + 远端真实 GUI + 零远端组件）仍是最省本地维护成本的一条，没有同类项目完全覆盖。
-- 最大风险不是需求，而是 **iframe 的 cookie 种入/持久化**：必须 V0 先验，再进 V1。
+- **最接近的现成实现是 `graydovee/dsh-remote-window`（alpha.6）**：已用**同源 portal 反代**解决 iframe cookie，主区全屏显示远端官方 UI，支持本机模型自动代理 / server 模型、host key pin、per-client profile 与 runtime；代价是远端更重（常驻 profile + 专属插件 + 独立 runtime）。详见 `_design/research/dsh-remote-window-调研.md`。
+- 因此自研只剩两条路：**轻量差异化**（零远端专属组件、只用远端已有 dsh web + SSH，自己做 portal 或接受外部窗口降级）或 **fork/采用**该实现。
+- 最大风险仍是 **iframe 的 cookie 种入/持久化**：必须 V0 先验；已有 portal 正解可参考。
 
 ---
 ## 附录 · 5 分钟演示脚本
