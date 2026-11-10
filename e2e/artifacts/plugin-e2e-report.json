@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-11-10T17:39:58.898Z",
+  "startedAt": "2026-11-10T17:44:38.568Z",
   "sshAddress": "tencent-vm",
   "steps": [
     {
@@ -32,9 +32,9 @@
       "ok": true,
       "bootstrapLevel": "T0-local",
       "remoteVersion": "0.2.2-rc.1",
-      "remotePort": 38373,
-      "localPort": 59421,
-      "pid": 1412217
+      "remotePort": 40221,
+      "localPort": 53340,
+      "pid": 1414080
     },
     {
       "step": "tunnel-token-cookie",
@@ -56,7 +56,7 @@
     {
       "step": "browser-iframe",
       "ok": true,
-      "iframeSrcOrigin": "http://127.0.0.1:59421",
+      "iframeSrcOrigin": "http://127.0.0.1:53340",
       "sandbox": "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads",
       "remoteTitle": "DeepSeek Harness",
       "remoteNodes": 1131,
@@ -64,7 +64,7 @@
       "remoteNotice": false,
       "remoteTextSample": "探索未至之境\n预览版\nubuntu home\n标准模式\n描述你想要构建的内容, / 调用指令, @ 文件或对话\n工作区内修改\n请选择模型\n开始使用\n\n登录 DeepSeek 账号，或添加 API Key，即可开始使用。你的项目和文件保存在本",
       "authCookie": {
-        "name": "dsh-auth-C33T6BQUauqZFbc2u8Xq2zuMSHlunzC2Lw4d8AlrojI",
+        "name": "dsh-auth-FJmU025w5TnPeFVef1UTSRes0PsOTuKXCAARtIT8zi8",
         "sameSite": "Strict",
         "httpOnly": true
       },
@@ -82,13 +82,13 @@
     }
   ],
   "control": {
-    "origin": "http://127.0.0.1:59413",
-    "port": 59413
+    "origin": "http://127.0.0.1:53333",
+    "port": 53333
   },
   "host": {
-    "id": "h_64ya1k7o1p",
+    "id": "h_0xvx4giaey",
     "address": "tencent-vm"
   },
   "ok": true,
-  "finishedAt": "2026-11-10T17:40:23.329Z"
+  "finishedAt": "2026-11-10T17:45:03.369Z"
 }

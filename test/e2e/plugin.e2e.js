@@ -373,6 +373,12 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
       await page.screenshot({ path: path.join(ARTIFACTS, 'panel-missing.png') }).catch(() => {})
       throw error
     }
+    // Opening the remote panel must close the settings dialog behind it.
+    assert.equal(
+      await page.evaluate(() => Boolean(document.querySelector('[data-testid="settings-remote-section"]'))),
+      false,
+      'the settings dialog should close when the remote panel opens',
+    )
 
     // Workspace rail: local group + one group per remote host.
     const railSelector = '[data-testid="workspace-rail"]'
