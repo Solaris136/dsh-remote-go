@@ -78,7 +78,7 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 ```json
 {
   "name": "dsh-remote-go",
-  "title": { "zh": "远程入口", "en": "Remote entry" },
+  "title": { "zh": "dsh remote go", "en": "dsh remote go" },
   "description": {
     "zh": "通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH：主机清单、接入向导、连接诊断、远端运行时自举与版本一致。",
     "en": "Open a remote DSH inside a local full-page panel over SSH, with host list, connection wizard, diagnostics, remote runtime bootstrap and exact version parity."

@@ -304,6 +304,27 @@ test('GET /diagnostics/self proves host activation and client-module registratio
   }
 })
 
+test('workspace inventory endpoints serve local and per-remote groups', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const local = await call(api.base, '/local/workspaces')
+    assert.equal(local.status, 200)
+    assert.equal(local.json.ok, true)
+    assert.ok(Array.isArray(local.json.workspaces))
+
+    const host = await createHost(service)
+    const remote = await call(api.base, `/hosts/${host.id}/workspaces`)
+    assert.equal(remote.status, 200)
+    assert.equal(remote.json.ok, true)
+    assert.equal(remote.json.connected, false)
+    assert.deepEqual(remote.json.workspaces, [])
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('GET /version reports plugin and host versions', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)

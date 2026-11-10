@@ -1,8 +1,8 @@
 {
   "name": "dsh-remote-go",
   "title": {
-    "zh": "远程入口",
-    "en": "Remote entry"
+    "zh": "dsh remote go",
+    "en": "dsh remote go"
   },
   "description": {
     "zh": "通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH：主机清单、接入向导、连接诊断、远端运行时自举与版本一致。",
@@ -27,7 +27,7 @@
   "versions": [
     {
       "version": "0.1.0",
-      "publishTimestamp": 1794325115,
+      "publishTimestamp": 1794329451,
       "source": {
         "type": "npm"
       },

@@ -1,4 +1,4 @@
-# dsh-remote-go · DSH 远程入口
+# dsh-remote-go · dsh remote go
 
 > 在本地 DeepSeek Harness（DSH）里，通过 SSH 整页使用服务器上的 DSH。本地只负责连接、入口与状态。
 
@@ -8,8 +8,8 @@
 
 | 证据 | 结果 |
 |---|---|
-| 单元测试 | `node --test "test/unit/*.test.js"` → 155 用例全部通过（Host + Client） |
-| 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `node --test "test/e2e/*.e2e.js"` → 通过（插件验收 + 发布物安装）；证据 `e2e/artifacts/*.json`、截图 `e2e/artifacts/panel-remote-dsh.png` |
+| 单元测试 | `node --test "test/unit/*.test.js"` → 169 用例全部通过（Host + Client） |
+| 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `node --test "test/e2e/*.e2e.js"` → 通过；证据 `e2e/artifacts/plugin-e2e-report.json` 与截图 `settings-remote-section.png`、`panel-workspace-rail.png`、`panel-remote-dsh.png`（含工作区按远端分组断言） |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`） |
 | CI | GitHub Actions：ubuntu/windows × Node 24 单测 + 打包/市场条目校验；手动触发的真实主机 E2E |
 | V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：同站 loopback iframe 可嵌入，无需同源反代 |
@@ -23,7 +23,7 @@
 
 ## 它是什么
 
-- 一个 DSH 插件：在本地 DSH 侧边栏新增「远程入口」，点一下切到**全局面板**。
+- 一个 DSH 插件：主机在 **设置 → 远程主机** 里配置，打开后在**全局面板**里整页使用远端 DSH（**不占用侧边栏入口**）。
 - 面板里是一整页**远端 DSH 自己的 Web 界面**（同站 loopback iframe），会话、审批、文件、终端、插件、凭据、日志都由远端 DSH 提供。
 - 本地只做四件事：**主机清单、SSH 连接与隧道、全局面板承载、连接状态与诊断**。
 - 远端只需原版 DSH（`@deepseek-ai/dsh`）——没有环境时由插件自举（无 root，装到用户目录）。
@@ -32,7 +32,9 @@
 
 | 能力 | 状态 |
 |---|---|
-| 主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ |
+| **设置页「远程主机」**：主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ |
+| **面板左侧「工作区」栏**：本地工作区 + 按远端分组 / 远端工作区，点击本地工作区回本地会话 | ✅ |
+| 不占用侧边栏入口（入口在设置页与面板内） | ✅ |
 | 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ |
 | SSH 别名自动发现（`~/.ssh/config`）、known_hosts 只读解析 | ✅ |
 | 主机指纹：首次确认 / 记录 / 变化强提示 / strict 策略 | ✅ |
@@ -58,7 +60,7 @@
 dsh plugin --profile web add /absolute/path/to/dsh-remote-go
 ```
 
-或在 DSH 的 **Settings → Plugins** 里以插件包目录安装。安装后刷新页面，侧边栏出现「远程入口」。
+或在 DSH 的 **Settings → Plugins** 里以插件包目录安装。安装后刷新页面，打开 **设置 → 远程主机** 即可管理服务器。
 
 ### 方式 2：npm / 插件市场
 
@@ -70,11 +72,11 @@ dsh plugin --profile web add dsh-remote-go
 
 ## 快速开始
 
-1. 侧边栏「远程入口」→「添加第一台服务器」。
+1. 打开 **设置 → 远程主机** →「添加第一台服务器」。
 2. 填 SSH 地址或 `~/.ssh/config` 别名（可用 Agent / 密钥 / 一次性密码；可选跳板机）。
 3. 首次连接确认主机指纹（可「接受并记住」）。
 4. 插件探测远端环境：能连 SSH 后自动选择自举级别并启动远端 DSH，等待进入「已连接」。
-5. 远端 DSH 界面在面板中整页打开；后续所有操作都在远端界面里完成。
+5. 点「打开远程界面」：远端 DSH 在面板中整页打开；面板左侧「工作区」栏会列出「本地工作区」和每台远端的工作区（按远端分组），点击本地工作区可回到本地会话。
 6. 关闭视窗只关闭本地承载，远端任务继续（按主机的存活策略）。
 
 ### 远端自举分级（D0–D5，对应设计 §16.2）
@@ -94,13 +96,14 @@ dsh plugin --profile web add dsh-remote-go
 
 ```text
 本地 DSH（Host 插件 src/ + Client 插件 client.js）
-├─ 主机清单 / 向导 / 诊断 / 设置（本地 UI）
+├─ 设置页「远程主机」：主机清单 / 向导 / 诊断 / 插件设置（本地 UI，不占侧边栏入口）
 ├─ SSH（ssh2）：认证、主机指纹、exec、forwardOut
 ├─ 远端自举 / 远端 dsh web 生命周期（start/stop/adopt）
 └─ 本地回环 TCP 隧道  127.0.0.1:<localPort> ──SSH──▶ 远端 127.0.0.1:<remotePort>
                                                      │
 远端服务器：原版 DSH（`dsh --profile web --no-open --port 0`）
-└─ 远端 DSH Web 界面 ──同站 loopback iframe──▶ 本地「远程入口」全局面板
+└─ 远端 DSH Web 界面 ──同站 loopback iframe──▶ 本地远程面板
+                     └─ 面板左侧工作区栏：本地工作区 + 按远端分组
 ```
 
 关键决策：
@@ -178,3 +181,6 @@ E2E 需要本机有 Chrome/Edge（`E2E_CHROME` 可覆盖路径），以及可通
 ## License
 
 MIT（见 [LICENSE](LICENSE)）。
+
+
+

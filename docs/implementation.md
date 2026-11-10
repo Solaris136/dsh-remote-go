@@ -101,7 +101,9 @@ connect(id)
 
 ## 4. Client 半端
 
-- 注册：`main` 面板（key `dsh-remote-go`）+ `sidebar.panellist` 入口；`ctx.layout.selectPanel('dsh-remote-go')` 切换。
+- 注册：`settings.section`「远程主机」（id `dsh-remote-go`，order 45）承载主机清单/添加/编辑/删除/连接/诊断/打开面板；`main` 面板（key `dsh-remote-go`）承载远端视窗与左侧「工作区」栏；**不注册 `sidebar.panellist`**（产品要求不占侧边栏入口）。`ctx.layout.selectPanel('dsh-remote-go')` 切换面板。
+- 工作区栏：`GET /local/workspaces` + 每台主机 `GET /hosts/:id/workspaces`（Host 读取本机/远端 DSH 的 `storages/workspace.json`）；本地工作区点击回本地会话并 `ctx.uiWorkspace.openWorkspace(id)`，远端工作区点击打开对应主机面板。DSH 的 `sidebar.workspaces` 是 single 槽位被 ui-workspace 独占，插件无法向内置侧边栏追加分组，因此该区分放在面板内（本地侧边栏原样保留）。
+- 市场显示名：`dsh remote go`（locale meta.title）；设置页栏目名「远程主机」（Remote hosts）。
 - 状态：`GET /state` 为唯一真相；`EventSource /events` 实时推送，失败退化 3s 轮询。
 - 视窗：仅 `connected` 时 `GET /hosts/:id/open` 取一次性 token URL，校验 `http://127.0.0.1:` 前缀后赋给 iframe（sandbox 白名单）；URL/token 不进 localStorage/日志。
 - UI：主机清单/空态、接入向导 3 步、指纹确认、密码弹窗（password 认证）、诊断抽屉、设置、错误卡片、断线 banner、首次提示；中英双语。

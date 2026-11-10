@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "远程入口",
-    "description": "通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH：主机清单、诊断、远端运行时自举。"
+    "title": "dsh remote go",
+    "description": "通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH。主机在「设置 → 远程主机」里管理；面板左侧工作区按远端分组，并与本地工作区区分。"
   }
 }

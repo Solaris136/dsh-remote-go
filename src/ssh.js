@@ -79,6 +79,13 @@ export class SshConnection extends EventEmitter {
     /** @type {{ sha256: string, keyType: string, pinned: boolean } | null} */
     this.hostKeyInfo = null
     this.execSeq = 0
+    // ssh2 clients emit `error` for every failed auth attempt and again while
+    // tearing down. EventEmitter treats an unhandled `error` as a thrown
+    // exception, which would take down the whole DSH host process; keep a
+    // permanent safety listener so failures stay inside this connection.
+    this.on('error', () => {})
+    /** @type {() => any} */
+    this.clientFactory = typeof options.clientFactory === 'function' ? options.clientFactory : () => new Client()
   }
 
   get connected() {
@@ -134,7 +141,7 @@ export class SshConnection extends EventEmitter {
         if (error) reject(error)
         else resolve(value)
       }
-      const client = new Client()
+      const client = this.clientFactory()
       this.client = client
       /** @type {string | null} */
       let serverBanner = null
@@ -144,7 +151,10 @@ export class SshConnection extends EventEmitter {
       client.once('ready', () => {
         settle(null, { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '', serverBanner })
       })
-      client.once('error', (error) => {
+      // Permanent listener: settle the promise on the first error, swallow any
+      // later teardown errors (they are already reflected in the rejection).
+      client.on('error', (error) => {
+        if (settled) return
         settle(toSshError(error, this.options.host, this.options.port))
       })
       const config = {
@@ -374,6 +384,8 @@ export class SshConnection extends EventEmitter {
     this.closed = true
     if (client) {
       try {
+        // Keep an error sink attached: ssh2 may still emit during teardown.
+        client.on('error', () => {})
         client.end()
       } catch {
         /* already gone */

@@ -185,6 +185,10 @@ export function createApi(options) {
         sendJson(res, 200, { ok: true, ...(await service.discoverSshAliases()) })
         return
       }
+      if (method === 'GET' && path === '/local/workspaces') {
+        sendJson(res, 200, { ok: true, ...(await service.listLocalWorkspaces()) })
+        return
+      }
       if (method === 'POST' && path === '/hosts') {
         const body = await readJson(req)
         const host = await service.saveHost(body.host ?? body)
@@ -266,6 +270,10 @@ export function createApi(options) {
         if (method === 'POST' && action === 'diagnose') {
           const report = await service.diagnose(id)
           sendJson(res, 200, { ok: true, report })
+          return
+        }
+        if (method === 'GET' && action === 'workspaces') {
+          sendJson(res, 200, { ok: true, ...(await service.listHostWorkspaces(id)) })
           return
         }
         if (method === 'GET' && action === 'open') {

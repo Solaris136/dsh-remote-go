@@ -35,6 +35,7 @@ import {
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
+import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
 export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
@@ -313,6 +314,47 @@ export class RemoteGoService extends EventEmitter {
     const settings = await this.store.saveSettings(patch)
     this.#emitState()
     return settings
+  }
+
+  /**
+   * Local DSH workspaces for the panel's "local workspaces" group.
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async listLocalWorkspaces() {
+    const result = await readLocalWorkspaces({ home: this.home })
+    return {
+      source: result.source,
+      initialized: result.initialized,
+      defaultWorkspaceId: result.defaultWorkspaceId,
+      workspaces: result.workspaces.map((workspace) => ({ ...workspace, origin: 'local' })),
+    }
+  }
+
+  /**
+   * Workspaces of one remote DSH (read over the existing SSH session, same
+   * durable registry format). Returns `connected:false` instead of throwing when
+   * the host is not connected so the panel can render the group placeholder.
+   * @param {string} id
+   */
+  async listHostWorkspaces(id) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    if (!runtime.ssh?.connected) {
+      return { hostId: id, hostName: runtime.entry.name, connected: false, workspaces: [], initialized: false, defaultWorkspaceId: null }
+    }
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
+    return {
+      hostId: id,
+      hostName: runtime.entry.name,
+      connected: true,
+      dshHome: layout.home,
+      ok: result.ok,
+      reason: result.reason ?? null,
+      initialized: result.initialized,
+      defaultWorkspaceId: result.defaultWorkspaceId,
+      workspaces: result.workspaces.map((workspace) => ({ ...workspace, origin: 'remote', hostId: id, hostName: runtime.entry.name })),
+    }
   }
 
   /** Read-only SSH discovery for the wizard (design §15.1). */

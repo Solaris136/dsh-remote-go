@@ -119,3 +119,36 @@ test('exec refuses to run without an open connection', async () => {
   await assert.rejects(() => ssh.exec('true'), /not open/)
   await assert.rejects(() => ssh.forwardOut('127.0.0.1', 80), /not open/)
 })
+
+test('late ssh2 errors after a failed auth attempt never crash the host process', async () => {
+  const { EventEmitter } = await import('node:events')
+  class FakeClient extends EventEmitter {
+    connect() {
+      queueMicrotask(() => {
+        this.emit('error', Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' }))
+        this.emit('error', new Error('late teardown error'))
+      })
+    }
+    end() {}
+  }
+  const ssh = new SshConnection({ host: 'example.com', username: 'u', auth: { type: 'password', password: 'x' }, clientFactory: () => new FakeClient() })
+  await assert.rejects(ssh.connect(), (error) => error?.code === 'auth')
+  // The second error must be swallowed by the permanent listener; an unhandled
+  // 'error' event would fail the whole test process here.
+  await new Promise((resolve) => setTimeout(resolve, 20))
+})
+
+test('post-connect ssh errors are contained and reach optional listeners', async () => {
+  const { EventEmitter } = await import('node:events')
+  class FakeClient extends EventEmitter {
+    connect() { queueMicrotask(() => this.emit('ready')) }
+    end() {}
+  }
+  const fake = new FakeClient()
+  const ssh = new SshConnection({ host: 'example.com', username: 'u', auth: { type: 'password', password: 'x' }, clientFactory: () => fake })
+  await ssh.connect()
+  const seen = []
+  ssh.on('error', (error) => seen.push(error.message))
+  assert.doesNotThrow(() => fake.emit('error', new Error('connection lost')))
+  assert.deepEqual(seen, ['connection lost'])
+})

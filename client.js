@@ -1,10 +1,11 @@
 /*
  * dsh-remote-go · Client half
  *
- * A single-file browser plugin (no build step) that adds a "Remote" sidebar
- * entry and a global main panel. The panel lists SSH hosts, runs the
- * connect wizard, and embeds the remote DSH Web UI — reached through a local
- * loopback tunnel — in a sandboxed iframe.
+ * A single-file browser plugin (no build step) that contributes the
+ * Settings → "Remote hosts" section and a global main panel. The panel lists
+ * SSH hosts, runs the connect wizard, and embeds the remote DSH Web UI —
+ * reached through a local loopback tunnel — in a sandboxed iframe. A left rail
+ * in the panel groups local and per-host workspaces.
  *
  * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
  * source of truth; this file renders that state and sends user intents back.
@@ -50,6 +51,8 @@ window.__ModuleLoader__.load({
     /** LocalStorage flags (never store tokens or iframe URLs). */
     const ENTER_HINT_KEY = 'dsh-remote-go.hint.remote-enter'
     const CLOSE_HINT_KEY = 'dsh-remote-go.hint.remote-close'
+    /** The workspace rail's collapsed state (UI preference only). */
+    const RAIL_COLLAPSED_KEY = 'dsh-remote-go.rail.collapsed'
     /** iframe sandbox: enough for the remote DSH UI, nothing more. */
     const IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads'
     /** Only loopback URLs may ever become an iframe src (contract §3.5). */
@@ -99,12 +102,18 @@ window.__ModuleLoader__.load({
      */
     const zh = {
       // -- navigation / common -------------------------------------------------
-      panel: '远程入口',
-      panelSubtitle: '通过 SSH 在本地整页使用远端 DSH',
+      settingsNav: '远程主机',
+      settingsIntro: '管理通过 SSH 连接的远程主机；连接后可以在这里打开远端 DSH 界面。',
+      settingsEmptyTitle: '还没有远程主机',
+      settingsEmptyBody: '还没有远程主机。添加一台，然后在这里打开它的 DSH。',
+      settingsAddHost: '添加远程主机',
+      settingsHostOpen: '打开远程界面',
+      settingsPluginSettings: '插件设置',
+      panelSubtitle: '管理远程主机，并在本地整页打开远端 DSH。',
       addHost: '添加主机',
       addFirstHost: '添加第一台服务器',
-      emptyTitle: '还没有服务器',
-      emptyBody: '还没有服务器。添加一台，然后在本地窗口里直接使用它上面的 DSH。',
+      emptyTitle: '还没有远程主机',
+      emptyBody: '还没有远程主机。添加一台，然后打开它的远端 DSH 界面。',
       refresh: '刷新状态',
       refreshing: '刷新中…',
       settings: '设置',
@@ -141,7 +150,7 @@ window.__ModuleLoader__.load({
       name: '名称',
 
       // -- host list -----------------------------------------------------------
-      hostsTitle: '远程入口',
+      hostsTitle: '远程主机',
       summary: '已连接 {connected} / 共 {total}',
       lastOpened: '上次打开',
       neverOpened: '尚未打开',
@@ -180,6 +189,26 @@ window.__ModuleLoader__.load({
       loopbackNote: '远端界面只经 SSH 隧道映射为 127.0.0.1 后嵌入；不会直接使用该地址，也不会暴露到公网。',
       statusUnknownHostTitle: '读取不到这台主机的状态',
       statusUnknownHostBody: '主机可能已被删除，或状态尚未同步。',
+
+      // -- workspace rail ------------------------------------------------------
+      workspaceRailTitle: '工作区',
+      workspaceRailToggleCollapse: '收起工作区栏',
+      workspaceRailToggleExpand: '展开工作区栏',
+      workspaceRailRefresh: '刷新工作区',
+      workspaceLocalGroup: '本地工作区',
+      workspaceRemoteGroup: '远端工作区',
+      workspaceRailHint: '本地工作区仍可在左侧边栏切换',
+      workspaceRailEmpty: '还没有远程主机。添加一台后，这里会显示它的工作区。',
+      workspaceLocalEmpty: '没有本地工作区',
+      workspaceRemoteEmpty: '没有远端工作区',
+      workspaceRailDisconnected: '未连接',
+      workspaceRailRemoteError: '无法读取远端工作区',
+      workspaceRailLocalError: '无法读取本地工作区',
+      workspaceRailLoading: '正在读取…',
+      workspaceRailSessions: '{count} 个会话',
+      workspaceDefault: '默认',
+      workspaceLocalOrigin: '本地',
+      workspaceRemoteOrigin: '远端',
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
@@ -285,7 +314,7 @@ window.__ModuleLoader__.load({
       'wizard.testRetry': '重新测试',
       'wizard.testing': '正在测试连接…',
       'wizard.testDone': '连接成功，远端界面可用。',
-      'wizard.finishTitle': '远端入口已就绪',
+      'wizard.finishTitle': '远程主机已就绪',
       'wizard.finishBody': '远端 DSH 界面已可以通过本地视窗打开。',
       'wizard.versionLocal': '本机 DSH',
       'wizard.versionRemote': '远端 DSH',
@@ -295,7 +324,7 @@ window.__ModuleLoader__.load({
       'wizard.uiReady': '远端界面',
       'wizard.uiReadyYes': '就绪',
       'wizard.uiReadyNo': '未就绪',
-      'wizard.openRemote': '打开远程入口',
+      'wizard.openRemote': '打开远程界面',
       'wizard.finishLater': '稍后再说',
       'wizard.errorTitle': '连接测试未通过',
       'wizard.copyDiag': '复制诊断信息',
@@ -382,12 +411,18 @@ window.__ModuleLoader__.load({
 
     /** English dictionary — complete parallel of `zh`. */
     const en = {
-      panel: 'Remote',
-      panelSubtitle: 'Use a remote DSH on this page over SSH',
+      settingsNav: 'Remote hosts',
+      settingsIntro: 'Manage hosts connected over SSH; once connected, open their DSH interface here.',
+      settingsEmptyTitle: 'No remote hosts yet',
+      settingsEmptyBody: 'No remote hosts yet. Add one, then open its DSH here.',
+      settingsAddHost: 'Add remote host',
+      settingsHostOpen: 'Open remote UI',
+      settingsPluginSettings: 'Plugin settings',
+      panelSubtitle: 'Manage remote hosts and open their DSH full-page locally.',
       addHost: 'Add host',
       addFirstHost: 'Add your first server',
-      emptyTitle: 'No servers yet',
-      emptyBody: 'No servers yet. Add one, then use the DSH running on it right here in a local window.',
+      emptyTitle: 'No remote hosts yet',
+      emptyBody: 'No remote hosts yet. Add one, then open its remote DSH interface.',
       refresh: 'Refresh status',
       refreshing: 'Refreshing…',
       settings: 'Settings',
@@ -423,7 +458,7 @@ window.__ModuleLoader__.load({
       status: 'Status',
       name: 'Name',
 
-      hostsTitle: 'Remote',
+      hostsTitle: 'Remote hosts',
       summary: '{connected} connected / {total} total',
       lastOpened: 'Last opened',
       neverOpened: 'Never opened',
@@ -462,6 +497,25 @@ window.__ModuleLoader__.load({
       loopbackNote: 'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
       statusUnknownHostTitle: 'Cannot read this host',
       statusUnknownHostBody: 'It may have been deleted, or its state has not synced yet.',
+
+      workspaceRailTitle: 'Workspaces',
+      workspaceRailToggleCollapse: 'Collapse the workspaces bar',
+      workspaceRailToggleExpand: 'Expand the workspaces bar',
+      workspaceRailRefresh: 'Refresh workspaces',
+      workspaceLocalGroup: 'Local workspaces',
+      workspaceRemoteGroup: 'Remote workspaces',
+      workspaceRailHint: 'Local workspaces can still be switched from the left sidebar',
+      workspaceRailEmpty: 'No remote hosts yet. Add one and its workspaces will show here.',
+      workspaceLocalEmpty: 'No local workspaces',
+      workspaceRemoteEmpty: 'No remote workspaces',
+      workspaceRailDisconnected: 'Not connected',
+      workspaceRailRemoteError: 'Cannot read remote workspaces',
+      workspaceRailLocalError: 'Cannot read local workspaces',
+      workspaceRailLoading: 'Loading…',
+      workspaceRailSessions: '{count} sessions',
+      workspaceDefault: 'Default',
+      workspaceLocalOrigin: 'Local',
+      workspaceRemoteOrigin: 'Remote',
 
       viewportConnecting: 'Connecting to "{name}"…',
       viewportOpening: 'Connecting to "{name}" and preparing the remote UI…',
@@ -563,7 +617,7 @@ window.__ModuleLoader__.load({
       'wizard.testRetry': 'Test again',
       'wizard.testing': 'Testing the connection…',
       'wizard.testDone': 'Connected; the remote UI is available.',
-      'wizard.finishTitle': 'Remote entry is ready',
+      'wizard.finishTitle': 'Remote host is ready',
       'wizard.finishBody': 'The remote DSH interface can now open in this local window.',
       'wizard.versionLocal': 'Local DSH',
       'wizard.versionRemote': 'Remote DSH',
@@ -573,7 +627,7 @@ window.__ModuleLoader__.load({
       'wizard.uiReady': 'Remote UI',
       'wizard.uiReadyYes': 'Ready',
       'wizard.uiReadyNo': 'Not ready',
-      'wizard.openRemote': 'Open remote entry',
+      'wizard.openRemote': 'Open remote UI',
       'wizard.finishLater': 'Later',
       'wizard.errorTitle': 'The connection test failed',
       'wizard.copyDiag': 'Copy diagnostics',
@@ -993,6 +1047,63 @@ window.__ModuleLoader__.load({
       return count
     }
 
+    /**
+     * One-shot request channel between the settings section and the main panel:
+     * the settings page asks the panel to open a host, then switches the layout
+     * to it. The panel consumes the request on mount or on subscribe.
+     * @returns {{request: Function, take: Function, subscribe: Function}} store handle.
+     */
+    function createPanelRequestStore() {
+      let pending = null
+      const listeners = new Set()
+      const emit = () => {
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch (_error) {
+            // a stale listener must not break the request
+          }
+        }
+      }
+      return {
+        request(hostId) {
+          if (typeof hostId === 'string' && hostId.length > 0) {
+            pending = hostId
+            emit()
+          }
+        },
+        take() {
+          const hostId = pending
+          pending = null
+          return hostId
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    }
+
+    /** @returns {boolean} whether the workspace rail was left collapsed. */
+    function readRailCollapsed() {
+      try {
+        const store = localStore()
+        return store !== null && store.getItem(RAIL_COLLAPSED_KEY) === '1'
+      } catch (_error) {
+        return false
+      }
+    }
+
+    /** @param {boolean} collapsed - collapse state to remember. */
+    function writeRailCollapsed(collapsed) {
+      try {
+        const store = localStore()
+        if (store !== null) store.setItem(RAIL_COLLAPSED_KEY, collapsed === true ? '1' : '0')
+      } catch (_error) {
+        // storage is an optional preference; never break the rail
+      }
+    }
+
     //#endregion
 
     //#region 5. local error views
@@ -1227,6 +1338,42 @@ window.__ModuleLoader__.load({
         const payload = await apiRequest('/settings', { method: 'POST', body: { patch } })
         return payload.settings
       },
+      /** @returns {Promise<object>} local workspace registry (contract §1 GET /local/workspaces). */
+      async getLocalWorkspaces() {
+        const payload = await apiRequest('/local/workspaces')
+        return {
+          workspaces: Array.isArray(payload.workspaces) ? payload.workspaces : [],
+          defaultWorkspaceId: typeof payload.defaultWorkspaceId === 'string' ? payload.defaultWorkspaceId : null,
+          initialized: payload.initialized !== false,
+          source: typeof payload.source === 'string' ? payload.source : null,
+        }
+      },
+      /**
+       * Workspace list of one remote host (contract §1 GET /hosts/:id/workspaces).
+       * Reports `connected:false` instead of failing when the tunnel is down.
+       * @param {string} hostId - host id.
+       * @returns {Promise<object>} workspace payload.
+       */
+      async getHostWorkspaces(hostId) {
+        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/workspaces')
+        return {
+          connected: payload.connected === true,
+          hostId: typeof payload.hostId === 'string' ? payload.hostId : hostId,
+          hostName: typeof payload.hostName === 'string' ? payload.hostName : '',
+          workspaces: Array.isArray(payload.workspaces) ? payload.workspaces : [],
+          defaultWorkspaceId: typeof payload.defaultWorkspaceId === 'string' ? payload.defaultWorkspaceId : null,
+          initialized: payload.initialized !== false,
+        }
+      },
+      /**
+       * Point the Host's active host at `hostId` so a reload reopens the same
+       * remote panel (POST /hosts/:id/activate).
+       * @param {string} hostId - host id.
+       * @returns {Promise<object>} acknowledgement.
+       */
+      async activate(hostId) {
+        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
+      },
       /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (contract §1). */
       async getAliases() {
         const payload = await apiRequest('/ssh/aliases')
@@ -1349,7 +1496,6 @@ window.__ModuleLoader__.load({
           strokeLinejoin: 'round',
           'aria-hidden': 'true',
           focusable: 'false',
-          'data-testid': 'dsh-remote-go-sidebar',
           style: { display: 'block' },
         },
         h('rect', { x: 2.5, y: 4, width: 12, height: 9.5, rx: 2 }),
@@ -1399,6 +1545,11 @@ window.__ModuleLoader__.load({
     const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
     const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
     const IconWifi = strokeIcon(['M3.5 9.5a13 13 0 0 1 17 0', 'M6.5 13a8.5 8.5 0 0 1 11 0', 'M9.5 16.5a4 4 0 0 1 5 0', 'M12 20h.01'])
+    const IconFolder = strokeIcon([
+      'M3.5 7A1.5 1.5 0 0 1 5 5.5h4.2l1.8 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17V7Z',
+    ])
+    const IconChevronLeft = strokeIcon(['M14.5 6.5 8.5 12l6 5.5'])
+    const IconChevronRight = strokeIcon(['M9.5 6.5l6 5.5-6 5.5'])
 
     /**
      * Status dot. Color comes from theme tokens with stable fallbacks.
@@ -1702,16 +1853,21 @@ window.__ModuleLoader__.load({
      */
     function EmptyHosts(props) {
       const t = translatorOf(props)
+      const settingsMode = props.variant === 'settings'
       return h(
         'div',
-        { className: 'drg-empty', 'data-testid': 'host-list-empty' },
+        { className: 'drg-empty', 'data-testid': settingsMode ? 'settings-host-list-empty' : 'host-list-empty' },
         h('div', { className: 'drg-empty-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 40 })),
-        h('h3', { className: 'drg-empty-title' }, t('emptyTitle')),
-        h('p', { className: 'drg-empty-body' }, t('emptyBody')),
+        h('h3', { className: 'drg-empty-title' }, settingsMode ? t('settingsEmptyTitle') : t('emptyTitle')),
+        h('p', { className: 'drg-empty-body' }, settingsMode ? t('settingsEmptyBody') : t('emptyBody')),
         h(
           Button,
-          { variant: 'primary', testId: 'host-add-empty', onClick: props.onAdd === undefined ? undefined : () => props.onAdd() },
-          t('addFirstHost'),
+          {
+            variant: 'primary',
+            testId: settingsMode ? 'settings-host-add-empty' : 'host-add-empty',
+            onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
+          },
+          settingsMode ? t('settingsAddHost') : t('addFirstHost'),
         ),
       )
     }
@@ -1735,15 +1891,18 @@ window.__ModuleLoader__.load({
       const lastOpened = host.lastOpenedAt ? formatTime(host.lastOpenedAt, locale) : t('neverOpened')
       const failing = host.status === 'error' || host.status === 'limited'
       const reason = host.error ? resolveText(host.error.detail, locale) || resolveText(host.error.title, locale) : ''
-      const primaryLabel =
-        host.status === 'connected'
+      const settingsMode = props.variant === 'settings'
+      const primaryLabel = settingsMode
+        ? t('settingsHostOpen')
+        : host.status === 'connected'
           ? t('cardOpen')
           : host.status === 'fingerprint-pending'
             ? t('confirmFingerprint')
             : host.status === 'connecting'
               ? t('connecting')
               : t('cardConnect')
-      const primaryDisabled = busy || host.status === 'connecting'
+      const primaryTestId = settingsMode ? 'settings-host-open' : 'host-open'
+      const primaryDisabled = settingsMode ? busy || host.status !== 'connected' : busy || host.status === 'connecting'
 
       return h(
         'li',
@@ -1782,15 +1941,27 @@ window.__ModuleLoader__.load({
             Button,
             {
               variant: host.status === 'connected' ? 'primary' : 'secondary',
-              testId: 'host-open',
+              testId: primaryTestId,
               onClick: () => {
                 if (typeof props.onOpen === 'function') props.onOpen(host)
               },
               disabled: primaryDisabled,
-              busy: busy && host.status !== 'connected' && host.status !== 'connecting',
+              busy: settingsMode ? false : busy && host.status !== 'connected' && host.status !== 'connecting',
             },
             primaryLabel,
           ),
+          settingsMode && host.status !== 'connected'
+            ? h(
+                Button,
+                {
+                  variant: 'secondary',
+                  testId: 'settings-host-connect',
+                  onClick: () => props.onConnect && props.onConnect(host),
+                  disabled: busy || host.status === 'connecting',
+                },
+                host.status === 'connecting' ? t('connecting') : t('cardConnect'),
+              )
+            : null,
           host.status === 'connected'
             ? h(
                 Button,
@@ -1798,7 +1969,7 @@ window.__ModuleLoader__.load({
                 t('cardDisconnect'),
               )
             : null,
-          host.status === 'disconnected' || host.status === 'error' || host.status === 'limited'
+          !settingsMode && (host.status === 'disconnected' || host.status === 'error' || host.status === 'limited')
             ? h(
                 Button,
                 { variant: 'ghost', testId: 'host-reconnect', onClick: () => props.onReconnect && props.onReconnect(host), disabled: busy },
@@ -1850,6 +2021,7 @@ window.__ModuleLoader__.load({
       const connected = connectedCount(hosts)
       const total = hosts.length
       const busyHostId = props.busyHostId || null
+      const settingsMode = props.variant === 'settings'
 
       let content
       if (state === null && error !== null) {
@@ -1862,7 +2034,7 @@ window.__ModuleLoader__.load({
       } else if (state === null) {
         content = h(LoadingBlock, { t, label: t('loading') })
       } else if (hosts.length === 0) {
-        content = h(EmptyHosts, { t, onAdd: props.onAdd })
+        content = h(EmptyHosts, { t, variant: props.variant, onAdd: props.onAdd })
       } else {
         content = h(
           'div',
@@ -1882,6 +2054,7 @@ window.__ModuleLoader__.load({
                 t,
                 locale,
                 host,
+                variant: props.variant,
                 busy: busyHostId === host.id,
                 onOpen: props.onOpenHost,
                 onConnect: props.onConnectHost,
@@ -1905,20 +2078,34 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'drg-page-heading' },
-            h('h1', { className: 'drg-page-title' }, t('hostsTitle')),
-            h('p', { className: 'drg-page-subtitle' }, t('panelSubtitle')),
+            h('h1', { className: 'drg-page-title' }, settingsMode ? t('settingsNav') : t('hostsTitle')),
+            h('p', { className: 'drg-page-subtitle' }, settingsMode ? t('settingsIntro') : t('panelSubtitle')),
           ),
           h(
             'div',
             { className: 'drg-page-actions' },
             h(
               Button,
-              { variant: 'primary', testId: 'host-add', onClick: props.onAdd === undefined ? undefined : () => props.onAdd() },
+              {
+                variant: 'primary',
+                testId: settingsMode ? 'settings-host-add' : 'host-add',
+                onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
+              },
               h(IconPlus, { size: 14 }),
-              h('span', null, t('addHost')),
+              h('span', null, settingsMode ? t('settingsAddHost') : t('addHost')),
             ),
-            h(Button, { variant: 'ghost', testId: 'host-refresh', onClick: props.onRefresh, busy: loading }, h(IconRefresh, { size: 14 }), h('span', null, t('refresh'))),
-            h(IconButton, { icon: h(IconGear), label: t('settings'), testId: 'host-settings', onClick: props.onOpenSettings }),
+            h(Button, {
+              variant: 'ghost',
+              testId: settingsMode ? 'settings-host-refresh' : 'host-refresh',
+              onClick: props.onRefresh,
+              busy: loading,
+            }, h(IconRefresh, { size: 14 }), h('span', null, t('refresh'))),
+            h(IconButton, {
+              icon: h(IconGear),
+              label: settingsMode ? t('settingsPluginSettings') : t('settings'),
+              testId: settingsMode ? 'settings-settings-open' : 'host-settings',
+              onClick: props.onOpenSettings,
+            }),
           ),
         ),
         props.closeNotice === true
@@ -3315,12 +3502,15 @@ window.__ModuleLoader__.load({
     /**
      * Owns the panel's live state: one initial `/state` read, then SSE with a
      * 3s polling fallback (contract §1). Disposal closes the stream and timers.
+     * An optional `initialState` is a test/preview seam; production callers omit it.
+     * @param {object|undefined} [initialState] - state used for the first render.
      * @returns {{state: object|null, error: object|null, loading: boolean, mode: string, refresh: Function, patch: Function}} remote state handle.
      */
-    function useRemoteState() {
-      const [state, setState] = useState(null)
+    function useRemoteState(initialState) {
+      const hasInitial = initialState !== undefined && initialState !== null
+      const [state, setState] = useState(hasInitial ? initialState : null)
       const [error, setError] = useState(null)
-      const [loading, setLoading] = useState(true)
+      const [loading, setLoading] = useState(!hasInitial)
       const [mode, setMode] = useState('idle')
       const alive = useRef(true)
       const refresh = useCallback(() => {
@@ -3490,6 +3680,22 @@ window.__ModuleLoader__.load({
         setShowEnterNotice(true)
       }, [view])
 
+      // The settings page asks the panel to open one host, then switches to it.
+      useEffect(() => {
+        const store = props.panelStore
+        if (!store || typeof store.take !== 'function' || typeof store.subscribe !== 'function') return undefined
+        const consume = () => {
+          const requested = store.take()
+          if (typeof requested !== 'string' || requested.length === 0) return
+          setActiveHostId(requested)
+          setView('viewport')
+          openPanel()
+          remote.refresh()
+        }
+        consume()
+        return store.subscribe(consume)
+      }, [props.panelStore])
+
       const openPanel = () => {
         if (typeof props.openPanel === 'function') {
           try {
@@ -3541,6 +3747,7 @@ window.__ModuleLoader__.load({
         setActiveHostId(host.id)
         setView('viewport')
         openPanel()
+        api.activate(host.id).catch(() => {})
         if (needsConnect) performConnect(host)
       }
 
@@ -3708,6 +3915,7 @@ window.__ModuleLoader__.load({
         setActiveHostId(hostId)
         setView('viewport')
         openPanel()
+        api.activate(hostId).catch(() => {})
         remote.refresh()
       }
       const closeWizard = () => {
@@ -3772,7 +3980,612 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'drg-root', 'data-testid': 'dsh-remote-go-panel' },
         h(StyleSheet),
-        content,
+        h(
+          'div',
+          { className: 'drg-panel-layout' },
+          h(WorkspaceRail, {
+            t,
+            locale,
+            hosts,
+            activeHostId,
+            onOpenHost: openHost,
+            onConnectHost: connectHost,
+            onDiagnoseHost: runDiagnose,
+            onOpenLocalWorkspace: (workspaceId) => {
+              if (typeof props.openLocalWorkspace === 'function') {
+                try {
+                  props.openLocalWorkspace(workspaceId)
+                } catch (_error) {
+                  // switching local workspaces is optional; the panel still closes
+                }
+              }
+            },
+          }),
+          h('div', { className: 'drg-panel-main' }, content),
+        ),
+        wizard
+          ? h(WizardDialog, {
+              key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
+              t,
+              locale,
+              mode: wizard.mode,
+              initialHost: wizard.host,
+              state,
+              onClose: closeWizard,
+              onRefresh: remote.refresh,
+              onOpenRemote: openRemoteFromWizard,
+              onDiagnose: runDiagnose,
+            })
+          : null,
+        diagnose
+          ? h(DiagnoseDrawer, {
+              t,
+              locale,
+              host: diagnose.host,
+              status: diagnose.status,
+              report: diagnose.report,
+              error: diagnose.error,
+              onClose: () => setDiagnose(null),
+              onRun: rerunDiagnose,
+            })
+          : null,
+        settingsOpen && state
+          ? h(SettingsModal, {
+              t,
+              locale,
+              settings: state.settings,
+              onClose: () => setSettingsOpen(false),
+              onSave: saveSettings,
+            })
+          : null,
+        pendingDelete
+          ? h(ConfirmDialog, {
+              title: t('deleteTitle'),
+              body: t('deleteBody', { name: pendingDelete.name || pendingDelete.id }),
+              confirmLabel: deleting ? t('deleteBusy') : t('deleteConfirm'),
+              cancelLabel: t('cancel'),
+              busy: deleting,
+              onConfirm: confirmDeleteHost,
+              onCancel: () => setPendingDelete(null),
+            })
+          : null,
+        passwordPrompt
+          ? h(PasswordPrompt, {
+              key: passwordPrompt.host && passwordPrompt.host.id ? passwordPrompt.host.id : 'password',
+              t,
+              locale,
+              host: passwordPrompt.host,
+              busy: passwordPrompt.busy === true,
+              error: passwordPrompt.error,
+              onSubmit: submitPassword,
+              onCancel: cancelPassword,
+            })
+          : null,
+        h(Toast, { toast }),
+      )
+    }
+
+    //#region 16. workspace rail and settings section
+
+    /** Local workspace payload used before the first `/local/workspaces` read. */
+    const EMPTY_LOCAL_WORKSPACES = {
+      status: 'loading',
+      workspaces: [],
+      defaultWorkspaceId: null,
+      error: null,
+    }
+
+    /**
+     * Workspace data for the rail: the local DSH registry plus one workspace
+     * list per configured host. Refreshes on mount, whenever host ids/statuses
+     * change (SSE `/state` pushes), and on demand from the refresh button.
+     * @param {object[]} hosts - HostView list.
+     * @param {{local?: object, remotes?: object}|undefined} initialData - test/preview seam.
+     * @returns {{local: object, remotes: object, refresh: Function}} workspace data handle.
+     */
+    function useWorkspaceData(hosts, initialData) {
+      const [local, setLocal] = useState(() =>
+        initialData && initialData.local ? initialData.local : { ...EMPTY_LOCAL_WORKSPACES },
+      )
+      const [remotes, setRemotes] = useState(() => (initialData && initialData.remotes ? initialData.remotes : {}))
+      const generation = useRef(0)
+      const alive = useRef(true)
+      const hostsRef = useRef(hosts)
+      hostsRef.current = hosts
+
+      useEffect(() => () => {
+        alive.current = false
+      }, [])
+
+      const refresh = useCallback(() => {
+        const token = ++generation.current
+        const list = Array.isArray(hostsRef.current) ? hostsRef.current : []
+        setLocal((current) => ({ ...current, status: 'loading', error: null }))
+        api.getLocalWorkspaces().then(
+          (payload) => {
+            if (!alive.current || token !== generation.current) return
+            setLocal({
+              status: 'ready',
+              workspaces: payload.workspaces,
+              defaultWorkspaceId: payload.defaultWorkspaceId,
+              error: null,
+            })
+          },
+          (error) => {
+            if (!alive.current || token !== generation.current) return
+            setLocal((current) => ({ ...current, status: 'error', error: toErrorView(error) }))
+          },
+        )
+        const nextRemotes = {}
+        for (const host of list) {
+          if (!host || !host.id) continue
+          nextRemotes[host.id] = {
+            status: host.status === 'connected' ? 'loading' : 'disconnected',
+            connected: host.status === 'connected',
+            workspaces: [],
+            error: null,
+            hostName: host.name || host.id,
+          }
+        }
+        setRemotes(nextRemotes)
+        for (const host of list) {
+          if (!host || !host.id || host.status !== 'connected') continue
+          api.getHostWorkspaces(host.id).then(
+            (payload) => {
+              if (!alive.current || token !== generation.current) return
+              setRemotes((current) => ({
+                ...current,
+                [host.id]: {
+                  status: 'ready',
+                  connected: payload.connected,
+                  workspaces: payload.workspaces,
+                  error: null,
+                  hostName: payload.hostName || host.name || host.id,
+                },
+              }))
+            },
+            (error) => {
+              if (!alive.current || token !== generation.current) return
+              setRemotes((current) => ({
+                ...current,
+                [host.id]: {
+                  status: 'error',
+                  connected: true,
+                  workspaces: [],
+                  error: toErrorView(error),
+                  hostName: host.name || host.id,
+                },
+              }))
+            },
+          )
+        }
+      }, [])
+
+      const signature = (Array.isArray(hosts) ? hosts : [])
+        .map((host) => (host && host.id ? host.id : '') + ':' + (host && host.status ? host.status : ''))
+        .join('|')
+      useEffect(() => {
+        refresh()
+      }, [signature, refresh])
+
+      return { local, remotes, refresh }
+    }
+
+    /**
+     * Left rail of the remote panel: local workspaces on top, then one group
+     * per configured host. The rail is the panel's own surface; the app's
+     * `sidebar.workspaces` slot stays untouched (contract §1 note).
+     * @param {object} props - hosts, activeHostId, callbacks, test seams.
+     * @returns {object} aside element.
+     */
+    function WorkspaceRail(props) {
+      const t = translatorOf(props)
+      const locale = localeOf(props)
+      const hosts = Array.isArray(props.hosts) ? props.hosts : []
+      const [collapsed, setCollapsed] = useState(() =>
+        props.initialCollapsed === undefined ? readRailCollapsed() : props.initialCollapsed === true,
+      )
+      const data = useWorkspaceData(hosts, props.initialWorkspaceData)
+      const toggle = () => {
+        const next = !collapsed
+        setCollapsed(next)
+        writeRailCollapsed(next)
+      }
+      const refresh = () => data.refresh()
+      const workspaceTitle = (workspace) =>
+        typeof workspace.title === 'string' && workspace.title.length > 0
+          ? workspace.title
+          : typeof workspace.path === 'string' && workspace.path.length > 0
+            ? workspace.path
+            : String(workspace.id || '')
+      const sessionsLabel = (workspace) =>
+        t('workspaceRailSessions', { count: typeof workspace.sessionCount === 'number' ? workspace.sessionCount : 0 })
+      const workspaceRow = (workspace, kind, host) =>
+        h(
+          'button',
+          {
+            key: (host ? host.id + ':' : '') + String(workspace.id || workspaceTitle(workspace)),
+            type: 'button',
+            className: 'drg-rail-item',
+            'data-testid': kind === 'local' ? 'workspace-local-item' : 'workspace-remote-item',
+            'data-workspace-id': workspace.id,
+            'data-host-id': host ? host.id : undefined,
+            title: workspace.path || workspaceTitle(workspace),
+            onClick: () => {
+              if (kind === 'local') {
+                if (typeof props.onOpenLocalWorkspace === 'function') props.onOpenLocalWorkspace(workspace.id)
+              } else if (typeof props.onOpenHost === 'function') {
+                props.onOpenHost(host)
+              }
+            },
+          },
+          h('span', { className: 'drg-rail-item-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 14 })),
+          h('span', { className: 'drg-rail-item-title' }, workspaceTitle(workspace)),
+          workspace.isDefault === true ? h(Badge, { tone: 'idle' }, t('workspaceDefault')) : null,
+          h('span', { className: 'drg-rail-item-meta' }, sessionsLabel(workspace)),
+        )
+
+      const retryButton = h(
+        'button',
+        { type: 'button', className: 'drg-linkbtn', onClick: refresh },
+        t('retry'),
+      )
+
+      let localGroup
+      if (data.local.status === 'loading') {
+        localGroup = h('div', { className: 'drg-rail-muted' }, h(Spinner, { size: 12 }), h('span', null, t('workspaceRailLoading')))
+      } else if (data.local.status === 'error') {
+        localGroup = h(
+          'div',
+          { className: 'drg-rail-error', 'data-testid': 'workspace-rail-error' },
+          h('span', null, t('workspaceRailLocalError')),
+          retryButton,
+        )
+      } else if (data.local.workspaces.length === 0) {
+        localGroup = h('div', { className: 'drg-rail-muted' }, t('workspaceLocalEmpty'))
+      } else {
+        localGroup = h(
+          'div',
+          { className: 'drg-rail-items' },
+          data.local.workspaces.map((workspace) => workspaceRow(workspace, 'local', null)),
+        )
+      }
+
+      const renderRemoteGroup = (host) => {
+        const info = data.remotes[host.id] || {
+          status: host.status === 'connected' ? 'loading' : 'disconnected',
+          workspaces: [],
+          error: null,
+        }
+        let body
+        if (host.status !== 'connected') {
+          body = h(
+            'div',
+            { className: 'drg-rail-muted drg-rail-row' },
+            h('span', null, host.status === 'connecting' ? t('progress.default') : t('workspaceRailDisconnected')),
+            host.status === 'connecting'
+              ? null
+              : h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'drg-linkbtn',
+                    'data-testid': 'workspace-remote-connect',
+                    onClick: () => {
+                      if (typeof props.onConnectHost === 'function') props.onConnectHost(host)
+                    },
+                  },
+                  t('cardConnect'),
+                ),
+          )
+        } else if (info.status === 'loading') {
+          body = h('div', { className: 'drg-rail-muted' }, h(Spinner, { size: 12 }), h('span', null, t('workspaceRailLoading')))
+        } else if (info.status === 'error') {
+          body = h(
+            'div',
+            { className: 'drg-rail-error', 'data-testid': 'workspace-rail-error' },
+            h('span', null, t('workspaceRailRemoteError')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'drg-linkbtn',
+                onClick: () => {
+                  if (typeof props.onDiagnoseHost === 'function') props.onDiagnoseHost(host)
+                },
+              },
+              t('diagnose'),
+            ),
+          )
+        } else if (Array.isArray(info.workspaces) && info.workspaces.length === 0) {
+          body = h('div', { className: 'drg-rail-muted' }, t('workspaceRemoteEmpty'))
+        } else {
+          body = h(
+            'div',
+            { className: 'drg-rail-items' },
+            info.workspaces.map((workspace) => workspaceRow(workspace, 'remote', host)),
+          )
+        }
+        return h(
+          'div',
+          {
+            key: host.id,
+            className: 'drg-rail-group',
+            'data-testid': 'workspace-remote-group',
+            'data-host-id': host.id,
+            'data-status': host.status,
+          },
+          h(
+            'div',
+            { className: 'drg-rail-group-head' },
+            h(StatusDot, { status: host.status, title: t(statusMeta(host.status || 'unconfigured').labelKey) }),
+            h('span', { className: 'drg-rail-group-title', title: host.name }, host.name || host.id),
+            h('span', { className: 'drg-rail-group-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 12 })),
+          ),
+          body,
+        )
+      }
+
+      return h(
+        'aside',
+        {
+          className: 'drg-rail',
+          'data-collapsed': collapsed ? 'true' : 'false',
+          'data-testid': 'workspace-rail',
+          'aria-label': t('workspaceRailTitle'),
+        },
+        h(
+          'div',
+          { className: 'drg-rail-head' },
+          collapsed ? null : h('span', { className: 'drg-rail-title' }, t('workspaceRailTitle')),
+          h(IconButton, {
+            icon: collapsed ? h(IconChevronRight) : h(IconChevronLeft),
+            label: collapsed ? t('workspaceRailToggleExpand') : t('workspaceRailToggleCollapse'),
+            testId: 'workspace-rail-toggle',
+            onClick: toggle,
+          }),
+          collapsed
+            ? null
+            : h(IconButton, {
+                icon: h(IconRefresh),
+                label: t('workspaceRailRefresh'),
+                testId: 'workspace-rail-refresh',
+                onClick: refresh,
+              }),
+        ),
+        collapsed
+          ? null
+          : h(
+              'div',
+              { className: 'drg-rail-body' },
+              h(
+                'div',
+                { className: 'drg-rail-group', 'data-testid': 'workspace-local-group' },
+                h(
+                  'div',
+                  { className: 'drg-rail-group-head' },
+                  h('span', { className: 'drg-rail-group-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 12 })),
+                  h('span', { className: 'drg-rail-group-title' }, t('workspaceLocalGroup')),
+                  h('span', { className: 'drg-rail-group-count' }, String(data.local.workspaces.length)),
+                ),
+                localGroup,
+              ),
+              hosts.length === 0
+                ? h(
+                    'div',
+                    { className: 'drg-rail-empty', 'data-testid': 'workspace-rail-empty' },
+                    h(RemoteIcon, { size: 20 }),
+                    h('p', null, t('workspaceRailEmpty')),
+                  )
+                : hosts.map(renderRemoteGroup),
+              h('p', { className: 'drg-rail-hint' }, t('workspaceRailHint')),
+            ),
+      )
+    }
+
+    /**
+     * The Settings → "Remote hosts" section: full host management (list, add,
+     * connect/disconnect, edit, delete, diagnostics, open remote UI) plus the
+     * plugin settings modal. Data comes from the same `/state` stream.
+     * @param {object} props - injected openPanel/panelStore/getLocaleId, slot `t`.
+     * @returns {object} section element.
+     */
+    function SettingsSection(props) {
+      const t = translatorOf(props)
+      const locale = localeOf(props)
+      const remote = useRemoteState(props.initialState)
+      const state = remote.state
+      const [wizard, setWizard] = useState(null)
+      const [diagnose, setDiagnose] = useState(null)
+      const [settingsOpen, setSettingsOpen] = useState(false)
+      const [pendingDelete, setPendingDelete] = useState(null)
+      const [deleting, setDeleting] = useState(false)
+      const [busyHostId, setBusyHostId] = useState(null)
+      const [passwordPrompt, setPasswordPrompt] = useState(null)
+      const [toast, setToast] = useState(null)
+      const toastTimer = useRef(null)
+
+      const notify = (text, tone) => {
+        setToast({ text, tone: tone || 'info' })
+        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
+        if (typeof setTimeout === 'function') toastTimer.current = setTimeout(() => setToast(null), 4200)
+      }
+      useEffect(() => () => {
+        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
+      }, [])
+      const errorMessage = (error) => {
+        const view = toErrorView(error)
+        const title = resolveText(view.title, locale)
+        const detail = resolveText(view.detail, locale)
+        return detail ? title + ' ' + detail : title
+      }
+
+      const openPanel = () => {
+        if (typeof props.openPanel === 'function') {
+          try {
+            props.openPanel()
+          } catch (_error) {
+            // selecting the already-active panel is a no-op
+          }
+        }
+      }
+      const requestPanelHost = (hostId) => {
+        api.activate(hostId).catch(() => {})
+        if (props.panelStore && typeof props.panelStore.request === 'function') props.panelStore.request(hostId)
+        openPanel()
+        // The settings.section slot hands us the shell's `close` callback; close the
+        // settings dialog so the remote panel is not left behind it.
+        if (typeof props.close === 'function') {
+          try {
+            props.close()
+          } catch (_error) {
+            /* already closed */
+          }
+        }
+        remote.refresh()
+      }
+
+      const performConnect = (host, password) => {
+        if (!host || !host.id) return
+        setBusyHostId(host.id)
+        api.connect(host.id, typeof password === 'string' ? { password } : {}).then(
+          () => {
+            setPasswordPrompt(null)
+            remote.refresh()
+          },
+          (error) => {
+            setPasswordPrompt(null)
+            notify(errorMessage(error), 'error')
+          },
+        ).finally(() => setBusyHostId(null))
+      }
+      const connectHost = (host, options) => {
+        if (!host || !host.id) return
+        const opts = options || {}
+        if (host.authType === 'password' && typeof opts.password !== 'string') {
+          setPasswordPrompt({ host, intent: 'connect', error: null, busy: false })
+          return
+        }
+        performConnect(host, opts.password)
+      }
+      const submitPassword = (password) => {
+        const pending = passwordPrompt
+        if (!pending || !pending.host) return
+        const value = typeof password === 'string' ? password : ''
+        if (value.trim() === '') {
+          setPasswordPrompt({ ...pending, error: t('passwordPromptRequired') })
+          return
+        }
+        const host = pending.host
+        setPasswordPrompt({ ...pending, busy: true, error: null })
+        setBusyHostId(host.id)
+        const connect = pending.intent === 'reconnect'
+          ? api.disconnect(host.id, false)
+              .catch(() => {})
+              .then(() => api.connect(host.id, { password: value }))
+          : api.connect(host.id, { password: value })
+        connect.then(
+          () => {
+            setPasswordPrompt(null)
+            remote.refresh()
+          },
+          (error) => {
+            const message = errorMessage(error)
+            setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
+            notify(message, 'error')
+          },
+        ).finally(() => setBusyHostId(null))
+      }
+      const cancelPassword = () => setPasswordPrompt(null)
+
+      const disconnectHost = (host) => {
+        if (!host) return
+        setBusyHostId(host.id)
+        api.disconnect(host.id, false).then(
+          () => remote.refresh(),
+          (error) => notify(errorMessage(error), 'error'),
+        ).finally(() => setBusyHostId(null))
+      }
+      const reconnectHost = (host) => {
+        if (!host) return
+        if (host.authType === 'password') {
+          setPasswordPrompt({ host, intent: 'reconnect', error: null, busy: false })
+          return
+        }
+        setBusyHostId(host.id)
+        api.reconnect(host.id).then(
+          () => remote.refresh(),
+          (error) => notify(errorMessage(error), 'error'),
+        ).finally(() => setBusyHostId(null))
+      }
+
+      const runDiagnose = (host) => {
+        if (!host || !host.id) return
+        setDiagnose({ host, status: 'loading', report: null, error: null })
+        api.diagnose(host.id).then(
+          (report) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current)),
+          (error) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'error', error: toErrorView(error) } : current)),
+        )
+      }
+      const rerunDiagnose = () => {
+        if (diagnose && diagnose.host) runDiagnose(diagnose.host)
+      }
+      const confirmDeleteHost = () => {
+        if (!pendingDelete) return
+        setDeleting(true)
+        api.deleteHost(pendingDelete.id).then(
+          () => {
+            setPendingDelete(null)
+            remote.refresh()
+          },
+          (error) => notify(errorMessage(error), 'error'),
+        ).finally(() => setDeleting(false))
+      }
+      const saveSettings = async (patch) => {
+        const saved = await api.saveSettings(patch)
+        remote.patch((current) => ({ ...current, settings: saved }))
+        notify(t('settings.saved'), 'success')
+      }
+      const openRemoteFromWizard = (hostId) => {
+        setWizard(null)
+        requestPanelHost(hostId)
+      }
+      const closeWizard = () => {
+        setWizard(null)
+        remote.refresh()
+      }
+      const openRemoteHost = (host) => {
+        if (!host) return
+        if (host.status !== 'connected') {
+          connectHost(host)
+          return
+        }
+        requestPanelHost(host.id)
+      }
+
+      return h(
+        'div',
+        { className: 'drg-root drg-settings-remote', 'data-testid': 'settings-remote-section' },
+        h(StyleSheet),
+        h(HostListView, {
+          t,
+          locale,
+          variant: 'settings',
+          state,
+          loading: remote.loading,
+          error: remote.error,
+          busyHostId,
+          onAdd: () => setWizard({ mode: 'add', host: null }),
+          onRefresh: remote.refresh,
+          onOpenSettings: () => setSettingsOpen(true),
+          onOpenHost: openRemoteHost,
+          onConnectHost: connectHost,
+          onDisconnectHost: disconnectHost,
+          onReconnectHost: reconnectHost,
+          onEditHost: (host) => setWizard({ mode: 'edit', host }),
+          onDeleteHost: (host) => setPendingDelete(host),
+          onDiagnoseHost: runDiagnose,
+        }),
         wizard
           ? h(WizardDialog, {
               key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
@@ -3837,7 +4650,7 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region 16. styles
+    //#region 17. styles
 
     /**
      * Panel styles. Everything inherits from the DSH theme: labels use
@@ -4072,6 +4885,37 @@ window.__ModuleLoader__.load({
 .drg-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--drg-label-3); }
 .drg-divider { height: 1px; background: var(--drg-border-soft); margin: 8px 0; }
 
+/* main-panel layout + workspace rail */
+.drg-panel-layout { display: flex; flex: 1; min-height: 0; min-width: 0; }
+.drg-panel-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.drg-rail { display: flex; flex-direction: column; flex: none; width: 220px; min-height: 0; border-right: 1px solid var(--drg-border); background: var(--drg-surface); transition: width 120ms ease; }
+.drg-rail[data-collapsed="true"] { width: 44px; }
+.drg-rail-head { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--drg-border-soft); min-height: 42px; }
+.drg-rail[data-collapsed="true"] .drg-rail-head { padding: 6px; justify-content: center; }
+.drg-rail-title { flex: 1; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--drg-label-3); overflow: hidden; white-space: nowrap; }
+.drg-rail-body { flex: 1; min-height: 0; overflow: auto; padding: 8px 8px 12px; display: flex; flex-direction: column; gap: 10px; }
+.drg-rail-group { display: flex; flex-direction: column; gap: 2px; }
+.drg-rail-group-head { display: flex; align-items: center; gap: 5px; padding: 4px 6px; color: var(--drg-label-3); font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
+.drg-rail-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drg-rail-group-icon { flex: none; display: inline-flex; }
+.drg-rail-group-count { flex: none; font-size: 10px; padding: 0 5px; border-radius: 999px; background: var(--drg-surface-2); color: var(--drg-label-3); }
+.drg-rail-items { display: flex; flex-direction: column; gap: 1px; }
+.drg-rail-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; border: none; border-radius: var(--drg-radius-sm); background: transparent; color: var(--drg-label-2); text-align: left; cursor: pointer; font-size: 13px; }
+.drg-rail-item:hover { background: var(--drg-hover); color: var(--drg-label); }
+.drg-rail-item-icon { flex: none; display: inline-flex; color: var(--drg-label-3); }
+.drg-rail-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drg-rail-item-meta { flex: none; font-size: 10px; color: var(--drg-label-3); }
+.drg-rail-item .drg-badge { flex: none; font-size: 10px; padding: 0 5px; line-height: 16px; }
+.drg-rail-muted { display: flex; align-items: center; gap: 6px; padding: 4px 8px; color: var(--drg-label-3); font-size: 12px; }
+.drg-rail-row { justify-content: space-between; }
+.drg-rail-error { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; color: var(--dsw-alias-state-error-primary, #d64545); font-size: 12px; }
+.drg-rail-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; text-align: center; color: var(--drg-label-3); border: 1px dashed var(--drg-border); border-radius: var(--drg-radius-sm); }
+.drg-rail-empty p { font-size: 12px; line-height: 1.5; }
+.drg-rail-hint { padding: 4px 6px 0; color: var(--drg-label-3); font-size: 11px; line-height: 1.5; }
+.drg-settings-remote { display: flex; flex-direction: column; height: auto; min-height: 0; background: transparent; }
+.drg-settings-remote .drg-page { padding: 0; overflow: visible; }
+@media (max-width: 900px) { .drg-rail { width: 190px; } }
+
 .drg-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: min(560px, calc(100vw - 32px)); padding: 9px 16px; border-radius: var(--drg-radius-sm); background: var(--dsw-alias-toast-bg, CanvasText); color: var(--dsw-alias-toast-label, Canvas); font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
 .drg-toast[data-tone="error"] { background: var(--dsw-alias-state-error-primary, #d64545); color: #fff; }
 .drg-toast[data-tone="success"] { background: var(--dsw-alias-state-success-primary, #22a06b); color: #fff; }
@@ -4084,12 +4928,12 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region 17. plugin registration
+    //#region 18. plugin registration
 
     /**
-     * Register dictionaries, the main panel, and the sidebar entry. All side
-     * effects stay inside the registration (or React effects) so disposing the
-     * plugin cleans them up.
+     * Register dictionaries, the remote main panel, and the Settings →
+     * "Remote hosts" section. There is intentionally no sidebar entry: host
+     * management lives in Settings, and the remote UI opens in the main panel.
      * @param {object} ctx - browser plugin context.
      * @returns {void}
      */
@@ -4121,31 +4965,56 @@ window.__ModuleLoader__.load({
         return 'zh'
       }
 
+      /** Host/panel request channel shared by the settings section and the panel. */
+      const panelStore = createPanelRequestStore()
+      const openPanel = () => ctx.layout.selectPanel(PANEL_ID)
+      /**
+       * Leave the remote panel for the local conversation and switch the local
+       * workspace. The uiWorkspace service is declared in `inject`; the lookup
+       * stays guarded so a missing implementation never throws.
+       * @param {string} workspaceId - local workspace id.
+       */
+      const openLocalWorkspace = (workspaceId) => {
+        try {
+          ctx.layout.selectPanel(null)
+        } catch (_error) {
+          // leaving the panel is best-effort; switching still proceeds
+        }
+        try {
+          const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
+          if (workspace && typeof workspace.openWorkspace === 'function' && typeof workspaceId === 'string') {
+            const result = workspace.openWorkspace(workspaceId)
+            if (result && typeof result.catch === 'function') result.catch(() => {})
+          }
+        } catch (_error) {
+          // the local conversation is already visible; a missing service is fine
+        }
+      }
+      const sharedInject = () => ({ openPanel, panelStore, openLocalWorkspace, getLocaleId })
+
       ctx.slots.inject('main', () =>
         ctx.slots.register(
           {
             name: 'main',
             key: PANEL_ID,
             locale: NS,
-            inject: () => ({
-              openPanel: () => ctx.layout.selectPanel(PANEL_ID),
-              getLocaleId,
-            }),
+            inject: sharedInject,
           },
           MainPanel,
         ),
       )
 
-      ctx.slots.inject('sidebar.panellist', () =>
+      ctx.slots.inject('settings.section', () =>
         ctx.slots.register(
           {
-            name: 'sidebar.panellist',
+            name: 'settings.section',
             id: PANEL_ID,
-            order: 0,
-            label: () => t('panel'),
+            order: 45,
+            label: () => t('settingsNav'),
             locale: NS,
+            inject: sharedInject,
           },
-          RemoteIcon,
+          SettingsSection,
         ),
       )
     }
@@ -4154,6 +5023,8 @@ window.__ModuleLoader__.load({
     const components = {
       RemoteIcon,
       MainPanel,
+      WorkspaceRail,
+      SettingsSection,
       HostListView,
       HostCard,
       EmptyHosts,
@@ -4174,7 +5045,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'layout', 'locale'],
+      inject: ['slots', 'layout', 'locale', 'uiWorkspace'],
       apply,
       components,
     }

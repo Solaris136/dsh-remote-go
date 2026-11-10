@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-11-10T16:47:17.942Z",
+  "startedAt": "2026-11-10T17:41:09.458Z",
   "steps": [
     {
       "step": "pack",
@@ -20,7 +20,7 @@
       "ok": true,
       "hostEntry": "dsh-remote-go",
       "clientPath": "C:\\Work\\dsh-remote-go\\e2e\\control\\home-published\\profiles\\web\\node_modules\\dsh-remote-go\\client.js",
-      "clientBundleSize": 184120,
+      "clientBundleSize": 221626,
       "hostVersion": "0.2.2-rc.1"
     },
     {
@@ -34,5 +34,5 @@
     "version": "0.1.0"
   },
   "ok": true,
-  "finishedAt": "2026-11-10T16:47:28.044Z"
+  "finishedAt": "2026-11-10T17:41:19.137Z"
 }

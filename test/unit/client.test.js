@@ -87,10 +87,16 @@ function runApply(plugin) {
     selectPanel: [],
     registerNamespace: null,
     bindNamespace: null,
+    openWorkspace: [],
   }
   const disposers = []
   let dicts = null
   let t = (key) => key
+  const uiWorkspace = {
+    openWorkspace(workspaceId) {
+      calls.openWorkspace.push(workspaceId)
+    },
+  }
 
   const ctx = {
     effect(callback, label) {
@@ -98,6 +104,9 @@ function runApply(plugin) {
       const dispose = callback()
       if (typeof dispose === 'function') disposers.push(dispose)
       return dispose
+    },
+    get(name) {
+      return name === 'uiWorkspace' ? uiWorkspace : null
     },
     locale: {
       register(ns, dictionaries) {
@@ -197,9 +206,9 @@ test('client.js registers one lazy factory through window.__ModuleLoader__', () 
   }
 })
 
-test('factory injects slots, layout and locale', () => {
+test('factory injects slots, layout, locale and uiWorkspace', () => {
   const injects = Array.from(plugin.inject)
-  assert.deepEqual(injects, ['slots', 'layout', 'locale'])
+  assert.deepEqual(injects, ['slots', 'layout', 'locale', 'uiWorkspace'])
 })
 
 test('components export is a non-empty map of renderable functions', () => {
@@ -216,6 +225,8 @@ test('components export is a non-empty map of renderable functions', () => {
   assert.equal(typeof plugin.components.DiagnoseDrawer, 'function')
   assert.equal(typeof plugin.components.SettingsModal, 'function')
   assert.equal(typeof plugin.components.PasswordPrompt, 'function')
+  assert.equal(typeof plugin.components.SettingsSection, 'function')
+  assert.equal(typeof plugin.components.WorkspaceRail, 'function')
   assert.equal(typeof plugin.components.RemoteIcon, 'function')
 })
 
@@ -247,10 +258,11 @@ test('dictionaries are bilingual and balanced', () => {
   }
 })
 
-test('apply registers the main panel and the sidebar entry', () => {
+test('apply registers the main panel and the settings section, never a sidebar entry', () => {
   const { calls } = runApply(plugin)
-  assert.deepEqual(calls.injects, ['main', 'sidebar.panellist'])
+  assert.deepEqual(calls.injects, ['main', 'settings.section'])
   assert.equal(calls.registers.length, 2)
+  assert.ok(!calls.injects.includes('sidebar.panellist'), 'the sidebar entry must be gone')
 
   const main = calls.registers.find((entry) => entry.options.name === 'main')
   assert.ok(main, 'main slot entry must be registered')
@@ -258,26 +270,39 @@ test('apply registers the main panel and the sidebar entry', () => {
   assert.equal(main.options.locale, PANEL_ID)
   assert.equal(main.component, plugin.components.MainPanel)
 
-  const sidebar = calls.registers.find((entry) => entry.options.name === 'sidebar.panellist')
-  assert.ok(sidebar, 'sidebar.panellist entry must be registered')
-  assert.equal(sidebar.options.id, PANEL_ID)
-  assert.equal(sidebar.options.order, 0)
-  assert.equal(sidebar.options.locale, PANEL_ID)
-  assert.equal(sidebar.component, plugin.components.RemoteIcon)
-  assert.equal(typeof sidebar.options.label, 'function')
-  assert.equal(sidebar.options.label(), '远程入口')
+  const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
+  assert.ok(section, 'settings.section entry must be registered')
+  assert.equal(section.options.id, PANEL_ID)
+  assert.equal(section.options.order, 45)
+  assert.equal(section.options.locale, PANEL_ID)
+  assert.equal(section.component, plugin.components.SettingsSection)
+  assert.equal(typeof section.options.label, 'function')
+  assert.equal(section.options.label(), '远程主机')
 })
 
-test('main panel inject face opens the panel through ctx.layout.selectPanel', () => {
+test('shared inject face opens the panel, the local workspace and the panel request store', () => {
   const { calls } = runApply(plugin)
   const main = calls.registers.find((entry) => entry.options.name === 'main')
+  const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
   assert.equal(typeof main.options.inject, 'function')
+  assert.equal(typeof section.options.inject, 'function')
   const face = main.options.inject()
   assert.equal(typeof face.openPanel, 'function')
   assert.equal(typeof face.getLocaleId, 'function')
+  assert.equal(typeof face.openLocalWorkspace, 'function')
+  assert.ok(face.panelStore && typeof face.panelStore.request === 'function')
   assert.equal(face.getLocaleId(), 'zh')
+
   face.openPanel()
   assert.deepEqual(calls.selectPanel, [PANEL_ID])
+
+  face.openLocalWorkspace('ws_local')
+  assert.deepEqual(calls.selectPanel, [PANEL_ID, null])
+  assert.deepEqual(calls.openWorkspace, ['ws_local'])
+
+  face.panelStore.request('h_test')
+  assert.equal(face.panelStore.take(), 'h_test')
+  assert.equal(face.panelStore.take(), null)
 })
 
 // ---------------------------------------------------------------------------
@@ -336,8 +361,8 @@ test('empty host list renders the empty state and the first-server action', () =
       onRefresh: () => {},
     }),
   )
-  assert.match(html, /远程入口/)
-  assert.match(html, /还没有服务器/)
+  assert.match(html, /远程主机/)
+  assert.match(html, /还没有远程主机/)
   assert.match(html, /添加第一台服务器/)
   assert.match(html, /drg-empty/)
   assert.doesNotMatch(html, /drg-host-card/)
@@ -371,7 +396,7 @@ test('host list renders a connected host card with remote version and actions', 
   assert.match(html, /ubuntu@10\.0\.0\.5:22/)
   assert.match(html, /0\.2\.2-rc\.1/)
   assert.match(html, /已连接/)
-  assert.match(html, /重点|共 1/)
+  assert.match(html, /共 1/)
   assert.match(html, /断开/)
   assert.match(html, /诊断/)
 })
@@ -724,7 +749,7 @@ test('settings modal renders contract fields and the save action', () => {
   assert.match(html, /保存设置/)
 })
 
-test('main panel renders its loading state inside the DSH theme root', () => {
+test('main panel renders its loading state inside the DSH theme root and the workspace rail', () => {
   const html = render(
     React.createElement(plugin.components.MainPanel, {
       t,
@@ -733,10 +758,151 @@ test('main panel renders its loading state inside the DSH theme root', () => {
     }),
   )
   assert.match(html, /class="drg-root"/)
-  assert.match(html, /远程入口/)
+  assert.match(html, /data-testid="dsh-remote-go-panel"/)
+  assert.match(html, /远程主机/)
   assert.match(html, /加载中/)
+  assert.match(html, /data-testid="workspace-rail"/)
+  assert.match(html, /data-testid="workspace-rail-toggle"/)
   assert.match(html, /data-dsh-remote-go="styles"/)
   assert.match(html, /--dsw-alias-label-primary/)
+})
+
+test('settings section renders the remote-hosts page and its empty state', () => {
+  const state = {
+    hostVersion: '0.2.2-rc.1',
+    targetVersion: '0.2.2-rc.1',
+    hosts: [],
+    settings: {},
+    activeHostId: null,
+    firstRun: true,
+  }
+  const html = render(
+    React.createElement(plugin.components.SettingsSection, {
+      t,
+      initialState: state,
+      openPanel: () => {},
+      panelStore: { request: () => {} },
+      getLocaleId: () => 'zh',
+    }),
+  )
+  assert.match(html, /data-testid="settings-remote-section"/)
+  assert.match(html, /远程主机/)
+  assert.match(html, /管理通过 SSH 连接的远程主机/)
+  assert.match(html, /data-testid="settings-host-add"/)
+  assert.match(html, /data-testid="settings-settings-open"/)
+  assert.match(html, /还没有远程主机。添加一台，然后在这里打开它的 DSH。/)
+})
+
+test('settings section offers open/connect actions per host', () => {
+  const state = {
+    hostVersion: '0.2.2-rc.1',
+    targetVersion: '0.2.2-rc.1',
+    hosts: [
+      hostView({ id: 'h_connected', name: '已连接主机' }),
+      hostView({ id: 'h_offline', name: '未连接主机', status: 'disconnected' }),
+    ],
+    settings: {},
+    activeHostId: null,
+    firstRun: false,
+  }
+  const html = render(
+    React.createElement(plugin.components.SettingsSection, {
+      t,
+      initialState: state,
+      openPanel: () => {},
+      panelStore: { request: () => {} },
+      getLocaleId: () => 'zh',
+    }),
+  )
+  assert.match(html, /data-testid="settings-host-open"/)
+  assert.match(html, /打开远程界面/)
+  assert.match(html, /data-testid="settings-host-connect"/)
+  assert.match(html, /data-host-id="h_connected"/)
+  assert.match(html, /data-host-id="h_offline"/)
+})
+
+test('workspace rail renders local and per-host workspace groups', () => {
+  const hosts = [
+    hostView({ id: 'h_one', name: '主机一', status: 'connected' }),
+    hostView({ id: 'h_two', name: '主机二', status: 'disconnected' }),
+  ]
+  const initialWorkspaceData = {
+    local: {
+      status: 'ready',
+      workspaces: [
+        { id: 'ws_local_1', title: 'proj', path: 'C:\\Work\\proj', sessionCount: 3, isDefault: true, origin: 'local' },
+      ],
+      defaultWorkspaceId: 'ws_local_1',
+      error: null,
+    },
+    remotes: {
+      h_one: {
+        status: 'ready',
+        connected: true,
+        hostName: '主机一',
+        error: null,
+        workspaces: [
+          { id: 'r_ws_1', title: 'remote-proj', path: '/home/ubuntu/proj', sessionCount: 2, origin: 'remote', hostId: 'h_one' },
+        ],
+      },
+      h_two: { status: 'disconnected', connected: false, hostName: '主机二', workspaces: [], error: null },
+    },
+  }
+  const html = render(
+    React.createElement(plugin.components.WorkspaceRail, { t, hosts, initialWorkspaceData }),
+  )
+  assert.match(html, /data-testid="workspace-rail"/)
+  assert.match(html, /data-testid="workspace-local-group"/)
+  assert.match(html, /data-testid="workspace-local-item"/)
+  assert.match(html, /data-workspace-id="ws_local_1"/)
+  assert.match(html, /proj/)
+  assert.match(html, /3 个会话/)
+  assert.match(html, /默认/)
+  assert.match(html, /data-testid="workspace-remote-group"/)
+  assert.match(html, /data-host-id="h_one"/)
+  assert.match(html, /data-testid="workspace-remote-item"/)
+  assert.match(html, /data-workspace-id="r_ws_1"/)
+  assert.match(html, /未连接/)
+  assert.match(html, /data-testid="workspace-rail-toggle"/)
+  assert.match(html, /data-testid="workspace-rail-refresh"/)
+  assert.match(html, /本地工作区仍可在左侧边栏切换/)
+})
+
+test('workspace rail renders empty, error and collapsed states', () => {
+  const empty = render(
+    React.createElement(plugin.components.WorkspaceRail, {
+      t,
+      hosts: [],
+      initialWorkspaceData: {
+        local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
+        remotes: {},
+      },
+    }),
+  )
+  assert.match(empty, /data-testid="workspace-rail-empty"/)
+  assert.match(empty, /还没有远程主机。添加一台后，这里会显示它的工作区。/)
+
+  const failed = render(
+    React.createElement(plugin.components.WorkspaceRail, {
+      t,
+      hosts: [hostView({ id: 'h_err', name: '故障主机', status: 'connected' })],
+      initialWorkspaceData: {
+        local: { status: 'error', workspaces: [], defaultWorkspaceId: null, error: { code: 'network' } },
+        remotes: {
+          h_err: { status: 'error', connected: true, hostName: '故障主机', workspaces: [], error: { code: 'network' } },
+        },
+      },
+    }),
+  )
+  assert.match(failed, /data-testid="workspace-rail-error"/)
+  assert.match(failed, /无法读取远端工作区|无法读取本地工作区/)
+
+  const collapsed = render(
+    React.createElement(plugin.components.WorkspaceRail, { t, hosts: [], initialCollapsed: true }),
+  )
+  assert.match(collapsed, /data-collapsed="true"/)
+  assert.match(collapsed, /data-testid="workspace-rail-toggle"/)
+  assert.doesNotMatch(collapsed, /data-testid="workspace-local-group"/)
 })
 
 /** All `data-testid` values contained in one rendered markup string. */
@@ -756,9 +922,66 @@ test('every automation data-testid required by acceptance is rendered', () => {
   }
   const emptyState = { ...baseState, hosts: [] }
   const markup = {
-    sidebar: render(React.createElement(plugin.components.RemoteIcon, { size: 18, active: false })),
     panel: render(
       React.createElement(plugin.components.MainPanel, { t, getLocaleId: () => 'zh', openPanel: () => {} }),
+    ),
+    settingsSection: render(
+      React.createElement(plugin.components.SettingsSection, {
+        t,
+        initialState: baseState,
+        openPanel: () => {},
+        panelStore: { request: () => {} },
+        getLocaleId: () => 'zh',
+      }),
+    ),
+    workspaceRail: render(
+      React.createElement(plugin.components.WorkspaceRail, {
+        t,
+        hosts: [
+          hostView({ id: 'h_ws', name: '工作区主机', status: 'connected' }),
+          hostView({ id: 'h_ws_off', name: '离线主机', status: 'disconnected' }),
+        ],
+        initialWorkspaceData: {
+          local: {
+            status: 'ready',
+            workspaces: [{ id: 'ws_local', title: 'local-proj', sessionCount: 1, isDefault: true }],
+            defaultWorkspaceId: 'ws_local',
+            error: null,
+          },
+          remotes: {
+            h_ws: {
+              status: 'ready',
+              connected: true,
+              hostName: '工作区主机',
+              error: null,
+              workspaces: [{ id: 'ws_remote', title: 'remote-proj', sessionCount: 2 }],
+            },
+            h_ws_off: { status: 'disconnected', connected: false, hostName: '离线主机', workspaces: [], error: null },
+          },
+        },
+      }),
+    ),
+    workspaceRailError: render(
+      React.createElement(plugin.components.WorkspaceRail, {
+        t,
+        hosts: [hostView({ id: 'h_err', name: '故障主机' })],
+        initialWorkspaceData: {
+          local: { status: 'error', workspaces: [], defaultWorkspaceId: null, error: { code: 'network' } },
+          remotes: {
+            h_err: { status: 'error', connected: true, hostName: '故障主机', workspaces: [], error: { code: 'network' } },
+          },
+        },
+      }),
+    ),
+    workspaceRailEmpty: render(
+      React.createElement(plugin.components.WorkspaceRail, {
+        t,
+        hosts: [],
+        initialWorkspaceData: {
+          local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
+          remotes: {},
+        },
+      }),
     ),
     empty: render(
       React.createElement(plugin.components.HostListView, {
@@ -886,7 +1109,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
     ),
   }
   const required = [
-    'dsh-remote-go-sidebar',
     'dsh-remote-go-panel',
     'host-list',
     'host-list-empty',
@@ -913,6 +1135,19 @@ test('every automation data-testid required by acceptance is rendered', () => {
     'diagnose-copy',
     'settings',
     'settings-save',
+    'settings-remote-section',
+    'settings-host-add',
+    'settings-host-open',
+    'settings-settings-open',
+    'workspace-rail',
+    'workspace-rail-toggle',
+    'workspace-rail-refresh',
+    'workspace-local-group',
+    'workspace-local-item',
+    'workspace-remote-group',
+    'workspace-remote-item',
+    'workspace-rail-empty',
+    'workspace-rail-error',
     'error-card',
     'error-retry',
     'fingerprint-card',
@@ -922,11 +1157,14 @@ test('every automation data-testid required by acceptance is rendered', () => {
   const ids = new Set(Object.values(markup).flatMap(testIdsOf))
   for (const id of required) assert.ok(ids.has(id), 'missing data-testid="' + id + '"')
   assert.match(markup.list, /data-host-id="h_test"/)
+  assert.match(markup.workspaceRail, /data-workspace-id="ws_local"/)
+  assert.match(markup.workspaceRail, /data-workspace-id="ws_remote"/)
   assert.match(markup.password, /type="password"/)
   assert.match(markup.password, /只用于本次连接，不会保存/)
+  assert.doesNotMatch(JSON.stringify(markup), /dsh-remote-go-sidebar/)
 })
 
-test('sidebar icon is original, currentColor SVG that respects size', () => {
+test('remote icon is original, currentColor SVG that respects size', () => {
   const html = render(React.createElement(plugin.components.RemoteIcon, { size: 18, active: true }))
   assert.match(html, /<svg[^>]*width="18"[^>]*height="18"/)
   assert.match(html, /stroke="currentColor"/)

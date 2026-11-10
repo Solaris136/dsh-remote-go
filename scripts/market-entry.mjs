@@ -72,8 +72,8 @@ async function main() {
   const entry = {
     name: pkg.name,
     title: {
-      zh: '远程入口',
-      en: 'Remote entry',
+      zh: 'dsh remote go',
+      en: 'dsh remote go',
     },
     description: {
       zh: '通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH：主机清单、接入向导、连接诊断、远端运行时自举与版本一致。',
@@ -98,11 +98,11 @@ async function main() {
   const index = {
     format: 1,
     title: {
-      zh: 'DSH 远程入口',
-      en: 'DSH Remote Entry',
+      zh: 'dsh remote go',
+      en: 'dsh remote go',
     },
     description: {
-      zh: 'dsh-remote-go 的插件市场索引（单插件，可直接作为 Index source 添加）。',
+      zh: 'dsh remote go 的插件市场索引（单插件，可直接作为 Index source 添加）。',
       en: 'Plugin market index for dsh-remote-go (single plugin; add directly as an Index source).',
     },
     metadata: {},
@@ -130,3 +130,5 @@ async function main() {
 }
 
 main().catch((error) => fail(error.stack ?? String(error)))
+
+

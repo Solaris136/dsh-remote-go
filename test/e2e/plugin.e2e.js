@@ -263,7 +263,7 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     assert.match(cookie, /SameSite=Strict/i)
     report.steps.push({ step: 'tunnel-token-cookie', ok: true, status: tokenized.status })
 
-    // 3) the browser half: sidebar entry, full-page panel, remote iframe
+    // 3) the browser half: Settings → 远程主机 → panel → workspace rail → iframe
     browser = await puppeteer.launch({
       executablePath: chromePath,
       headless: true,
@@ -277,27 +277,95 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     })
     await page.goto(control.url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
     await page.waitForFunction(() => !location.search.includes('token='), { timeout: 30_000 })
+    await page.waitForSelector('[data-slot="sidebar"]', { timeout: 60_000 })
 
-    const sidebar = '[data-testid="dsh-remote-go-sidebar"]'
-    await page.waitForSelector(sidebar, { timeout: 60_000 })
-    // The sidebar slot renders our icon inside the sidebar's own nav row; a DOM
-    // click on that row is what the shell listens to (a synthetic icon click is
-    // swallowed by the vendored glyph wrapper).
-    const clickedSidebar = await page.evaluate((selector) => {
-      const icon = document.querySelector(selector)
-      if (!icon) return null
-      let node = icon
-      while (node && node !== document.body) {
-        if (node.tagName === 'BUTTON' || node.tagName === 'A' || node.getAttribute('role') === 'button') {
-          node.click()
-          return { tag: node.tagName, text: (node.textContent ?? '').trim().slice(0, 40) }
+    /** Dismiss the first-run preview notice / signed-out dialog that would block clicks. */
+    const dismissOverlays = async () => {
+      return page.evaluate(() => {
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+        const target = dialogs.find((dialog) => /开始使用|Get started|预览版说明|preview/i.test(dialog.innerText ?? ''))
+        if (target) {
+          const close = target.querySelector('button[aria-label="关闭"], button[aria-label="Close"]')
+          if (close) { close.click(); return 'closed-dialog' }
         }
-        node = node.parentElement
-      }
-      return null
-    }, sidebar)
-    assert.ok(clickedSidebar, 'the sidebar nav row for the remote entry was not clickable')
+        const continueButton = Array.from(document.querySelectorAll('button')).find((button) =>
+          /^(继续|Continue|知道了|Got it)$/.test((button.textContent ?? '').trim()),
+        )
+        if (continueButton) { continueButton.click(); return 'continue' }
+        // The signed-out "开始使用 / Get started" onboarding card is not a
+        // role=dialog; its own close button is the reliable way out.
+        const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+        for (const closer of closers) {
+          let node = closer
+          for (let depth = 0; depth < 5 && node; depth += 1) {
+            if (/开始使用|Get started/.test(node.innerText ?? '')) {
+              closer.click()
+              return 'closed-signin'
+            }
+            node = node.parentElement
+          }
+        }
+        return null
+      })
+    }
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const dismissed = await dismissOverlays()
+      if (!dismissed) break
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    }
 
+    /** Click the first button/menu item whose whitespace-stripped text starts with a candidate. @param {string[]} texts */
+    const clickByText = (texts) =>
+      page.evaluate((candidates) => {
+        const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], a'))
+        const target = nodes.find((element) => {
+          const text = (element.textContent ?? '').replace(/\s+/g, '')
+          return candidates.some((candidate) => text === candidate || text.startsWith(candidate))
+        })
+        target?.click()
+        return target ? (target.textContent ?? '').replace(/\s+/g, ' ').trim() : null
+      }, texts)
+
+    // Product requirement: no sidebar entry any more.
+    assert.equal(
+      await page.evaluate(() => Boolean(document.querySelector('[data-testid="dsh-remote-go-sidebar"]'))),
+      false,
+      'the plugin must not register a sidebar entry',
+    )
+
+    // Open Settings from the signed-out/account menu.
+    const accountOpened = await page.evaluate(() => {
+      const button = document.querySelector('[data-slot="sidebar.settings"] button')
+      button?.click()
+      return Boolean(button)
+    })
+    assert.ok(accountOpened, 'sidebar settings/account trigger missing')
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('[role="menuitem"], button')).some((element) => (element.textContent ?? '').replace(/\s+/g, '').startsWith('设置')),
+      { timeout: 15_000 },
+    )
+    const settingsClicked = await clickByText(['设置', 'Settings'])
+    assert.ok(settingsClicked, 'settings menu item not clickable')
+    await page.waitForFunction(
+      () => Array.from(document.querySelectorAll('button, [role="button"]')).some((element) => (element.textContent ?? '').replace(/\s+/g, '') === '远程主机' || (element.textContent ?? '').replace(/\s+/g, '') === 'Remotehosts'),
+      { timeout: 30_000 },
+    )
+    const sectionClicked = await clickByText(['远程主机', 'Remote hosts'])
+    assert.ok(sectionClicked, 'the 远程主机 settings section is not reachable')
+    await page.waitForSelector('[data-testid="settings-remote-section"]', { timeout: 30_000 })
+    await page.screenshot({ path: path.join(ARTIFACTS, 'settings-remote-section.png') })
+
+    // Open the remote panel for the connected host from its settings card. A DOM
+    // click is used because the signed-out onboarding card can overlap the card
+    // and swallow synthetic mouse events in the isolated control profile.
+    const openButton = `[data-testid="host-card"][data-host-id="${hostId}"] [data-testid="settings-host-open"]`
+    await page.waitForSelector(openButton, { timeout: 30_000 })
+    const openedViaDom = await page.evaluate((selector) => {
+      const element = document.querySelector(selector)
+      element?.click()
+      return Boolean(element)
+    }, openButton)
+    assert.ok(openedViaDom, 'the 打开远程界面 button was not clickable')
     const panel = '[data-testid="dsh-remote-go-panel"]'
     try {
       await page.waitForSelector(panel, { timeout: 30_000 })
@@ -305,16 +373,40 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
       await page.screenshot({ path: path.join(ARTIFACTS, 'panel-missing.png') }).catch(() => {})
       throw error
     }
-    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-host-list.png') })
 
-    // The connected host makes the client restore the viewport; otherwise open it from the card.
-    const iframeSelector = '[data-testid="remote-iframe"]'
-    const iframeAlready = await page.$(iframeSelector)
-    if (!iframeAlready) {
-      const openButton = `[data-testid="host-card"][data-host-id="${hostId}"] [data-testid="host-open"]`
-      await page.waitForSelector(openButton, { timeout: 30_000 })
-      await page.click(openButton)
+    // Workspace rail: local group + one group per remote host.
+    const railSelector = '[data-testid="workspace-rail"]'
+    await page.waitForSelector(railSelector, { timeout: 30_000 })
+    const rail = await page.evaluate((id) => {
+      const railElement = document.querySelector('[data-testid="workspace-rail"]')
+      return {
+        text: (railElement?.innerText ?? '').slice(0, 600),
+        hasLocalGroup: Boolean(document.querySelector('[data-testid="workspace-local-group"]')),
+        hasRemoteGroup: Boolean(document.querySelector(`[data-testid="workspace-remote-group"][data-host-id="${id}"]`)),
+        hasIframe: Boolean(document.querySelector('[data-testid="remote-iframe"]')),
+      }
+    }, hostId)
+    assert.ok(rail.hasLocalGroup, 'workspace rail must show the local workspace group')
+    assert.ok(rail.hasRemoteGroup, 'workspace rail must show a per-remote workspace group for the connected host')
+    assert.match(rail.text, /本地工作区|Local workspaces/)
+    // The seeded test host exposes two Workspaces; the rail must list them under
+    // the host's own group (remote workspaces are read from the remote registry).
+    const hostWorkspaces = await api(control.origin, `/hosts/${hostId}/workspaces`)
+    assert.equal(hostWorkspaces.status, 200, hostWorkspaces.text)
+    const remoteWorkspaces = hostWorkspaces.json.workspaces ?? []
+    if (remoteWorkspaces.length > 0) {
+      await page.waitForFunction(
+        () => document.querySelectorAll('[data-testid="workspace-remote-item"]').length > 0,
+        { timeout: 20_000 },
+      )
+      const remoteGroupText = await page.evaluate(() => document.querySelector('[data-testid="workspace-remote-group"]')?.innerText ?? '')
+      assert.ok(remoteGroupText.includes(remoteWorkspaces[0].title), `remote rail group does not list "${remoteWorkspaces[0].title}": ${remoteGroupText.slice(0, 200)}`)
+      report.steps.push({ step: 'remote-workspaces', ok: true, count: remoteWorkspaces.length })
     }
+    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-workspace-rail.png') })
+    report.steps.push({ step: 'workspace-rail', ok: true, hasLocalGroup: rail.hasLocalGroup, hasRemoteGroup: rail.hasRemoteGroup, textSample: rail.text.slice(0, 120) })
+
+    const iframeSelector = '[data-testid="remote-iframe"]'
     await page.waitForSelector(iframeSelector, { timeout: 60_000 })
 
     const iframeHandle = await page.$(iframeSelector)
@@ -353,14 +445,31 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     }
     assert.ok(remoteFrame, 'the remote DSH document never loaded inside the iframe')
     assert.ok(remoteFrame.url().startsWith(tunnelOrigin), `iframe frame lives on ${remoteFrame.url()}, expected ${tunnelOrigin}`)
-    // A fresh remote DSH_HOME shows the "preview build" notice first; dismiss it so
-    // the assertion covers the real shell rather than the notice dialog.
+    // A fresh remote DSH_HOME shows the "preview build" notice and a signed-out
+    // card; dismiss both so the assertion covers the real shell.
     const noticed = await remoteFrame
       .evaluate(() => {
         const text = document.body?.innerText ?? ''
-        const button = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
-        if (button) button.click()
-        return { hadNotice: Boolean(button), beforeNodes: document.querySelectorAll('*').length, beforeText: text.slice(0, 120) }
+        let dismissed = 0
+        const continueButton = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
+        if (continueButton) {
+          continueButton.click()
+          dismissed += 1
+        }
+        const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+        for (const closer of closers) {
+          let node = closer
+          for (let depth = 0; depth < 5 && node; depth += 1) {
+            if (/开始使用|Get started/.test(node.innerText ?? '')) {
+              closer.click()
+              dismissed += 1
+              break
+            }
+            node = node.parentElement
+          }
+          if (dismissed > 0) break
+        }
+        return { hadNotice: dismissed > 0, beforeNodes: document.querySelectorAll('*').length, beforeText: text.slice(0, 120) }
       })
       .catch(() => ({ hadNotice: false, beforeNodes: 0, beforeText: '' }))
     await new Promise((resolve) => setTimeout(resolve, 3_000))
@@ -384,6 +493,28 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     assert.equal(authCookie.sameSite, 'Strict')
     assert.equal(authCookie.httpOnly, true)
 
+    // Clear the local signed-out onboarding card (if any) before the evidence shots.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const dismissed = await dismissOverlays()
+      if (!dismissed) break
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    }
+    await remoteFrame.evaluate(() => {
+      const continueButton = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
+      if (continueButton) continueButton.click()
+      const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+      for (const closer of closers) {
+        let node = closer
+        for (let depth = 0; depth < 5 && node; depth += 1) {
+          if (/开始使用|Get started/.test(node.innerText ?? '')) {
+            closer.click()
+            break
+          }
+          node = node.parentElement
+        }
+      }
+    }).catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 800))
     await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh.png') })
     await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh-full.png'), fullPage: true })
 
@@ -399,7 +530,7 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
       remoteTextSample: frameInfo.text.slice(0, 120),
       authCookie: { name: authCookie.name, sameSite: authCookie.sameSite, httpOnly: authCookie.httpOnly },
       consoleErrors: consoleErrors.slice(0, 10),
-      screenshots: ['panel-host-list.png', 'panel-remote-dsh.png', 'panel-remote-dsh-full.png'],
+      screenshots: ['settings-remote-section.png', 'panel-workspace-rail.png', 'panel-remote-dsh.png', 'panel-remote-dsh-full.png'],
     })
     t.diagnostic(`remote UI rendered in panel: ${frameInfo.title} (${frameInfo.nodes} nodes)`)
 
@@ -432,4 +563,5 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
   }
 })
+
 

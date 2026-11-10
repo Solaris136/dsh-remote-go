@@ -233,6 +233,44 @@ data: {}
 ```
 每个主机每次连接只返回同一 URL；`?token=` 只用一次完成 cookie 种入，之后 iframe 由远端自己重定向到干净地址。
 
+### `POST /hosts/:id/activate`
+设置面板当前展示的主机（客户端打开面板前调用；失败可忽略）。无请求体，返回 `{ "ok": true }`。
+
+### `GET /local/workspaces`
+本地 DSH 的工作区清单（供面板左侧「本地工作区」分组使用；只读，来自本机 DSH 的持久化工作区注册表）。
+
+```json
+{
+  "ok": true,
+  "source": "file",
+  "initialized": true,
+  "defaultWorkspaceId": "1a46…",
+  "workspaces": [
+    { "id": "132b…", "title": "dsh-remote-go", "path": "C:\\Work\\dsh-remote-go", "sessionCount": 1, "createdAt": "…", "updatedAt": "…", "isDefault": false, "origin": "local" }
+  ]
+}
+```
+
+### `GET /hosts/:id/workspaces`
+某台远端 DSH 的工作区清单（面板左侧「<主机名>」分组）。未连接时返回 `connected:false` 而不是报错：
+
+```json
+{
+  "ok": true,
+  "hostId": "h_x",
+  "hostName": "腾讯云测试机",
+  "connected": true,
+  "dshHome": "/home/ubuntu/.dsh-remote-go/home",
+  "initialized": true,
+  "defaultWorkspaceId": "…",
+  "workspaces": [
+    { "id": "…", "title": "proj", "path": "/home/ubuntu/proj", "sessionCount": 3, "createdAt": "…", "updatedAt": "…", "isDefault": false, "origin": "remote", "hostId": "h_x", "hostName": "腾讯云测试机" }
+  ]
+}
+```
+
+> 说明：DSH 的侧边栏工作区列表是 `sidebar.workspaces` 单位单占槽位，第三方插件无法向其中追加分组（该槽位由 `dsh-client-ui-workspace` 独占）。因此本插件把「本地工作区 + 按远端分组的工作区」放在远程面板自己的左侧工作区栏里，并在设置页提供「远程主机」管理；本地侧边栏的工作区列表保持原样、互不影响。
+
 ### `POST /hosts/:id/diagnose`
 执行完整检查表（可能需要数秒）。
 

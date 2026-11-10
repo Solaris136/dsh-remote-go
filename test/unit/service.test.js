@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 
@@ -255,6 +256,63 @@ test('updateHostPolicy patches keep-alive fields', async () => {
   assert.equal(view.keepAlive, 'idle')
   assert.equal(view.idleMinutes, 45)
   assert.equal(store.getHost(host.id).keepAlive, 'idle')
+})
+
+test('listLocalWorkspaces reads the local DSH workspace registry', async () => {
+  const { service, dir } = await makeTestService()
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const home = path.join(dir, 'home')
+  await mkdir(path.join(home, 'storages'), { recursive: true })
+  await writeFile(
+    path.join(home, 'storages', 'workspace.json'),
+    JSON.stringify({
+      global: { initialized: true, defaultWorkspaceId: 'w1', workspaceIds: ['w1', 'w2'] },
+      tables: { workspaces: { w1: { path: '/p/one', title: 'one', sessionIds: [] }, w2: { path: '/p/two', title: 'two', sessionIds: ['s'] } } },
+    }),
+    'utf8',
+  )
+  const result = await service.listLocalWorkspaces()
+  assert.equal(result.workspaces.length, 2)
+  assert.equal(result.workspaces[0].origin, 'local')
+  assert.equal(result.workspaces[0].title, 'one')
+  assert.equal(result.defaultWorkspaceId, 'w1')
+})
+
+test('listHostWorkspaces reports disconnected hosts without throwing', async () => {
+  const { service } = await makeTestService()
+  const host = await createHost(service)
+  const result = await service.listHostWorkspaces(host.id)
+  assert.equal(result.connected, false)
+  assert.deepEqual(result.workspaces, [])
+  assert.equal(result.hostId, host.id)
+})
+
+test('listHostWorkspaces reads the remote registry over the live SSH session', async () => {
+  const { service } = await makeTestService()
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  const calls = []
+  runtime.ssh.exec = async (command) => {
+    calls.push(command)
+    return {
+      code: 0,
+      stdout: JSON.stringify({
+        global: { initialized: true, defaultWorkspaceId: 'r1', workspaceIds: ['r1'] },
+        tables: { workspaces: { r1: { path: '/home/u/proj', title: 'remote project', sessionIds: ['a', 'b'] } } },
+      }),
+      stderr: '',
+    }
+  }
+  const result = await service.listHostWorkspaces(host.id)
+  assert.equal(result.connected, true)
+  assert.equal(result.workspaces.length, 1)
+  assert.equal(result.workspaces[0].origin, 'remote')
+  assert.equal(result.workspaces[0].hostId, host.id)
+  assert.equal(result.workspaces[0].sessionCount, 2)
+  assert.match(calls[0], /storages\/workspace\.json/)
+  await service.shutdown()
 })
 
 

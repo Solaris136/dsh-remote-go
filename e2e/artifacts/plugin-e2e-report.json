@@ -1,5 +1,5 @@
 {
-  "startedAt": "2026-11-10T16:47:18.295Z",
+  "startedAt": "2026-11-10T17:39:58.898Z",
   "sshAddress": "tencent-vm",
   "steps": [
     {
@@ -15,8 +15,8 @@
       },
       "clientRow": {
         "id": "dsh-remote-go",
-        "rev": "c9cb33bdb390",
-        "url": "plugins/??dsh-remote-go/client.js&rev=c9cb33bdb390",
+        "rev": "80ab3bf34931",
+        "url": "plugins/??dsh-remote-go/client.js&rev=80ab3bf34931",
         "inject": [
           "@deepseek-ai/dsh-client-ui-layout",
           "@deepseek-ai/dsh-client-ui-sidebar",
@@ -24,7 +24,7 @@
         ],
         "immediately": true
       },
-      "clientBundleSize": 184120,
+      "clientBundleSize": 221626,
       "hostVersion": "0.2.2-rc.1"
     },
     {
@@ -32,9 +32,9 @@
       "ok": true,
       "bootstrapLevel": "T0-local",
       "remoteVersion": "0.2.2-rc.1",
-      "remotePort": 43477,
-      "localPort": 61336,
-      "pid": 1390441
+      "remotePort": 38373,
+      "localPort": 59421,
+      "pid": 1412217
     },
     {
       "step": "tunnel-token-cookie",
@@ -42,23 +42,36 @@
       "status": 303
     },
     {
+      "step": "remote-workspaces",
+      "ok": true,
+      "count": 2
+    },
+    {
+      "step": "workspace-rail",
+      "ok": true,
+      "hasLocalGroup": true,
+      "hasRemoteGroup": true,
+      "textSample": "工作区\n本地工作区\n1\ndefault-workspace\n默认\n1 个会话\nE2E TEST HOST\n正在读取…\n\n本地工作区仍可在左侧边栏切换"
+    },
+    {
       "step": "browser-iframe",
       "ok": true,
-      "iframeSrcOrigin": "http://127.0.0.1:61336",
+      "iframeSrcOrigin": "http://127.0.0.1:59421",
       "sandbox": "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads",
       "remoteTitle": "DeepSeek Harness",
-      "remoteNodes": 1123,
-      "remoteHasComposer": false,
+      "remoteNodes": 1131,
+      "remoteHasComposer": true,
       "remoteNotice": false,
-      "remoteTextSample": "新会话\nCtrl\n+\nAlt\n+\nN\n插件\n自动化任务\n更多\n工作区\n暂无会话\n更多\n探索未至之境\n预览版\n选择工作区\n标准模式\n选择一个工作区开始\n预览版说明\n\nDeepSeek Harness 目前的 0.2 版本仍处于预览阶段，还有许",
+      "remoteTextSample": "探索未至之境\n预览版\nubuntu home\n标准模式\n描述你想要构建的内容, / 调用指令, @ 文件或对话\n工作区内修改\n请选择模型\n开始使用\n\n登录 DeepSeek 账号，或添加 API Key，即可开始使用。你的项目和文件保存在本",
       "authCookie": {
-        "name": "dsh-auth-c8Jp4AYsEGocf9B19zKiQm5OvguyQZ7fBZT3d3MG2ww",
+        "name": "dsh-auth-C33T6BQUauqZFbc2u8Xq2zuMSHlunzC2Lw4d8AlrojI",
         "sameSite": "Strict",
         "httpOnly": true
       },
       "consoleErrors": [],
       "screenshots": [
-        "panel-host-list.png",
+        "settings-remote-section.png",
+        "panel-workspace-rail.png",
         "panel-remote-dsh.png",
         "panel-remote-dsh-full.png"
       ]
@@ -69,13 +82,13 @@
     }
   ],
   "control": {
-    "origin": "http://127.0.0.1:61325",
-    "port": 61325
+    "origin": "http://127.0.0.1:59413",
+    "port": 59413
   },
   "host": {
-    "id": "h_xn3ok6rbf4",
+    "id": "h_64ya1k7o1p",
     "address": "tencent-vm"
   },
   "ok": true,
-  "finishedAt": "2026-11-10T16:47:42.121Z"
+  "finishedAt": "2026-11-10T17:40:23.329Z"
 }
