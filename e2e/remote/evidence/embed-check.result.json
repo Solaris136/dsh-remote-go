@@ -1,0 +1,148 @@
+{
+  "generatedAt": "2026-11-10T16:28:03.557Z",
+  "kind": "v0-iframe-embed-check",
+  "wrapperUrl": "http://127.0.0.1:58420/",
+  "remoteUrl": "http://127.0.0.1:45905/",
+  "seedUrlRedacted": "http://127.0.0.1:45905/?token=hXGRV0<redacted>(len=43)",
+  "chromePath": "C:\\Users\\zhang\\scoop\\shims\\chrome.exe",
+  "timeoutMs": 45000,
+  "checks": [
+    {
+      "id": "wrapper.loaded",
+      "expected": "wrapper page HTTP 200",
+      "actual": "HTTP 200",
+      "pass": true,
+      "evidence": "http://127.0.0.1:58420/"
+    },
+    {
+      "id": "frame.found",
+      "expected": "iframe frame for 127.0.0.1:45905",
+      "actual": "http://127.0.0.1:45905/",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "frame.cookie-exchange",
+      "expected": "frame URL settles on clean / (no token) after 303",
+      "actual": "http://127.0.0.1:45905/",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "frame.dom-rendered",
+      "expected": "remote DOM has > 80 elements or > 80 chars of text",
+      "actual": "elements=1098, textLength=69",
+      "pass": true,
+      "evidence": "frame.dom"
+    },
+    {
+      "id": "frame.no-error-text",
+      "expected": "no login/401/error page text in remote body",
+      "actual": "新会话 Ctrl + Alt + N 插件 自动化任务 更多 工作区 暂无会话 更多 探索未至之境 预览版 选择工作区 选择一个工作区开始",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "cookie.dsh-auth-present",
+      "expected": "a dsh-auth-* cookie is stored for the remote authority",
+      "actual": "dsh-auth-R9GyCGpCVKhIX21mIzyzdvw9Fc9JoqhxKoMBHCYvmy0 domain=127.0.0.1 httpOnly=true sameSite=Strict",
+      "pass": true,
+      "evidence": "Network.getAllCookies"
+    },
+    {
+      "id": "websocket.created",
+      "expected": "at least one WebSocket opened to 127.0.0.1:<remote-port>",
+      "actual": "1 socket(s); first=ws://127.0.0.1:45905/api/remote.mux",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "websocket.101",
+      "expected": "WebSocket handshake answered 101",
+      "actual": "url=undefined status=101",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "websocket.traffic",
+      "expected": "WebSocket carried frames (received > 0)",
+      "actual": "received=5 sent=5",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "console.no-fatal",
+      "expected": "no page-context uncaught errors",
+      "actual": "0 pageerror(s)",
+      "pass": true,
+      "evidence": ""
+    },
+    {
+      "id": "network.no-failed-remote-requests",
+      "expected": "no failed network request to the remote origin",
+      "actual": "0 failed remote request(s)",
+      "pass": true,
+      "evidence": ""
+    }
+  ],
+  "frame": {
+    "url": "http://127.0.0.1:45905/",
+    "title": "DeepSeek Harness",
+    "readyState": "complete",
+    "elementCount": 1098,
+    "bodyTextPreview": "新会话 Ctrl + Alt + N 插件 自动化任务 更多 工作区 暂无会话 更多 探索未至之境 预览版 选择工作区 选择一个工作区开始",
+    "composerInputPresent": false,
+    "sidebarPresent": true,
+    "scriptCount": 12,
+    "localStorageKeys": 0
+  },
+  "cookies": [
+    {
+      "name": "dsh-auth-R9GyCGpCVKhIX21mIzyzdvw9Fc9JoqhxKoMBHCYvmy0",
+      "domain": "127.0.0.1",
+      "path": "/",
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Strict",
+      "session": false,
+      "expires": 1796920084.207108
+    }
+  ],
+  "webSockets": {
+    "created": [
+      {
+        "url": "ws://127.0.0.1:45905/api/remote.mux",
+        "requestId": "7032.42"
+      }
+    ],
+    "handshakes": [
+      {
+        "status": 101,
+        "headers": {
+          "Upgrade": "websocket",
+          "Sec-WebSocket-Accept": "3xtHR+A04xhhMZK9MX/hA8Ku7sk=",
+          "Connection": "Upgrade",
+          "Sec-WebSocket-Extensions": "permessage-deflate"
+        }
+      }
+    ],
+    "closed": [],
+    "errors": [],
+    "framesReceived": 5,
+    "framesSent": 5
+  },
+  "consoleErrors": [],
+  "pageErrors": [],
+  "requestFailures": [],
+  "browser": "Chrome/157.0.8103.39",
+  "wrapper": {
+    "title": "dsh-remote-go V0 wrapper",
+    "iframeCount": 1,
+    "iframeSrcRedacted": "http://127.0.0.1:45905/?token=<redacted>",
+    "iframeLoadState": "cross-origin (expected)"
+  },
+  "screenshot": "C:\\Work\\dsh-remote-go\\e2e\\remote\\evidence\\embed-check.png",
+  "error": null,
+  "verdict": "pass",
+  "finishedAt": "2026-11-10T16:28:10.527Z"
+}

@@ -1,0 +1,3 @@
+minimumReleaseAgeExclude:
+  - '@puppeteer/browsers@3.2.7'
+  - puppeteer-core@25.17.0

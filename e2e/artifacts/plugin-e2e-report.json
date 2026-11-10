@@ -1,0 +1,81 @@
+{
+  "startedAt": "2026-11-10T16:47:18.295Z",
+  "sshAddress": "tencent-vm",
+  "steps": [
+    {
+      "step": "health",
+      "ok": true
+    },
+    {
+      "step": "activation",
+      "ok": true,
+      "hostEntry": {
+        "id": "dsh-remote-go",
+        "name": "dsh-remote-go"
+      },
+      "clientRow": {
+        "id": "dsh-remote-go",
+        "rev": "c9cb33bdb390",
+        "url": "plugins/??dsh-remote-go/client.js&rev=c9cb33bdb390",
+        "inject": [
+          "@deepseek-ai/dsh-client-ui-layout",
+          "@deepseek-ai/dsh-client-ui-sidebar",
+          "@deepseek-ai/dsh-client-locale"
+        ],
+        "immediately": true
+      },
+      "clientBundleSize": 184120,
+      "hostVersion": "0.2.2-rc.1"
+    },
+    {
+      "step": "connect",
+      "ok": true,
+      "bootstrapLevel": "T0-local",
+      "remoteVersion": "0.2.2-rc.1",
+      "remotePort": 43477,
+      "localPort": 61336,
+      "pid": 1390441
+    },
+    {
+      "step": "tunnel-token-cookie",
+      "ok": true,
+      "status": 303
+    },
+    {
+      "step": "browser-iframe",
+      "ok": true,
+      "iframeSrcOrigin": "http://127.0.0.1:61336",
+      "sandbox": "allow-scripts allow-same-origin allow-forms allow-popups allow-downloads",
+      "remoteTitle": "DeepSeek Harness",
+      "remoteNodes": 1123,
+      "remoteHasComposer": false,
+      "remoteNotice": false,
+      "remoteTextSample": "新会话\nCtrl\n+\nAlt\n+\nN\n插件\n自动化任务\n更多\n工作区\n暂无会话\n更多\n探索未至之境\n预览版\n选择工作区\n标准模式\n选择一个工作区开始\n预览版说明\n\nDeepSeek Harness 目前的 0.2 版本仍处于预览阶段，还有许",
+      "authCookie": {
+        "name": "dsh-auth-c8Jp4AYsEGocf9B19zKiQm5OvguyQZ7fBZT3d3MG2ww",
+        "sameSite": "Strict",
+        "httpOnly": true
+      },
+      "consoleErrors": [],
+      "screenshots": [
+        "panel-host-list.png",
+        "panel-remote-dsh.png",
+        "panel-remote-dsh-full.png"
+      ]
+    },
+    {
+      "step": "cleanup",
+      "ok": true
+    }
+  ],
+  "control": {
+    "origin": "http://127.0.0.1:61325",
+    "port": 61325
+  },
+  "host": {
+    "id": "h_xn3ok6rbf4",
+    "address": "tencent-vm"
+  },
+  "ok": true,
+  "finishedAt": "2026-11-10T16:47:42.121Z"
+}

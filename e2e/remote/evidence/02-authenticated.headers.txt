@@ -1,0 +1,8 @@
+HTTP/1.1 200 OK
+content-type: text/html; charset=utf-8
+Vary: Accept-Encoding
+Date: Tue, 10 Nov 2026 16:27:30 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Transfer-Encoding: chunked
+

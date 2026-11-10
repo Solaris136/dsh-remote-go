@@ -1,0 +1,18 @@
+== STOPPED-STATE VERIFICATION ==
+PORT_45905_NOT_LISTENING
+1380785 /home/ubuntu/.dsh-remote-go/node/bin/node /home/ubuntu/.dsh-remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open --port 0
+1383531 bash -c set +e; echo "== STOPPED-STATE VERIFICATION =="; ss -ltnp 2>/dev/null | grep -E ":45905\b" && echo "PORT_45905_STILL_LISTENING" || echo "PORT_45905_NOT_LISTENING"; pgrep -af "dsh-remote-go/node/bin/node.*bin.js --profile web" || echo "NO_WEB_PROCESS_WITH_THIS_RUNTIME"; echo; echo "== MY STOPPED PID 1374966 =="; kill -0 1374966 2>/dev/null && echo "PID_1374966_ALIVE" || echo "PID_1374966_GONE"; echo; echo "== SELF SSH ALIAS =="; bash ~/.dsh-remote-go/scripts/setup-self-ssh.sh
+
+== MY STOPPED PID 1374966 ==
+PID_1374966_GONE
+
+== SELF SSH ALIAS ==
+GENERATED_KEY=/home/ubuntu/.ssh/id_ed25519
+AUTHORIZED_KEY=added
+SSH_CONFIG=added
+SSHD_LISTEN:
+LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*          
+LISTEN 0      4096            [::]:22            [::]:*          
+SELF_SSH_TEST:
+SELF_OK host=VM-0-5-ubuntu user=ubuntu ssh_connection=127.0.0.1 43926 127.0.0.1 22
+SELF_SSH_EXIT=0

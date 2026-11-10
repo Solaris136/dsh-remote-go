@@ -1,0 +1,130 @@
+
+===== A. runtime versions =====
+root=/home/ubuntu/.dsh-remote-go
+node=v24.22.2
+dsh=0.2.2-rc.1
+install_record:
+{
+  "root": "/home/ubuntu/.dsh-remote-go",
+  "nodeVersion": "v24.22.2",
+  "npmVersion": "11.19.1",
+  "dshVersion": "0.2.2-rc.1",
+  "log": "/home/ubuntu/.dsh-remote-go/logs/setup.log",
+  "installedSizeKb": 1153824,
+  "installedAt": "2026-11-10T16:16:24Z"
+}
+
+disk_usage:
+208M	/home/ubuntu/.dsh-remote-go/node
+920M	/home/ubuntu/.dsh-remote-go/dsh-home
+44K	/home/ubuntu/.dsh-remote-go/home
+
+directory_layout:
+d dsh-home
+d dsh-home/node_modules
+d home
+d home/profiles
+d home/storages
+d logs
+d node
+d node/bin
+d node/include
+d node/lib
+d node/share
+d run
+d scripts
+f dsh-home/package.json
+f dsh-home/package-lock.json
+f home/.anonymous-user-id
+f home/.credentials.yaml
+f logs/remote-web.log
+f logs/setup.log
+f logs/web.log
+f node/CHANGELOG.md
+f node/LICENSE
+f node/README.md
+f node-v24.22.2-linux-x64.tar.xz
+f run/install.json
+f run/web.json
+f run/web.pid
+f run/web.port
+f run/web.state.json
+f run/web.token
+f run/web.url
+f scripts/collect-evidence.sh
+f scripts/setup-remote.sh
+f scripts/start-remote.sh
+f scripts/status-remote.sh
+f scripts/stop-remote.sh
+f SHASUMS256.txt
+
+===== B. dsh web process =====
+pid=1374966
+    PID    PPID    PGID     SID STAT ELAPSED START   RSS COMMAND
+1374966       1 1374966 1374966 Ssl      738 00:16 338400 /home/ubuntu/.dsh-remote-go/node/bin/node /home/ubuntu/.dsh-remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open --port 0
+
+listener:
+LISTEN 0      511        127.0.0.1:45905      0.0.0.0:*    users:(("MainThread",pid=1374966,fd=21))
+
+ssh_relevant_env:
+SSH_CONNECTION=240e:304:83ba:a700:1651:20ff:fe70:a078 62813 240d:c000:f05f:8d00:327e:8b66:5c18:0 22
+DSH_HOME=/home/ubuntu/.dsh-remote-go/home
+SSH_CLIENT=240e:304:83ba:a700:1651:20ff:fe70:a078 62813 22
+
+launch_environment_source (launchedThroughSsh):
+73-* @returns whether the inherited process layer carries either SSH marker.
+74-*/
+75:function launchedThroughSsh(environment) {
+76-	return ["SSH_CONNECTION", "SSH_TTY"].some((name) => {
+77-		const value = environment.getFrom(name, ["process"])?.value;
+78-		return value !== void 0 && value !== "";
+79-	});
+80-}
+81-//#endregion
+82:export { DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot, launchEnvironmentOf, launchedThroughSsh };
+
+process_is_session_leader:
+    PID     SID    PGID
+1374966 1374966 1374966
+
+===== C. startup log and timing evidence =====
+log=/home/ubuntu/.dsh-remote-go/logs/remote-web.log
+log_mtime=2026-11-11 00:16:55.732554545 +0800
+pidfile_mtime=2026-11-11 00:16:49.428511195 +0800
+log_mode=600 pidfile_mode=600
+log_content_redacted:
+dsh web: http://127.0.0.1:45905/?token=hXGRV0<redacted>
+derived_process_start_epoch=1794327410 log_ready_epoch=1794327415 startup_seconds=5
+
+===== D. DSH_HOME layout (isolated) =====
+d profiles
+d profiles/web
+d storages
+f .anonymous-user-id
+f .credentials.yaml
+f profiles/web/cordis.patch.yml
+f profiles/web/cordis.yml
+f profiles/web/package.json
+f profiles/web/pnpm-workspace.yaml
+f storages/workspace.json
+
+===== E. isolated startup timing probe (throwaway DSH_HOME, does not touch main instance) =====
+probe_root=/home/ubuntu/.dsh-remote-go/.timing-probe (node/dsh-home symlinked, fresh DSH_HOME)
+START_OK
+REUSED=0
+PORT=33033
+PID=1381088
+STARTUP_SECONDS=6
+NODE_VERSION=v24.22.2
+DSH_VERSION=0.2.2-rc.1
+URL_REDACTED=http://127.0.0.1:33033/?token=0rnP3Y...(len=43)
+probe_probe_http=401
+probe_log:
+# dsh-remote-go start 2026-11-10T16:29:08Z DSH_HOME=/home/ubuntu/.dsh-remote-go/.timing-probe/home
+dsh web: http://127.0.0.1:33033/?token=0rnP3Y<redacted>
+# dsh-remote-go up pid=1381088 port=33033 dsh=0.2.2-rc.1 node=v24.22.2 in 6s
+STOP_OK
+ALREADY_STOPPED=0
+PID=1381088
+POST_STOP_PROBE_HTTP=000000
+probe_root_removed=yes

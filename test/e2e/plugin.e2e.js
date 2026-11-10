@@ -1,0 +1,435 @@
+// End-to-end acceptance for dsh-remote-go (real product path, not fakes):
+//
+//   1. boot an isolated control DSH (own DSH_HOME, own profile) from the locally
+//      installed runtime, with this plugin installed into that profile;
+//   2. prove the Host half answers and the browser half is in the client-module graph;
+//   3. create + connect a host through the local API against the real test server
+//      (`E2E_SSH_ADDRESS`, default `tencent-vm`) — SSH, remote probe, T0-local
+//      runtime reuse, remote web start, loopback tunnel, token → cookie handshake;
+//   4. drive the real Web GUI in headless Chrome: sidebar entry → full-page panel →
+//      remote DSH iframe renders inside the panel;
+//   5. clean up (stop the remote web, delete the host, stop the control DSH).
+//
+// Run:  node --test "test/e2e/*.e2e.js"
+// Env:  E2E_SSH_ADDRESS (default tencent-vm), E2E_CHROME (browser executable),
+//       E2E_KEEP_CONTROL=1 to keep the control instance for debugging.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import process from 'node:process'
+import puppeteer from 'puppeteer-core'
+
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../..')
+const CONTROL_DIR = path.join(ROOT, 'e2e', 'control')
+const CONTROL_HOME = path.join(CONTROL_DIR, 'home')
+const DSH_BIN = path.join(CONTROL_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const ARTIFACTS = path.join(ROOT, 'e2e', 'artifacts')
+const SSH_ADDRESS = process.env.E2E_SSH_ADDRESS || 'tencent-vm'
+const KEEP_CONTROL = process.env.E2E_KEEP_CONTROL === '1'
+const API_HEADER = 'x-dsh-remote-go'
+
+/** @param {string} file */
+async function readJson(file) {
+  return JSON.parse(await readFile(file, 'utf8'))
+}
+
+function resolveChrome() {
+  const candidates = [
+    process.env.E2E_CHROME,
+    'C:/Users/zhang/scoop/apps/chrome/current/chrome.exe',
+    'C:/Users/zhang/scoop/shims/chrome.exe',
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean)
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+/**
+ * @param {{ log: (line: string) => void }} options
+ */
+async function startControlDsh(options) {
+  if (!existsSync(DSH_BIN)) {
+    throw new Error(`control DSH runtime missing at ${DSH_BIN}; install it with: pnpm --dir e2e/control add --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1`)
+  }
+  const logLines = []
+  const proc = spawn(process.execPath, [DSH_BIN, '--profile', 'web', '--no-open', '--port', '0'], {
+    cwd: ROOT,
+    env: { ...process.env, DSH_HOME: CONTROL_HOME },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  let stdout = ''
+  let stderr = ''
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString('utf8')
+    for (const line of chunk.toString('utf8').split(/\r?\n/)) {
+      if (line.includes('dsh web:') || line.trim() !== '') {
+        logLines.push(line)
+        options.log?.(line)
+      }
+    }
+  })
+  proc.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf8')
+    logLines.push(chunk.toString('utf8'))
+  })
+  const deadline = Date.now() + 180_000
+  let url = null
+  while (Date.now() < deadline) {
+    const match = /dsh web:\s*(http:\/\/[^\s]+)/.exec(stdout)
+    if (match) {
+      url = match[1]
+      break
+    }
+    if (proc.exitCode !== null) break
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  if (!url) {
+    proc.kill()
+    throw new Error(`control DSH did not become ready.\nstdout:\n${stdout.slice(-4000)}\nstderr:\n${stderr.slice(-4000)}`)
+  }
+  const parsed = new URL(url)
+  const token = parsed.searchParams.get('token') || ''
+  return {
+    proc,
+    url,
+    token,
+    port: Number(parsed.port),
+    origin: `http://127.0.0.1:${parsed.port}`,
+    logLines,
+  }
+}
+
+/** @param {import('node:child_process').ChildProcess} proc */
+async function stopControlDsh(proc) {
+  if (!proc || proc.exitCode !== null) return
+  proc.kill()
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      try {
+        proc.kill('SIGKILL')
+      } catch {
+        /* already gone */
+      }
+      resolve(undefined)
+    }, 5000)
+    proc.once('exit', () => {
+      clearTimeout(timer)
+      resolve(undefined)
+    })
+  })
+}
+
+/**
+ * @param {string} origin
+ * @param {string} route
+ * @param {{ method?: string, body?: unknown, headers?: Record<string, string> }} [options]
+ */
+async function api(origin, route, options = {}) {
+  const response = await fetch(`${origin}/dsh-remote-go/api${route}`, {
+    method: options.method ?? 'GET',
+    headers: {
+      [API_HEADER]: '1',
+      ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+      ...(options.headers ?? {}),
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  })
+  const text = await response.text()
+  let json = null
+  try {
+    json = text === '' ? null : JSON.parse(text)
+  } catch {
+    json = null
+  }
+  return { status: response.status, json, text }
+}
+
+/** @param {string} origin @param {string} id */
+async function waitForHostState(origin, id, predicate, timeoutMs = 180_000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const result = await api(origin, '/state')
+    const host = result.json?.state?.hosts?.find((item) => item.id === id) ?? null
+    last = host
+    if (host && predicate(host)) return host
+    await new Promise((resolve) => setTimeout(resolve, 500))
+  }
+  throw new Error(`host did not reach the expected state; last=${JSON.stringify(last)}`)
+}
+
+/** @param {string} origin */
+async function cleanupHosts(origin) {
+  const state = await api(origin, '/state')
+  for (const host of state.json?.state?.hosts ?? []) {
+    await api(origin, `/hosts/${host.id}/disconnect`, { method: 'POST', body: { stopRemote: true } }).catch(() => {})
+    await api(origin, `/hosts/${host.id}`, { method: 'DELETE' }).catch(() => {})
+  }
+}
+
+test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel iframe', { timeout: 420_000 }, async (t) => {
+  await mkdir(ARTIFACTS, { recursive: true })
+  /** @type {Record<string, unknown>} */
+  const report = { startedAt: new Date().toISOString(), sshAddress: SSH_ADDRESS, steps: [] }
+  const chromePath = resolveChrome()
+  assert.ok(chromePath, 'a Chrome/Edge executable is required for the browser half of the E2E (set E2E_CHROME)')
+
+  /** @type {Awaited<ReturnType<typeof startControlDsh>> | null} */
+  let control = null
+  /** @type {import('puppeteer-core').Browser | null} */
+  let browser = null
+  /** @type {string | null} */
+  let hostId = null
+  try {
+    // 1) isolated control DSH with this plugin installed in its profile
+    control = await startControlDsh({ log: () => {} })
+    report.control = { origin: control.origin, port: control.port }
+    t.diagnostic(`control DSH on ${control.origin}`)
+
+    const health = await api(control.origin, '/health')
+    assert.equal(health.status, 200, `plugin API not reachable: ${health.text}`)
+    report.steps.push({ step: 'health', ok: true })
+
+    const diagnostics = await api(control.origin, '/diagnostics/self')
+    assert.equal(diagnostics.status, 200)
+    const self = diagnostics.json
+    assert.equal(self?.plugin?.id, 'dsh-remote-go')
+    assert.ok(self?.entry?.id, 'host plugin entry must be live')
+    assert.ok(self?.client?.row?.id === 'dsh-remote-go', 'browser half must be registered in the client-module graph')
+    assert.ok(self?.client?.bundle?.size > 1000, 'client bundle must be readable')
+    report.steps.push({
+      step: 'activation',
+      ok: true,
+      hostEntry: self.entry,
+      clientRow: self.client.row,
+      clientBundleSize: self.client.bundle.size,
+      hostVersion: self.hostVersion,
+    })
+
+    // 2) connect the real test server through the plugin's own API
+    await cleanupHosts(control.origin)
+    const created = await api(control.origin, '/hosts', {
+      method: 'POST',
+      body: {
+        host: {
+          name: 'E2E test host',
+          address: SSH_ADDRESS,
+          username: 'ubuntu',
+          auth: { type: 'key', keyPath: '~/.ssh/id_rsa' },
+          keepAlive: 'stop',
+          autoReconnect: true,
+        },
+      },
+    })
+    assert.equal(created.status, 200, created.text)
+    hostId = created.json.host.id
+    report.host = { id: hostId, address: SSH_ADDRESS }
+
+    const connect = await api(control.origin, `/hosts/${hostId}/connect`, { method: 'POST', body: {} })
+    assert.equal(connect.status, 200, connect.text)
+    const connected = await waitForHostState(control.origin, hostId, (host) => host.status === 'connected' || host.status === 'error')
+    assert.equal(connected.status, 'connected', `connect failed: ${JSON.stringify(connected.error)}`)
+    assert.equal(connected.remote.uiReady, true)
+    assert.equal(connected.versionParity.status, 'same')
+    assert.ok(connected.remote.localPort > 0)
+    report.steps.push({
+      step: 'connect',
+      ok: true,
+      bootstrapLevel: connected.remote.bootstrapLevel,
+      remoteVersion: connected.remote.version,
+      remotePort: connected.remote.port,
+      localPort: connected.remote.localPort,
+      pid: connected.remote.pid,
+    })
+
+    const opened = await api(control.origin, `/hosts/${hostId}/open`)
+    assert.equal(opened.status, 200, opened.text)
+    assert.match(opened.json.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=/)
+    // The token URL must actually complete the cookie handshake through the tunnel.
+    const tokenized = await fetch(opened.json.url, { redirect: 'manual' })
+    assert.ok([302, 303].includes(tokenized.status), `unexpected token response ${tokenized.status}`)
+    const cookie = tokenized.headers.get('set-cookie') ?? ''
+    assert.match(cookie, /dsh-auth-/)
+    assert.match(cookie, /SameSite=Strict/i)
+    report.steps.push({ step: 'tunnel-token-cookie', ok: true, status: tokenized.status })
+
+    // 3) the browser half: sidebar entry, full-page panel, remote iframe
+    browser = await puppeteer.launch({
+      executablePath: chromePath,
+      headless: true,
+      args: ['--disable-gpu', '--no-first-run', '--no-default-browser-check', '--window-size=1440,900', '--lang=zh-CN'],
+    })
+    const page = await browser.newPage()
+    await page.setViewport({ width: 1440, height: 900 })
+    const consoleErrors = []
+    page.on('console', (message) => {
+      if (message.type() === 'error') consoleErrors.push(message.text())
+    })
+    await page.goto(control.url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+    await page.waitForFunction(() => !location.search.includes('token='), { timeout: 30_000 })
+
+    const sidebar = '[data-testid="dsh-remote-go-sidebar"]'
+    await page.waitForSelector(sidebar, { timeout: 60_000 })
+    // The sidebar slot renders our icon inside the sidebar's own nav row; a DOM
+    // click on that row is what the shell listens to (a synthetic icon click is
+    // swallowed by the vendored glyph wrapper).
+    const clickedSidebar = await page.evaluate((selector) => {
+      const icon = document.querySelector(selector)
+      if (!icon) return null
+      let node = icon
+      while (node && node !== document.body) {
+        if (node.tagName === 'BUTTON' || node.tagName === 'A' || node.getAttribute('role') === 'button') {
+          node.click()
+          return { tag: node.tagName, text: (node.textContent ?? '').trim().slice(0, 40) }
+        }
+        node = node.parentElement
+      }
+      return null
+    }, sidebar)
+    assert.ok(clickedSidebar, 'the sidebar nav row for the remote entry was not clickable')
+
+    const panel = '[data-testid="dsh-remote-go-panel"]'
+    try {
+      await page.waitForSelector(panel, { timeout: 30_000 })
+    } catch (error) {
+      await page.screenshot({ path: path.join(ARTIFACTS, 'panel-missing.png') }).catch(() => {})
+      throw error
+    }
+    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-host-list.png') })
+
+    // The connected host makes the client restore the viewport; otherwise open it from the card.
+    const iframeSelector = '[data-testid="remote-iframe"]'
+    const iframeAlready = await page.$(iframeSelector)
+    if (!iframeAlready) {
+      const openButton = `[data-testid="host-card"][data-host-id="${hostId}"] [data-testid="host-open"]`
+      await page.waitForSelector(openButton, { timeout: 30_000 })
+      await page.click(openButton)
+    }
+    await page.waitForSelector(iframeSelector, { timeout: 60_000 })
+
+    const iframeHandle = await page.$(iframeSelector)
+    const iframeSrc = await page.evaluate((element) => element.getAttribute('src'), iframeHandle)
+    assert.match(iframeSrc ?? '', /^http:\/\/127\.0\.0\.1:\d+\/\?token=/, 'iframe must point at the loopback tunnel')
+    const sandbox = await page.evaluate((element) => element.getAttribute('sandbox'), iframeHandle)
+    assert.match(sandbox ?? '', /allow-scripts/)
+    assert.match(sandbox ?? '', /allow-same-origin/)
+
+    // Wait for the remote DSH document inside the iframe. Puppeteer's
+    // `contentFrame()` is the only reliable way to tell the iframe apart from the
+    // shell's own main frame (both are http://127.0.0.1:...).
+    const tunnelOrigin = new URL(iframeSrc).origin
+    const iframeElement = await page.$(iframeSelector)
+    assert.ok(iframeElement, 'iframe element handle missing')
+    const frameDeadline = Date.now() + 120_000
+    /** @type {import('puppeteer-core').Frame | null} */
+    let remoteFrame = null
+    while (Date.now() < frameDeadline) {
+      const candidate = await iframeElement.contentFrame()
+      if (candidate) {
+        try {
+          const url = candidate.url()
+          if (url.startsWith(tunnelOrigin)) {
+            const title = await candidate.evaluate(() => document.title)
+            if (title && title.includes('DeepSeek')) {
+              remoteFrame = candidate
+              break
+            }
+          }
+        } catch {
+          /* frame may still be navigating */
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    assert.ok(remoteFrame, 'the remote DSH document never loaded inside the iframe')
+    assert.ok(remoteFrame.url().startsWith(tunnelOrigin), `iframe frame lives on ${remoteFrame.url()}, expected ${tunnelOrigin}`)
+    // A fresh remote DSH_HOME shows the "preview build" notice first; dismiss it so
+    // the assertion covers the real shell rather than the notice dialog.
+    const noticed = await remoteFrame
+      .evaluate(() => {
+        const text = document.body?.innerText ?? ''
+        const button = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
+        if (button) button.click()
+        return { hadNotice: Boolean(button), beforeNodes: document.querySelectorAll('*').length, beforeText: text.slice(0, 120) }
+      })
+      .catch(() => ({ hadNotice: false, beforeNodes: 0, beforeText: '' }))
+    await new Promise((resolve) => setTimeout(resolve, 3_000))
+    const frameInfo = await remoteFrame.evaluate(() => ({
+      title: document.title,
+      text: (document.body?.innerText ?? '').slice(0, 400),
+      nodes: document.querySelectorAll('*').length,
+      hasComposer: Boolean(document.querySelector('textarea, [contenteditable="true"]')),
+    }))
+    assert.ok(frameInfo.title.includes('DeepSeek'), `unexpected remote title: ${frameInfo.title}`)
+    assert.ok(frameInfo.nodes > 100, `remote UI did not render (${frameInfo.nodes} nodes; notice=${JSON.stringify(noticed)})`)
+    // The frame must be the remote DSH, not the local shell: the local panel's
+    // toolbar strings never appear inside the remote document.
+    assert.ok(!frameInfo.text.includes('隐藏地址'), 'the iframe frame must be the remote document, not the local shell')
+    assert.ok(!frameInfo.text.includes('你正在操作远端服务器'), 'the local banner must not leak into the remote document')
+
+    // Cookie evidence for the tunnel authority (the iframe origin).
+    const cookies = await page.cookies(tunnelOrigin)
+    const authCookie = cookies.find((cookie) => cookie.name.startsWith('dsh-auth-'))
+    assert.ok(authCookie, 'the tunnel origin must hold the remote DSH auth cookie')
+    assert.equal(authCookie.sameSite, 'Strict')
+    assert.equal(authCookie.httpOnly, true)
+
+    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh.png') })
+    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh-full.png'), fullPage: true })
+
+    report.steps.push({
+      step: 'browser-iframe',
+      ok: true,
+      iframeSrcOrigin: tunnelOrigin,
+      sandbox,
+      remoteTitle: frameInfo.title,
+      remoteNodes: frameInfo.nodes,
+      remoteHasComposer: frameInfo.hasComposer,
+      remoteNotice: noticed.hadNotice,
+      remoteTextSample: frameInfo.text.slice(0, 120),
+      authCookie: { name: authCookie.name, sameSite: authCookie.sameSite, httpOnly: authCookie.httpOnly },
+      consoleErrors: consoleErrors.slice(0, 10),
+      screenshots: ['panel-host-list.png', 'panel-remote-dsh.png', 'panel-remote-dsh-full.png'],
+    })
+    t.diagnostic(`remote UI rendered in panel: ${frameInfo.title} (${frameInfo.nodes} nodes)`)
+
+    // 4) cleanup: stop the remote web and remove the host
+    const stopped = await api(control.origin, `/hosts/${hostId}/disconnect`, { method: 'POST', body: { stopRemote: true } })
+    assert.equal(stopped.status, 200)
+    const removed = await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
+    assert.equal(removed.status, 200)
+    const after = await api(control.origin, '/state')
+    assert.equal(after.json.state.hosts.length, 0)
+    report.steps.push({ step: 'cleanup', ok: true })
+    report.ok = true
+  } catch (error) {
+    report.ok = false
+    report.error = error instanceof Error ? `${error.stack ?? error.message}` : String(error)
+    throw error
+  } finally {
+    report.finishedAt = new Date().toISOString()
+    // Best-effort cleanup so a failed run does not leave a remote DSH running.
+    if (control && hostId) {
+      try {
+        await api(control.origin, `/hosts/${hostId}/disconnect`, { method: 'POST', body: { stopRemote: true } })
+        await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
+      } catch {
+        /* control may already be gone */
+      }
+    }
+    await writeFile(path.join(ARTIFACTS, 'plugin-e2e-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8').catch(() => {})
+    if (browser) await browser.close().catch(() => {})
+    if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
+  }
+})
+

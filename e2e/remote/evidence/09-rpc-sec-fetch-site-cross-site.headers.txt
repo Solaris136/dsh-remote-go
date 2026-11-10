@@ -1,0 +1,6 @@
+HTTP/1.1 403 Forbidden
+Date: Tue, 10 Nov 2026 16:27:32 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Transfer-Encoding: chunked
+

@@ -1,0 +1,38 @@
+{
+  "startedAt": "2026-11-10T16:47:17.942Z",
+  "steps": [
+    {
+      "step": "pack",
+      "ok": true,
+      "tarball": "dsh-remote-go-0.1.0.tgz"
+    },
+    {
+      "step": "install-tarball",
+      "ok": true,
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        "dsh-remote-go"
+      ]
+    },
+    {
+      "step": "clean-profile-activation",
+      "ok": true,
+      "hostEntry": "dsh-remote-go",
+      "clientPath": "C:\\Work\\dsh-remote-go\\e2e\\control\\home-published\\profiles\\web\\node_modules\\dsh-remote-go\\client.js",
+      "clientBundleSize": 184120,
+      "hostVersion": "0.2.2-rc.1"
+    },
+    {
+      "step": "cleanup",
+      "ok": true
+    }
+  ],
+  "pack": {
+    "tarball": "C:\\Work\\dsh-remote-go\\e2e\\artifacts\\dsh-remote-go-0.1.0.tgz",
+    "name": "dsh-remote-go",
+    "version": "0.1.0"
+  },
+  "ok": true,
+  "finishedAt": "2026-11-10T16:47:28.044Z"
+}

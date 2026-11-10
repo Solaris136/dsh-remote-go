@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote entry",
+    "description": "Open a remote DSH inside a full-page panel over SSH, with host list, diagnostics, and remote runtime bootstrap."
+  }
+}

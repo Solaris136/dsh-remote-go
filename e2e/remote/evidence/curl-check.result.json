@@ -1,0 +1,186 @@
+{
+  "generatedAt": "2026-11-11T00:27:39.5057294+08:00",
+  "remoteHost": "tencent-vm",
+  "remotePort": 45905,
+  "localPort": 45905,
+  "baseUrl": "http://127.0.0.1:45905",
+  "tokenLength": 43,
+  "tokenPrefix": "hXGRV0",
+  "checks": [
+    {
+      "id": "B1.token-exchange",
+      "expect": "HTTP 303 + Set-Cookie + Location ./",
+      "actual": "HTTP 303; location='./'; set-cookie-count=1",
+      "pass": true,
+      "evidence": "01-token-exchange.headers.txt"
+    },
+    {
+      "id": "B1b.cookie-name",
+      "expect": "cookie name is dsh-auth-<base64url sha256(authority)>",
+      "actual": "name='dsh-auth-R9GyCGpCVKhIX21mIzyzdvw9Fc9JoqhxKoMBHCYvmy0'",
+      "pass": true,
+      "evidence": "01-token-exchange.headers.txt"
+    },
+    {
+      "id": "B1c.cookie-flags",
+      "expect": "HttpOnly; SameSite=Strict; Path=/",
+      "actual": "; Max-Age=2592000; Path=/; Expires=Thu, 10 Dec 2026 16:27:29 GMT; HttpOnly; SameSite=Strict",
+      "pass": true,
+      "evidence": "01-token-exchange.headers.txt"
+    },
+    {
+      "id": "B1d.cookie-http-no-secure",
+      "expect": "no Secure flag on plain HTTP",
+      "actual": "SecurePresent=False",
+      "pass": true,
+      "evidence": "01-token-exchange.headers.txt"
+    },
+    {
+      "id": "B2.authenticated-200",
+      "expect": "HTTP 200 with text/html",
+      "actual": "HTTP 200; content-type='text/html; charset=utf-8'; title='DeepSeek Harness'; bodyLength=40102",
+      "pass": true,
+      "evidence": "02-authenticated.headers.txt"
+    },
+    {
+      "id": "B2b.html-title",
+      "expect": "HTML title is DeepSeek Harness (or contains DSH)",
+      "actual": "title='DeepSeek Harness'",
+      "pass": true,
+      "evidence": "02-authenticated.body.txt"
+    },
+    {
+      "id": "B2c.no-x-frame-options",
+      "expect": "no X-Frame-Options header (iframe allowed)",
+      "actual": "x-frame-options=''",
+      "pass": true,
+      "evidence": "02-authenticated.headers.txt"
+    },
+    {
+      "id": "B2d.no-csp-frame-ancestors",
+      "expect": "no CSP frame-ancestors (iframe allowed)",
+      "actual": "csp=''; frame-ancestors=''",
+      "pass": true,
+      "evidence": "02-authenticated.headers.txt"
+    },
+    {
+      "id": "B3.unauthenticated-401",
+      "expect": "HTTP 401 without cookie",
+      "actual": "HTTP 401",
+      "pass": true,
+      "evidence": "03-unauthenticated.headers.txt"
+    },
+    {
+      "id": "B4.rpc-authenticated-200",
+      "expect": "POST /api/session/list with cookie -> 200",
+      "actual": "HTTP 200",
+      "pass": true,
+      "evidence": "04-rpc-authenticated.headers.txt"
+    },
+    {
+      "id": "B5.rpc-unauthenticated-401",
+      "expect": "POST /api/session/list without cookie -> 401",
+      "actual": "HTTP 401",
+      "pass": true,
+      "evidence": "05-rpc-unauthenticated.headers.txt"
+    },
+    {
+      "id": "B6.rpc-origin-same-authority-200",
+      "expect": "Origin = listener authority -> 200",
+      "actual": "HTTP 200",
+      "pass": true,
+      "evidence": "06-rpc-origin-same-authority.headers.txt"
+    },
+    {
+      "id": "B7.rpc-origin-foreign-403",
+      "expect": "foreign Origin -> 403",
+      "actual": "HTTP 403",
+      "pass": true,
+      "evidence": "07-rpc-origin-foreign.headers.txt"
+    },
+    {
+      "id": "B8.rpc-host-foreign-403",
+      "expect": "foreign Host -> 403 (DNS-rebinding fence)",
+      "actual": "HTTP 403",
+      "pass": true,
+      "evidence": "08-rpc-host-foreign.headers.txt"
+    },
+    {
+      "id": "B9.rpc-cross-site-403",
+      "expect": "Sec-Fetch-Site: cross-site -> 403",
+      "actual": "HTTP 403",
+      "pass": true,
+      "evidence": "09-rpc-sec-fetch-site-cross-site.headers.txt"
+    },
+    {
+      "id": "B10.rpc-same-site-200",
+      "expect": "Sec-Fetch-Site: same-site -> 200 (same-site iframe passes)",
+      "actual": "HTTP 200",
+      "pass": true,
+      "evidence": "10-rpc-sec-fetch-site-same-site.headers.txt"
+    },
+    {
+      "id": "B11.ws-mux-upgrade-101",
+      "expect": "GET /api/remote.mux upgrade with cookie -> 101",
+      "actual": "HTTP/1.1 101 Switching Protocols",
+      "pass": true,
+      "evidence": "11-ws-mux-upgrade.headers.txt"
+    },
+    {
+      "id": "B12.ws-mux-foreign-origin-403",
+      "expect": "WS upgrade with foreign Origin -> 403",
+      "actual": "HTTP 403",
+      "pass": true,
+      "evidence": "12-ws-mux-foreign-origin.headers.txt"
+    }
+  ],
+  "summary": {
+    "total": 18,
+    "passed": 18,
+    "failed": 0
+  },
+  "details": {
+    "tokenExchange": {
+      "status": 303,
+      "statusLine": "HTTP/1.1 303 See Other",
+      "location": "./",
+      "setCookie": [
+        "dsh-auth-R9GyCGpCVKhIX21mIzyzdvw9Fc9JoqhxKoMBHCYvmy0=<REDACTED>; Max-Age=2592000; Path=/; Expires=Thu, 10 Dec 2026 16:27:29 GMT; HttpOnly; SameSite=Strict"
+      ]
+    },
+    "cookieJar": [],
+    "authenticatedPage": {
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "title": "DeepSeek Harness",
+      "bodyLength": 40102,
+      "xFrameOptions": [],
+      "csp": [],
+      "frameAncestors": ""
+    },
+    "unauthenticated": {
+      "status": 401,
+      "statusLine": "HTTP/1.1 401 Unauthorized",
+      "wwwAuthenticate": [],
+      "body": "dsh web authentication required; reopen the URL printed by dsh web."
+    },
+    "rpc": {
+      "status": 200,
+      "bodyPreview": "{\"type\":\"server-response\",\"rpcId\":\"invalid-request\",\"result\":{\"ok\":false,\"error\":{\"code\":\"gateway/bad-request\",\"message\":\"invalid client-request message\",\"details\":{\"issues\":[{\"code\":\"invalid_value\",\""
+    },
+    "websocketUpgrade": {
+      "statusLine": "HTTP/1.1 101 Switching Protocols",
+      "headers": [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+      ],
+      "stderr": "curl: (28) Operation timed out after 5003 milliseconds with 4 bytes received"
+    },
+    "indexForeignOrigin": {
+      "status": 200,
+      "note": "index/static routes authenticate by authority-bound cookie only; Origin/Sec-Fetch-Site fence applies to /api/*"
+    }
+  }
+}

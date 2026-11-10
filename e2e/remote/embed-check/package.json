@@ -1,0 +1,13 @@
+{
+  "name": "dsh-remote-go-embed-check",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "V0 iframe embedding check for dsh-remote-go: same-site loopback iframe pointing at the tunnelled remote DSH web UI.",
+  "scripts": {
+    "check": "node embed-check.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "25.17.0"
+  }
+}

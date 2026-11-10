@@ -1,0 +1,10 @@
+HTTP/1.1 303 See Other
+cache-control: no-store
+location: ./
+referrer-policy: no-referrer
+set-cookie: dsh-auth-R9GyCGpCVKhIX21mIzyzdvw9Fc9JoqhxKoMBHCYvmy0=<REDACTED>; Max-Age=2592000; Path=/; Expires=Thu, 10 Dec 2026 16:27:29 GMT; HttpOnly; SameSite=Strict
+Date: Tue, 10 Nov 2026 16:27:29 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+Transfer-Encoding: chunked
+
