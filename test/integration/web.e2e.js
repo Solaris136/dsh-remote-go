@@ -178,9 +178,17 @@ async function dismissFirstRunDialogs(page) {
         const dialog = document.querySelector('[role="dialog"]')
         if (!dialog) return false
         const button = [...dialog.querySelectorAll('button')].find((node) =>
-          ['继续', 'Continue', '知道了', 'Got it', '稍后配置', 'Configure later'].includes(
-            (node.textContent ?? '').trim(),
-          ),
+          [
+            '继续',
+            'Continue',
+            '知道了',
+            'Got it',
+            '稍后配置',
+            'Set up later',
+            'Configure later',
+            '稍后',
+            'Later',
+          ].includes((node.textContent ?? '').trim()),
         )
         if (!button) return false
         button.setAttribute('data-web-e2e-click', '1')
@@ -422,7 +430,26 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
 
     await t.test('the Remote-hosts settings section mounts', async () => {
       await dismissFirstRunDialogs(page)
-      await openRemoteHostsSection(page)
+      try {
+        await openRemoteHostsSection(page)
+      } catch (error) {
+        // Without this, a navigation failure is undiagnosable from the log alone (the first
+        // CI runs failed here with nothing but "TimeoutError"). Report what the UI shows.
+        const snapshot = await page
+          .evaluate(() => ({
+            url: location.href,
+            dialogs: [...document.querySelectorAll('[role="dialog"]')]
+              .map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 160))
+              .slice(0, 4),
+            labels: [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"]')]
+              .map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim())
+              .filter(Boolean)
+              .slice(0, 40),
+            body: (document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 300),
+          }))
+          .catch((inspectError) => ({ error: String(inspectError?.message ?? inspectError) }))
+        throw new Error(`${error?.message ?? error} — page: ${JSON.stringify(snapshot)}`)
+      }
       // Behaviour, not a marker: the plugin's stylesheet is proven applied when its
       // own class and CSS custom properties resolve on the mounted section. (The
       // `[data-dsh-remote-go="styles"]` element is NOT reliable — the desktop shell

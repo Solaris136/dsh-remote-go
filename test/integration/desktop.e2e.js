@@ -55,7 +55,10 @@ const REPO_ROOT = path.resolve(HERE, '..', '..')
 const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account menu"], [aria-label="账号"]'
 const SETTINGS_LABELS = ['设置', 'Settings']
 const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
-const ONBOARDING_LABELS = ['稍后配置', 'Configure later', '稍后', 'Later']
+// The onboarding affordance is localised. "Set up later" is what the shipped app renders in
+// English (observed on the Windows runner); "Configure later" was an assumption that made the
+// first CI run time out, so both spellings (and the Chinese one) are accepted.
+const ONBOARDING_LABELS = ['稍后配置', 'Set up later', 'Configure later', '稍后', 'Later']
 
 /**
  * The bundles the desktop profile must mount. `@deepseek-ai/dsh-base` and
