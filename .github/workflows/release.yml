@@ -1,0 +1,108 @@
+name: Release
+
+# Publishes a tagged version: runs the full gate, packs the tarball, publishes to
+# npm when NPM_PUBLISH_TOKEN is configured, and always creates a GitHub Release
+# (unless dry_run is set on a manual dispatch).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build, must equal v<version> from package.json
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate only, skip npm publish and GitHub Release
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    name: Release ${{ github.event.inputs.tag || github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Lint repository conventions
+        run: pnpm run lint
+
+      - name: Syntax check
+        run: pnpm run check:syntax
+
+      - name: Validate workflow YAML
+        run: pnpm run check:workflows
+
+      - name: Validate bundle metadata and market index entry
+        run: pnpm run market:check
+
+      - name: Check file coverage
+        run: pnpm run pack:check
+
+      - name: Unit tests (Host + Client)
+        run: pnpm run test:unit
+
+      - name: Assert tag matches package.json version
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).version')"
+          EXPECTED_TAG="v${PACKAGE_VERSION}"
+          if [ "$TAG" != "$EXPECTED_TAG" ]; then
+            echo "::error::Tag '$TAG' does not match package.json version '$PACKAGE_VERSION' (expected '$EXPECTED_TAG')"
+            exit 1
+          fi
+          echo "Tag $TAG matches package.json version $PACKAGE_VERSION"
+
+      - name: Pack tarball
+        run: pnpm pack --pack-destination artifacts
+
+      - name: Validate packed tarball
+        run: pnpm run pack:check:tarball
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::notice::NPM_PUBLISH_TOKEN is not configured, skipping npm publish; the GitHub Release is still created"
+            exit 0
+          fi
+          npm publish --access public --provenance
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$TAG" artifacts/*.tgz --repo "$GITHUB_REPOSITORY" --generate-notes --title "$TAG"

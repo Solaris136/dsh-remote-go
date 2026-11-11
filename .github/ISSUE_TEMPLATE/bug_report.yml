@@ -1,0 +1,119 @@
+name: Bug 报告
+description: 报告一个可复现的缺陷或异常行为
+title: '[Bug] '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 提交前请先确认
+
+        - 已搜索 [已有 issue](https://github.com/Solaris136/dsh-remote-go/issues?q=is%3Aissue)，没有重复。
+        - 已阅读 [README](https://github.com/Solaris136/dsh-remote-go#readme) 与 [docs/](https://github.com/Solaris136/dsh-remote-go/tree/main/docs)。
+        - 按 [贡献指南](https://github.com/Solaris136/dsh-remote-go/blob/main/CONTRIBUTING.md) 准备好最小复现信息。
+
+        这个插件通过 SSH 把远端 DSH 的 Web 界面嵌在本地全局面板里，问题可能出在本地 Host、
+        远端 Host、SSH 链路、隧道或面板 iframe 任一层，请尽量写清失败发生在哪一层。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 实际观察到的行为与报错（请粘贴原始报错文本，不要截图代替日志）。
+      placeholder: '打开面板后 iframe 一直白屏，控制台报 `SSH handshake failed: ...`'
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 从干净状态开始的最小步骤，包含触发时的操作顺序。
+      placeholder: |
+        1. 在本地 DSH 打开「设置 → 远程主机」，选中一台主机并「打开远程界面」
+        2. 选择主机 e2e-target（Linux + OpenSSH 9.x）
+        3. ...
+        4. 现象出现
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你认为正确的行为是什么；如果这是回归，请说明上一个可用版本。
+    validations:
+      required: false
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      description: 本地 Host 运行的 DSH 版本（`dsh --version` 或面板「关于」）。
+      placeholder: 0.2.2-rc.1
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: dsh-remote-go 版本（`package.json` 的 `version` 或已安装包的版本）。
+      placeholder: '0.1.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      description: 你运行本地 DSH（以及出现问题的 Side）的操作系统。
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: remote-host
+    attributes:
+      label: 远端主机
+      description: 远端系统与 SSH 服务端版本；不确定可留空。
+      placeholder: Ubuntu 24.04 / OpenSSH_9.6p1
+    validations:
+      required: false
+
+  - type: dropdown
+    id: bootstrap-level
+    attributes:
+      label: 自举级别
+      description: 远端 DSH 的自举状态（见 docs/ 中的自举级别说明）。
+      options:
+        - T0
+        - T0-local
+        - T1
+        - T2
+        - T3
+        - T5
+        - 未自举
+        - 不确定
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断信息
+      description: |
+        粘贴相关日志前请先脱敏：不要包含 token、密码、私钥、主机名/IP、用户名或任何凭据。
+        注意 e2e/remote/evidence 下的产物包含与具体测试主机相关的数据，公开粘贴前必须清理。
+        不确定某项是否可以公开时，请只保留报错类型与代码路径。
+      placeholder: |
+        [已脱敏] DSH 0.2.2-rc.1 / 插件 0.1.0 / Windows 11
+        error: tunnel handshake timeout after 8000ms (src/tunnel.js:123)
+    validations:
+      required: false

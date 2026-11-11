@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/Solaris136/dsh-remote-go/security/advisories/new
+    about: 报告安全漏洞（请勿公开提交 issue）
+  - name: 贡献指南
+    url: https://github.com/Solaris136/dsh-remote-go/blob/main/CONTRIBUTING.md
+    about: 提交 issue 或 PR 之前请先阅读贡献指南

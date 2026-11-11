@@ -14,6 +14,42 @@ permissions:
   contents: read
 
 jobs:
+  conventions:
+    name: Repository conventions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Lint repository conventions
+        run: pnpm run lint
+
+      - name: Syntax check
+        run: pnpm run check:syntax
+
+      - name: Validate workflow YAML
+        run: pnpm run check:workflows
+
+      - name: Check PR title (Conventional Commits)
+        # Dependabot PR titles are auto-generated and often exceed the 72-char
+        # limit, so the bot is exempt from this human-facing convention.
+        if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node scripts/check-pr-title.mjs
+
   test:
     name: Unit tests (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
@@ -28,8 +64,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -39,12 +73,6 @@ jobs:
 
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Syntax check
-        run: pnpm run check:syntax
-
-      - name: Validate workflow YAML
-        run: pnpm run check:workflows
 
       - name: Rebuild vendored ssh2 bundle
         run: pnpm run build:vendor
@@ -65,8 +93,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -87,7 +113,7 @@ jobs:
         run: pnpm pack --pack-destination artifacts
 
       - name: Validate packed tarball
-        run: pnpm run pack:check
+        run: pnpm run pack:check:tarball
 
       - name: Upload tarball
         uses: actions/upload-artifact@v4

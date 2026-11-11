@@ -1,0 +1,51 @@
+name: 功能请求
+description: 提出一个新能力或改进建议
+title: '[Feature] '
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索 [已有 issue](https://github.com/Solaris136/dsh-remote-go/issues?q=is%3Aissue)，
+        确认这不是重复请求；安全问题请改用 Security Advisory，不要在这里公开细节。
+
+  - type: textarea
+    id: requirement
+    attributes:
+      label: 需求
+      description: 你希望插件增加或改变什么能力。
+      placeholder: 希望在面板里直接显示远端 DSH 的连接状态与重连倒计时
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 这个能力解决的实际问题或工作流，尽量给出真实场景。
+      placeholder: 长时间远程开发时隧道偶发断开，现在无法判断是本地还是远端故障
+    validations:
+      required: false
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 可选。你设想的实现方式、配置项或交互；如果有替代方案也请写明。
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: 影响范围
+      description: 可选。这个改动主要涉及哪一层。
+      options:
+        - Host
+        - client
+        - 两者
+        - 文档
+        - CI
+    validations:
+      required: false

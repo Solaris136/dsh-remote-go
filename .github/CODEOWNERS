@@ -1,0 +1,9 @@
+# Default code owner for the whole repository.
+#
+# This is review routing, not an approval gate: the "main protection" ruleset
+# requires the CI checks and a pull request, but not a code-owner approval (the
+# project currently has a single maintainer, who could not approve their own
+# PR). Add `require_code_owners` to the ruleset once there is a second reviewer.
+*           @Solaris136
+
+/.github/   @Solaris136

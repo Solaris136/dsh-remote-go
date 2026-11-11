@@ -10,6 +10,9 @@ name: Remote E2E
 # Optional:
 #   E2E_SSH_KNOWN_HOSTS  pre-pinned known_hosts line (otherwise ssh-keyscan is used)
 #
+# Test host: pass the `ssh_address` dispatch input, or configure the
+# E2E_SSH_ADDRESS repository variable. No host is hardcoded in this workflow.
+#
 # This workflow is manual only: it depends on a real external host and is not
 # part of the default push/PR gate.
 
@@ -17,9 +20,9 @@ on:
   workflow_dispatch:
     inputs:
       ssh_address:
-        description: Test host address (IP or hostname)
-        required: true
-        default: 43.133.80.40
+        description: Test host address (IP or hostname); falls back to the E2E_SSH_ADDRESS repository variable
+        required: false
+        default: ''
       ssh_user:
         description: SSH user
         required: true
@@ -45,13 +48,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Resolve test host
+        id: target
+        env:
+          INPUT_SSH_ADDRESS: ${{ inputs.ssh_address }}
+          VARIABLE_SSH_ADDRESS: ${{ vars.E2E_SSH_ADDRESS }}
+        run: |
+          set -euo pipefail
+          SSH_ADDRESS="${INPUT_SSH_ADDRESS:-${VARIABLE_SSH_ADDRESS:-}}"
+          if [ -z "$SSH_ADDRESS" ]; then
+            echo "::error::No test host configured: pass the ssh_address input or set the E2E_SSH_ADDRESS repository variable"
+            exit 1
+          fi
+          echo "ssh_address=$SSH_ADDRESS" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -77,7 +92,7 @@ jobs:
         env:
           E2E_SSH_PRIVATE_KEY: ${{ secrets.E2E_SSH_PRIVATE_KEY }}
           E2E_SSH_KNOWN_HOSTS: ${{ secrets.E2E_SSH_KNOWN_HOSTS }}
-          SSH_ADDRESS: ${{ inputs.ssh_address }}
+          SSH_ADDRESS: ${{ steps.target.outputs.ssh_address }}
           SSH_USER: ${{ inputs.ssh_user }}
           SSH_PORT: ${{ inputs.ssh_port }}
         run: |
