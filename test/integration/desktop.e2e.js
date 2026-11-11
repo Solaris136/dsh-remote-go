@@ -37,6 +37,20 @@ import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
 import {
+  assertBlockedIframe,
+  assertNoNonLoopbackIframes,
+  assertFrameRefresh,
+  assertLoopbackUrl,
+  assertPanelToolbar,
+  connectSimulatedHost,
+  describePanel,
+  openRemotePanel,
+  startSimulatedRemote,
+  stubNonLoopbackIframeUrl,
+  switchPanelHost,
+  waitForRemoteFrame,
+} from './panel-support.js'
+import {
   isWindows,
   makeTempRoot,
   packPlugin,
@@ -199,9 +213,21 @@ async function findPage(browser, predicate, timeoutMs) {
 }
 
 /** The onboarding window of a fresh profile (`…/renderer/welcome.html`). */
-const isWelcomeUrl = (url) => url.includes('welcome.html')
-/** The app window. */
-const isAppUrl = (url) => url.startsWith('dsh-app://')
+const isWelcomeUrl = (url) => {
+  try {
+    return new URL(url).pathname.endsWith('welcome.html')
+  } catch {
+    return false
+  }
+}
+/** The app window. Compared by parsed protocol, never by a `dsh-app://` prefix. */
+const isAppUrl = (url) => {
+  try {
+    return new URL(url).protocol === 'dsh-app:'
+  } catch {
+    return false
+  }
+}
 
 /**
  * Skip onboarding with "configure later", which needs no credentials.
@@ -446,6 +472,22 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
   }
 }
 
+/**
+ * Run one panel assertion and, on failure, append the panel's observable state to
+ * the message: a timeout with no iframe src or toolbar dump is undiagnosable from
+ * a CI log alone.
+ * @param {import('puppeteer-core').Page} page
+ * @param {() => Promise<any>} task
+ */
+async function withPanelDiagnostics(page, task) {
+  try {
+    return await task()
+  } catch (error) {
+    const state = await describePanel(page).catch(() => null)
+    throw new Error(`${error?.message ?? error} — panel: ${JSON.stringify(state)}`)
+  }
+}
+
 test('the desktop shell renders the plugin settings with legible buttons', { timeout: 1_200_000 }, async (t) => {
   if (!isWindows) {
     skipOrFail(t, 'the desktop installer exists for Windows and macOS only; there is no Linux build')
@@ -481,6 +523,10 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
   let page = null
   /** @type {any} */
   let lightMeasurement = null
+  /** @type {string | null} */
+  let simulatedHostId = null
+  /** @type {Awaited<ReturnType<typeof startSimulatedRemote>> | null} */
+  let sim = null
   /** @type {string[]} */
   const consoleErrors = []
   const onSignal = (signal) => {
@@ -574,6 +620,93 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       assert.notEqual(dark.sectionBackground, lightMeasurement.sectionBackground, 'the section did not switch theme')
     })
 
+    await t.test('the remote panel embeds the remote UI in a loopback iframe', async () => {
+      await withPanelDiagnostics(page, async () => {
+        // Same simulated remote host as the web suite: a real connect through the
+        // plugin's own API, then the panel is opened the way a user opens it.
+        sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
+        // The panel subtests are the only ones that need a *live* SSH endpoint, so
+        // assert it explicitly: a dead simulator must be reported here, not as a
+        // mysterious "panel never mounted".
+        assert.equal(sim.child.exitCode, null, `the simulator exited: ${sim.logs.join('').slice(-1200)}`)
+        const host = await connectSimulatedHost(page, {
+          hostName: 'simulated-remote',
+          sshPort: sim.state.sshPort,
+          logs: sim.logs,
+        })
+        simulatedHostId = host.hostId
+        assert.equal(host.host.status, 'connected')
+        await openRemotePanel(page, { hostId: host.hostId })
+        const frame = await waitForRemoteFrame(page)
+        assert.equal(frame.ready, 'complete', 'the iframe document never reached a ready state')
+        assert.equal(frame.frameTitle, 'simulated remote DSH')
+        const iframeSrcs = await assertNoNonLoopbackIframes(page, 'the remote panel')
+        assert.ok(iframeSrcs.length >= 1, 'the panel mounted no iframe')
+        // The iframe must target the tunnel, never the simulated remote's own
+        // listener: embedding the remote port directly would still render the
+        // marker, so the port is pinned explicitly.
+        const iframeUrl = assertLoopbackUrl(frame.iframeSrc, 'the remote panel iframe')
+        assert.notEqual(
+          Number(iframeUrl.port),
+          Number(sim.state.remotePort),
+          'the iframe embeds the simulated remote directly instead of going through the tunnel',
+        )
+      })
+    })
+
+    await t.test('the panel toolbar affords reconnect, refresh, open-in-new-window and address hiding', async () => {
+      await withPanelDiagnostics(page, async () => {
+        const toolbar = await assertPanelToolbar(page)
+        // Print the labels that actually matched, so the log shows which language
+        // the shell rendered. This suite is **locale-tolerant, not locale-exercised**:
+        // Electron resolves the plugin locale from the app/OS locale rather than
+        // `--lang`, and CI runs one OS locale, so the assertions accept whichever
+        // language appears. (The web suite genuinely drives both `en-US` and `zh-CN`.)
+        console.log(`[desktop-e2e] panel toolbar labels: ${JSON.stringify(toolbar.labels)}`)
+        // The helper validated the masked address with an anchored pattern; here the
+        // toggle must restore exactly the same text, so "show" cannot be a no-op.
+        assert.equal(toolbar.restored, toolbar.address, 'the address toggle did not restore the address')
+        assert.equal(toolbar.hidden, '••••••')
+        const refreshed = await assertFrameRefresh(page)
+        assertLoopbackUrl(refreshed.iframeSrc, 'the refreshed panel iframe')
+      })
+    })
+
+    await t.test('a non-loopback iframe URL is refused instead of embedded', async () => {
+      await withPanelDiagnostics(page, async () => {
+        assert.ok(simulatedHostId, 'the simulated host was not connected')
+        // Snapshot the console log so a regression in the blocked path is reported
+        // here (as part of this subtest) rather than surfacing later as a vaguer
+        // "console errors" failure.
+        const errorsBefore = consoleErrors.length
+        // A second connected host gives the toolbar's host switcher something to
+        // switch to; the switch is what makes the client fetch `/open` again (the
+        // client caches that URL per viewport mount by design).
+        const second = await connectSimulatedHost(page, {
+          hostName: 'simulated-remote-b',
+          sshPort: sim.state.sshPort,
+          logs: sim.logs,
+        })
+        const guard = await stubNonLoopbackIframeUrl(page)
+        try {
+          const blocked = await assertBlockedIframe(page, {
+            intercepted: () => guard.calls(),
+            forbiddenOrigin: guard.origin,
+            forceRefetch: () => switchPanelHost(page, { hostId: second.hostId, hostName: 'simulated-remote-b' }),
+          })
+          assert.equal(blocked.panelIframe, null, 'a blocked URL produced an iframe')
+          // Attribute any console noise to the path that caused it.
+          assert.deepEqual(
+            consoleErrors.slice(errorsBefore),
+            [],
+            `the blocked path logged console errors:\n${consoleErrors.slice(errorsBefore).join('\n')}`,
+          )
+        } finally {
+          await guard.disable()
+        }
+      })
+    })
+
     await t.test('the shell logged no console errors while rendering the section', async () => {
       assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
     })
@@ -588,6 +721,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
     })
     throw error
   } finally {
+    if (sim) await sim.stop()
     if (browser) await browser.disconnect().catch(() => {})
     if (app) await app.stop()
     process.removeListener('SIGINT', onSignal)

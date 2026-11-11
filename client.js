@@ -5541,6 +5541,13 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'layout', 'locale', 'uiWorkspace'],
       apply,
       components,
+      /**
+       * The Host-API client, exposed so unit tests can exercise the real security
+       * guards on the real code path (`openHost`) instead of matching source text.
+       * Not part of the plugin contract: the loader only consumes
+       * `inject`/`apply`/`components`.
+       */
+      api,
     }
 
     //#endregion

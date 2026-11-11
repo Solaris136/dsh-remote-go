@@ -27,16 +27,23 @@ const PANEL_ID = 'dsh-remote-go'
 /**
  * Execute client.js in a VM with a fake module loader and materialize the
  * registered factory with the real React. Returns the factory's plugin object.
+ *
+ * `options.fetch` is installed as the sandbox's global `fetch`, which the client
+ * resolves per request through `getFetch()`; that is what lets a unit test drive
+ * the real API layer (`api.openHost`) instead of matching source text.
+ * @param {{ fetch?: (input: any, init?: any) => Promise<any> }} [options]
  */
-function loadClientPlugin() {
+function loadClientPlugin(options = {}) {
   const sandbox = {
     console,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
+    fetch: options.fetch,
   }
   sandbox.window = {
+    fetch: options.fetch,
     __ModuleLoader__: {
       load(declaration) {
         sandbox.__declaration = declaration
@@ -157,6 +164,33 @@ const enT = translateFrom(runApply(plugin).dicts.en)
 /** Render a component to static markup with a stable `t`. */
 function render(element) {
   return renderToStaticMarkup(element)
+}
+
+/**
+ * Every `src="…"` attribute value in static markup.
+ *
+ * Structural extraction (no pattern matching on the URL itself): the assertions
+ * then parse each value and compare protocol/host/port, so a lookalike host cannot
+ * satisfy them the way a substring test could.
+ * @param {string} markup
+ * @returns {string[]}
+ */
+function srcAttributes(markup) {
+  const marker = 'src="'
+  /** @type {string[]} */
+  const values = []
+  let from = 0
+  for (;;) {
+    const start = markup.indexOf(marker, from)
+    if (start === -1) break
+    const valueStart = start + marker.length
+    const end = markup.indexOf('"', valueStart)
+    if (end === -1) break
+    // Attribute serialization escapes `&`; a URL comparison needs the literal.
+    values.push(markup.slice(valueStart, end).split('&amp;').join('&'))
+    from = end + 1
+  }
+  return values
 }
 
 /** Minimal HostView factory for render tests. */
@@ -334,13 +368,109 @@ test('iframe URL guard blocks non-loopback addresses', () => {
       enterNotice: false,
     }),
   )
-  assert.doesNotMatch(blocked, /evil\.example\.com/)
+  // Structural, not textual: if the guard were bypassed the refused URL would
+  // become an iframe `src`, and that is what this reads.
+  assert.deepEqual(srcAttributes(blocked), [], 'a non-loopback URL must not reach an iframe src')
   assert.match(blocked, /已阻止内嵌远端界面/)
 })
 
 // ---------------------------------------------------------------------------
 // 4. key component renders (react-dom/server)
 // ---------------------------------------------------------------------------
+
+test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () => {
+  // Drive the real `api.openHost` through a stubbed transport. The positive
+  // control matters: a test that only checks rejection would also pass if the
+  // method rejected everything.
+  const requests = []
+  /** @type {string} */
+  let answer = 'http://127.0.0.1:54321/?token=abc123'
+  const client = loadClientPlugin({
+    fetch: async (endpoint) => {
+      requests.push(String(endpoint))
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, url: answer, localPort: 54321, address: '127.0.0.1:54321' }
+        },
+      }
+    },
+  })
+  assert.equal(typeof client.api?.openHost, 'function', 'client.js must expose the Host-API client for this test')
+
+  const allowed = await client.api.openHost('h_test')
+  assert.equal(allowed, 'http://127.0.0.1:54321/?token=abc123')
+  assert.equal(requests.at(-1), '/dsh-remote-go/api/hosts/h_test/open')
+
+  for (const refusedUrl of [
+    'https://evil.example.com/?token=secret',
+    'http://10.0.0.5:54321/?token=secret',
+    'http://localhost:54321/?token=secret',
+    'http://127.0.0.1.evil.example.com/?token=secret',
+  ]) {
+    answer = refusedUrl
+    await assert.rejects(client.api.openHost('h_test'), (error) => {
+      assert.equal(error?.view?.code, 'blocked-iframe', `unexpected error view for ${refusedUrl}`)
+      // The refused URL must not be echoed back: compare the whole message with
+      // the documented localized detail instead of searching for host text.
+      assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止内嵌。')
+      return true
+    })
+  }
+})
+
+test('RemoteViewport embeds a loopback iframeUrl and refuses a non-loopback one', () => {
+  const host = hostView()
+  const viewportProps = {
+    t,
+    host,
+    hosts: [host],
+    iframeKey: 0,
+    iframeLoading: false,
+    iframeError: null,
+    addressVisible: true,
+    enterNotice: false,
+    onBack: () => {},
+    onReconnect: () => {},
+    onRefreshFrame: () => {},
+    onSwitchHost: () => {},
+    onToggleAddress: () => {},
+    onOpenExternal: () => {},
+    onDiagnose: () => {},
+  }
+
+  // Positive control: a validated loopback URL really becomes the iframe src.
+  const embedded = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      ...viewportProps,
+      iframeUrl: 'http://127.0.0.1:54321/?token=abc123',
+    }),
+  )
+  assert.ok(testIdsOf(embedded).includes('remote-iframe'), 'a loopback URL must render the remote iframe')
+  const embeddedSrcs = srcAttributes(embedded)
+  assert.equal(embeddedSrcs.length, 1, 'the viewport must render exactly one iframe src')
+  const embeddedUrl = new URL(embeddedSrcs[0])
+  assert.equal(embeddedUrl.protocol, 'http:')
+  assert.equal(embeddedUrl.hostname, '127.0.0.1')
+  assert.equal(embeddedUrl.port, '54321')
+  assert.equal(embeddedUrl.pathname, '/')
+  assert.equal(embeddedUrl.searchParams.get('token'), 'abc123')
+
+  // Render-layer guard: without it this URL would become the iframe src.
+  const refused = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      ...viewportProps,
+      iframeUrl: 'https://evil.example.com/?token=secret',
+    }),
+  )
+  assert.equal(testIdsOf(refused).includes('remote-iframe'), false, 'a non-loopback URL must not render an iframe')
+  // Structural: any surviving src would be parsed here, so a bypass cannot hide
+  // behind a hostname that merely looks similar.
+  assert.deepEqual(srcAttributes(refused), [], 'a non-loopback URL must not reach an iframe src')
+  assert.match(refused, /已阻止内嵌远端界面/)
+  assert.match(refused, /远端地址不是本地回环地址/)
+})
 
 test('empty host list renders the empty state and the first-server action', () => {
   const state = {
