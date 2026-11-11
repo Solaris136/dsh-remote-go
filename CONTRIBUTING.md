@@ -200,6 +200,10 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
    反例：`history.e2e.js` 只等 `cursor === 2`，随后断言日志含 `gap-unfilled`——日志在持久化之后才写，于是
    Windows 上偶发失败、ubuntu 上通过。现在谓词同时覆盖 cursor、level、reason 与日志行。
    写测试时先写下断言，再把断言里的每个条件抄进谓词；不要用「再睡一会儿」掩盖窗口。
+   这条由 `test/unit/predicate-guard.test.js` 强制：它扫描 `test/integration/*.e2e.js` 的
+   `waitForMirrors` / `pollUntil` 谓词，与紧随其后 `assert.*` 读取的字段比对，缺字段就按 `file:line` 失败；
+   少数「瞬时快照」等待（断言读的是谓词匹配到的同一份快照）在 `TRANSIENT_SNAPSHOT_WAITS` 里逐条登记理由，
+   新增违规仍然失败，登记失效（违规消失）也会失败。
 
 2. **激活路径只能有一套定位器，且必须验证效果（one locator, DOM click, verified effect）。**
    就绪检查与点击必须用同一个定位器（`test/integration/activation.js` 的 `activateRowInPage` 用 `*` 遍历），

@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createSessionAdapter } from '../../src/session-adapter.js'
+import { assertSeededCreateOptions } from '../helpers/fake-sessions.js'
 import { RemoteGoService } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
 
@@ -151,7 +152,11 @@ function createSessionsService() {
   /** @type {{ id: string, type: string, data: any }[]} */
   const appends = []
   const sessions = {
-    create(id) {
+    create(id, options) {
+      // The host rejects a seeded header without an explicit seed/inheritedEventCount;
+      // this local double enforces the same rule instead of accepting any shape
+      // (audit C). The double stays local — only the contract is shared.
+      assertSeededCreateOptions(options)
       /** @type {{ type: string, seq: number, data: any }[]} */
       let committed = []
       const session = {
@@ -357,7 +362,11 @@ test('a mirror that is not fenced keeps writing and holds its own epoch', { time
           mirror.level === 'L2' &&
           mirror.reason === null &&
           mirror.writable === true &&
-          mirror.lease !== null,
+          mirror.lease !== null &&
+          // The assertions below also read the epoch and the persisted owner, so the
+          // settled state includes them (audit A: predicate ⊇ assertion).
+          mirror.epoch >= 1 &&
+          typeof mirror.lease?.owner === 'string',
       ),
     )
     for (const mirror of mirrors) {
@@ -424,6 +433,9 @@ test('a fenced mirror resumes once it can re-acquire a newer epoch', { timeout: 
     )
     assert.equal(fenced[0].reason?.code, 'fenced')
     assert.equal(fenced[0].cursor, 0)
+    // Captured before the restart: the resume wait compares against it, so the wait must
+    // be able to check the same fact the assertion below checks (audit A).
+    const fencedEpoch = fenced[0].epoch
 
     // Phase 2: the competitor is gone. A *restart* now re-reads the persisted descriptor and
     // must re-acquire from the epoch it stored, which is exactly the property that matters
@@ -455,10 +467,14 @@ test('a fenced mirror resumes once it can re-acquire a newer epoch', { timeout: 
     repointed.entry.port = sim.state.sshPort
     await connectHost(service, existing.id, resumedLogs)
     await service.syncHostMirrors(existing.id).catch(() => null)
-    // The assertions below also require a writable lease and the resumed cursor, so the wait
-    // must require them too — "reason === null" is satisfied before the lease is re-acquired.
+    // The assertions below also require a writable lease, the resumed cursor **and** a
+    // newer epoch, so the wait requires all of them — "reason === null" alone is
+    // satisfied before the lease is re-acquired (audit A).
     const resumed = await waitForMirrors(service, existing.id, (list) =>
-      list.every((mirror) => mirror.reason === null && mirror.writable === true && mirror.cursor === 5),
+      list.every(
+        (mirror) =>
+          mirror.reason === null && mirror.writable === true && mirror.cursor === 5 && mirror.epoch > fencedEpoch,
+      ),
     )
     assert.equal(
       resumed.every((mirror) => mirror.reason === null),
