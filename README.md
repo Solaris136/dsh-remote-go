@@ -193,6 +193,7 @@ pnpm run verify                                   # 一条命令跑完下面全�
 | 命令 | 作用 |
 |---|---|
 | `pnpm run lint` | 仓库规范检查（必需文件、元数据、版本一致性、换行/空白、密钥泄漏、workflow 约定） |
+| `pnpm run format:check` | Prettier 格式检查（配置见 `.prettierrc.json`） |
 | `pnpm run check:syntax` | 用 `node --check` 解析所有生产/测试/脚本 JS |
 | `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml` |
 | `pnpm run market:check` | 用官方 `dsh-plugin-market-index` 校验市场条目 |

@@ -17,6 +17,9 @@ importers:
       js-yaml:
         specifier: ^5.5.0
         version: 5.5.0
+      prettier:
+        specifier: ^3.9.10
+        version: 3.9.10
       puppeteer-core:
         specifier: ^24.30.0
         version: 24.43.1(bare-buffer@3.7.1)
@@ -471,6 +474,11 @@ packages:
 
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
+
+  prettier@3.9.10:
+    resolution: {integrity: sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA==}
+    engines: {node: '>=14'}
+    hasBin: true
 
   progress@2.0.3:
     resolution: {integrity: sha512-7PiHtLll5LdnKIMw100I+8xJXR5gW2QwWYkT6iJva0bXitZKa/XMrSbdmg3r2Xnaidz9Qumd0VPaMrZlF9V9sA==}
@@ -988,6 +996,8 @@ snapshots:
       netmask: 2.1.1
 
   pend@1.2.0: {}
+
+  prettier@3.9.10: {}
 
   progress@2.0.3: {}
 

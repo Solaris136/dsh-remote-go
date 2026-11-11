@@ -1,0 +1,24 @@
+# Generated, vendored or recorded material: never formatted by the toolchain.
+node_modules/
+vendor/
+artifacts/
+coverage/
+.pnpm-store/
+
+# Packed/published output and captured evidence keep their byte-level form.
+e2e/artifacts/
+e2e/remote/evidence/
+e2e/remote/.state.json
+e2e/remote/.token
+e2e/control/home/
+e2e/control/home-published/
+e2e/control/logs/
+e2e/control/.state.json
+
+# Lockfiles are managed by pnpm, not by a formatter.
+pnpm-lock.yaml
+e2e/control/pnpm-lock.yaml
+e2e/remote/embed-check/pnpm-lock.yaml
+
+# Markdown is hand-wrapped for review; formatting it would rewrap every doc.
+*.md

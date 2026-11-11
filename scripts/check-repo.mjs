@@ -77,6 +77,9 @@ const REQUIRED_FILES = [
   'SECURITY.md',
   '.editorconfig',
   '.gitattributes',
+  '.git-blame-ignore-revs',
+  '.prettierignore',
+  '.prettierrc.json',
   '.nvmrc',
   '.github/CODEOWNERS',
   '.github/PULL_REQUEST_TEMPLATE.md',
@@ -140,7 +143,9 @@ if (pkg === null) {
 
   const shipped = Array.isArray(pkg.files) ? pkg.files : []
   for (const needed of ['index.js', 'client.js', 'src', 'locale', 'cordis.patch.yml']) {
-    const covered = shipped.some((entry) => entry === needed || (typeof entry === 'string' && entry.startsWith(`${needed}/`)))
+    const covered = shipped.some(
+      (entry) => entry === needed || (typeof entry === 'string' && entry.startsWith(`${needed}/`)),
+    )
     if (covered) pass()
     else fail(`package.json: "files" must ship ${needed}`)
   }
@@ -149,8 +154,10 @@ if (pkg === null) {
   else pass()
 
   const dependencies = pkg.dependencies && typeof pkg.dependencies === 'object' ? Object.keys(pkg.dependencies) : null
-  if (dependencies === null) fail('package.json: "dependencies" must be an object (this plugin ships zero runtime dependencies)')
-  else if (dependencies.length > 0) fail(`package.json: runtime "dependencies" must stay empty (found ${dependencies.join(', ')})`)
+  if (dependencies === null)
+    fail('package.json: "dependencies" must be an object (this plugin ships zero runtime dependencies)')
+  else if (dependencies.length > 0)
+    fail(`package.json: runtime "dependencies" must stay empty (found ${dependencies.join(', ')})`)
   else pass()
 
   // The npm SPDX identifier must agree with the LICENSE file the tarball ships.
@@ -181,7 +188,8 @@ if (pkg === null) {
     else {
       const published = index.plugins?.[0]?.versions?.[0]?.version
       if (published === version) pass()
-      else fail(`market/index.json: plugins[0].versions[0].version is ${JSON.stringify(published)}, expected ${version}`)
+      else
+        fail(`market/index.json: plugins[0].versions[0].version is ${JSON.stringify(published)}, expected ${version}`)
     }
 
     const changelog = await readText('CHANGELOG.md')
@@ -200,7 +208,16 @@ if (pkg === null) {
 const MAX_TEXT_BYTES = 1024 * 1024
 const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store'])
 const SKIPPED_PREFIXES = ['e2e/artifacts/', 'e2e/remote/evidence/', 'node_modules/', 'vendor/']
-const ROOT_DOTFILES = ['.editorconfig', '.gitattributes', '.gitignore', '.nvmrc', '.node-version', 'package.json', 'index.js', 'client.js']
+const ROOT_DOTFILES = [
+  '.editorconfig',
+  '.gitattributes',
+  '.gitignore',
+  '.nvmrc',
+  '.node-version',
+  'package.json',
+  'index.js',
+  'client.js',
+]
 const TABBED_EXTENSIONS = /\.(?:js|mjs|cjs|json|ya?ml)$/
 
 /**
@@ -359,7 +376,9 @@ for (const rel of [...secretFiles].sort()) {
 // format to the other.
 let evidenceEntries = []
 try {
-  evidenceEntries = (await readdir(abs('e2e/remote/evidence'))).filter((name) => name.endsWith('.txt') || name.endsWith('.json'))
+  evidenceEntries = (await readdir(abs('e2e/remote/evidence'))).filter(
+    (name) => name.endsWith('.txt') || name.endsWith('.json'),
+  )
 } catch {
   warn('e2e/remote/evidence: directory missing; skipped the token redaction check')
 }

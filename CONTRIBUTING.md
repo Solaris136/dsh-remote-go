@@ -47,6 +47,8 @@ pnpm install --frozen-lockfile --ignore-scripts
 |---|---|
 | `pnpm run verify` | 提交前必跑；等价于 CI 门禁（组成见下） |
 | `pnpm run lint` | `node scripts/check-repo.mjs`，检查仓库级约定 |
+| `pnpm run format` | 用 Prettier 按 `.prettierrc.json` 格式化（提交前跑） |
+| `pnpm run format:check` | 只检查格式，不改文件（CI 会跑） |
 | `pnpm run check:syntax` | 解析全部 JS/MJS，确认无语法错误 |
 | `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml` |
 | `pnpm run market:check` | 校验包元数据、运行时文件与 format-1 市场索引条目 |
@@ -56,8 +58,11 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run build:vendor` | 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
 | `pnpm run test:e2e` | 两个端到端套件（见下），需要 SSH 主机、Chrome 或可用的 pnpm；不在常规 PR CI 中运行 |
 
-`pnpm run verify` 依次执行：`lint` + `check:syntax` + `check:workflows` + `market:check` +
+`pnpm run verify` 依次执行：`lint` + `format:check` + `check:syntax` + `check:workflows` + `market:check` +
 `pack:check` + `test:unit`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。
+
+代码风格由 Prettier 统一（`.prettierrc.json`：无分号、单引号、行宽 120、ES 尾逗号、LF）。不要手工调格式：
+改完代码跑 `pnpm run format` 即可。Markdown 由人换行（列在 `.prettierignore` 中），不会被格式化工具重排。
 
 ### 端到端测试（可选）
 

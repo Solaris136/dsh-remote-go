@@ -36,6 +36,9 @@ jobs:
       - name: Lint repository conventions
         run: pnpm run lint
 
+      - name: Check formatting
+        run: pnpm run format:check
+
       - name: Syntax check
         run: pnpm run check:syntax
 
