@@ -56,8 +56,11 @@ if (Test-Path $statePath) {
 if (Test-Path $log) { Remove-Item $log -Force }
 if (Test-Path $errLog) { Remove-Item $errLog -Force }
 $env:DSH_HOME = $controlHome
+# -WindowStyle Hidden: the control instance is a background helper, so it must never
+# pop a console window. (`-NoNewWindow` cannot be combined with `-WindowStyle`, and
+# the hidden style is what the Windows conventions in CONTRIBUTING call for.)
 $proc = Start-Process -FilePath $node -ArgumentList @($dshBin, '--profile', 'web', '--no-open', '--port', '0') `
-  -WorkingDirectory $root -RedirectStandardOutput $log -RedirectStandardError $errLog -PassThru -NoNewWindow
+  -WorkingDirectory $root -RedirectStandardOutput $log -RedirectStandardError $errLog -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)
 $line = $null
 while ((Get-Date) -lt $deadline) {

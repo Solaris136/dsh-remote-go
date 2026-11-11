@@ -82,7 +82,11 @@ if (tarball) {
   if (!existsSync(tarball)) fail(`tarball not found: ${tarball}`)
   let listing
   try {
-    listing = execFileSync('tar', ['-tzf', tarball], { encoding: 'utf8' })
+    listing = execFileSync('tar', ['-tzf', tarball], {
+      encoding: 'utf8',
+      // windowsHide keeps a console from flashing for every child the gates start.
+      windowsHide: true,
+    })
   } catch (error) {
     fail(`cannot list tarball with tar: ${error.message}`)
   }

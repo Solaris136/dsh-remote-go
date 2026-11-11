@@ -884,6 +884,8 @@ test(
         const child = spawn(process.execPath, [workerFile, stateDir, host, '150'], {
           env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
           stdio: ['ignore', 'pipe', 'pipe'],
+          // windowsHide keeps a console from flashing for every child the suite starts.
+          windowsHide: true,
         })
         let output = ''
         child.stdout?.on('data', (chunk) => {

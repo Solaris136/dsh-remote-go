@@ -10,8 +10,8 @@
 // Run: node --test "test/e2e/*.e2e.js"
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -28,20 +28,78 @@ const API_HEADER = 'x-dsh-remote-go'
 
 /**
  * Resolve how to invoke pnpm without depending on a developer-specific path:
- * an explicit override (DSH_PNPM / PNPM_EXE, either a JS entry or an
- * executable), otherwise `pnpm` from PATH. On Windows a `.cmd` shim cannot be
- * spawned directly, so both cases are routed through cmd.exe.
+ * an explicit override (DSH_PNPM_CJS / DSH_PNPM / PNPM_EXE, either a JS entry or
+ * an executable), otherwise `pnpm` from PATH.
+ *
+ * On Windows a `.cmd` shim is *not* spawned: routing through `cmd.exe` flashes a
+ * console window (see CONTRIBUTING "Windows 平台约定"). Instead the shim is read
+ * to find the JavaScript entry it wraps and that entry runs through
+ * `process.execPath`, which is both silent and quote-safe.
  * @returns {{ command: string, prefixArgs: string[] }}
  */
 function resolvePnpmInvocation() {
+  const cjs = process.env.DSH_PNPM_CJS
+  if (cjs && existsSync(cjs)) return { command: process.execPath, prefixArgs: [cjs] }
   const explicit = process.env.DSH_PNPM ?? process.env.PNPM_EXE
   if (explicit && existsSync(explicit)) {
     if (/\.(?:c?js|mjs)$/.test(explicit)) return { command: process.execPath, prefixArgs: [explicit] }
-    if (process.platform === 'win32') return { command: 'cmd.exe', prefixArgs: ['/c', explicit] }
-    return { command: explicit, prefixArgs: [] }
+    if (!/\.cmd$/i.test(explicit)) return { command: explicit, prefixArgs: [] }
+    const fromExplicitShim = pnpmJsFromShim(explicit)
+    if (fromExplicitShim) return { command: process.execPath, prefixArgs: [fromExplicitShim] }
   }
-  if (process.platform === 'win32') return { command: 'cmd.exe', prefixArgs: ['/c', 'pnpm'] }
-  return { command: 'pnpm', prefixArgs: [] }
+  if (process.platform !== 'win32') return { command: 'pnpm', prefixArgs: [] }
+  const shim = whichPnpmShim()
+  if (shim) {
+    const js = pnpmJsFromShim(shim)
+    if (js) return { command: process.execPath, prefixArgs: [js] }
+  }
+  const guessed = ['pnpm/bin/pnpm.cjs', 'pnpm/bin/pnpm.js']
+    .map((suffix) => path.join(process.env.APPDATA ?? '', 'npm', 'node_modules', ...suffix.split('/')))
+    .find((candidate) => existsSync(candidate))
+  if (guessed) return { command: process.execPath, prefixArgs: [guessed] }
+  throw new Error(
+    'cannot locate a pnpm JavaScript entry on Windows; set DSH_PNPM_CJS to pnpm.cjs ' +
+      '(a .cmd shim is not spawned on purpose: it flashes a console window)',
+  )
+}
+
+/**
+ * Read the JavaScript entry point out of a `pnpm.cmd` shim.
+ * npm/pnpm shims wrap a real file (`"%~dp0\node_modules\pnpm\bin\pnpm.cjs"`), which
+ * is what we want to run through `process.execPath`.
+ * @param {string} shimPath
+ * @returns {string | null}
+ */
+function pnpmJsFromShim(shimPath) {
+  let text
+  try {
+    text = readFileSync(shimPath, 'utf8')
+  } catch {
+    return null
+  }
+  const dir = path.dirname(shimPath)
+  for (const line of text.split(/\r?\n/)) {
+    const match = /"([^"]*pnpm[^"]*\.(?:cjs|js))"/i.exec(line) ?? /(\S*pnpm\S*\.(?:cjs|js))/i.exec(line)
+    if (!match) continue
+    const raw = match[1].replace(/%~dp0/gi, '').replace(/^[\\/]+/, '')
+    const resolved = path.resolve(dir, raw)
+    if (existsSync(resolved)) return resolved
+  }
+  return null
+}
+
+/**
+ * The first `pnpm` shim on PATH (Windows), found without a console window.
+ * @returns {string | null}
+ */
+function whichPnpmShim() {
+  const probe = spawnSync('where', ['pnpm'], { encoding: 'utf8', windowsHide: true })
+  if (probe.status !== 0) return null
+  const first = (probe.stdout ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line !== '' && existsSync(line))
+  return first ?? null
 }
 
 /**

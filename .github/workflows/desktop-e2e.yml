@@ -1,0 +1,197 @@
+name: Desktop E2E
+
+# Real-installation acceptance for the **Electron desktop shell** (Windows only —
+# the desktop app is not on npm and ships no Linux build).
+#
+# The job installs the official per-user app, hand-crafts the `desktop` profile
+# (the CLI refuses `plugin --profile desktop add`), installs the *packed* plugin
+# into it, launches the app with an isolated `DSH_HOME`/`--user-data-dir` and a
+# CDP port, skips onboarding with "configure later", then asserts the plugin's
+# Remote-hosts settings section renders with legible buttons in light and dark.
+#
+# Reliability contract for a *required* check:
+# - `DSH_E2E_STRICT=1`: a missing app/installer is a hard failure, never a skip;
+# - the installer runs with an explicit timeout, and a failure dumps where the app
+#   (not) appeared, because a silent NSIS install can stall when an instance is
+#   already running or when elevation cannot be prompted for;
+# - the app is located by *searching* `%LOCALAPPDATA%\Programs` and
+#   `%PROGRAMFILES%`, never by assuming one path;
+# - on failure a screenshot + console/harness logs are uploaded;
+# - the job name is fixed (no matrix) so the required context never drifts.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # CI is required-grade: a missing prerequisite must fail, never skip.
+  DSH_E2E_STRICT: '1'
+  DSH_DESKTOP_INSTALLER_URL: https://download.deepseek.com/desktop/dsh-latest-windows-x64.exe
+
+jobs:
+  desktop-e2e:
+    name: Desktop E2E (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Cache the desktop installer
+        # ~280 MB per run; the key is bumped manually when a new build is needed.
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\dsh-desktop-installer.exe
+          key: dsh-desktop-installer-v1
+
+      - name: Refuse to test a machine with a running instance
+        shell: pwsh
+        run: |
+          $running = Get-Process -Name 'DeepSeek Harness' -ErrorAction SilentlyContinue
+          if ($running) {
+            $ids = ($running | Select-Object -ExpandProperty Id) -join ', '
+            Write-Error "a DeepSeek Harness instance is already running (pid: $ids); a silent install/launch cannot be validated in that state"
+            exit 1
+          }
+          Write-Host 'no running instance, safe to install'
+
+      - name: Download the desktop installer
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:RUNNER_TEMP 'dsh-desktop-installer.exe'
+          if (Test-Path $target) {
+            $size = (Get-Item $target).Length
+            if ($size -gt 100MB) {
+              Write-Host "cached installer: $target ($([math]::Round($size / 1MB)) MB)"
+              exit 0
+            }
+            Remove-Item $target -Force
+          }
+          Write-Host "downloading $env:DSH_DESKTOP_INSTALLER_URL"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $env:DSH_DESKTOP_INSTALLER_URL -OutFile $target -TimeoutSec 900
+          $size = (Get-Item $target).Length
+          if ($size -lt 100MB) { Write-Error "installer is suspiciously small: $size bytes"; exit 1 }
+          Write-Host "downloaded $target ($([math]::Round($size / 1MB)) MB)"
+
+      - name: Install the desktop app silently (bounded)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP 'dsh-desktop-installer.exe'
+
+          function Find-HarnessExe {
+            $roots = @(
+              (Join-Path $env:LOCALAPPDATA 'Programs'),
+              $env:PROGRAMFILES,
+              ${env:ProgramFiles(x86)},
+              $env:RUNNER_TEMP
+            ) | Where-Object { $_ -and (Test-Path $_) }
+            foreach ($root in $roots) {
+              $hit = Get-ChildItem -LiteralPath $root -Filter 'DeepSeek Harness.exe' -Recurse -Depth 3 -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              if ($hit) { return $hit.FullName }
+            }
+            return $null
+          }
+
+          function Show-Tree([string[]]$roots) {
+            foreach ($root in $roots) {
+              if (-not $root -or -not (Test-Path $root)) { continue }
+              Write-Host "--- $root"
+              Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+                Select-Object -First 20 |
+                ForEach-Object { Write-Host "    $($_.Name)" }
+            }
+          }
+
+          function Invoke-Installer([string[]]$arguments, [string]$label) {
+            Write-Host "installing ($label): $installer $($arguments -join ' ')"
+            # -WindowStyle Hidden matters here: the installer is a GUI binary, so without it every
+            # attempt flashes a console window in the runner and on a developer machine.
+            $proc = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
+            $deadline = (Get-Date).AddMinutes(10)
+            while (-not $proc.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+            $stalled = -not $proc.HasExited
+            if ($stalled) {
+              Write-Warning "installer still alive after 10 minutes ($label); terminating it"
+              try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { Write-Warning "kill failed: $_" }
+            } else {
+              Write-Host "installer exited with code $($proc.ExitCode) ($label)"
+            }
+            # The payload is extracted by a child process: poll for the binary.
+            $searchDeadline = (Get-Date).AddMinutes(5)
+            while ((Get-Date) -lt $searchDeadline) {
+              $found = Find-HarnessExe
+              if ($found) { return @{ exe = $found; stalled = $stalled; exit = $proc.ExitCode } }
+              Start-Sleep -Seconds 5
+            }
+            return @{ exe = $null; stalled = $stalled; exit = $proc.ExitCode }
+          }
+
+          $result = Invoke-Installer @('/S') 'default per-user location'
+          if (-not $result.exe) {
+            Write-Warning 'no binary after the default /S install; retrying with /D='
+            $fallback = Join-Path $env:RUNNER_TEMP 'dsh-desktop-install'
+            $result = Invoke-Installer @('/S', "/D=$fallback") 'explicit /D= target'
+          }
+
+          if (-not $result.exe) {
+            Write-Host '--- diagnostics: installer did not produce a binary'
+            Write-Host "installer: $installer"
+            Write-Host "stalled: $($result.stalled), exit code: $($result.exit)"
+            Show-Tree @((Join-Path $env:LOCALAPPDATA 'Programs'), $env:PROGRAMFILES, ${env:ProgramFiles(x86)}, $env:RUNNER_TEMP)
+            Write-Error 'DeepSeek Harness.exe was not found after a bounded silent install'
+            exit 1
+          }
+
+          $version = (Get-Item -LiteralPath $result.exe).VersionInfo.FileVersion
+          Write-Host "app: $($result.exe)"
+          Write-Host "file version: $version"
+          Write-Host "installer stalled: $($result.stalled)"
+          "DSH_DESKTOP_EXE=$($result.exe)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Report tool versions
+        shell: pwsh
+        run: |
+          Write-Host "node $(node --version)"
+          Write-Host "pnpm $(pnpm --version)"
+          Write-Host "installer $env:DSH_DESKTOP_INSTALLER_URL"
+          $exe = $env:DSH_DESKTOP_EXE
+          Write-Host "app $exe"
+          if (Test-Path $exe) { Write-Host "appVersion $((Get-Item -LiteralPath $exe).VersionInfo.FileVersion)" }
+
+      - name: Run the desktop E2E
+        env:
+          DSH_DESKTOP_E2E_ARTIFACTS: ${{ runner.temp }}\desktop-e2e-artifacts
+        run: node --test test/integration/desktop.e2e.js
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-e2e-failure
+          path: ${{ runner.temp }}\desktop-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14
