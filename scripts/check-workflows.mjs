@@ -20,6 +20,7 @@ const files = [
   '.github/workflows/e2e.yml',
   '.github/workflows/codeql.yml',
   '.github/workflows/release.yml',
+  '.github/workflows/web-e2e.yml',
 ]
 
 /** @type {((text: string) => unknown) | null} */

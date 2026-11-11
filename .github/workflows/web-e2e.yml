@@ -1,0 +1,68 @@
+name: Web E2E
+
+# Real-browser acceptance for the "web + desktop compatible" claim.
+#
+# Boots an isolated `dsh web` from the published harness package, installs this
+# repository as a plugin into a temporary profile, then drives the real UI with
+# Chrome and asserts the plugin's Remote-hosts settings section renders with
+# legible button labels in light AND dark mode (the bug this guards: an
+# invisible primary-button label, fixed in #10).
+#
+# Deliberately separate from ci.yml: this is the only place that runs
+# test/integration/web.e2e.js, and it runs it in strict mode
+# (DSH_E2E_STRICT=1), where a missing harness/browser FAILS instead of skipping —
+# so provisioning drift cannot silently turn this job into a no-op.
+# `pnpm run verify` never needs a harness: there the same file skips cleanly.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: web-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  web-e2e:
+    name: Web E2E (ubuntu, Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Install the DSH harness
+        # `--ignore-scripts` keeps pnpm 11 from failing the job on build-script
+        # approval prompts for optional native deps (node-pty & friends); the
+        # settings UI this test drives needs none of them.
+        run: pnpm add --global --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1
+
+      - name: Verify the harness is installed
+        run: dsh --version
+
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+
+      - name: Run the web E2E
+        env:
+          DSH_E2E_STRICT: '1'
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: node --test test/integration/web.e2e.js
