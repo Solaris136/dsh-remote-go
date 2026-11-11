@@ -61,9 +61,11 @@ test('deepMerge replaces scalars and merges objects', () => {
   assert.deepEqual(base, { a: 1, nested: { b: 2, c: 3 }, list: [1] })
 })
 
-test('deepMerge cannot be used to pollute Object.prototype', () => {
+test('deepMerge cannot inject undeclared properties', () => {
   // Shaped like a JSON request body: `__proto__`/`constructor` arrive as plain
-  // own properties (JSON.parse does not invoke the setter).
+  // own properties (JSON.parse does not invoke the setter). The old merge copied
+  // them through, which swapped the merged object's prototype and added an own
+  // `constructor`; it never reached Object.prototype itself.
   const patch = JSON.parse(
     '{"__proto__":{"polluted":"yes"},"constructor":{"prototype":{"polluted":"yes"}},"saveTokens":true}',
   )
@@ -78,7 +80,7 @@ test('deepMerge cannot be used to pollute Object.prototype', () => {
   assert.equal(Object.getPrototypeOf(merged), Object.prototype)
 })
 
-test('deepMerge only writes properties the schema declares', () => {
+test('deepMerge drops nested properties the schema does not declare', () => {
   const merged = deepMerge({ known: 1, nested: { a: 1 } }, { known: 2, invented: { deep: 'value' }, nested: { b: 2 } })
   assert.deepEqual(merged, { known: 2, nested: { a: 1 } })
   assert.equal(Object.hasOwn(merged, 'invented'), false)

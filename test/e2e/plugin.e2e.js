@@ -58,7 +58,11 @@ function sanitizeEvidence(value, depth = 0) {
   if (typeof value === 'string') return evidenceText(value)
   if (Array.isArray(value)) return value.map((entry) => sanitizeEvidence(entry, depth + 1))
   if (value && typeof value === 'object') {
-    const out = {}
+    // Null-prototype accumulator: these keys are author-written literals from
+    // fixed-shape `page.evaluate` results, but copying them into a prototype-free
+    // object keeps this module consistent with the `deepMerge` hardening above
+    // (`JSON.stringify` serializes it normally).
+    const out = Object.create(null)
     for (const [key, entry] of Object.entries(value)) out[evidenceText(key, 120)] = sanitizeEvidence(entry, depth + 1)
     return out
   }
@@ -68,10 +72,17 @@ function sanitizeEvidence(value, depth = 0) {
 /**
  * Write the evidence report to its fixed destination.
  *
- * The path is a constant under `e2e/artifacts/`: it is never derived from page,
- * network or SSH data, and the resolved target is re-checked against the
- * artifacts directory. The untrusted part is only the *content*, which is
- * sanitized above — so remote data cannot steer where, or whether, we write.
+ * The destination is a constant under `e2e/artifacts/`, never derived from page,
+ * network or SSH data, and the resolved target is re-checked against that
+ * directory before the write.
+ *
+ * The content *is* remote page text, which is why `js/http-to-file-access` keeps
+ * reporting this line: the value is still derived from tainted input, so the
+ * alert is legitimate and stays open (dismissed as "used in tests" — nothing
+ * reads the file back; it is uploaded as a CI artifact only). The sanitizer below
+ * is defence-in-depth, not the reason the alert could be closed: it bounds the
+ * text and strips control characters so a remote page cannot smuggle terminal
+ * escapes into a log or grow the artifact without limit.
  * @param {unknown} report - evidence payload.
  * @returns {Promise<void>} resolves once the file is written.
  */

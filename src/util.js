@@ -55,9 +55,9 @@ export function isPlainObject(value) {
 }
 
 /**
- * Property names that would rewrite the prototype chain instead of storing a
- * value. The merge below only writes keys that `base` declares, so these can
- * only appear if a caller ever passes a hostile `base`; the guard is cheap
+ * Property names whose write would land on the prototype chain instead of a
+ * plain value. The merge below only writes keys that `base` declares, so these
+ * can only appear if a caller ever passes a hostile `base`; the guard is cheap
  * insurance for that case.
  */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
@@ -68,9 +68,10 @@ const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
  * Only properties that `base` declares are merged: `base` is the trusted schema
  * (the settings defaults), `patch` is untrusted input (a saved or HTTP-supplied
  * settings object), and a patch may therefore change known values but never
- * invent a property name. That blocks prototype pollution and remote property
- * injection by construction instead of by blocklist, and matches the caller,
- * which reads a fixed set of fields.
+ * invent a property name. That closes the remote-property-injection path (and
+ * with it the prototype-polluting-assignment shape, where `{"__proto__": …}`
+ * would replace the merged object's prototype) by construction rather than by
+ * blocklist, and matches the caller, which reads a fixed set of fields.
  * @template T
  * @param {T} base
  * @param {unknown} patch

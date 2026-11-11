@@ -1,5 +1,5 @@
 // Vendored-ssh2 entry point. `scripts/build-vendor.mjs` bundles this file into
-// `vendor/ssh2.bundle.mjs`, so the published plugin ships with **zero runtime
+// `vendor/ssh2.bundle.cjs`, so the published plugin ships with **zero runtime
 // dependencies and no install/build scripts** (design: keep install light, never
 // run arbitrary npm lifecycle scripts on the user's machine).
 //
