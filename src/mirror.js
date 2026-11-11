@@ -29,6 +29,7 @@ import { normalizeVersion, versionsEqual } from './version.js'
  * @typedef {{ list: boolean, history: boolean, stream: boolean, input: boolean, approve: boolean }} MirrorCapabilities
  * @typedef {'active' | 'remote-deleted'} MirrorStatus
  * @typedef {'L1' | 'L2' | 'L3'} MirrorLevel
+ * @typedef {{ code: string, message: { zh: string, en: string } }} MirrorDescriptorReason
  * @typedef {{
  *   localSessionId: string,
  *   hostId: string,
@@ -37,6 +38,8 @@ import { normalizeVersion, versionsEqual } from './version.js'
  *   title: string,
  *   cursor: number,
  *   capabilities: MirrorCapabilities,
+ *   level: MirrorLevel,
+ *   reason: MirrorDescriptorReason | null,
  *   mirroredAt: string | null,
  *   status: MirrorStatus,
  * }} MirrorDescriptor
@@ -151,6 +154,11 @@ export function l1Capabilities() {
  * caller passes no `now` (failure/partial path) the previous `mirroredAt` is
  * preserved.
  *
+ * `level` and `reason` are stamped on **every** descriptor from the caller's
+ * `decideLevel()` result (design §7 requires a version mismatch to be annotated
+ * on the session, not only on the host). Without a decision the descriptor is the
+ * conservative directory baseline: `level: 'L1', reason: null`.
+ *
  * Ordering is deterministic and independent of the input order: descriptors sort
  * by `hostId`, then `workspaceId` (nulls last), then `remoteSessionId`.
  *
@@ -160,6 +168,7 @@ export function l1Capabilities() {
  *   capabilities?: unknown,
  *   existing?: readonly unknown[] | null,
  *   now?: string | number | Date | null,
+ *   decision?: { level?: unknown, reason?: unknown } | null,
  * }} [input]
  * @returns {MirrorDescriptor[]}
  */
@@ -170,6 +179,8 @@ export function planMirror(input = {}) {
   // The caller just read the remote directory, so `list` is a verified fact.
   capabilities.list = true
   const mirroredAt = toIsoTime(input.now)
+  const level = levelOrNull(input.decision?.level) ?? MIRROR_LEVELS.L1
+  const reason = descriptorReason(input.decision?.reason)
   const existingById = indexDescriptors(input.existing)
   /** @type {MirrorDescriptor[]} */
   const planned = []
@@ -193,6 +204,8 @@ export function planMirror(input = {}) {
         title: mirrorTitle(baseTitle, remoteSessionId),
         cursor: previous ? previous.cursor : 0,
         capabilities: { ...capabilities },
+        level,
+        reason: reason === null ? null : { code: reason.code, message: { ...reason.message } },
         // Last successful sync time: advance on every planned (successful) read.
         mirroredAt: mirroredAt ?? previous?.mirroredAt ?? null,
         status: 'active',
@@ -236,6 +249,8 @@ export function normalizeMirrorDescriptor(raw) {
     title: title.length > 120 ? title.slice(0, 120) : title,
     cursor: nonNegativeInteger(record.cursor) ?? 0,
     capabilities: normalizeCapabilities(record.capabilities),
+    level: levelOrNull(record.level) ?? MIRROR_LEVELS.L1,
+    reason: descriptorReason(record.reason),
     mirroredAt: toIsoTime(record.mirroredAt),
     status: record.status === 'remote-deleted' ? 'remote-deleted' : 'active',
   }
@@ -838,6 +853,33 @@ function textOrNull(value) {
   if (typeof value !== 'string') return null
   const text = value.trim()
   return text === '' ? null : text
+}
+
+/**
+ * @param {unknown} value
+ * @returns {MirrorLevel | null} a supported level, or null for anything else
+ */
+function levelOrNull(value) {
+  return value === MIRROR_LEVELS.L1 || value === MIRROR_LEVELS.L2 || value === MIRROR_LEVELS.L3 ? value : null
+}
+
+/**
+ * Normalize a descriptor reason. `decideLevel` reports `{ code, detail }`;
+ * descriptors persist `{ code, message }`. Both shapes are accepted so a stored
+ * descriptor and a fresh decision can share this validator.
+ * @param {unknown} value
+ * @returns {MirrorDescriptorReason | null}
+ */
+function descriptorReason(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = /** @type {Record<string, any>} */ (value)
+  const code = textOrNull(record.code)
+  const detail = record.message ?? record.detail
+  if (code === null || !detail || typeof detail !== 'object' || Array.isArray(detail)) return null
+  const zh = textOrNull(/** @type {Record<string, any>} */ (detail).zh)
+  const en = textOrNull(/** @type {Record<string, any>} */ (detail).en)
+  if (zh === null || en === null) return null
+  return { code, message: { zh, en } }
 }
 
 /**

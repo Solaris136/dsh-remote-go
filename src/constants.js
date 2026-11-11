@@ -21,6 +21,9 @@ export const API_HEADER = 'x-dsh-remote-go'
 export const PLUGIN_ID = 'dsh-remote-go'
 export const PLUGIN_VERSION = '0.1.0'
 
+/** Host↔Client contract version served by `GET /version` (docs/api.md v1.1). */
+export const API_VERSION = '1.1'
+
 /** Default remote directory (tilde keeps it user-owned; expanded remotely). */
 export const DEFAULT_REMOTE_DIR = '~/.dsh-remote-go'
 

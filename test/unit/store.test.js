@@ -1,9 +1,37 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { promises as realFs } from 'node:fs'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore, resolveDshHome, resolveStateDir } from '../../src/store.js'
+
+/**
+ * Wrap the real fs and throw `EPERM` on the first `failures` renames whose target
+ * ends with `suffix` (Windows behaviour when another process briefly holds it).
+ * @param {string} suffix
+ * @param {number} failures
+ */
+function flakyRenameFs(suffix, failures) {
+  let remaining = failures
+  return new Proxy(realFs, {
+    get(target, prop, receiver) {
+      if (prop === 'rename') {
+        return async (/** @type {string} */ from, /** @type {string} */ to) => {
+          if (typeof to === 'string' && to.endsWith(suffix) && remaining > 0) {
+            remaining -= 1
+            const error = new Error('busy')
+            error.code = 'EPERM'
+            throw error
+          }
+          return realFs.rename(from, to)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
 
 async function tempStore() {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-'))
@@ -102,4 +130,26 @@ test('resolveDshHome prefers DSH_HOME and falls back to the user home', () => {
   assert.equal(resolveDshHome({ DSH_HOME: '/custom/dsh' }), '/custom/dsh')
   assert.equal(resolveDshHome({ USERPROFILE: 'C:\\Users\\u' }), path.join('C:\\Users\\u', '.dsh'))
   assert.equal(resolveStateDir('/custom/dsh'), path.join('/custom/dsh', 'remote-go'))
+})
+
+test('the shared atomic writer retries a busy rename for hosts.json', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-retry-'))
+  // Two transient EPERM failures, then success: the old writer threw at once.
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: flakyRenameFs('hosts.json', 2) })
+  await store.load()
+  const host = await store.upsertHost({ address: 'retry.example.com' })
+  assert.ok(host.id)
+  const raw = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
+  assert.equal(raw[0].address, 'retry.example.com')
+  const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'))
+  assert.deepEqual(leftovers, [])
+})
+
+test('a failed hosts.json write leaves no temp file behind', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-fail-'))
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: flakyRenameFs('hosts.json', 99) })
+  await store.load()
+  await assert.rejects(() => store.upsertHost({ address: 'fail.example.com' }))
+  const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'))
+  assert.deepEqual(leftovers, [])
 })

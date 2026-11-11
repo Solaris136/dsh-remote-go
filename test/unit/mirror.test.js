@@ -435,6 +435,58 @@ test('capability and descriptor normalization drop unknown data', () => {
 
 // (f) capability level ------------------------------------------------------
 
+test('planMirror stamps every descriptor with the decided level and reason', () => {
+  const decision = {
+    level: 'L1',
+    reason: { code: 'version-mismatch', detail: { zh: '版本不一致', en: 'Version mismatch' } },
+  }
+  const planned = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: l1Capabilities(),
+    now: NOW,
+    decision,
+  })
+  assert.equal(planned.length, 2)
+  for (const descriptor of planned) {
+    assert.equal(descriptor.level, 'L1')
+    assert.deepEqual(descriptor.reason, {
+      code: 'version-mismatch',
+      message: { zh: '版本不一致', en: 'Version mismatch' },
+    })
+  }
+
+  // A fully capable decision carries no downgrade reason.
+  const complete = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: { list: true, history: true, stream: true, input: true, approve: true },
+    now: NOW,
+    decision: { level: 'L3', reason: null },
+  })
+  assert.equal(complete[0].level, 'L3')
+  assert.equal(complete[0].reason, null)
+
+  // Without a decision the descriptor is the conservative directory baseline.
+  const bare = planMirror({ host: HOST, remoteWorkspaces: registry(), now: NOW })
+  assert.equal(bare[0].level, 'L1')
+  assert.equal(bare[0].reason, null)
+
+  // Persisted descriptors keep a valid annotation and drop an invalid one.
+  const roundTrip = normalizeMirrorDescriptor(planned[0])
+  assert.equal(roundTrip.level, 'L1')
+  assert.deepEqual(roundTrip.reason, planned[0].reason)
+  const invalid = normalizeMirrorDescriptor({ ...planned[0], level: 'L9', reason: { code: 42 } })
+  assert.equal(invalid.level, 'L1')
+  assert.equal(invalid.reason, null)
+  // `{ code, detail }` (the decideLevel shape) is accepted as well.
+  const fromDetail = normalizeMirrorDescriptor({
+    ...planned[0],
+    reason: { code: 'probe-missing', detail: { zh: '未探测', en: 'Not probed' } },
+  })
+  assert.deepEqual(fromDetail.reason, { code: 'probe-missing', message: { zh: '未探测', en: 'Not probed' } })
+})
+
 test('decideLevel downgrades with the reason codes the design names', () => {
   const full = { list: true, history: true, stream: true, input: true, approve: true }
   const versions = { hostVersion: '0.2.2-rc.1', localVersion: '0.2.2-rc.1' }

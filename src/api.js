@@ -4,7 +4,7 @@
  * `x-dsh-remote-go` header and, when a browser supplies an Origin, be same-origin
  * (design §9.1: the remote UI is never exposed, only the local plugin state).
  */
-import { API_HEADER, API_PREFIX, PLUGIN_VERSION } from './constants.js'
+import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
 import { nowIso } from './util.js'
 
@@ -240,7 +240,12 @@ export function createApi(options) {
         return
       }
       if (method === 'GET' && path === '/version') {
-        sendJson(res, 200, { ok: true, version: PLUGIN_VERSION, hostVersion: service.localVersion })
+        sendJson(res, 200, {
+          ok: true,
+          version: PLUGIN_VERSION,
+          apiVersion: API_VERSION,
+          hostVersion: service.localVersion,
+        })
         return
       }
       if (method === 'GET' && path === '/diagnostics/self') {

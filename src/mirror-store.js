@@ -16,70 +16,29 @@
  *   the newer schema), so an older plugin can never overwrite it in place.
  *
  * Writes are safe across **processes**: writers serialize on a `wx` lock file
- * (stale locks from a crashed writer are broken after `LOCK_STALE_MS`), re-read
+ * (stale locks from a crashed writer are broken, see `./atomic-json.js`), re-read
  * the file inside the lock before mutating (so two writers cannot lose each
- * other's rows), and use a `crypto.randomUUID()` temp name opened with `wx`,
- * fsynced, then renamed. On Windows another process can hold the target file
- * briefly, so the rename is retried on `EPERM`/`EBUSY`; any failure removes the
- * temp file instead of leaving a `.tmp` behind. Directories are fsynced where the
- * platform allows it.
+ * other's rows), and use the shared atomic writer (unique temp name, `wx`,
+ * fsync, rename retry, temp cleanup). Directories are fsynced where the platform
+ * allows it.
  */
 import { promises as fs } from 'node:fs'
-import { existsSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import {
+  LOCK_RETRY_MS,
+  LOCK_STALE_MS,
+  LOCK_WAIT_MS,
+  quarantineFile,
+  readJsonFile,
+  withProcessLock,
+  writeJsonAtomic,
+} from './atomic-json.js'
 import { compareMirrors, normalizeMirrorDescriptor } from './mirror.js'
 
 /** On-disk envelope version; bump only when an older file cannot be sanitized. */
 export const MIRROR_STORE_VERSION = 1
 
-/** Rename attempts when another process holds/replaces the target (Windows). */
-const RENAME_RETRY_ATTEMPTS = 5
-
-/** Base backoff for a busy rename; multiplied by the attempt number. */
-const RENAME_RETRY_BASE_MS = 20
-
-/** A lock file older than this is stale (the writer crashed). */
-const LOCK_STALE_MS = 10_000
-
-/** How long to wait for another process to release the lock before failing. */
-const LOCK_WAIT_MS = 20_000
-
-/** Poll interval while waiting for the cross-process lock. */
-const LOCK_RETRY_MS = 10
-
-/** @param {number} ms @returns {Promise<void>} */
-function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
-
 /** @typedef {{ version: number, mirrors: import('./mirror.js').MirrorDescriptor[] }} MirrorStoreData */
-
-/**
- * Per-file write locks shared by every store instance in this process. The value
- * is the tail of the chain (always settled), so a rejected write never poisons
- * the next waiter.
- * @type {Map<string, Promise<unknown>>}
- */
-const WRITE_LOCKS = new Map()
-
-/**
- * @template T
- * @param {string} file
- * @param {() => Promise<T>} task
- * @returns {Promise<T>}
- */
-function withFileLock(file, task) {
-  const previous = WRITE_LOCKS.get(file) ?? Promise.resolve()
-  const run = previous.then(task, task)
-  WRITE_LOCKS.set(
-    file,
-    run.catch(() => undefined),
-  )
-  return run
-}
 
 export class MirrorStore {
   /**
@@ -127,55 +86,30 @@ export class MirrorStore {
   }
 
   /**
-   * Read the current envelope without interpreting it.
-   * @returns {Promise<{ status: 'missing' | 'ok' | 'corrupt' | 'future', value: unknown }>}
-   */
-  async #readEnvelope() {
-    try {
-      if (!existsSync(this.file)) return { status: 'missing', value: null }
-      const text = await this.fs.readFile(this.file, 'utf8')
-      const value = JSON.parse(text)
-      const version =
-        value && typeof value === 'object' && Number.isInteger(/** @type {any} */ (value).version)
-          ? /** @type {any} */ (value).version
-          : null
-      if (version !== null && version > MIRROR_STORE_VERSION) return { status: 'future', value }
-      return { status: 'ok', value }
-    } catch (error) {
-      this.logger.warn?.(`[dsh-remote-go] cannot read ${path.basename(this.file)}:`, error)
-      return { status: 'corrupt', value: null }
-    }
-  }
-
-  /**
-   * Move an uninterpretable file aside so it is never overwritten in place.
-   * @param {'corrupt' | 'future'} kind
-   * @returns {Promise<string | null>}
-   */
-  async #quarantine(kind) {
-    const target = `${this.file}.${kind}-${Date.now()}`
-    try {
-      await this.fs.rename(this.file, target)
-      this.quarantinedFile = target
-      this.logger.warn?.(`[dsh-remote-go] kept ${path.basename(this.file)} aside as ${path.basename(target)} (${kind})`)
-      return target
-    } catch (error) {
-      this.logger.warn?.(`[dsh-remote-go] cannot keep ${path.basename(this.file)} aside:`, error)
-      return null
-    }
-  }
-
-  /**
-   * Read the file and return usable data; quarantine corrupt/future files first.
+   * Read the file and return usable data. A corrupt file or one written by a
+   * newer store version is quarantined first (never reinterpreted in place),
+   * then an empty store is returned.
    * @returns {Promise<MirrorStoreData>}
    */
   async #readFresh() {
-    const envelope = await this.#readEnvelope()
-    if (envelope.status === 'corrupt' || envelope.status === 'future') {
-      await this.#quarantine(envelope.status)
+    const result = await readJsonFile(this.file, { fs: this.fs, logger: this.logger })
+    if (result.status === 'missing') return emptyMirrorData()
+    if (result.status === 'corrupt') {
+      const target = await quarantineFile(this.file, 'corrupt', { fs: this.fs, logger: this.logger })
+      if (target !== null) this.quarantinedFile = target
       return emptyMirrorData()
     }
-    return sanitizeMirrorStore(envelope.value)
+    const value = result.value
+    const version =
+      value && typeof value === 'object' && Number.isInteger(/** @type {any} */ (value).version)
+        ? /** @type {any} */ (value).version
+        : null
+    if (version !== null && version > MIRROR_STORE_VERSION) {
+      const target = await quarantineFile(this.file, 'future', { fs: this.fs, logger: this.logger })
+      if (target !== null) this.quarantinedFile = target
+      return emptyMirrorData()
+    }
+    return sanitizeMirrorStore(value)
   }
 
   /**
@@ -267,151 +201,34 @@ export class MirrorStore {
   }
 
   /**
-   * Run one mutation under the in-process chain and the cross-process lock.
-   * Inside the lock the file is re-read so concurrent writers merge instead of
-   * overwriting each other.
+   * Run one mutation under the shared cross-process lock (plus the in-process
+   * chain inside it). The file is re-read inside the lock so concurrent writers
+   * merge instead of overwriting each other.
    * @template T
    * @param {(data: MirrorStoreData) => T} apply
    * @returns {Promise<T>}
    */
   async #mutate(apply) {
-    return withFileLock(this.file, async () => {
-      const release = await this.#acquireLock()
-      try {
+    return withProcessLock(
+      this.lockFile,
+      {
+        fs: this.fs,
+        logger: this.logger,
+        staleMs: this.lockStaleMs,
+        waitMs: this.lockWaitMs,
+        retryMs: this.lockRetryMs,
+      },
+      async () => {
         this.data = await this.#readFresh()
         const result = apply(this.data)
-        await this.#writeAtomic(this.data)
+        await writeJsonAtomic(this.file, this.data, {
+          dir: this.dir,
+          fs: this.fs,
+          logger: this.logger,
+        })
         return result
-      } finally {
-        await release()
-      }
-    })
-  }
-
-  /**
-   * Create the exclusive lock file. Another process holding it means this writer
-   * waits (a stale lock from a crashed process is broken after `LOCK_STALE_MS`).
-   * @returns {Promise<() => Promise<void>>} release function
-   */
-  async #acquireLock() {
-    const started = Date.now()
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      try {
-        const handle = await this.fs.open(this.lockFile, 'wx', 0o600)
-        return async () => {
-          try {
-            await handle.close()
-          } catch {
-            /* already closed */
-          }
-          await this.#removeQuietly(this.lockFile)
-        }
-      } catch (error) {
-        if (/** @type {any} */ (error)?.code !== 'EEXIST') throw error
-        await this.#breakStaleLock()
-        if (Date.now() - started > this.lockWaitMs) {
-          const timeout = new Error('timed out waiting for another process to release the mirror store lock')
-          timeout.code = 'ELOCKTIMEOUT'
-          throw timeout
-        }
-        await sleep(this.lockRetryMs)
-      }
-    }
-  }
-
-  /** Remove a lock file left behind by a writer that died. */
-  async #breakStaleLock() {
-    try {
-      const info = await this.fs.stat(this.lockFile)
-      if (Date.now() - info.mtimeMs > this.lockStaleMs) await this.#removeQuietly(this.lockFile)
-    } catch {
-      /* the lock disappeared or cannot be inspected: just retry the create */
-    }
-  }
-
-  /**
-   * Atomic write: unique temp file opened exclusively, fsynced, renamed with a
-   * retry when the target is briefly held (Windows), then the directory is
-   * fsynced where supported. No temp file survives a failure.
-   * @param {MirrorStoreData} data
-   */
-  async #writeAtomic(data) {
-    await this.#ensureDir()
-    const tmp = `${this.file}.${randomUUID()}.tmp`
-    const text = `${JSON.stringify(data, null, 2)}\n`
-    let handle = null
-    try {
-      handle = await this.fs.open(tmp, 'wx', 0o600)
-      await handle.writeFile(text, 'utf8')
-      await handle.sync()
-      await handle.close()
-      handle = null
-    } catch (error) {
-      if (handle) {
-        try {
-          await handle.close()
-        } catch {
-          /* ignore */
-        }
-      }
-      await this.#removeQuietly(tmp)
-      throw error
-    }
-    await this.#renameWithRetry(tmp)
-    await this.#syncDir()
-  }
-
-  /**
-   * Windows can throw `EPERM`/`EBUSY` when another process briefly holds or
-   * replaces the target; retry with backoff. Any other failure (or the last
-   * attempt) removes the temp file before rethrowing so no `.tmp` is left.
-   * @param {string} tmp
-   */
-  async #renameWithRetry(tmp) {
-    for (let attempt = 1; attempt <= RENAME_RETRY_ATTEMPTS; attempt += 1) {
-      try {
-        await this.fs.rename(tmp, this.file)
-        return
-      } catch (error) {
-        const code = /** @type {any} */ (error)?.code
-        const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
-        if (retryable && attempt < RENAME_RETRY_ATTEMPTS) {
-          await sleep(RENAME_RETRY_BASE_MS * attempt)
-          continue
-        }
-        await this.#removeQuietly(tmp)
-        throw error
-      }
-    }
-  }
-
-  /** @param {string} target */
-  async #removeQuietly(target) {
-    try {
-      await this.fs.unlink(target)
-    } catch {
-      /* already gone */
-    }
-  }
-
-  /** Best effort: some platforms (Windows) cannot fsync a directory. */
-  async #syncDir() {
-    let handle = null
-    try {
-      handle = await this.fs.open(this.dir, 'r')
-      await handle.sync()
-    } catch {
-      /* not supported on this platform/filesystem */
-    } finally {
-      if (handle) {
-        try {
-          await handle.close()
-        } catch {
-          /* ignore */
-        }
-      }
-    }
+      },
+    )
   }
 }
 

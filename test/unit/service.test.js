@@ -983,3 +983,103 @@ test('without the optional sessions adapter the mirror stays directory-only', as
   assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 1)
   await service.shutdown()
 })
+
+// ------------------------------------------------- L2 preflight: descriptors
+
+/** A live-session adapter double: records creates/removals and answers liveness. */
+function createLiveMirrorAdapter() {
+  /** @type {Map<string, any>} */
+  const live = new Map()
+  /** @type {string[]} */
+  const created = []
+  /** @type {string[]} */
+  const removed = []
+  return {
+    live,
+    created,
+    removed,
+    ensureMirrorSession(descriptor) {
+      created.push(descriptor.localSessionId)
+      live.set(descriptor.localSessionId, {})
+      return { ok: true, created: true, localSessionId: descriptor.localSessionId }
+    },
+    hasMirrorSession(localSessionId) {
+      return live.has(localSessionId)
+    },
+    removeMirrorSession(localSessionId) {
+      removed.push(localSessionId)
+      live.delete(localSessionId)
+      return { ok: true, removed: true, reason: null }
+    },
+  }
+}
+
+test('a version mismatch is annotated on every mirrored session, not just the host', async () => {
+  const facts = makeFacts({ dshPath: '/usr/local/bin/dsh', dshVersion: '0.2.1', nodeVersion: '24.22.2' })
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  const { service } = await makeTestService({ facts, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service, {
+    bootstrap: { mode: 'reuse', targetVersion: 'local', remoteDir: '~/.dsh/remote-go', nodeVersion: '24.22.2' },
+  })
+  await service.connect(host.id, { overrideVersion: true })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+
+  const listed = await service.listHostMirrors(host.id)
+  assert.equal(listed.level, 'L1')
+  assert.equal(listed.reason.code, 'version-mismatch')
+  for (const mirror of listed.mirrors) {
+    assert.equal(mirror.level, 'L1')
+    assert.equal(mirror.reason.code, 'version-mismatch')
+    assert.equal(typeof mirror.reason.message.zh, 'string')
+    assert.equal(typeof mirror.reason.message.en, 'string')
+  }
+  await service.shutdown()
+})
+
+test('mirrorMaxSessions caps creation and reports truncated/skipped', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b', 's-c'] },
+  })
+  const adapter = createLiveMirrorAdapter()
+  const { service } = await makeTestService({ sessionAdapter: adapter, sshFactory: registrySshFactory(stdout) })
+  await service.saveSettings({ mirrorMaxSessions: 2 })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 3)
+  await waitFor(() => adapter.live.size === 2, { label: 'capped session creation' })
+
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.synced, true)
+  assert.equal(synced.sessionLimit, 2)
+  assert.equal(synced.truncated, 1)
+  assert.equal(synced.skipped, 1)
+  assert.equal(synced.sessions.length, 2)
+  assert.equal(adapter.live.size, 2)
+  assert.equal(new Set(adapter.created).size, 2)
+  await service.shutdown()
+})
+
+test('lowering mirrorMaxSessions never orphans a session it already created', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b', 's-c'] },
+  })
+  const adapter = createLiveMirrorAdapter()
+  const { service } = await makeTestService({ sessionAdapter: adapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  await waitFor(() => adapter.live.size === 3, { label: 'three sessions created under the default cap' })
+
+  await service.saveSettings({ mirrorMaxSessions: 1 })
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.sessionLimit, 1)
+  assert.equal(synced.truncated, 2)
+  assert.equal(synced.skipped, 0, 'sessions created earlier are not skipped work')
+  assert.deepEqual(adapter.removed, [])
+  assert.equal(adapter.live.size, 3)
+  await service.shutdown()
+})

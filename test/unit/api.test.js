@@ -503,6 +503,8 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
+    // v1.1 clients detect the additive contract without probing for 404s.
+    assert.equal(result.json.apiVersion, '1.1')
   } finally {
     await api.close()
     await service.shutdown()

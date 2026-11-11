@@ -361,6 +361,11 @@ data: {}
       "title": "proj · session-",
       "cursor": 0,
       "capabilities": { "list": true, "history": false, "stream": false, "input": false, "approve": false },
+      "level": "L1",
+      "reason": {
+        "code": "version-mismatch",
+        "message": { "zh": "远端 DSH（0.2.1）与本机（0.2.2-rc.1）版本不一致，只做目录镜像（L1）。", "en": "…" }
+      },
       "mirroredAt": "2026-11-11T00:00:00.000Z",
       "status": "active"
     }
@@ -370,6 +375,10 @@ data: {}
 
 `resyncRequired` / `notice` 来自连接时后台同步产生的「重启后从远端重拉」提示（见下节）：它**不是**瞬时值，
 在客户端确认之前一直返回；没有待确认提示时为 `0` / `null`。
+
+每条 `MirrorView` 都带自己的 `level` / `reason`（与顶层同源，来自 `decideLevel`），因此「这台主机版本不匹配，
+所以这几个会话只做目录镜像」可以直接显示在会话行上，而不必只挂在主机卡片上（设计 §7）。这两个字段在每次成功
+同步时写入并持久化；`GET` 返回的是**最近一次成功同步**的判定，主机版本变化后会在下一次同步时刷新。
 
 ```ts
 type MirrorLevel = 'L1' | 'L2' | 'L3'
@@ -393,6 +402,10 @@ interface MirrorView {
   /** 已镜像到的远端事件序号（1 起；0 = 尚未同步），重连后从这里续传 */
   cursor: number
   capabilities: MirrorCapabilities
+  /** 该镜像会话最近一次同步时判定的能力级别（设计 §7：版本不匹配要标注在会话上，而不只是主机上） */
+  level: MirrorLevel
+  /** 该级别被降级的原因；`null` 表示已到该级最高能力。`message` 为双语文本 */
+  reason: { code: string; message: { zh: string; en: string } } | null
   /** 最后一次成功同步时间（ISO）；失败/部分同步路径保留旧值，从未同步为 null */
   mirroredAt: string | null
   /** 远端会话被删除时只标记，不删除本地记录（设计 §7） */
@@ -417,6 +430,9 @@ interface MirrorView {
   "revived": [],
   "resyncRequired": 1,
   "notice": { "zh": "本地镜像会话在重启后不保留…", "en": "Mirror sessions do not survive a restart yet…" },
+  "sessionLimit": 200,
+  "truncated": 0,
+  "skipped": 0,
   "sidebar": {
     "ok": true,
     "enabled": true,
@@ -445,6 +461,12 @@ interface MirrorView {
 `synced:false` 的两种情况都**不改动**已持久化的镜像状态：`reason:"unreadable"`（注册表读不到/不可解析）与
 `reason:"empty-registry"`（注册表可解析但 0 个工作区，通常是一次写入中途的瞬时状态）。`sessions[]` 是适配器的
 原始结果（`ok:false` 时带 `reason`，如 `sessions-unavailable` / `create-failed`）。
+
+**会话创建上限（`mirrorMaxSessions`）**：设置项 `mirrorMaxSessions`（默认 `200`，`0` = 不限制）限制每次同步最多为多少条
+镜像描述创建本地会话。`sessionLimit` 是本次生效的上限（`0` 表示不限制），`truncated` 是被上限挡下、本次未尝试创建的
+描述数，`skipped` 是其中**确实缺少本地会话**的数量。上限只限制「创建」：不会删除任何早先创建的会话，因此调低上限
+不会让已有会话变成孤儿（它们既不计入 `skipped`，也不会被移除）；上限生效时仍会注册侧边栏分组（只要至少有会话创建
+成功），不会留下空分组。未连接 / 注册表不可读 / 瞬时空注册表时，`truncated` 与 `skipped` 均为 `0`。
 
 **提示的生命周期**：连接成功后 Host 会在后台跑同一条同步，并创建本地镜像会话（此时 `created:true` /
 `resync.needed:true`）。客户端随后调用本端点时，会话已经存在（`created:false` / `resync:null`），所以
@@ -517,3 +539,13 @@ v1.1 约束：
     而不是仅停止新建；重新开启后在下一次同步重建。删除主机时删除注册；删除失败由启动时的孤儿清理补删
     （只删镜像根下没有对应主机的注册，从不删除目录）。`workspaceRegistry` 缺失时该能力整体降级为
     `adapter-absent`，不影响 v1 的任何字段。
+11. **契约版本探测**：`GET /version` 追加 `apiVersion`（当前 `"1.1"`），与插件 `version` 并列返回。客户端据此
+    判断是否可以使用本节的追加契约，不需要靠探测 404 猜能力；`apiVersion` 未来升级只增不改，v1 字段语义不变。
+12. **设置追加字段 `mirrorMaxSessions`**：`SettingsView` 追加 `mirrorMaxSessions: number`（默认 `200`，`0` = 不限制，
+    上限 `5000`）。它只影响本地镜像会话的**创建**数量，见 `POST /hosts/:id/mirrors/sync` 的 `sessionLimit` /
+    `truncated` / `skipped`；v1 的设置字段语义不变，旧客户端可忽略该字段。
+13. **写入实现统一**：`hosts.json` / `settings.json` / `secrets.json` 与 `mirrors.json` 现在共用同一个原子写入器
+    （0700 目录、0600 文件、随机临时名 + `wx`、文件与目录 fsync、`EPERM`/`EBUSY` 重命名重试、跨进程锁、
+    失败清理临时文件）。区别仍在各自的读取语义：`hosts/settings/secrets` 读取损坏时回退默认值（不回退后写坏文件），
+    镜像存储会把损坏/更高版本的文件另存而不是覆盖。所有文件均不含凭据或 token。简短的“写入实现统一”说明：两个存储
+    都把「写」交给同一模块，每个存储仍保留自己的错误与回退策略。
