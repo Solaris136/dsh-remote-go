@@ -186,7 +186,7 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
   不要在脚本里 `Start-Process taskkill`。
 - 非 Windows 平台不受影响：这些参数在 POSIX 上被忽略。
 
-## 9. 测试基础设施约定（三条硬规则）
+## 9. 测试基础设施约定（四条硬规则）
 
 > **English abstract.** Four rules, each derived from a real failure or CI incident: (1) a wait predicate must cover
 > **every** state the assertions after it require; (2) an activation must use the **same** locator as its readiness
@@ -194,7 +194,7 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 > instead of accepting any shape; (4) a `catch` that turns an unknown failure into a normal-looking state must log at
 > error level and stay distinguishable — never let an internal defect masquerade as a remote condition.
 
-这三条不是风格偏好，而是过去四个 CI 失败里三个的根因。改 `test/**` 时请对照执行：
+这四条不是风格偏好，而是过去几个 CI 失败与一次「全绿的静默故障」的根因。改 `test/**` 与 `src/**` 时请对照执行：
 
 1. **等待谓词必须覆盖其后的断言（wait predicate ⊇ assertion）。**
    `pollUntil` / `while` 轮询 / `waitForFunction` 返回真之后的第一段断言，涉及的每一个状态都必须在谓词里出现过。
@@ -241,8 +241,11 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
      return { ok: false, reason: 'read-failed' }
    }
    ```
-   `// swallow-ok: <理由>` 标记会被 `test/unit/swallow-guard.test.js` 识别：扫描 `src/**/*.js` 里
-   「产出类型化原因」的 `catch`，没有 `internal-error`、没有 error 级日志、也没有该标记的，按 `file:line` 失败；
+   `// swallow-ok: <理由>` 标记会被 `test/unit/swallow-guard.test.js` 识别：它**递归**扫描 `src/**/*.js`，
+   把**任何**「产出 `reason:` 字段」的 `catch` 都当作违规（默认违规，而不是维护一份远端原因黑名单——
+   变量、helper 调用、新造的名字都逃不掉），除非该 `catch` 已经**可区分**（出现 `internal-error` /
+   `internalHistoryFault(` / 真正的 `#log(…, 'error', …)` 或 `logger.error(` 调用 / 重新抛出），
+   或者带有该标记。判定前会**先剥离注释**，所以注释里的 "throw"、"error" 不算数。
    标记后**必须**跟至少两个词的理由，空的 `// swallow-ok` 不生效。不要用它掩盖一个本该 log 的分支。
 
 ## 10. 安全相关

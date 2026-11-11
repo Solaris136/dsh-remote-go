@@ -638,6 +638,8 @@ export async function fetchRemoteHistory(ssh, input) {
     try {
       return { ok: /** @type {const} */ (true), result: await ssh.exec(command, options) }
     } catch (error) {
+      // swallow-ok: read-failed / permission-denied — the try body is only `ssh.exec`,
+      // so a rejection here is the transport, which is exactly a remote condition
       return { ok: /** @type {const} */ (false), reason: remoteReasonFor(error) }
     }
   }

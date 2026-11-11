@@ -1236,6 +1236,9 @@ export class RemoteGoService extends EventEmitter {
         await this.sessionAdapter.ensureMirrorCwd?.(descriptor)
         results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
       } catch (error) {
+        // swallow-ok: adapter-error — the adapter contract is never-throw, so a broken
+        // or third-party implementation is reported with its message instead of failing
+        // the connect; the enclosing sync logs and counts the result
         results.push({
           ok: false,
           reason: 'adapter-error',
