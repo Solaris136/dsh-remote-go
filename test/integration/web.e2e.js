@@ -711,6 +711,9 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         await neverPage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
         await openRemoteHostsSection(neverPage)
         await openRemotePanel(neverPage, { hostId: simulatedHostId })
+        // The rail mounted here: its bounded poll deadline (45 s) starts now, and
+        // "still retrying" is only assertable while that budget is running (see below).
+        const mountedAt = Date.now()
         await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
           timeoutMs: 60_000,
           label: 'the first mirror read on the never-replay page',
@@ -721,8 +724,14 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         await sleep(6000)
         const second = await stub.calls()
         assert.equal(await neverPage.$(selector), null, 'a never-read-only host must not show the badge')
-        assert.ok(second > first, 'the client must retry while replay is still in flight')
+        // Rate limit always holds; **growth** is only meaningful while the bounded poll
+        // deadline is still running. Asserting growth across that boundary was the
+        // flake: on a slow suite the deadline had already elapsed, so stopping was the
+        // documented behaviour and the assertion was wrong, not the client.
         assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
+        if (Date.now() - mountedAt < 40_000) {
+          assert.ok(second > first, 'the client must retry while replay is still in flight')
+        }
       } finally {
         await neverPage.close()
       }

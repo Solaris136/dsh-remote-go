@@ -4,6 +4,7 @@ import http from 'node:http'
 import { createApi } from '../../src/api.js'
 import { createSessionAdapter } from '../../src/session-adapter.js'
 import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createFakeSessions } from '../helpers/fake-sessions.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 
@@ -381,17 +382,10 @@ test('POST /hosts/:id/mirrors/sync exposes the restart re-pull notice', async ()
   })
   // A real adapter over an empty in-memory sessions store: the mirror session
   // does not exist (as after a restart), so the sync must report `resyncRequired`.
-  const live = new Map()
-  const sessions = {
-    create(id) {
-      const session = { id, append() {} }
-      live.set(id, session)
-      return session
-    },
-    get(id) {
-      return live.get(id)
-    },
-  }
+  // Host-faithful double (audit C): rejects a seeded header without an explicit
+  // seed/inheritedEventCount, so this path cannot drift from the live contract.
+  const sessions = createFakeSessions()
+  const live = sessions.live
   const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
   const { service } = await makeTestService({
     sessionAdapter,
@@ -433,17 +427,10 @@ test('the background resync notice survives later syncs until a client acknowled
   })
   // An adapter over a fake in-memory sessions store: connect's background sync
   // creates the sessions, so the client's own sync finds them already live.
-  const live = new Map()
-  const sessions = {
-    create(id) {
-      const session = { id, append() {} }
-      live.set(id, session)
-      return session
-    },
-    get(id) {
-      return live.get(id)
-    },
-  }
+  // Host-faithful double (audit C): rejects a seeded header without an explicit
+  // seed/inheritedEventCount, so this path cannot drift from the live contract.
+  const sessions = createFakeSessions()
+  const live = sessions.live
   const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
   const { service } = await makeTestService({
     sessionAdapter,
