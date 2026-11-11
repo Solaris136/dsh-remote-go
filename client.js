@@ -4736,7 +4736,11 @@ window.__ModuleLoader__.load({
         if (mirrors.length === 0) return null
         const first = mirrors[0]
         const level = typeof first.level === 'string' ? first.level : ''
-        const reason = resolveText(first.reason && first.reason.message, locale)
+        // `locale` is derived here rather than read from `props` directly: the rail's own
+        // `locale` binding was dropped as an unused local (it only served this badge), so
+        // resolving it at the point of use keeps the badge working without reintroducing a
+        // binding that only one call site needs.
+        const reason = resolveText(first.reason && first.reason.message, localeOf(props))
         return h(
           Badge,
           {
