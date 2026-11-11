@@ -7,16 +7,13 @@
  * and returns fresh values, so the whole P0 contract is unit-testable. The
  * sibling `./version.js` is pure as well and is reused for version parity.
  *
- * P0 scope is the L1 directory mirror: the remote workspace registry becomes one
- * mirror descriptor per remote session. L2 (history replay) and L3 (stream,
- * input, approvals) layer on the same descriptor/state shapes. The §6 cursor
- * merge and write-lease helpers below are implemented but **not wired in P0**
- * (they are marked `@internal`): no event stream, event store or writer exists
- * yet, and the docs must not claim they are delivered.
- *
- * TODO(P1/P3): `mirrorMaxEvents` retention (keep head/tail, fold the middle,
- * mark "collapsed") is part of design §6 and is deliberately NOT implemented or
- * advertised here; it lands with the L3 event store.
+ * P0 scope was the L1 directory mirror: the remote workspace registry becomes one
+ * mirror descriptor per remote session. L2 (history replay, this release) layers
+ * on the same descriptor/state shapes and **wires the §6 cursor merge for real**:
+ * `applyEvents` / `nextCursor` / `summarize` are called by `./history.js` and
+ * `./service.js`, and `./history.js` owns retention (`mirrorMaxEvents`). L3
+ * (stream, input, approvals) is still unimplemented, and the write-lease helpers
+ * below remain `@internal` because no local writer exists yet.
  *
  * Every exported function degrades to a typed result instead of throwing, per
  * design §4: "any level that fails must degrade explicitly, never silently
@@ -209,6 +206,9 @@ export function planMirror(input = {}) {
         // Last successful sync time: advance on every planned (successful) read.
         mirroredAt: mirroredAt ?? previous?.mirroredAt ?? null,
         status: 'active',
+        // Carried forward: `planMirror` only knows the directory, so the read-only
+        // flag set by the L2 replay must not be cleared on the next sync.
+        readOnly: previous ? previous.readOnly === true : false,
       })
     }
   }
@@ -253,6 +253,9 @@ export function normalizeMirrorDescriptor(raw) {
     reason: descriptorReason(record.reason),
     mirroredAt: toIsoTime(record.mirroredAt),
     status: record.status === 'remote-deleted' ? 'remote-deleted' : 'active',
+    // L2: a replayed mirror is a read-only projection until L3 forwards input
+    // (design §10 P1 asks for the marker; the client renders it from this flag).
+    readOnly: record.readOnly === true,
   }
 }
 
@@ -315,7 +318,6 @@ export function reconcileMirrors(input = {}) {
 /**
  * The seq the next remote event must carry (`cursor + 1`).
  *
- * @internal P0 does not wire this: the L3 event stream (not built) will call it.
  * @param {unknown} state
  * @returns {number}
  */
@@ -326,8 +328,6 @@ export function nextCursor(state) {
 /**
  * Merge a batch of remote events into a mirror state (design §6).
  *
- * @internal P0 does not wire this: no remote event stream or event store exists
- * yet, so §6 is implemented as a pure helper only. L3 will call it.
  *
  * Rules:
  * - only `seq > cursor` is applied, so replaying a batch twice is idempotent;
@@ -375,7 +375,6 @@ export function applyEvents(state, events) {
 /**
  * Compact, client-safe view of a mirror state.
  *
- * @internal P0 does not wire this: it ships with the L3 event stream.
  * @param {unknown} state
  * @returns {{
  *   cursor: number,

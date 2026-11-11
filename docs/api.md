@@ -106,6 +106,12 @@ interface SettingsView {
   saveTokens: boolean            // 默认 false（token 仅内存）
   /** v1.1：把远端镜像会话注册到本地侧边栏（默认 true） */
   mirrorToSidebar: boolean
+  /** v1.1：每次同步最多新建多少个镜像会话（默认 200，0 = 不限；只限制创建） */
+  mirrorMaxSessions: number
+  /** v1.1（L2）：是否回放远端历史（默认 true；false 时所有镜像停在 L1） */
+  mirrorHistory: boolean
+  /** v1.1（L2）：单个镜像会话保留/回放的事件上限（默认 200，0 = 不限；超出保留最新 N 条） */
+  mirrorMaxEvents: number
   windowMode: 'panel' | 'external'
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
@@ -336,8 +342,8 @@ data: {}
 
 ### `GET /hosts/:id/mirrors`
 
-某台远端主机已镜像到本地的会话（P0 = L1 目录镜像）。只读，不触发任何远端调用；目录同步发生在主机连接成功时，
-也可由 Host 内部显式触发。未连接时返回上次快照并带 `connected:false`，不报错。
+某台远端主机已镜像到本地的会话（**L2 = 目录镜像 + 历史回放**）。只读，不触发任何远端调用；目录同步与历史回放
+发生在主机连接成功时，也可由 Host 内部显式触发。未连接时返回上次快照并带 `connected:false`，不报错。
 
 ```json
 {
@@ -345,15 +351,12 @@ data: {}
   "hostId": "h_x",
   "hostName": "腾讯云测试机",
   "connected": true,
-  "level": "L1",
-  "reason": {
-    "code": "history-unavailable",
-    "detail": { "zh": "远端没有可用的历史回放接口，只做目录镜像（L1）。", "en": "The remote exposes no history replay…" }
-  },
-  "capabilities": { "list": true, "history": false, "stream": false, "input": false, "approve": false },
+  "level": "L2",
+  "reason": null,
+  "capabilities": { "list": true, "history": true, "stream": false, "input": false, "approve": false },
   "sessionsAvailable": true,
-  "resyncRequired": 1,
-  "notice": { "zh": "本地镜像会话在重启后不保留…", "en": "Mirror sessions do not survive a restart yet…" },
+  "resyncRequired": 0,
+  "notice": null,
   "mirrors": [
     {
       "localSessionId": "mirror_1a2b3c4d5e6f7g8h9i0j1k2l3",
@@ -361,13 +364,10 @@ data: {}
       "remoteSessionId": "session-42",
       "workspaceId": "ws_1",
       "title": "proj · session-",
-      "cursor": 0,
-      "capabilities": { "list": true, "history": false, "stream": false, "input": false, "approve": false },
-      "level": "L1",
-      "reason": {
-        "code": "version-mismatch",
-        "message": { "zh": "远端 DSH（0.2.1）与本机（0.2.2-rc.1）版本不一致，只做目录镜像（L1）。", "en": "…" }
-      },
+      "cursor": 5,
+      "capabilities": { "list": true, "history": true, "stream": false, "input": false, "approve": false },
+      "level": "L2",
+      "reason": null,
       "mirroredAt": "2026-11-11T00:00:00.000Z",
       "status": "active"
     }
@@ -401,7 +401,8 @@ interface MirrorView {
   workspaceId: string | null
   /** L1 为占位标题（工作区标题 · 远端会话 id 前缀）；L2 换成远端会话标题 */
   title: string
-  /** 已镜像到的远端事件序号（1 起；0 = 尚未同步），重连后从这里续传 */
+  /** 已镜像到的远端事件序号（1 起；0 = 尚未同步）。L2 下等于「已投影到本地会话的最大 `seq`」，
+   *  持久化在 mirrors.json 里，重启后从它续传；缺口时停在缺口前的最后一个连续事件 */
   cursor: number
   capabilities: MirrorCapabilities
   /** 该镜像会话最近一次同步时判定的能力级别（设计 §7：版本不匹配要标注在会话上，而不只是主机上） */
@@ -412,6 +413,8 @@ interface MirrorView {
   mirroredAt: string | null
   /** 远端会话被删除时只标记，不删除本地记录（设计 §7） */
   status: 'active' | 'remote-deleted'
+  /** L2：已回放历史的镜像会话为只读投影（L3 才有输入通道）。客户端据此标注「只读」 */
+  readOnly: boolean
 }
 ```
 
@@ -435,6 +438,15 @@ interface MirrorView {
   "sessionLimit": 200,
   "truncated": 0,
   "skipped": 0,
+  "history": {
+    "enabled": true,
+    "attempted": 2,
+    "applied": 10,
+    "appended": 10,
+    "folded": 0,
+    "skipped": 0,
+    "failures": []
+  },
   "sidebar": {
     "ok": true,
     "enabled": true,
@@ -463,6 +475,46 @@ interface MirrorView {
 `synced:false` 的两种情况都**不改动**已持久化的镜像状态：`reason:"unreadable"`（注册表读不到/不可解析）与
 `reason:"empty-registry"`（注册表可解析但 0 个工作区，通常是一次写入中途的瞬时状态）。`sessions[]` 是适配器的
 原始结果（`ok:false` 时带 `reason`，如 `sessions-unavailable` / `create-failed`）。
+
+### L2 历史回放（v1.1）
+
+L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容。远端仍是原版 DSH，插件只用 SSH `exec` 读远端
+`<DSH_HOME>/sessions` 下的会话日志，**不需要任何远端专属组件**。
+
+- **能力与级别**：`capabilities.history=true` 且顶层 `level` 为 `L2`，仅当本次同步确实读到了历史（或此前已有
+  `cursor > 0`）。`mirrorHistory:false`、或日志读不到/格式不认识/版本更新时，该镜像会话保持 `L1` 并带 `reason`。
+- **`history` 汇总**（仅 `POST /hosts/:id/mirrors/sync` 返回）：`attempted` 本次尝试的会话数，`applied` 本次判定为
+  可应用的远端事件数，`appended` 实际写入本地会话的事件数（两者不等说明被 `mirrorSeq` 去重挡下了重复），
+  `folded` 因超出保留上限而被显式折叠的**前缀**事件数，`failures[]` 为 `{ localSessionId, reason }`。
+- **幂等**：写入本地会话的事件都带 `data.mirrorSeq`（远端 `seq`）。同步只应用 `seq > cursor`，并在 append 前用
+  会话里已有的 `mirrorSeq` 再挡一次（真机读 `snapshotEvents()`，不是不存在的 `events` 属性），因此重复同步、以及
+  「append 成功后 cursor 尚未落盘就崩溃」都不会重复消息。
+- **缺口**：远端日志缺号时，先按 §6 的「重置游标 + 全量重拉」恢复一次（日志里能看到
+  `cursor … is unreachable … re-pulling the full log`）。重拉后仍不连续，才写入 `reason.code="gap-unfilled"`，
+  游标停在缺口前的最后一个连续事件——不会跳过缺口，也不会永远重试同一段不可达区间。
+- **只读标识**：回放过历史的镜像会话在 `MirrorView` 上带 `readOnly: true`，并在会话里写一条一次性的
+  `mirror/read-only` 非 surface 事件（带 `capabilities: { input:false, stream:false, approve:false }`），
+  客户端据此标注「只读」；重复同步不会重复写入该通知。
+- **保留上限**：`mirrorMaxEvents`（默认 200，`0` = 不限）限制单次回放的事件窗口。超限时保留**最新**的 N 条并在
+  会话里先写一条 `mirror/history-folded`（非 surface 事件，带真实的 `folded` / `from` / `to` / `retained`，
+  以及 `retentionCap` / `fetchCap` 两个上限），然后从新的窗口起点继续；折叠只发生在首次同步（`cursor == 0`），
+  之后的溢出按缺口处理，避免「游标说完整、正文却有洞」。
+
+`reason.code` 在 L2 新增的取值：
+
+| code | 含义 |
+|---|---|
+| `sessions-dir-missing` | 远端没有 `sessions/` 目录（DSH 还没写过会话日志） |
+| `no-session-log` | 目录存在，但找不到该会话的日志文件 |
+| `read-failed` | 读取失败（连接/超时/命令失败），下次同步重试 |
+| `permission-denied` | 日志不可读（权限不足）。读取命令保留 `2>&1`，所以该错误真的能被分类出来，而不是退化成 `no-session-log` |
+| `log-truncated` | 日志超过读取上限，本次跳过以免回放半截内容 |
+| `log-malformed` | 日志无法解析 |
+| `unknown-version` | 日志版本高于本插件，跳过以免错位映射 |
+| `gap-unfilled` | 远端历史有缺口，游标停在缺口前 |
+| `history-disabled` | 设置里关闭了历史回放，保持 L1 |
+
+远端记录到本地事件的映射（保留/丢弃的字段）见 [session-design.md](session-design.md) §6.1。
 
 **会话创建上限（`mirrorMaxSessions`）**：设置项 `mirrorMaxSessions`（默认 `200`，`0` = 不限制）限制每次同步最多为多少条
 镜像描述创建本地会话。`sessionLimit` 是本次生效的上限（`0` 表示不限制），`truncated` 是被上限挡下、本次未尝试创建的
@@ -526,10 +578,15 @@ v1.1 约束：
 6. 远端会话被删除时，本地记录保留并标记 `status="remote-deleted"`；Host 不会调用远端删除接口。注册表可解析但
    为空时按瞬时状态处理（`reason:"empty-registry"`），不批量标记删除。
 7. 写入语义：同一镜像会话同时只允许一个写入者；租约过期或发现第二个写入者时转为只读并提示，绝不并发写。
-   **P0 未接线**：`src/mirror.js` 里的游标合并（`applyEvents`）与租约判定（`acquireLease` 等）是带 `@internal`
-   标记的纯函数，没有调用方；事件流、输入转发、审批回传在 L3 才落地，v1.1 不声称已交付 §6。
-8. 事件上限 `mirrorMaxEvents`（保留首尾、折叠中段、标注「已折叠」）**尚未实现**，P0 也不缓存事件；
-   它随 L3 事件存储一起落地（见 session-design.md §11）。
+   **L2 状态**：游标合并（`applyEvents` / `nextCursor`）**已接线**，由 L2 历史回放实际调用（`src/history.js`
+   的 `planHistoryWindow` 与 `src/service.js#syncMirrorHistory`），不再带 `@internal` 标记。租约判定
+   （`acquireLease` / `renewLease` / `expireLease` / `isLeaseHeldBy`）仍标 `@internal`：事件流、输入转发、审批回传
+   在 L3 才落地，因此 v1.1 只声称交付了 §6 的**游标**部分，不声称交付写入租约。
+8. 事件上限 `mirrorMaxEvents`（默认 `200`，`0` = 不限制，上限 `5000`）**已在 L2 实现**：保留**最新** N 条，
+   超出部分作为前缀折叠，并在会话里写一条 `mirror/history-folded`（带 `folded` / `from` / `to` / `retained`）。
+   折叠只发生在首次同步（`cursor == 0`）；之后的溢出按缺口处理并触发 §6 的「重置游标 + 全量重拉」。
+   注意它约束的是**回放窗口**，与 `HISTORY_LIMITS.maxEvents`（远端日志单次最多解析 2000 条，防止超大日志拖垮同步）
+   是两个不同的上限：前者决定本地保留多少，后者决定一次读取多少。
 9. 镜像记录沿用 §3 安全约束：0700 目录、0600 文件、原子写（随机临时名 + `wx` + fsync + 目录 fsync）；
    损坏或更高 `version` 的文件会被**另存**为 `mirrors.json.corrupt-<ts>` / `mirrors.json.future-<ts>` 而不是
    被覆盖；不含任何凭据或 token。

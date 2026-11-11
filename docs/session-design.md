@@ -64,7 +64,7 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 | 级别 | 能力 | 数据来源 | 用户可见效果 |
 |---|---|---|---|
 | L1 目录镜像 | 列出远端工作区（标题、路径、会话数）与会话 id/计数 | 远端 `storages/workspace.json`（现有 `src/workspaces.js` 只产出工作区级数据 + sessionIds，不含每会话标题/时间/状态） | 侧边栏能看到远端工作区及其会话数，点开进入 iframe 面板定位到该工作区 |
-| L2 只读镜像 | L1 + 每会话标题/时间/状态 + 历史正文回放 | 远端 DSH 的 RPC/HTTP（经隧道） | 本地 Conversation UI 里能读远端历史，只读 |
+| L2 只读镜像 | L1 + 历史正文回放 | 远端 `sessions/**/session-*.json[l]`（SSH `exec` 读取，本版已实现） | 本地 Conversation UI 里能读远端历史，只读 |
 | L3 完全会话 | L2 + 流式订阅 + 输入转发 + 审批回本地 | 远端 `ws-mux` 事件流（本仓库 E2E 证据已证明隧道内可握手） | 与本地会话几乎无差别：流式、可发消息、审批在本地弹 |
 
 选型：**分阶段做到 L3，但每一级都独立可用**。任何一级失败必须显式降级（例如事件流握手失败 → 停在 L2 并提示
@@ -153,11 +153,11 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 ├─ 侧边栏工作区注册（每台主机一个 workspace，路径 = 镜像 cwd）   ← P0 增补
 ├─ SSH（ssh2）：认证 / exec / forwardOut          ← 已有
 ├─ 隧道：127.0.0.1:<localPort> ──▶ 远端 127.0.0.1:<remotePort>   ← 已有
-└─ 远端会话适配器（新增）
-   ├─ 目录：读远端 storages/workspace.json
-   ├─ 历史：远端 RPC 拉取事件区间 [0, lastSeq]
-   ├─ 流式：ws-mux 订阅（增量事件 → 追加到本地镜像会话）
-   └─ 写入：本地输入 → 远端 RPC（单写者仲裁）
+└─ 远端会话适配器（L1/L2 已实现）
+   ├─ 目录：读远端 storages/workspace.json                      ← L1
+   ├─ 历史：读远端 sessions/**/session-*.json[l]（SSH exec）     ← L2（本版）
+   ├─ 流式：ws-mux 订阅（增量事件 → 追加到本地镜像会话）          ← L3 未实现
+   └─ 写入：本地输入 → 远端 RPC（单写者仲裁）                     ← L3 未实现
 
 远端服务器：原版 DSH（不装任何专属组件）
 ```
@@ -165,7 +165,8 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 镜像会话能不能出现在侧边栏，取决于「工作区注册」这一行：DSH 的侧边栏按工作区列会话，而工作区成员由会话头的
 规范化 cwd 决定（§4.3）。镜像目录与会话 `meta.cwd` 必须完全一致，因此两者共用一个路径函数。
 
-设计取舍：**不引入远端 agent**。远端就是原版 DSH，镜像所需的目录、历史、事件、输入全部走它已有的 HTTP/RPC
+设计取舍：**不引入远端 agent**。远端就是原版 DSH，镜像所需的目录与历史都走它**已经在磁盘上的文件**（SSH `exec`
+读取，L1 读 `storages/workspace.json`、L2 读 `sessions/**/session-*.json[l]`），事件流与输入转发预留给 L3 的既有
 接口；这是本项目相对 `Golden-Pigeon/dsh-remote`（需装 `dsh-remote-agent`）的主要差异，也是「零远端专属组件」
 承诺的延续。
 
@@ -175,8 +176,34 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 - 重连：从 `cursor` 续传；远端若已丢弃该区间事件，则降级为「重新拉全量快照 + 重置 cursor」并提示用户。
 - 单写者仲裁：本地持有「写入租约」（心跳续约）。租约过期或远端检测到第二个写入者时，本地转为只读并提示，
   绝不并发写。
-- 上限（**尚未实现**，见 §11 开放问题与 `docs/api.md` 的约束说明）：镜像事件数将由 `mirrorMaxEvents` 限制，
-  超限时保留首尾、压缩中段并标注「已折叠」。P0/P1 目前不存储事件，因此该上限只是 TODO。
+- 上限：镜像事件数受 `mirrorMaxEvents` 限制（默认 200，`0` = 不限）。超限时保留**最新** N 条，并在会话里先写一条
+  `mirror/history-folded` 通知（带 `folded` / `retained`），然后从新窗口起点继续。
+
+### 6.1 L2 已落地（历史回放）
+
+`cursor` / `applyEvents` / `nextCursor` 从「纯函数」变成**生产在跑**的路径（`src/history.js` +
+`src/service.js#syncMirrorHistory`）：
+
+| 环节 | 实现 |
+|---|---|
+| 远端发现 | SSH `exec`：`test -d <DSH_HOME>/sessions` → `find … -maxdepth 4 -type f -name '*<remoteSessionId>*' \| head -n 5` → `head -c <maxBytes> <file>`，全部单引号转义、带超时 |
+| 解析 | JSON 数组 / `{events\|records\|messages\|history\|turns:[...]}` / JSONL；显式 `version != 1` 直接判 `unknown-version`，不猜 |
+| 映射 | `{ seq, type, data, at }`，`seq` 单调；缺 `seq` 时用 1 起的位置 |
+| 应用 | `applyEvents({ cursor, events: [] }, window)`：只应用 `seq > cursor`，输入顺序无关，重复 `seq` 取首个 |
+| 缺口 | 游标停在缺口前最后一个连续事件；随后按 §6 的「重置游标 + 全量重拉」恢复一次，仍不连续才判 `gap-unfilled` |
+| 去重 | 写入本地会话的事件带 `data.mirrorSeq`，append 前再与「会话里已有的 seq」比对（真机走 `snapshotEvents()`），覆盖「append 成功但 cursor 未落盘」的窗口 |
+| 保留 | `mirrorMaxEvents`（默认 200）截断为最新窗口；首次同步折叠前缀并写 `mirror/history-folded`（带真实的 `from`/`to`），之后溢出按缺口处理 |
+| 只读标识 | 每个镜像会话首次回放时写一条 `mirror/read-only`（非 surface），descriptor 同时带 `readOnly: true`，客户端据此标注「只读」 |
+
+**什么被保留**：角色/类型、正文文本（`text` 或 `content` 的文本段）、工具调用的名称 + 参数摘要（≤200 字符）+
+`toolCallId`、`isError`、时间戳。
+
+**什么被丢弃**：二进制/内联附件（`data:` base64 直接替换为 `[binary omitted]`）、非文本 content 段、
+模型内部字段（`logprobs` / `usage` / `raw` / `embeddings` / `providerMetadata` 等）、以及任何未识别的匿名记录
+（无 `type`、无 `role`、无正文的对象）。
+
+**未知类型**：带 `type` 但本插件不认识的记录**保留**为 `{ seq, type, data: { record: <投影> } }`，投影有确定的
+深度/键数/字符串上限，因此同一输入永远得到同一事件；这样远端升级不会表现为「数据消失」。
 
 ## 7. 生命周期与失败模式
 
@@ -211,10 +238,13 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 
 | 阶段 | 交付 | 验收标准 |
 |---|---|---|
-| P0 | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
-| P1 | 历史回放（L2） | 本地 Conversation UI 渲染远端历史，只读标识清晰；断线后仍可读 |
+| P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
+| P1 🟡 | 历史回放（L2）：**数据层已交付，可见标识待客户端** | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 已在 **Host/契约层** 提供（`test/unit/history.test.js` + `test/integration/history.e2e.js` 覆盖）。**未完成**：客户端尚未渲染只读标识（DSH 的 Conversation UI 不显示非 surface 事件），因此「只读标识清晰」这一用户可见目标仍未达成，见 §11 #8 |
 | P2 | 事件流 + 输入转发（L3） | 本地发消息 → 远端执行 → 事件流回本地；`seq` 幂等与续传有用例覆盖 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
+
+L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的会话日志，因此没有实时性承诺；`stream` / `input` /
+`approve` 三个能力仍为 `false`，`decideLevel` 也仍停在 L2（`stream-unavailable`）。
 
 ## 11. 开放问题（需要在实现前定）
 
@@ -222,5 +252,16 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 2. 远端「会话列表」的分页与上限：远端可能有数千会话，镜像全量还是按工作区懒加载？
 3. `ws-mux` 的事件 schema 稳定性：需要一层 capability 探测与版本门禁，避免远端升级后静默错位。
 4. 多客户端同镜像同一远端会话时，写入租约的实现放在本地还是远端？（倾向本地租约 + 远端检测）
-5. `mirrorMaxEvents` 的保留策略（保留首尾、折叠中段、如何标注「已折叠」、按工作区还是按会话计数）：P0 不缓存
-   事件，尚未实现，需在 L3 事件存储落地前定稿；在此之前文档与 UI 都不得声称已有事件上限。
+5. ~~`mirrorMaxEvents` 的保留策略~~ **已定稿（L2）**：保留最新 N 条（默认 200，0 = 不限），折叠只发生在首次同步，
+   并在会话里写一条 `mirror/history-folded` 通知；后续溢出按缺口处理而不是再折叠。不再声称「保留首尾、压缩中段」——
+   那会让「游标说完整」与「正文有洞」同时成立。
+6. **远端会话日志的真实布局仍只在小范围样本上验证过**：L2 的发现策略是
+   `find <DSH_HOME>/sessions -maxdepth 4 -name '*<id>*'`，覆盖 `sessions/<ws>/session-<id>.json[l]` 这类形状；若实测
+   出现别的位置或压缩格式，会以 `no-session-log` / `log-malformed` 显式降级（不是静默错位）。拿到真实远端样本后
+   应补一个夹具，并把发现策略收敛到确定的一种。
+7. 远端日志的**增量读取**：L2 每次都读全量日志再用 `cursor` 过滤。日志很大时这是带宽浪费（虽有 `maxBytes` 上限），
+   后续应按字节偏移或尾部读取来优化，并把 `cursor` 与远端日志的物理位置关联起来。
+8. **P1 的「只读标识清晰」只完成了数据层**：Host 侧已提供 `MirrorView.readOnly` 与一条 `mirror/read-only` 非
+   surface 事件（契约层可断言），但 DSH 的 Conversation UI 不渲染非 surface 事件，客户端也还没有据此绘制任何
+   可见标记——所以**用户实际看到的仍是「没有标识的远端历史」**。这是有意的待办而非已完成项：需要客户端在会话头
+   或消息列表加一个只读徽标（并用 `redacted`/`level` 说明原因）后才能把 P1 的验收行标为全部达成。

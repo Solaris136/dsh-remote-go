@@ -16,6 +16,13 @@
 //   --workspace-fixture <file> (SIM_WORKSPACE_FIXTURE)          body served for
 //                                                             `storages/workspace.json`, so a test can
 //                                                             choose the remote sessions it wants
+//   --history-fixture <file> (SIM_HISTORY_FIXTURE)              session logs served for
+//                                                             `sessions/**/session-*.json[l]`
+//                                                             (`{ sessions: { "<id>": { events } } }`)
+//   --history-gap                                               drop a middle record, so the plugin must
+//                                                             detect a seq hole and stop its cursor there
+//   --history-no-root                                           model a remote with no `sessions/` dir
+//                                                             (typed `sessions-dir-missing` path)
 //   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published; the
 //                                                             default is e2e/sim/.state.json
 //
@@ -120,7 +127,7 @@ const SIM = {
 }
 
 /** @typedef {{ code: number, stdout: string, stderr: string }} CommandResult */
-/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string }} SimState */
+/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number> }} SimState */
 
 // ---------------------------------------------------------------------------
 // Isolation guards: this is a simulator that must never be mistaken for, or
@@ -200,6 +207,84 @@ function probeOutput() {
  * }} WorkspaceAnswer
  */
 
+/**
+ * Session-history answers served to the L2 replay path (`src/history.js`).
+ *
+ * Fixture shape (all optional):
+ * `{ sessions: { "<remoteSessionId>": { events: [...] } }, default: { events: [...] } }`
+ * Without a fixture the simulator invents a small, deterministic log per session so
+ * a plain `--serve` still answers history reads.
+ * @typedef {{ sessions: Record<string, any[]>, default: any[], gap: boolean, rootAvailable: boolean }} HistoryAnswer
+ */
+
+/** Deterministic fallback log, so history reads work without a fixture. */
+function defaultHistoryEvents(remoteSessionId) {
+  return [
+    { seq: 1, role: 'user', text: `hello from ${remoteSessionId}`, at: '2026-11-11T00:00:01Z' },
+    { seq: 2, role: 'assistant', text: 'acknowledged', at: '2026-11-11T00:00:02Z' },
+  ]
+}
+
+/**
+ * @returns {HistoryAnswer}
+ */
+function loadHistoryAnswer() {
+  /** @type {{ sessions: Record<string, any[]>, default: any[], gap: boolean, rootAvailable: boolean }} */
+  const answer = { sessions: {}, default: [], gap: args['history-gap'] === true, rootAvailable: true }
+  // `--history-no-root` models a remote whose DSH_HOME has no session store yet;
+  // the plugin must degrade to a typed reason instead of throwing.
+  if (args['history-no-root'] === true) answer.rootAvailable = false
+  const requested = args['history-fixture'] ?? process.env.SIM_HISTORY_FIXTURE ?? null
+  if (requested === null) return answer
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    console.error('[sim] --history-fixture needs a file path')
+    process.exit(2)
+  }
+  const resolved = path.resolve(requested)
+  /** @type {any} */
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(resolved, 'utf8'))
+  } catch (error) {
+    fatal(`history fixture ${resolved}`, error)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`[sim] history fixture ${resolved} must be an object`)
+    process.exit(2)
+  }
+  if (parsed.sessions && typeof parsed.sessions === 'object' && !Array.isArray(parsed.sessions)) {
+    for (const [sessionId, value] of Object.entries(parsed.sessions)) {
+      const events = Array.isArray(value) ? value : value?.events
+      if (!Array.isArray(events)) {
+        console.error(`[sim] history fixture session ${sessionId} needs an events array`)
+        process.exit(2)
+      }
+      answer.sessions[sessionId] = events
+    }
+  }
+  const fallback = Array.isArray(parsed) ? parsed : parsed.default?.events
+  if (Array.isArray(fallback)) answer.default = fallback
+  if (parsed.gap === true) answer.gap = true
+  return answer
+}
+
+/**
+ * Events served for one remote session. `--history-gap` removes one middle record
+ * so the plugin must notice a missing `seq` and stop before it.
+ * @param {HistoryAnswer} answer
+ * @param {string} remoteSessionId
+ * @param {{ reads?: number }} state
+ * @returns {any[]}
+ */
+function historyEventsFor(answer, remoteSessionId, state) {
+  const events =
+    answer.sessions[remoteSessionId] ??
+    (answer.default.length > 0 ? answer.default : defaultHistoryEvents(remoteSessionId))
+  if (!answer.gap || events.length < 3) return events
+  // Drop the second-to-last event: the log now has a hole the plugin must detect.
+  return events.filter((_event, index) => index !== events.length - 2)
+}
+
 /** Registry served when the caller names no fixture. */
 const DEFAULT_WORKSPACE_REGISTRY = {
   version: 2,
@@ -275,6 +360,25 @@ function loadWorkspaceAnswer() {
 }
 
 const WORKSPACE = loadWorkspaceAnswer()
+const HISTORY = loadHistoryAnswer()
+/**
+ * Sessions that have a log on this simulated host: every id the served registry
+ * advertises, plus anything the history fixture names. An id outside this set
+ * answers "no log", which is how the plugin's `no-session-log` path is exercised.
+ */
+const HISTORY_SESSION_IDS = new Set()
+{
+  const table = JSON.parse(WORKSPACE.json)?.tables?.workspaces ?? {}
+  for (const entry of Object.values(table)) {
+    for (const id of Array.isArray(entry?.sessionIds) ? entry.sessionIds : []) HISTORY_SESSION_IDS.add(id)
+  }
+  for (const id of Object.keys(HISTORY.sessions)) HISTORY_SESSION_IDS.add(id)
+}
+
+/** @param {string} remoteSessionId @returns {boolean} */
+function historySessionExists(remoteSessionId) {
+  return HISTORY_SESSION_IDS.has(remoteSessionId)
+}
 
 /** @param {SimState} sim @returns {string} */
 function webLine(sim) {
@@ -338,6 +442,39 @@ function respond(command, sim) {
   // 4. Workspace registry read (src/workspaces.js readRemoteWorkspaces).
   if (/^cat '[^']*\/storages\/workspace\.json'/.test(cmd)) {
     return ok(WORKSPACE.json)
+  }
+
+  // 4b. L2 history replay (src/history.js fetchRemoteHistory): directory probe,
+  //     discovery and the bounded read. Counters live on `sim` so a test can prove
+  //     "exactly one bounded backfill".
+  if (/^test -d '[^']*\/sessions' && echo yes \|\| echo no$/.test(cmd)) {
+    sim.historyProbes = (sim.historyProbes ?? 0) + 1
+    return ok(HISTORY.rootAvailable ? 'yes\n' : 'no\n')
+  }
+  const discovery =
+    /^find '[^']*\/sessions' -maxdepth \d+ -type f -name '\*([^']*)\*' 2>\/dev\/null \| head -n \d+$/.exec(cmd)
+  if (discovery) {
+    sim.historyDiscovery = (sim.historyDiscovery ?? 0) + 1
+    const sessionId = discovery[1]
+    if (!HISTORY.rootAvailable) return ok('')
+    if (!historySessionExists(sessionId)) return ok('')
+    // Both shapes exist in the wild; serve the JSONL stream as the live log.
+    return ok(
+      `/home/sim/.dsh/sessions/ws-sim/session-${sessionId}.jsonl\n/home/sim/.dsh/sessions/ws-sim/session-${sessionId}.json\n`,
+    )
+  }
+  const historyRead = /^head -c (\d+) '([^']*\/sessions\/[^']*)' 2>&1 \|\| true$/.exec(cmd)
+  if (historyRead) {
+    const sessionId = /session-([^./]+)\./.exec(historyRead[2])?.[1] ?? ''
+    sim.historyReads = sim.historyReads ?? {}
+    sim.historyReads[sessionId] = (sim.historyReads[sessionId] ?? 0) + 1
+    const events = historyEventsFor(HISTORY, sessionId, sim)
+    if (HISTORY.gap && sim.historyReads[sessionId] > 1) {
+      // A backfill attempt for a gapped log still leaves the hole: the plugin must
+      // report `gap-unfilled` and keep its cursor.
+      return ok(`${JSON.stringify({ version: 1, session: { id: sessionId }, events })}\n`)
+    }
+    return ok(`${JSON.stringify({ version: 1, session: { id: sessionId }, events })}\n`)
   }
 
   // 5. Run registry read (src/webapp.js readRunRegistry).
@@ -763,6 +900,11 @@ if (serve || selfTest) {
   console.log(`[sim] ssh 127.0.0.1:${host.sshPort}  remote-web 127.0.0.1:${host.remotePort}  ${host.fingerprint}`)
   console.log(
     `[sim] workspace registry: ${WORKSPACE.fixturePath ?? 'built-in'} — ${WORKSPACE.workspaceCount} workspace(s), ${WORKSPACE.sessionCount} session(s)`,
+  )
+  console.log(
+    `[sim] session history: ${HISTORY.rootAvailable ? 'sessions/ served' : 'no sessions/ directory (typed failure path)'}` +
+      `${HISTORY.gap ? ' — with a deliberate seq gap' : ''}` +
+      ` — ${Object.keys(HISTORY.sessions).length} fixture session(s)`,
   )
   console.log(`[sim] state file: ${STATE_FILE}`)
   console.log(`[sim] E2E_SSH_ADDRESS=127.0.0.1:${host.sshPort}   (use it in a dedicated shell only)`)

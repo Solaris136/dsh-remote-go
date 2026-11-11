@@ -16,6 +16,8 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   saveTokens: boolean,
  *   mirrorToSidebar: boolean,
  *   mirrorMaxSessions: number,
+ *   mirrorMaxEvents: number,
+ *   mirrorHistory: boolean,
  *   windowMode: 'panel' | 'external',
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
@@ -38,6 +40,12 @@ export function defaultSettings() {
     // Upper bound on local mirror sessions created per sync; 0 means unlimited.
     // It only limits creation: a session a previous sync created is never removed.
     mirrorMaxSessions: 200,
+    // Upper bound on replayed history events per mirror session (0 = unlimited).
+    // L2 keeps the NEWEST window and announces the folded prefix, so a session
+    // whose remote log is long still lands with a contiguous cursor.
+    mirrorMaxEvents: 200,
+    // L2 toggle: false keeps every mirror at L1 (directory only).
+    mirrorHistory: true,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -100,6 +108,12 @@ export function sanitizeSettings(raw) {
       input.mirrorMaxSessions === null
         ? defaults.mirrorMaxSessions
         : numberIn(input.mirrorMaxSessions, 0, 5000, defaults.mirrorMaxSessions),
+    // Same "null means unset, 0 means unlimited" rule as `mirrorMaxSessions`.
+    mirrorMaxEvents:
+      input.mirrorMaxEvents === null
+        ? defaults.mirrorMaxEvents
+        : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
+    mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
