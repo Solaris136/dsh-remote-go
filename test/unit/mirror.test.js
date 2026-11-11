@@ -1047,6 +1047,52 @@ test('a lock that can never be created fails fast with its own error', async () 
   assert.ok(Date.now() - started < 5_000, 'a permanent lock failure must not wait out the full lock window')
 })
 
+test('contention that keeps reporting EPERM is retried while the lock is seen', async () => {
+  // The 300-row cross-process race on the Windows runner hits exactly this: the lock is
+  // created and unlinked constantly, so it is momentarily absent right when a retry begins.
+  // Once the lock has been observed, EPERM must keep retrying instead of failing fast.
+  let attempts = 0
+  let statCalls = 0
+  const fakeFs = {
+    async mkdir() {},
+    async open(file, flags) {
+      if (flags === 'wx' && String(file).endsWith('.lock')) {
+        attempts += 1
+        // Fail past the transient window, then succeed: only the "seen the lock" rule can
+        // carry this through, because a fail-fast rule would rethrow around 250 ms.
+        if (attempts <= 120) {
+          const error = new Error('operation not permitted')
+          error.code = 'EPERM'
+          throw error
+        }
+      }
+      return { async close() {}, async sync() {}, async writeFile() {} }
+    },
+    async stat() {
+      statCalls += 1
+      return { mtimeMs: Date.now() }
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-contended-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 20_000,
+    lockRetryMs: 2,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }])
+  assert.equal(attempts, 121, 'every contended attempt must be retried, not failed fast')
+  assert.ok(statCalls > 0, 'the lock must have been probed while contending')
+})
+
 test('listMirrors returns deep copies so callers cannot corrupt the store', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-clone-'))
   const store = new MirrorStore({ dir, logger: quiet })

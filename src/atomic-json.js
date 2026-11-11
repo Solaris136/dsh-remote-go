@@ -121,6 +121,10 @@ async function acquireLock(lockFile, options) {
   const waitMs = options.waitMs ?? LOCK_WAIT_MS
   const retryMs = options.retryMs ?? LOCK_RETRY_MS
   const started = Date.now()
+  // Whether this acquisition has ever seen the lock in place. Under real contention the
+  // lock is created and unlinked constantly, so it can be momentarily absent exactly when
+  // a wait begins; only a lock we never once observed can be a permanent permission error.
+  let sawLock = false
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
@@ -152,14 +156,14 @@ async function acquireLock(lockFile, options) {
       const code = /** @type {any} */ (error)?.code
       const contended = code === 'EEXIST' || code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
       if (!contended) throw error
-      // Only EEXIST is unambiguous. Anything else is contention just while the lock is
-      // actually there, or for a moment after it vanished (the mid-delete window) — a lock
-      // that can never be created (ACL denial, read-only mount) must fail fast with its own
-      // error instead of becoming a misleading ELOCKTIMEOUT after a full wait.
-      if (code !== 'EEXIST' && Date.now() - started > LOCK_TRANSIENT_MS) {
-        const present = await lockExists(fsImpl, lockFile)
-        if (!present) throw error
+      // Only EEXIST is unambiguous. Anything else is contention while the lock is there, or
+      // after it was there (the create/delete window). A lock we have never seen existing
+      // and that still cannot be created (ACL denial, read-only mount) must fail fast with
+      // its own error instead of becoming a misleading ELOCKTIMEOUT after a full wait.
+      if (code !== 'EEXIST' && !sawLock && Date.now() - started > LOCK_TRANSIENT_MS) {
+        if (!(await lockExists(fsImpl, lockFile))) throw error
       }
+      if (code === 'EEXIST' || (await lockExists(fsImpl, lockFile))) sawLock = true
       await breakStaleLock(fsImpl, lockFile, staleMs)
       if (Date.now() - started > waitMs) {
         const timeout = new Error('timed out waiting for another process to release the store lock')
