@@ -183,6 +183,8 @@ async function startSimulator(stateFile) {
         SIM_SSH_PASSWORD: CREDENTIALS.password,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      // windowsHide keeps a console from flashing for every child the suite starts.
+      windowsHide: true,
     },
   )
   child.stdout?.on('data', (chunk) => logs.push(chunk.toString('utf8')))

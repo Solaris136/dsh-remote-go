@@ -82,7 +82,12 @@ async function readJson(file) {
 
 function commitTimestamp() {
   try {
-    const out = execFileSync('git', ['log', '-1', '--format=%ct'], { cwd: root, encoding: 'utf8' }).trim()
+    const out = execFileSync('git', ['log', '-1', '--format=%ct'], {
+      cwd: root,
+      encoding: 'utf8',
+      // windowsHide keeps a console from flashing for every child the gates start.
+      windowsHide: true,
+    }).trim()
     const value = Number(out)
     if (Number.isInteger(value) && value > 0) return value
   } catch {

@@ -169,7 +169,24 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 - 注释多解释「为什么」而非「是什么」；文档与注释控制在 120 列以内硬换行。
 - `client.js` 是单文件、无构建的浏览器半端：保持可读，不要引入打包步骤，也不要写 `import`。
 
-## 8. 安全相关
+## 8. Windows 平台约定
+
+> **English abstract.** Every `spawn` / `spawnSync` / `execFile` / `exec` in `test/**` and `src/**` must pass
+> `windowsHide: true`, avoid `shell: true` and `.cmd` shims, and kill process trees with native means. Each
+> short-lived child would otherwise flash a console window in the user's session.
+
+本插件与它的测试会在 Windows 上启动很多短命子进程（`dsh`、`pnpm`、浏览器、Electron、`taskkill`）。每漏一个
+`windowsHide`，维护者的桌面上就会闪一次黑框，所以这是硬性约定：
+
+- `test/**` 与 `src/**` 里**所有** `spawn` / `spawnSync` / `execFile` / `exec` 都传 `windowsHide: true`
+  （单元测试 `test/unit/e2e-child-process.test.js` 会扫描源码，漏一个就失败）。
+- 不要用 `shell: true`，它会绕 `cmd.exe`（多一层窗口与转义风险）。优先直接跑真实二进制，或
+  `process.execPath` + 入口脚本（如 `node <pnpm.cjs>`、`node <dsh>/lib/bin.js`）。
+- 杀掉整棵进程树用原生手段（遍历 `Win32_Process` + `Stop-Process`，或 Node 里的 `taskkill /T`），
+  不要在脚本里 `Start-Process taskkill`。
+- 非 Windows 平台不受影响：这些参数在 POSIX 上被忽略。
+
+## 9. 安全相关
 
 - 安全漏洞请**私下**报告，不要开公开 issue；渠道、时限与范围见 [SECURITY.md](SECURITY.md)。
 - 讨论安全问题时（哪怕只是怀疑）也不要贴真实凭据，用占位值复述现象。
