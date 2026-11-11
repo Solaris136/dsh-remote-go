@@ -39,6 +39,7 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | [docs/implementation.md](docs/implementation.md) | 模块划分与实现要点 |
 | [docs/api.md](docs/api.md) | 本地 Host 插件 HTTP API 契约 |
 | [docs/publish.md](docs/publish.md) | 发布到 npm / 插件市场的流程与检查清单 |
+| [docs/session-design.md](docs/session-design.md) | 「完全会话」设计：远端会话镜像成本地原生会话（能力分级、数据模型、事件流、失败模式） |
 | [e2e/remote/README.md](e2e/remote/README.md) | 远端测试环境的自举与复跑步骤 |
 | [docs/research-competitors.md](docs/research-competitors.md) | 同类项目调研 |
 | [docs/research-dsh-remote-window.md](docs/research-dsh-remote-window.md) | 相近实现调研（dsh-remote-window） |
