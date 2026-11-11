@@ -46,18 +46,18 @@ const WORKSPACE_FIXTURE = {
 }
 
 /** Five records per session, so retention and gaps have room to matter. */
-function historyFixture(withGap = false) {
+function historyFixture(withGap = false, startSeq = 1) {
   /** @param {string} id @param {boolean} gap */
   const eventsFor = (id, gap) => {
     /** @type {any[]} */
     const events = []
-    for (let seq = 1; seq <= 5; seq += 1) {
-      if (gap && seq === 3) continue // the simulator keeps the hole
+    for (let seq = startSeq; seq <= startSeq + 4; seq += 1) {
+      if (gap && seq === startSeq + 2) continue // the simulator keeps the hole
       events.push({
         seq,
         role: seq % 2 === 0 ? 'assistant' : 'user',
         text: `${id} message ${seq}`,
-        at: `2026-11-11T00:00:0${seq}Z`,
+        at: `2026-11-11T00:00:0${(seq % 9) + 1}Z`,
       })
     }
     return events
@@ -300,7 +300,11 @@ test('L2 history replay projects remote history into the local mirror session', 
         return (
           mirrors.length === HISTORY_SESSIONS.length &&
           mirrors.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2' && mirror.readOnly === true) &&
-          appends.filter((entry) => entry.type === 'mirror/read-only').length === HISTORY_SESSIONS.length
+          appends.filter((entry) => entry.type === 'mirror/read-only').length === HISTORY_SESSIONS.length &&
+          // The summary line is asserted immediately below, so it is part of "settled":
+          // waiting on it removes the window where the descriptor is already persisted
+          // but the log line has not been written yet.
+          logContains(logs, 'mirror history:')
         )
       }
       for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -310,7 +314,12 @@ test('L2 history replay projects remote history into the local mirror session', 
       assert.equal(
         await settled(),
         true,
-        `the history projection never settled: ${JSON.stringify(await mirrorsOf(service, host.id))}`,
+        `the history projection never settled: ${JSON.stringify({
+          mirrors: await mirrorsOf(service, host.id),
+          appends: appends.length,
+          markers: appends.filter((entry) => entry.type === 'mirror/read-only').length,
+          historyLog: logs.filter((line) => /history/.test(line)).slice(-3),
+        })}`,
       )
       const mirrors = await mirrorsOf(service, host.id)
       assert.equal(mirrors.length, HISTORY_SESSIONS.length, `expected ${HISTORY_SESSIONS.length} mirrors`)
@@ -543,10 +552,24 @@ test('a gap in the remote log stops the cursor and produces one bounded backfill
       // second sync repeats the same single attempt and still does not advance.
       const before = mirrors.map((mirror) => mirror.cursor)
       await service.syncHostMirrors(host.id).catch(() => null)
+      const after = await mirrorsOf(service, host.id)
       assert.deepEqual(
-        (await mirrorsOf(service, host.id)).map((mirror) => mirror.cursor),
+        after.map((mirror) => mirror.cursor),
         before,
         'a repeated gap must never advance the cursor',
+      )
+      // Monotonicity: the recovery re-plans from cursor 0, so a failed re-pull must not
+      // move the descriptor backwards even when the plan resolves to 0 (a log that does
+      // not start at seq 1). The session still holds everything up to the old cursor.
+      assert.equal(
+        after.every((mirror, index) => mirror.cursor >= before[index]),
+        true,
+        `the cursor must never go backwards, got ${JSON.stringify({ before, after: after.map((m) => m.cursor) })}`,
+      )
+      assert.equal(
+        after.every((mirror) => mirror.reason?.code === 'gap-unfilled' && mirror.level === 'L1'),
+        true,
+        'an unfillable gap stays L1 with the typed reason',
       )
     })
   } finally {

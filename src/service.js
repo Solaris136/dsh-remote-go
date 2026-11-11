@@ -37,7 +37,7 @@ import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
 import { decideLevel, l1Capabilities, planMirror, reconcileMirrors } from './mirror.js'
 import { MirrorStore } from './mirror-store.js'
-import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow } from './history.js'
+import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow, recoveredCursor } from './history.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -627,13 +627,13 @@ export class RemoteGoService extends EventEmitter {
     // §7: a host whose mirror was refused must not gain history. Returning the
     // descriptors untouched keeps whatever `planMirror` stamped (the mismatch reason)
     // instead of overwriting it with `level: 'L2', reason: null`.
-    // The blocked set is exactly "this host was not verified as mirrorable": a version
-    // mismatch, an unreadable/unknown version, or a missing probe. Note the healthy
-    // path is unaffected — by the time a sync runs, `runtime.remote.version` is known,
-    // so `decideLevel` returns L2 and none of these apply.
+    // Only a *hard* refusal blocks: `version-mismatch` (the documented "do not build a
+    // mirror" case) and `probe-missing`. `version-unknown` is deliberately allowed —
+    // it is the transient state during the first connect sync, before the remote
+    // version has been read, and history succeeding is itself the evidence that the
+    // channel works.
     const blockedCode = typeof decision?.reason?.code === 'string' ? decision.reason.code : null
-    const blocked =
-      blockedCode === 'version-mismatch' || blockedCode === 'version-unknown' || blockedCode === 'probe-missing'
+    const blocked = blockedCode === 'version-mismatch' || blockedCode === 'probe-missing'
     if (!enabled || blocked || !this.sessionAdapter) return { mirrors, level: null, reason: null, summary }
 
     const live = new Set(
@@ -760,13 +760,20 @@ export class RemoteGoService extends EventEmitter {
           }
           plan = planHistoryWindow({ cursor: 0, events: full.events, maxEvents, foldBeforeCursor: true })
           if (plan.gap) {
-            // Still discontinuous after a full re-pull: the log itself has holes.
-            // Report and keep the cursor where it was; a human has to look at it.
+            // Still discontinuous after a full re-pull: the remote log itself has holes.
+            // Report it and keep the cursor **monotonic**: the session already holds the
+            // events up to `descriptor.cursor`, so a plan computed from 0 must not move the
+            // descriptor backwards (a log that does not start at seq 1 would resolve to 0
+            // while events 1..N are still in the session). The mirror stays L1 with a typed
+            // reason until the log becomes readable in one piece again.
             summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'gap-unfilled' })
             firstReason = firstReason ?? 'gap-unfilled'
             updated.push({
               ...descriptor,
-              cursor: plan.cursor,
+              // Never backwards: the recovery plan is computed from 0, so for a log that
+              // does not start at seq 1 it can resolve below what this descriptor already
+              // applied. `recoveredCursor` keeps the larger value (see its docs).
+              cursor: recoveredCursor(descriptor.cursor, plan.cursor),
               level: 'L1',
               reason: historyReason('gap-unfilled'),
               mirroredAt: nowIso(),

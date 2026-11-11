@@ -514,6 +514,25 @@ export function foldNoticeRange(input) {
 }
 
 /**
+ * The cursor a descriptor keeps after a **failed** re-pull.
+ *
+ * §6 says the recovery "resets the cursor", but the *plan* it produces is computed from
+ * 0, so for a log that does not start at seq 1 it can resolve below what the descriptor
+ * already applied (the reviewer measured 5 → 0 while events 1..5 were still in the
+ * session). The cursor is therefore kept **monotonic**: a recovery that cannot make the
+ * log contiguous never rewrites the descriptor to claim fewer events were applied.
+ *
+ * @param {unknown} current the descriptor's cursor before the recovery
+ * @param {unknown} planned the cursor the recovery plan resolved to
+ * @returns {number}
+ */
+export function recoveredCursor(current, planned) {
+  const before = Number.isInteger(Number(current)) && Number(current) > 0 ? Number(current) : 0
+  const after = Number.isInteger(Number(planned)) && Number(planned) > 0 ? Number(planned) : 0
+  return Math.max(before, after)
+}
+
+/**
  * Read one remote session's history over SSH.
  *
  * Three bounded commands, each of which can fail into a typed reason:

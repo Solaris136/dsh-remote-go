@@ -21,6 +21,7 @@ import {
   pickLogFile,
   planHistoryWindow,
   remoteSessionsRoot,
+  recoveredCursor,
   retainEvents,
   sanitizeValue,
 } from '../../src/history.js'
@@ -427,19 +428,37 @@ test('the fold notice reports the range that was actually skipped', () => {
 
 test('the docs do not claim L2 is unimplemented', async () => {
   // The frozen-contract list drifted once already: it kept saying `applyEvents` had no
-  // caller and that `mirrorMaxEvents` was "尚未实现" after both shipped. Guard the two
-  // claims so a rebase cannot silently bring them back.
+  // caller and that `mirrorMaxEvents` was "尚未实现" after both shipped. A single phrase
+  // was not enough — a paraphrase slipped through — so this matches a small phrase list
+  // near each symbol.
   const { readFile } = await import('node:fs/promises')
   const api = await readFile(new URL('../../docs/api.md', import.meta.url), 'utf8')
   const design = await readFile(new URL('../../docs/session-design.md', import.meta.url), 'utf8')
 
-  assert.equal(/applyEvents[^。\n]*没有调用方/.test(api), false, 'api.md must not claim applyEvents has no caller')
-  assert.equal(
-    /mirrorMaxEvents[^。\n]*尚未实现/.test(api),
-    false,
-    'api.md must not claim mirrorMaxEvents is unimplemented',
-  )
-  assert.equal(/mirrorMaxEvents[^。\n]*尚未实现/.test(design), false, 'session-design.md must not claim it either')
+  /** Phrases that assert "not done" in either language. */
+  const UNIMPLEMENTED = ['尚未实现', '未实现', '没有调用方', '未被调用', 'not implemented', 'no caller']
+  /** Any of these near a symbol means the doc is claiming it is not wired. */
+  const claimsUnimplemented = (text, symbol) => {
+    for (const line of text.split('\n')) {
+      const at = line.indexOf(symbol)
+      if (at === -1) continue
+      // A wide window: the claim usually follows on the same line or the next.
+      const window = line.slice(at, at + 160)
+      if (UNIMPLEMENTED.some((phrase) => window.includes(phrase))) return window.trim()
+    }
+    return null
+  }
+
+  for (const [doc, name] of [
+    [api, 'api.md'],
+    [design, 'session-design.md'],
+  ]) {
+    for (const symbol of ['applyEvents', 'mirrorMaxEvents']) {
+      const claim = claimsUnimplemented(doc, symbol)
+      assert.equal(claim, null, `${name} must not claim ${symbol} is unimplemented: ${claim}`)
+    }
+  }
+
   // And it must positively document what L2 does.
   assert.match(api, /mirror\/history-folded/, 'api.md documents the fold notice')
   assert.match(design, /6\.1 L2 已落地/, 'session-design.md has the L2 section')
@@ -451,4 +470,19 @@ test('the docs do not claim L2 is unimplemented', async () => {
   for (const marker of ['acquireLease', 'renewLease', 'expireLease', 'isLeaseHeldBy']) {
     assert.equal(mirrorSource.includes(`@internal`) && mirrorSource.includes(`function ${marker}`), true)
   }
+})
+
+test('a failed re-pull keeps the cursor monotonic', () => {
+  // The reviewer's probe: a failed recovery re-plans from cursor 0, which for a log that
+  // does not start at seq 1 resolves to 0 while events 1..5 are still in the session.
+  // The descriptor must never claim fewer applied events than it already had.
+  assert.equal(recoveredCursor(5, 0), 5, 'a failed re-pull must not move 5 back to 0')
+  assert.equal(recoveredCursor(5, 2), 5)
+  assert.equal(recoveredCursor(0, 3), 3, 'a first-sync recovery may advance')
+  assert.equal(recoveredCursor(4, 4), 4)
+  // Degenerate input degrades to the safe side instead of NaN/negative. A fractional
+  // cursor is not a valid seq, so it is treated as "nothing applied".
+  assert.equal(recoveredCursor(undefined, undefined), 0)
+  assert.equal(recoveredCursor(-3, 'x'), 0)
+  assert.equal(recoveredCursor(2.5, 1), 1)
 })
