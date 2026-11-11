@@ -625,7 +625,15 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         // Same simulated remote host as the web suite: a real connect through the
         // plugin's own API, then the panel is opened the way a user opens it.
         sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
-        const host = await connectSimulatedHost(page, { hostName: 'simulated-remote', sshPort: sim.state.sshPort })
+        // The panel subtests are the only ones that need a *live* SSH endpoint, so
+        // assert it explicitly: a dead simulator must be reported here, not as a
+        // mysterious "panel never mounted".
+        assert.equal(sim.child.exitCode, null, `the simulator exited: ${sim.logs.join('').slice(-1200)}`)
+        const host = await connectSimulatedHost(page, {
+          hostName: 'simulated-remote',
+          sshPort: sim.state.sshPort,
+          logs: sim.logs,
+        })
         simulatedHostId = host.hostId
         assert.equal(host.host.status, 'connected')
         await openRemotePanel(page, { hostId: host.hostId })
@@ -677,6 +685,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         const second = await connectSimulatedHost(page, {
           hostName: 'simulated-remote-b',
           sshPort: sim.state.sshPort,
+          logs: sim.logs,
         })
         const guard = await stubNonLoopbackIframeUrl(page)
         try {

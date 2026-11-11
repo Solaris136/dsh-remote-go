@@ -322,11 +322,15 @@ export async function pluginCall(page, method, route, body) {
  * whose DSH version differs from the one the simulator advertises, which is a
  * version-warning path, not a mirror/panel defect.
  * @param {import('puppeteer-core').Page} page
- * @param {{ hostName: string, sshPort: number, timeoutMs?: number }} options
+ * @param {{ hostName: string, sshPort: number, logs?: string[] | null, timeoutMs?: number }} options
  * @returns {Promise<{ hostId: string, host: any }>}
  */
 export async function connectSimulatedHost(page, options) {
   const timeoutMs = options.timeoutMs ?? 180_000
+  // A simulator that died (a bad host key, a port clash) is the usual reason the
+  // connect never happens, so its log tail belongs in the failure message.
+  const simTail = () =>
+    Array.isArray(options.logs) && options.logs.length > 0 ? `\n[sim]\n${tail(options.logs, '', 12)}` : ''
   const created = await pluginCall(page, 'POST', '/hosts', {
     host: {
       name: options.hostName,
@@ -339,14 +343,17 @@ export async function connectSimulatedHost(page, options) {
     },
   })
   const hostId = created.payload?.host?.id
-  assert.ok(hostId, `the plugin did not create the host (HTTP ${created.status}: ${created.text.slice(0, 400)})`)
+  assert.ok(
+    hostId,
+    `the plugin did not create the host (HTTP ${created.status}: ${created.text.slice(0, 400)})${simTail()}`,
+  )
 
   const connect = await pluginCall(page, 'POST', `/hosts/${encodeURIComponent(hostId)}/connect`, {
     password: SIM_CREDENTIALS.password,
     rememberFingerprint: false,
     overrideVersion: true,
   })
-  assert.equal(connect.status, 200, `connect was refused: ${connect.text.slice(0, 400)}`)
+  assert.equal(connect.status, 200, `connect was refused: ${connect.text.slice(0, 400)}${simTail()}`)
 
   let confirmed = false
   const host = await pollUntil(
@@ -372,7 +379,7 @@ export async function connectSimulatedHost(page, options) {
       timeoutMs,
       intervalMs: 250,
       label: 'the simulated host to connect through the plugin',
-      diagnose: async () => JSON.stringify(await readHosts(page)),
+      diagnose: async () => `${JSON.stringify(await readHosts(page))}${simTail()}`,
     },
   )
   assert.notEqual(host.status, 'error', `the connect pipeline failed: ${JSON.stringify(host.error)}`)

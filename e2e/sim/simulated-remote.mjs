@@ -29,7 +29,6 @@
 // line, so a drifted command set shows up loudly instead of silently "passing".
 import { createServer as createHttpServer } from 'node:http'
 import { connect as netConnect } from 'node:net'
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -37,8 +36,21 @@ import { fileURLToPath } from 'node:url'
 import ssh2 from 'ssh2'
 import { buildProbeScript, parseProbeOutput, toProbeFacts } from '../../src/probe.js'
 import { assertSupportedRemote } from '../../src/bootstrap.js'
+import { createHostKey } from './host-key.mjs'
 
-const { Server: SshServer, Client: SshClient, utils } = ssh2
+const { Server: SshServer, Client: SshClient } = ssh2
+
+/**
+ * The installed `ssh2` version, for a host-key failure report.
+ * @returns {string}
+ */
+function ssh2Version() {
+  try {
+    return JSON.parse(readFileSync(new URL('../../node_modules/ssh2/package.json', import.meta.url), 'utf8')).version
+  } catch {
+    return 'unknown'
+  }
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_STATE_FILE = path.join(HERE, '.state.json')
@@ -456,11 +468,23 @@ function startRemoteWeb() {
  */
 async function startSimulatedRemote() {
   const remote = await startRemoteWeb()
-  const hostKey = utils.generateKeyPairSync('ed25519').private
-  // Informational only: what a client would see as the host key fingerprint.
-  const parsedKey = utils.parseKey(hostKey)
-  const publicBlob = typeof parsedKey?.getPublicSSH === 'function' ? parsedKey.getPublicSSH() : Buffer.from(hostKey)
-  const fingerprint = `SHA256:${createHash('sha256').update(publicBlob).digest('base64').replace(/=+$/, '')}`
+  // The host key is generated in memory and validated before anything listens: a
+  // key that ssh2 cannot parse (e.g. after a CRLF round-trip) must fail here, with
+  // the reason, instead of leaving the client to fail at handshake time.
+  /** @type {import('./host-key.mjs').HostKey} */
+  let hostKey
+  try {
+    hostKey = createHostKey()
+  } catch (error) {
+    console.error(`[sim] cannot build the SSH host key: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`[sim] node ${process.version}, ssh2 ${ssh2Version()}`)
+    console.error('[sim] the key is generated in memory and never written to disk; report this with the versions above')
+    await withTimeout(new Promise((resolve) => remote.server.close(() => resolve(undefined))), 5_000, 'shutdown').catch(
+      () => {},
+    )
+    process.exit(2)
+  }
+  const fingerprint = hostKey.fingerprint
 
   /** @type {SimState} */
   const sim = { remotePort: remote.port, pid: 0, started: false, token: SIM.token }
@@ -475,56 +499,74 @@ async function startSimulatedRemote() {
   const tunnelSockets = new Set()
   let closed = false
 
-  const server = new SshServer({ hostKeys: [hostKey] }, (client) => {
-    client.on('authentication', (ctx) => {
-      const matches = ctx.method === 'password' && ctx.username === SIM.username && ctx.password === SIM.password
-      if (matches) return ctx.accept()
-      // Only advertise the one method the simulator accepts; never log secrets.
-      if (ctx.method === 'password') {
-        console.warn(`[sim] rejected SSH authentication for user ${JSON.stringify(ctx.username)}`)
-      }
-      return ctx.reject(['password'])
-    })
-    client.on('ready', () => {
-      client.on('session', (accept) => {
-        const session = accept()
-        session.on('exec', (acceptExec, _reject, info) => {
-          const stream = acceptExec()
-          const result = respond(info.command, sim)
-          if (result === null) {
-            stream.stderr.write(`simulated-remote: command not simulated: ${describeCommand(info.command)}\n`)
-            stream.exit(127)
+  /** @type {import('ssh2').Server} */
+  let server
+  try {
+    server = new SshServer({ hostKeys: [hostKey.material] }, (client) => {
+      client.on('authentication', (ctx) => {
+        const matches = ctx.method === 'password' && ctx.username === SIM.username && ctx.password === SIM.password
+        if (matches) return ctx.accept()
+        // Only advertise the one method the simulator accepts; never log secrets.
+        if (ctx.method === 'password') {
+          console.warn(`[sim] rejected SSH authentication for user ${JSON.stringify(ctx.username)}`)
+        }
+        return ctx.reject(['password'])
+      })
+      client.on('ready', () => {
+        client.on('session', (accept) => {
+          const session = accept()
+          session.on('exec', (acceptExec, _reject, info) => {
+            const stream = acceptExec()
+            const result = respond(info.command, sim)
+            if (result === null) {
+              stream.stderr.write(`simulated-remote: command not simulated: ${describeCommand(info.command)}\n`)
+              stream.exit(127)
+              stream.end()
+              return
+            }
+            if (result.stdout) stream.write(result.stdout)
+            if (result.stderr) stream.stderr.write(result.stderr)
+            stream.exit(result.code)
             stream.end()
-            return
+          })
+        })
+        // The tunnel: a client forwardOut() arrives here as a `tcpip` request.
+        // Only the simulated remote web port is reachable, so this endpoint can
+        // never be used as a credential-free proxy to other local services.
+        client.on('tcpip', (accept, reject, info) => {
+          if (typeof accept !== 'function') return reject?.()
+          const destIP = String(info.destIP ?? '')
+          const destPort = Number(info.destPort)
+          if (destIP !== '127.0.0.1' || destPort !== sim.remotePort) {
+            console.warn(
+              `[sim] rejected tunnel to ${destIP}:${destPort}; only 127.0.0.1:${sim.remotePort} is reachable`,
+            )
+            return reject()
           }
-          if (result.stdout) stream.write(result.stdout)
-          if (result.stderr) stream.stderr.write(result.stderr)
-          stream.exit(result.code)
-          stream.end()
+          const stream = accept()
+          const socket = netConnect(destPort, '127.0.0.1')
+          socket.setTimeout(10_000, () => socket.destroy(new Error('tunnel socket idle timeout')))
+          tunnelSockets.add(socket)
+          socket.once('close', () => tunnelSockets.delete(socket))
+          socket.on('error', () => stream.close())
+          stream.on('error', () => socket.destroy())
+          socket.pipe(stream).pipe(socket)
         })
       })
-      // The tunnel: a client forwardOut() arrives here as a `tcpip` request.
-      // Only the simulated remote web port is reachable, so this endpoint can
-      // never be used as a credential-free proxy to other local services.
-      client.on('tcpip', (accept, reject, info) => {
-        if (typeof accept !== 'function') return reject?.()
-        const destIP = String(info.destIP ?? '')
-        const destPort = Number(info.destPort)
-        if (destIP !== '127.0.0.1' || destPort !== sim.remotePort) {
-          console.warn(`[sim] rejected tunnel to ${destIP}:${destPort}; only 127.0.0.1:${sim.remotePort} is reachable`)
-          return reject()
-        }
-        const stream = accept()
-        const socket = netConnect(destPort, '127.0.0.1')
-        socket.setTimeout(10_000, () => socket.destroy(new Error('tunnel socket idle timeout')))
-        tunnelSockets.add(socket)
-        socket.once('close', () => tunnelSockets.delete(socket))
-        socket.on('error', () => stream.close())
-        stream.on('error', () => socket.destroy())
-        socket.pipe(stream).pipe(socket)
-      })
     })
-  })
+  } catch (error) {
+    // Server construction is where ssh2 parses the host key: fail with the
+    // fingerprint and versions so a broken key is diagnosable from the log alone.
+    console.error(
+      `[sim] ssh2 refused the host key (${hostKey.fingerprint}): ${error instanceof Error ? error.message : String(error)}`,
+    )
+    console.error(`[sim] node ${process.version}, ssh2 ${ssh2Version()}, keyType ${hostKey.keyType}`)
+    remote.server.closeAllConnections?.()
+    await withTimeout(new Promise((resolve) => remote.server.close(() => resolve(undefined))), 5_000, 'shutdown').catch(
+      () => {},
+    )
+    process.exit(2)
+  }
   server.on('connection', (connection) => {
     connections.add(connection)
     connection.once('close', () => connections.delete(connection))
