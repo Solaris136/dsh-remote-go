@@ -839,11 +839,11 @@ window.__ModuleLoader__.load({
 
     /**
      * True when the address looks like a web URL rather than an SSH target.
-     * @param {unknown} address - candidate address text.
+     * @param {string} address - candidate address text (already trimmed).
      * @returns {boolean} whether a scheme or path was supplied by mistake.
      */
     function looksLikeWebAddress(address) {
-      const value = String(address === undefined || address === null ? '' : address).trim()
+      const value = address.trim()
       return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
     }
 
@@ -1420,9 +1420,9 @@ window.__ModuleLoader__.load({
      * @returns {() => void} dispose function.
      */
     function subscribeState(handlers) {
-      const onState = handlers && typeof handlers.onState === 'function' ? handlers.onState : () => {}
-      const onStatus = handlers && typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
-      const onError = handlers && typeof handlers.onError === 'function' ? handlers.onError : () => {}
+      const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
+      const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
+      const onError = typeof handlers.onError === 'function' ? handlers.onError : () => {}
       let disposed = false
       let source = null
       let timer = null
@@ -2775,7 +2775,6 @@ window.__ModuleLoader__.load({
 
       const hosts = props.state && Array.isArray(props.state.hosts) ? props.state.hosts : []
       const host = hostId ? hosts.find((item) => item && item.id === hostId) || null : null
-      const settings = pathValue(props.state, 'settings', null)
       const onRefresh = typeof props.onRefresh === 'function' ? props.onRefresh : () => {}
 
       // Load SSH config aliases once, for the address datalist.
@@ -2804,7 +2803,6 @@ window.__ModuleLoader__.load({
       }, [step, host ? host.status : null])
 
       const patchDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
-      const setField = (field) => (value) => patchDraft({ [field]: value })
 
       const onAddressChange = (value) => {
         patchDraft({ address: value })
@@ -4635,7 +4633,6 @@ window.__ModuleLoader__.load({
      */
     function WorkspaceRail(props) {
       const t = translatorOf(props)
-      const locale = localeOf(props)
       const hosts = Array.isArray(props.hosts) ? props.hosts : []
       const [collapsed, setCollapsed] = useState(() =>
         props.initialCollapsed === undefined ? readRailCollapsed() : props.initialCollapsed === true,

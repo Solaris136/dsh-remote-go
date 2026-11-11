@@ -55,7 +55,23 @@ export function isPlainObject(value) {
 }
 
 /**
+ * Property names whose write would land on the prototype chain instead of a
+ * plain value. The merge below only writes keys that `base` declares, so these
+ * can only appear if a caller ever passes a hostile `base`; the guard is cheap
+ * insurance for that case.
+ */
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
  * Recursively merge `patch` into `base` (arrays and scalars replace).
+ *
+ * Only properties that `base` declares are merged: `base` is the trusted schema
+ * (the settings defaults), `patch` is untrusted input (a saved or HTTP-supplied
+ * settings object), and a patch may therefore change known values but never
+ * invent a property name. That closes the remote-property-injection path (and
+ * with it the prototype-polluting-assignment shape, where `{"__proto__": …}`
+ * would replace the merged object's prototype) by construction rather than by
+ * blocklist, and matches the caller, which reads a fixed set of fields.
  * @template T
  * @param {T} base
  * @param {unknown} patch
@@ -64,9 +80,12 @@ export function isPlainObject(value) {
 export function deepMerge(base, patch) {
   if (!isPlainObject(base) || !isPlainObject(patch)) return /** @type {T} */ (patch === undefined ? base : patch)
   const out = { ...base }
-  for (const [key, value] of Object.entries(patch)) {
-    if (isPlainObject(value) && isPlainObject(out[key])) out[key] = deepMerge(out[key], value)
-    else if (value !== undefined) out[key] = value
+  for (const key of Object.keys(base)) {
+    if (UNSAFE_KEYS.has(key)) continue
+    const value = patch[key]
+    if (value === undefined) continue
+    // Recurse into declared nested objects so their keys are schema-anchored too.
+    out[key] = isPlainObject(value) && isPlainObject(base[key]) ? deepMerge(base[key], value) : value
   }
   return out
 }

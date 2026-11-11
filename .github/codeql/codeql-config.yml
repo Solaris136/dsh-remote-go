@@ -1,0 +1,28 @@
+# CodeQL configuration for dsh-remote-go.
+#
+# Scope: the hand-written plugin code — index.js, client.js, src/, scripts/,
+# test/, and the hand-written pieces under vendor/ — is analysed with the
+# `security-and-quality` suite.
+#
+# Only the generated bundle is excluded. `vendor/ssh2.bundle.cjs` is a
+# single-file bundle of the third-party `ssh2` package produced by
+# `scripts/build-vendor.mjs` (see also vendor/THIRD_PARTY_NOTICES.md) so the
+# published plugin ships with zero runtime dependencies and no install scripts.
+# It is not our source: findings inside it are upstream ssh2 defects (a
+# backtracking PEM-header regex, MD5 key derivation that the legacy OpenSSH PEM
+# format itself mandates, use-before-declaration and similar patterns in its
+# generated JS), they cannot be reviewed or fixed here, and every upstream bump
+# would rewrite the file and churn the alert list again. Analyzing generated
+# third-party code is noise, not coverage — fixes go upstream.
+#
+# vendor/ is deliberately *not* excluded wholesale: vendor/ssh2-entry.mjs is
+# hand-written first-party glue (the esbuild entry point), so it stays in scope.
+# Everything else stays in scope too: narrowing this list any further needs a
+# reviewable reason, not a convenient one.
+name: dsh-remote-go CodeQL config
+
+queries:
+  - uses: security-and-quality
+
+paths-ignore:
+  - vendor/*.bundle.cjs

@@ -545,7 +545,7 @@ function respond(command, sim) {
     return ok(sim.started ? `${webLine(sim)}\n` : '')
   }
 
-  // 8. Remote log tail (src/webapp.js tailRemoteLog).
+  // 8. Remote log tail: a `tail -n <lines> <logFile>` read of the log file.
   if (/^tail -n \d+ /.test(cmd)) {
     return ok(sim.started ? `${webLine(sim)}\n` : '')
   }

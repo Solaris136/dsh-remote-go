@@ -17,7 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import puppeteer from 'puppeteer-core'
@@ -27,13 +27,70 @@ const CONTROL_DIR = path.join(ROOT, 'e2e', 'control')
 const CONTROL_HOME = path.join(CONTROL_DIR, 'home')
 const DSH_BIN = path.join(CONTROL_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const ARTIFACTS = path.join(ROOT, 'e2e', 'artifacts')
+const REPORT_FILE = path.join(ARTIFACTS, 'plugin-e2e-report.json')
 const SSH_ADDRESS = process.env.E2E_SSH_ADDRESS || ''
 const KEEP_CONTROL = process.env.E2E_KEEP_CONTROL === '1'
 const API_HEADER = 'x-dsh-remote-go'
 
-/** @param {string} file */
-async function readJson(file) {
-  return JSON.parse(await readFile(file, 'utf8'))
+/**
+ * Report strings come from the remote page (titles, console lines, HTML
+ * excerpts) and are untrusted by definition. They are evidence, not input:
+ * keep them bounded and free of control characters so the artefact stays
+ * greppable and cannot inject terminal escapes into a CI log.
+ * @param {unknown} value - any report value.
+ * @param {number} limit - maximum retained length.
+ * @returns {string} printable, truncated text.
+ */
+function evidenceText(value, limit = 2000) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .slice(0, limit)
+}
+
+/**
+ * Deep-copy the report, passing every string through {@link evidenceText}.
+ * @param {unknown} value - report node.
+ * @param {number} depth - recursion guard.
+ * @returns {unknown} sanitized copy.
+ */
+function sanitizeEvidence(value, depth = 0) {
+  if (depth > 8) return '[depth-limit]'
+  if (typeof value === 'string') return evidenceText(value)
+  if (Array.isArray(value)) return value.map((entry) => sanitizeEvidence(entry, depth + 1))
+  if (value && typeof value === 'object') {
+    // Null-prototype accumulator: these keys are author-written literals from
+    // fixed-shape `page.evaluate` results, but copying them into a prototype-free
+    // object keeps this module consistent with the `deepMerge` hardening above
+    // (`JSON.stringify` serializes it normally).
+    const out = Object.create(null)
+    for (const [key, entry] of Object.entries(value)) out[evidenceText(key, 120)] = sanitizeEvidence(entry, depth + 1)
+    return out
+  }
+  return value
+}
+
+/**
+ * Write the evidence report to its fixed destination.
+ *
+ * The destination is a constant under `e2e/artifacts/`, never derived from page,
+ * network or SSH data, and the resolved target is re-checked against that
+ * directory before the write.
+ *
+ * The content *is* remote page text, which is why `js/http-to-file-access` keeps
+ * reporting this line: the value is still derived from tainted input, so the
+ * alert is legitimate and stays open (dismissed as "used in tests" — nothing
+ * reads the file back; it is uploaded as a CI artifact only). The sanitizer below
+ * is defence-in-depth, not the reason the alert could be closed: it bounds the
+ * text and strips control characters so a remote page cannot smuggle terminal
+ * escapes into a log or grow the artifact without limit.
+ * @param {unknown} report - evidence payload.
+ * @returns {Promise<void>} resolves once the file is written.
+ */
+async function writeReport(report) {
+  const target = path.resolve(REPORT_FILE)
+  const artifacts = path.resolve(ARTIFACTS) + path.sep
+  if (!target.startsWith(artifacts)) throw new Error(`refusing to write outside the artifacts directory: ${target}`)
+  await writeFile(target, `${JSON.stringify(sanitizeEvidence(report), null, 2)}\n`, 'utf8')
 }
 
 function resolveChrome() {
@@ -654,11 +711,7 @@ test(
           /* control may already be gone */
         }
       }
-      await writeFile(
-        path.join(ARTIFACTS, 'plugin-e2e-report.json'),
-        `${JSON.stringify(report, null, 2)}\n`,
-        'utf8',
-      ).catch(() => {})
+      await writeReport(report).catch(() => {})
       if (browser) await browser.close().catch(() => {})
       if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
     }

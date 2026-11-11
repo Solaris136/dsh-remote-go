@@ -229,22 +229,6 @@ export async function readRunRegistry(ssh, layout) {
 }
 
 /**
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {ReturnType<typeof remoteLayout>} layout
- * @param {number} [lines]
- */
-export async function tailRemoteLog(ssh, layout, lines = 80) {
-  try {
-    const result = await ssh.exec(`tail -n ${Math.max(1, lines)} ${shellQuote(layout.logFile)} 2>/dev/null || true`, {
-      timeoutMs: 15_000,
-    })
-    return headTail(result.stdout, 6000)
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error)
-  }
-}
-
-/**
  * Read the last `dsh web:` line from the remote log. Used to adopt an instance
  * started by an earlier local DSH process (design §15.1 tunnel adoption).
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
