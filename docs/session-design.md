@@ -20,9 +20,13 @@
 「local mirror Session + Agent façade」把远端会话镜像成本地原生会话，宣称 “remote sessions appear in the normal
 sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。两者都**没有**去遮蔽宿主的 `sidebar.workspaces`。
 
-> 关键约束：`sidebar.workspaces` 是单占槽位（由 `dsh-client-ui-workspace` 独占），第三方插件无法追加分组
-> （[docs/design.md](design.md) §v0.7 附录第 3 条的限制说明，行 ~536）。**所以「完全会话」不能靠改宿主侧边栏
+> 关键约束：`sidebar.workspaces` 是单占槽位（由 `dsh-client-ui-workspace` 独占），第三方插件无法向**该槽位**追加分组
+> （[docs/design.md](design.md) §v0.7 附录第 3 条的限制说明，行 ~536）。**所以「完全会话」不能靠往宿主侧边栏塞分组
 > 实现，只能靠让远端会话本身成为本地会话。**
+>
+> 补充（后续验证）：宿主另提供可选的 `workspaceRegistry`，插件可注册工作区（`Remote: <主机名>`），让镜像会话在
+> 本地侧边栏原生可见。这**不改**上述结论——它仍然是「让远端会话成为本地会话」，只是多了一条被宿主认可的分组途径。
+> 见下文 §4.3。
 
 ## 2. 目标与非目标
 
@@ -171,7 +175,8 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 - 重连：从 `cursor` 续传；远端若已丢弃该区间事件，则降级为「重新拉全量快照 + 重置 cursor」并提示用户。
 - 单写者仲裁：本地持有「写入租约」（心跳续约）。租约过期或远端检测到第二个写入者时，本地转为只读并提示，
   绝不并发写。
-- 上限：镜像事件数受 `mirrorMaxEvents` 限制（默认取远端窗口大小），超限时保留首尾、压缩中段并标注「已折叠」。
+- 上限（**尚未实现**，见 §11 开放问题与 `docs/api.md` 的约束说明）：镜像事件数将由 `mirrorMaxEvents` 限制，
+  超限时保留首尾、压缩中段并标注「已折叠」。P0/P1 目前不存储事件，因此该上限只是 TODO。
 
 ## 7. 生命周期与失败模式
 
