@@ -216,6 +216,17 @@ pnpm run verify                                   # 一条命令跑完下面全�
 pnpm run test:e2e   # control DSH → SSH → 测试主机 → 远端 DSH → 无头浏览器面板验收
 ```
 
+Web 兼容性验收（`dsh web` + 真实浏览器，不需要远端主机）：
+
+```bash
+pnpm run test:web   # 隔离的 dsh web → 安装本插件 → Chrome 打开真实界面 → 浅色/深色按钮对比度断言
+```
+
+`test:web` 需要三样东西：可用的 DSH CLI（`DSH_BIN`/`DSH_EXE`，或 Windows 上已安装的 Harness，或 PATH 上的
+`dsh`）、Chrome/Edge（`CHROME_PATH`），以及安装插件用的 `pnpm`（`DSH_PNPM_CJS` 可指定入口）。缺任何一样都
+**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
+`.github/workflows/web-e2e.yml` 安装 harness + Chrome 后以 `DSH_E2E_STRICT=1` 运行（缺件即失败，避免静默空跑）。
+
 目录：
 
 ```text
