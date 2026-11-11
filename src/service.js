@@ -35,6 +35,8 @@ import {
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
+import { decideLevel, l1Capabilities, planMirror, reconcileMirrors } from './mirror.js'
+import { MirrorStore } from './mirror-store.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -62,6 +64,11 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  *   tailLog?: typeof tailRemoteLog,
  *   loadSshMaterial?: typeof loadLocalSshMaterial,
  *   resolveTarget?: typeof resolveTargetVersion,
+ *   mirrorStore?: import('./mirror-store.js').MirrorStore,
+ *   sessionAdapter?: {
+ *     ensureMirrorSession: (descriptor: any) => any,
+ *     removeMirrorSession?: (localSessionId: string) => any,
+ *   } | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   clock?: () => number,
  * }} ServiceOptions
@@ -107,6 +114,8 @@ export class RemoteGoService extends EventEmitter {
     this.tailLog = options.tailLog ?? tailRemoteLog
     this.loadSshMaterial = options.loadSshMaterial ?? loadLocalSshMaterial
     this.resolveTarget = options.resolveTarget ?? resolveTargetVersion
+    this.mirrorStore = options.mirrorStore ?? new MirrorStore({ dir: options.store.dir, logger: this.logger })
+    this.sessionAdapter = options.sessionAdapter ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.clock = options.clock ?? (() => Date.now())
     /** @type {Map<string, any>} */
@@ -119,6 +128,7 @@ export class RemoteGoService extends EventEmitter {
   async init() {
     if (this.initialized) return this
     await this.store.load()
+    if (this.mirrorStore && typeof this.mirrorStore.load === 'function') await this.mirrorStore.load()
     for (const host of this.store.listHosts()) this.#ensureRuntime(host)
     this.initialized = true
     return this
@@ -302,6 +312,7 @@ export class RemoteGoService extends EventEmitter {
     if (runtime) await this.#teardownRuntime(runtime, { stopRemote: runtime.entry.keepAlive === 'stop' ? true : false })
     this.runtimes.delete(id)
     await this.store.removeHost(id)
+    await this.mirrorStore?.removeHostMirrors?.(id)
     if (this.activeHostId === id) this.activeHostId = null
     this.#emitState()
     return { ok: true }
@@ -373,6 +384,115 @@ export class RemoteGoService extends EventEmitter {
         hostName: runtime.entry.name,
       })),
     }
+  }
+
+  // ---------------------------------------------------------------- mirrors
+
+  /**
+   * Persisted mirror descriptors of one host (P0: L1 directory mirrors).
+   * Read-only: descriptors are reconciled when a host connects or when
+   * `syncHostMirrors()` is called explicitly, never on a GET.
+   * @param {string} id
+   */
+  async listHostMirrors(id) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    const decision = this.#mirrorDecision(runtime)
+    return {
+      hostId: id,
+      hostName: runtime.entry.name,
+      connected: Boolean(runtime.ssh?.connected),
+      level: decision.level,
+      reason: decision.reason,
+      capabilities: decision.capabilities,
+      mirrors: this.mirrorStore.listMirrors({ hostId: id }),
+    }
+  }
+
+  /**
+   * Re-read the remote workspace registry and reconcile the mirror descriptors
+   * (design §4 L1). Never creates or deletes anything on the remote; a session
+   * that disappeared from the registry is kept and marked `remote-deleted`
+   * (design §7).
+   * @param {string} id
+   */
+  async syncHostMirrors(id) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    if (!runtime.ssh?.connected) {
+      return {
+        hostId: id,
+        connected: false,
+        synced: false,
+        reason: 'not-connected',
+        mirrors: this.mirrorStore.listMirrors({ hostId: id }),
+      }
+    }
+    return this.#syncMirrors(runtime)
+  }
+
+  /** @param {any} runtime */
+  #mirrorDecision(runtime) {
+    return decideLevel({
+      hostVersion: runtime.remote.version ?? runtime.facts?.dshVersion ?? null,
+      localVersion: this.localVersion,
+      // P0 verifies the directory channel only. L2/L3 must probe the remote RPC
+      // and ws-mux before they may claim more (design §4, §11 question 3).
+      probe: l1Capabilities(),
+    })
+  }
+
+  /** @param {any} runtime */
+  async #syncMirrors(runtime) {
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
+    const existing = this.mirrorStore.listMirrors({ hostId: runtime.id })
+    const decision = this.#mirrorDecision(runtime)
+    if (!result.ok) {
+      // Offline or unreadable: keep the last known descriptors instead of
+      // marking every remote session deleted (design §7 "host not connected").
+      return { hostId: runtime.id, synced: false, reason: result.reason ?? 'unreadable', mirrors: existing }
+    }
+    const now = nowIso()
+    const planned = planMirror({
+      host: runtime.entry,
+      remoteWorkspaces: result,
+      capabilities: decision.capabilities,
+      existing,
+      now,
+    })
+    const reconciled = reconcileMirrors({ existing, planned })
+    const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
+    return {
+      hostId: runtime.id,
+      synced: true,
+      level: decision.level,
+      reason: decision.reason,
+      mirrors,
+      markedDeleted: reconciled.markedDeleted,
+      revived: reconciled.revived,
+      sessions: this.#ensureMirrorSessions(mirrors),
+    }
+  }
+
+  /**
+   * Create the local DSH sessions that back the mirrors, when the host publishes
+   * the optional `sessions` service. Absent adapter ⇒ no sessions, no error.
+   * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
+   */
+  #ensureMirrorSessions(mirrors) {
+    if (!this.sessionAdapter) return []
+    /** @type {any[]} */
+    const results = []
+    for (const descriptor of mirrors) {
+      if (descriptor.status !== 'active') continue
+      try {
+        results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
+      } catch (error) {
+        this.logger.warn?.('[dsh-remote-go] mirror session failed:', error)
+      }
+    }
+    return results
   }
 
   /** Read-only SSH discovery for the wizard (design §15.1). */
@@ -674,6 +794,21 @@ export class RemoteGoService extends EventEmitter {
       this.#attachDisconnectHandler(runtime)
       this.#emitState()
       this.#log(runtime, 'info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${runtime.tunnel.localPort}`)
+      // P0: mirror the remote directory once the host is usable. A mirror
+      // failure must never take the connection down (design §4).
+      try {
+        const synced = await this.#syncMirrors(runtime)
+        if (synced.mirrors.length > 0) {
+          this.#log(runtime, 'info', `mirror directory: ${synced.mirrors.length} session(s), level ${synced.level}`)
+        }
+      } catch (error) {
+        this.#log(
+          runtime,
+          'warn',
+          'mirror directory sync failed:',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
     } catch (error) {
       const view = toErrorView(error)
       runtime.error = view

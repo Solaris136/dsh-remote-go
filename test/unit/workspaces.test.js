@@ -49,6 +49,10 @@ test('parseWorkspaceStorage follows the global order and appends orphans', () =>
   assert.equal(a.title, 'proj-a')
   assert.equal(def.isDefault, true)
   assert.equal(def.sessionCount, 2)
+  // v1.1 additive field: the L1 mirror plans one descriptor per session id.
+  assert.deepEqual(def.sessionIds, ['s1', 's2'])
+  assert.deepEqual(b.sessionIds, ['s3'])
+  assert.deepEqual(a.sessionIds, [])
 })
 
 test('parseWorkspaceStorage is defensive about missing/malformed data', () => {

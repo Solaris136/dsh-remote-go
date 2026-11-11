@@ -334,6 +334,44 @@ test('workspace inventory endpoints serve local and per-remote groups', async ()
   }
 })
 
+test('GET /hosts/:id/mirrors serves the persisted directory mirrors', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const before = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(before.status, 200)
+    assert.equal(before.json.ok, true)
+    assert.equal(before.json.hostId, host.id)
+    assert.equal(before.json.connected, false)
+    assert.deepEqual(before.json.mirrors, [])
+    // P0 verifies the directory channel only, so the honest level is L1.
+    assert.equal(before.json.level, 'L1')
+    assert.equal(before.json.capabilities.list, true)
+    assert.equal(before.json.capabilities.stream, false)
+
+    await service.mirrorStore.upsertMirrors([
+      { hostId: host.id, remoteSessionId: 'remote-1', title: 'Project A · remote-1', cursor: 7 },
+      { hostId: 'h_other', remoteSessionId: 'remote-9', title: 'Other host mirror' },
+    ])
+    const after = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(after.status, 200)
+    assert.equal(after.json.mirrors.length, 1)
+    const [mirror] = after.json.mirrors
+    assert.equal(mirror.hostId, host.id)
+    assert.equal(mirror.remoteSessionId, 'remote-1')
+    assert.equal(mirror.title, 'Project A · remote-1')
+    assert.equal(mirror.cursor, 7)
+    assert.equal(mirror.status, 'active')
+    assert.equal(mirror.capabilities.list, true)
+    assert.equal(mirror.capabilities.stream, false)
+    assert.match(mirror.localSessionId, /^mirror_[a-z0-9]{14}$/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('GET /version reports plugin and host versions', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)
