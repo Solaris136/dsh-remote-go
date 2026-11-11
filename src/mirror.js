@@ -206,6 +206,9 @@ export function planMirror(input = {}) {
         // Last successful sync time: advance on every planned (successful) read.
         mirroredAt: mirroredAt ?? previous?.mirroredAt ?? null,
         status: 'active',
+        // Carried forward: `planMirror` only knows the directory, so the read-only
+        // flag set by the L2 replay must not be cleared on the next sync.
+        readOnly: previous ? previous.readOnly === true : false,
       })
     }
   }
@@ -250,6 +253,9 @@ export function normalizeMirrorDescriptor(raw) {
     reason: descriptorReason(record.reason),
     mirroredAt: toIsoTime(record.mirroredAt),
     status: record.status === 'remote-deleted' ? 'remote-deleted' : 'active',
+    // L2: a replayed mirror is a read-only projection until L3 forwards input
+    // (design §10 P1 asks for the marker; the client renders it from this flag).
+    readOnly: record.readOnly === true,
   }
 }
 

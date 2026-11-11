@@ -463,7 +463,7 @@ function respond(command, sim) {
       `/home/sim/.dsh/sessions/ws-sim/session-${sessionId}.jsonl\n/home/sim/.dsh/sessions/ws-sim/session-${sessionId}.json\n`,
     )
   }
-  const historyRead = /^head -c (\d+) '([^']*\/sessions\/[^']*)' 2>\/dev\/null \|\| true$/.exec(cmd)
+  const historyRead = /^head -c (\d+) '([^']*\/sessions\/[^']*)' 2>&1 \|\| true$/.exec(cmd)
   if (historyRead) {
     const sessionId = /session-([^./]+)\./.exec(historyRead[2])?.[1] ?? ''
     sim.historyReads = sim.historyReads ?? {}

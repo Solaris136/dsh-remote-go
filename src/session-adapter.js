@@ -328,8 +328,15 @@ export function createSessionAdapter(options = {}) {
    * it already holds closes that window. Replayed events carry their remote `seq` in
    * `data.mirrorSeq`, so the answer is exact rather than a heuristic.
    *
-   * Degrades to an empty set when the host does not expose session events: the
-   * cursor then remains the only guard, which is still correct for the common path.
+   * The host `Session` exposes **no `events` property**: its surface is
+   * `snapshotEvents(fromSeq?, toSeqExclusive?)`, `ownEvents()`, `eventAt(seq)` and
+   * `get seq`. `snapshotEvents()` is preferred because it returns the whole committed
+   * log in order; `ownEvents()` is the fallback for a session that only exposes its
+   * own (non-inherited) records. The plain `events` array is kept last for fakes and
+   * for older hosts, but the real API is what must work.
+   *
+   * Degrades to an empty set when the host exposes nothing readable: the cursor then
+   * remains the only guard, which is still correct for the common path.
    * @param {string} localSessionId
    * @returns {Set<number>}
    */
@@ -341,8 +348,18 @@ export function createSessionAdapter(options = {}) {
     const sessions = resolveSessions()
     if (!sessions || typeof sessions.get !== 'function') return seqs
     const session = sessions.get(id)
-    const events = Array.isArray(session?.events) ? session.events : null
-    if (events === null) return seqs
+    if (!session) return seqs
+    /** @type {readonly any[] | null} */
+    let events = null
+    try {
+      if (typeof session.snapshotEvents === 'function') events = session.snapshotEvents()
+      else if (typeof session.ownEvents === 'function') events = session.ownEvents()
+      else if (Array.isArray(session.events)) events = session.events
+    } catch (error) {
+      logger.debug?.('[dsh-remote-go] cannot read the mirror session events:', error)
+      return seqs
+    }
+    if (!Array.isArray(events)) return seqs
     for (const event of events) {
       const seq = Number(event?.data?.mirrorSeq)
       if (Number.isInteger(seq) && seq > 0) seqs.add(seq)

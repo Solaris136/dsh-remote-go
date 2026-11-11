@@ -37,7 +37,7 @@ import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
 import { decideLevel, l1Capabilities, planMirror, reconcileMirrors } from './mirror.js'
 import { MirrorStore } from './mirror-store.js'
-import { HISTORY_LIMITS, fetchRemoteHistory, planHistoryWindow } from './history.js'
+import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow } from './history.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -495,12 +495,15 @@ export class RemoteGoService extends EventEmitter {
 
   /** @param {any} runtime */
   #mirrorDecision(runtime) {
+    // L2: the history channel is read over SSH `exec`, the same transport L1 already
+    // uses. It is only *claimable* when there is somewhere to replay into — without a
+    // session adapter there are no local sessions, so the host stays at L1 and the
+    // descriptors keep their directory-level annotation.
+    const historyEnabled = this.store.getSettings()?.mirrorHistory !== false && Boolean(this.sessionAdapter)
     return decideLevel({
       hostVersion: runtime.remote.version ?? runtime.facts?.dshVersion ?? null,
       localVersion: this.localVersion,
-      // P0 verifies the directory channel only. L2/L3 must probe the remote RPC
-      // and ws-mux before they may claim more (design §4, §11 question 3).
-      probe: l1Capabilities(),
+      probe: { ...l1Capabilities(), history: historyEnabled },
     })
   }
 
@@ -547,8 +550,9 @@ export class RemoteGoService extends EventEmitter {
       existing,
       now,
       // §7: annotate every mirrored session with the level/reason decided for
-      // this host, not only the host summary.
-      decision,
+      // this host, not only the host summary. Without a session adapter there is
+      // nothing to replay into, so the descriptors must not claim L2.
+      decision: this.sessionAdapter ? decision : { ...decision, level: 'L1' },
     })
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
@@ -557,7 +561,7 @@ export class RemoteGoService extends EventEmitter {
     // L2: replay history into the sessions that were just created (design §3 L2,
     // §6 cursor, §7 failure modes). Runs after the session step because there is
     // nothing to append into before it; failures never affect the connect result.
-    const historyRun = await this.#syncMirrorHistory(runtime, mirrors, sessions)
+    const historyRun = await this.#syncMirrorHistory(runtime, mirrors, sessions, decision)
     const mirrorsWithHistory = historyRun.mirrors
     const sidebar = await this.#ensureHostWorkspace(runtime, mirrorsWithHistory, sessions)
     const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
@@ -609,15 +613,28 @@ export class RemoteGoService extends EventEmitter {
    * @param {any} runtime
    * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
    * @param {{ ok?: boolean, localSessionId?: string }[]} sessionResults
+   * @param {{ level?: string, reason?: any, capabilities?: any } | null} [decision] the host-level
+   *   level decision for this sync. History must respect it: a host that was
+   *   downgraded (version mismatch, unreadable directory) must not replay, or the
+   *   per-descriptor reason §7 requires is erased on the next sync.
    * @returns {Promise<{ mirrors: import('./mirror.js').MirrorDescriptor[], level: string | null, reason: any, summary: any }>}
    */
-  async #syncMirrorHistory(runtime, mirrors, sessionResults) {
+  async #syncMirrorHistory(runtime, mirrors, sessionResults, decision = null) {
     const settings = this.store.getSettings()
     const enabled = settings?.mirrorHistory !== false
     const maxEvents = Number(settings?.mirrorMaxEvents ?? 0)
     const summary = { enabled, attempted: 0, applied: 0, appended: 0, folded: 0, skipped: 0, failures: [] }
-    const unchanged = { mirrors, level: null, reason: null, summary }
-    if (!enabled || !this.sessionAdapter) return unchanged
+    // §7: a host whose mirror was refused must not gain history. Returning the
+    // descriptors untouched keeps whatever `planMirror` stamped (the mismatch reason)
+    // instead of overwriting it with `level: 'L2', reason: null`.
+    // The blocked set is exactly "this host was not verified as mirrorable": a version
+    // mismatch, an unreadable/unknown version, or a missing probe. Note the healthy
+    // path is unaffected — by the time a sync runs, `runtime.remote.version` is known,
+    // so `decideLevel` returns L2 and none of these apply.
+    const blockedCode = typeof decision?.reason?.code === 'string' ? decision.reason.code : null
+    const blocked =
+      blockedCode === 'version-mismatch' || blockedCode === 'version-unknown' || blockedCode === 'probe-missing'
+    if (!enabled || blocked || !this.sessionAdapter) return { mirrors, level: null, reason: null, summary }
 
     const live = new Set(
       (Array.isArray(sessionResults) ? sessionResults : [])
@@ -655,39 +672,45 @@ export class RemoteGoService extends EventEmitter {
           continue
         }
 
-        const plan = planHistoryWindow({
-          cursor: descriptor.cursor,
-          events: remote.events,
-          maxEvents,
-          // Folding the prefix is only legitimate when nothing has been applied yet.
-          foldBeforeCursor: descriptor.cursor === 0,
-        })
-
-        // A gap does not discard the contiguous prefix (design §6: the cursor stops
-        // at the last contiguous event). The prefix is applied, the cursor advances
-        // up to it, and the descriptor carries the typed reason so the UI can say the
-        // history is incomplete. One bounded backfill was already implicit — we asked
-        // for the whole log — so a repeated gap stays a typed failure, not a loop.
         const alreadyThere = this.sessionAdapter.mirrorEventSeqs?.(descriptor.localSessionId) ?? new Set()
         /** @type {any[]} */
         const appended = []
+        /** @type {string | null} */
         let appendFailed = null
-        if (plan.folded > 0) {
-          // Announce the fold once, so a reader is never misled by a session that
-          // starts mid-history.
-          const notice = {
-            seq: plan.append[0]?.seq ?? descriptor.cursor + 1,
-            type: 'mirror/history-folded',
-            data: { folded: plan.folded, from: 1, to: plan.folded, retained: plan.append.length },
-            at: null,
+        /**
+         * Apply one planned window to the local session.
+         * @param {{ append: any[], folded: number }} plan
+         * @returns {boolean} whether the append succeeded
+         */
+        const applyPlan = (plan) => {
+          if (plan.folded > 0) {
+            // Announce the fold once, with the range that was actually skipped. The
+            // fetch keeps only the newest `HISTORY_LIMITS.maxEvents` records, so the
+            // folded prefix for a very long log starts later than seq 1 — computing it
+            // from the retained window is the only honest answer.
+            const firstKept = plan.append[0]?.seq ?? 1
+            const { from: foldedFrom, to: foldedTo } = foldNoticeRange({
+              firstKeptSeq: firstKept,
+              folded: plan.folded,
+            })
+            const result = this.sessionAdapter.appendEvent(descriptor.localSessionId, {
+              type: 'mirror/history-folded',
+              data: {
+                mirrorSeq: firstKept,
+                folded: plan.folded,
+                from: foldedFrom,
+                to: foldedTo,
+                retained: plan.append.length,
+                // Which cap governed the window, so a reader is not left guessing.
+                retentionCap: maxEvents,
+                fetchCap: HISTORY_LIMITS.maxEvents,
+              },
+            })
+            if (result?.ok !== true) {
+              appendFailed = result?.reason ?? 'append-failed'
+              return false
+            }
           }
-          const result = this.sessionAdapter.appendEvent(descriptor.localSessionId, {
-            type: notice.type,
-            data: { mirrorSeq: notice.seq, folded: notice.data.folded, retained: plan.append.length },
-          })
-          if (result?.ok !== true) appendFailed = result?.reason ?? 'append-failed'
-        }
-        if (appendFailed === null) {
           for (const event of plan.append) {
             if (alreadyThere.has(event.seq)) continue
             const result = this.sessionAdapter.appendEvent(descriptor.localSessionId, {
@@ -696,12 +719,63 @@ export class RemoteGoService extends EventEmitter {
             })
             if (result?.ok !== true) {
               appendFailed = result?.reason ?? 'append-failed'
-              break
+              return false
             }
             appended.push(event.seq)
           }
+          return true
         }
-        if (appendFailed !== null) {
+
+        let cursor = descriptor.cursor
+        let plan = planHistoryWindow({
+          cursor,
+          events: remote.events,
+          maxEvents,
+          // Folding the prefix is only legitimate when nothing has been applied yet.
+          foldBeforeCursor: cursor === 0,
+        })
+
+        if (plan.gap) {
+          // Design §6 recovery: the remote dropped the range the cursor points at
+          // (or the log outgrew the fetch window). Resetting to a full re-pull is
+          // the documented fallback; retrying the same unreachable window forever
+          // would stall the mirror permanently.
+          summary.recovered = (summary.recovered ?? 0) + 1
+          this.#log(
+            runtime,
+            'info',
+            `mirror history: cursor ${cursor} is unreachable for ${descriptor.remoteSessionId}; re-pulling the full log`,
+          )
+          cursor = 0
+          const full = await fetchRemoteHistory(runtime.ssh, {
+            remoteDshHome: layout.home,
+            remoteSessionId: descriptor.remoteSessionId,
+            maxEvents: HISTORY_LIMITS.maxEvents,
+          })
+          if (!full.ok) {
+            summary.failures.push({ localSessionId: descriptor.localSessionId, reason: full.reason })
+            firstReason = firstReason ?? full.reason
+            updated.push({ ...descriptor, level: 'L1', reason: historyReason(full.reason) })
+            continue
+          }
+          plan = planHistoryWindow({ cursor: 0, events: full.events, maxEvents, foldBeforeCursor: true })
+          if (plan.gap) {
+            // Still discontinuous after a full re-pull: the log itself has holes.
+            // Report and keep the cursor where it was; a human has to look at it.
+            summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'gap-unfilled' })
+            firstReason = firstReason ?? 'gap-unfilled'
+            updated.push({
+              ...descriptor,
+              cursor: plan.cursor,
+              level: 'L1',
+              reason: historyReason('gap-unfilled'),
+              mirroredAt: nowIso(),
+            })
+            continue
+          }
+        }
+
+        if (!applyPlan(plan)) {
           // Partial append: do not persist a cursor past what landed. The
           // `mirrorSeq` guard makes the next sync continue from the real position.
           summary.failures.push({ localSessionId: descriptor.localSessionId, reason: appendFailed })
@@ -710,29 +784,36 @@ export class RemoteGoService extends EventEmitter {
           continue
         }
 
+        if (descriptor.readOnly !== true) {
+          // Design §10 P1 asks for a清晰 read-only marker. L2 has no input channel yet
+          // (`capabilities.input === false`), so the replay announces itself once, as a
+          // non-surface notice: a reader can tell mirrored history from local input
+          // without the plugin pretending it can send anything back.
+          this.sessionAdapter.appendEvent(descriptor.localSessionId, {
+            type: 'mirror/read-only',
+            data: {
+              readOnly: true,
+              level: 'L2',
+              // Kept in sync with the descriptor so a client that only sees the session
+              // can still explain why nothing can be typed into it.
+              capabilities: { input: false, stream: false, approve: false },
+            },
+          })
+        }
+
         appliedAny = appliedAny || plan.applied > 0
         summary.applied += plan.applied
         summary.appended += appended.length
         summary.folded += plan.folded
         summary.skipped += Math.max(0, plan.append.length - appended.length)
-        if (plan.gap) {
-          summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'gap-unfilled' })
-          firstReason = firstReason ?? 'gap-unfilled'
-          updated.push({
-            ...descriptor,
-            // Only the contiguous prefix landed, so the cursor stops there.
-            cursor: plan.cursor,
-            level: 'L1',
-            reason: historyReason('gap-unfilled'),
-            mirroredAt: nowIso(),
-          })
-          continue
-        }
         updated.push({
           ...descriptor,
           cursor: plan.cursor,
           level: 'L2',
           reason: null,
+          // Mirrored history is a projection of a remote session: it is read-only until
+          // L3 delivers input/approval forwarding (design §4).
+          readOnly: true,
           mirroredAt: nowIso(),
         })
       } catch (error) {

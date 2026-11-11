@@ -8,16 +8,35 @@ import { decideResync, l1Capabilities, mirrorSessionId } from '../../src/mirror.
 
 const quiet = { warn() {} }
 
+/**
+ * A fake of the real host `Session`, shaped after its actual surface:
+ * `snapshotEvents()`, `ownEvents()`, `eventAt(seq)`, `get seq` — and **no `events`
+ * property**, because the real object has none. Faking an `events` array would let
+ * `mirrorEventSeqs()` pass here while being dead in production.
+ */
 function createFakeSession(id, calls) {
+  /** @type {{ type: string, seq: number, data: any }[]} */
+  let committed = []
   const session = {
     id,
-    events: [],
+    get seq() {
+      return committed.length
+    },
     append(...args) {
       calls.push({ op: 'append', id, args })
       const [type, data] = args
-      const event = { type, seq: session.events.length + 1, data }
-      session.events.push(event)
+      const event = { type, seq: committed.length + 1, data }
+      committed = [...committed, event]
       return event
+    },
+    snapshotEvents() {
+      return committed
+    },
+    ownEvents() {
+      return committed
+    },
+    eventAt(seq) {
+      return committed.find((event) => event.seq === seq)
     },
   }
   return session
@@ -341,4 +360,77 @@ test('removeMirrorSession reports the fiber-owned caveat instead of pretending t
   assert.equal(removal.ok, true)
   assert.equal(removal.removed, true)
   assert.equal(deletable.live.has(created.localSessionId), false)
+})
+
+test('mirrorEventSeqs reads the real Session surface, not a fake events array', () => {
+  const sessions = createFakeSessions()
+  const adapter = createSessionAdapter({ sessions, logger: quiet })
+  const mirror = adapter.ensureMirrorSession(descriptor({ remoteSessionId: 'real-shape' }))
+  assert.equal(mirror.ok, true)
+
+  // Empty until something is appended.
+  assert.deepEqual([...adapter.mirrorEventSeqs(mirror.localSessionId)], [])
+
+  const session = sessions.get(mirror.localSessionId)
+  // The real host Session has no `events` property at all; the fake must agree,
+  // otherwise this guard could pass here while being dead in production.
+  assert.equal('events' in session, false, 'the fake must not expose an events array')
+  assert.equal(typeof session.snapshotEvents, 'function')
+
+  adapter.appendEvent(mirror.localSessionId, { type: 'user/message', data: { text: 'a', mirrorSeq: 1 } })
+  adapter.appendEvent(mirror.localSessionId, { type: 'assistant/message', data: { text: 'b', mirrorSeq: 2 } })
+  // A non-mirrored event carries no mirrorSeq and must not enter the set.
+  adapter.appendEvent(mirror.localSessionId, { type: 'mirror/notice', data: { note: 'x' } })
+
+  assert.deepEqual(
+    [...adapter.mirrorEventSeqs(mirror.localSessionId)].sort((a, b) => a - b),
+    [1, 2],
+  )
+})
+
+test('mirrorEventSeqs prefers snapshotEvents and falls back without throwing', () => {
+  const id = 'mirror_fallbackprobe0000000000'
+  const events = [
+    { type: 'user/message', seq: 1, data: { mirrorSeq: 3 } },
+    { type: 'user/message', seq: 2, data: { mirrorSeq: 4 } },
+  ]
+  /** @param {any} session */
+  const adapterFor = (session) =>
+    createSessionAdapter({
+      sessions: { get: () => session },
+      logger: quiet,
+    })
+
+  // snapshotEvents wins when both exist.
+  const both = adapterFor({ snapshotEvents: () => events, events: [{ data: { mirrorSeq: 9 } }] })
+  assert.deepEqual(
+    [...both.mirrorEventSeqs(id)].sort((a, b) => a - b),
+    [3, 4],
+  )
+
+  // ownEvents is used when snapshotEvents is absent.
+  const own = adapterFor({ ownEvents: () => events })
+  assert.deepEqual(
+    [...own.mirrorEventSeqs(id)].sort((a, b) => a - b),
+    [3, 4],
+  )
+
+  // A richer snapshot object is tolerated: only `data.mirrorSeq` matters.
+  const wrapped = adapterFor({ snapshotEvents: () => events.map((event) => ({ ...event, meta: { rev: 1 } })) })
+  assert.deepEqual(
+    [...wrapped.mirrorEventSeqs(id)].sort((a, b) => a - b),
+    [3, 4],
+  )
+
+  // Nothing readable / a throwing host degrades to an empty set instead of raising.
+  assert.deepEqual([...adapterFor({}).mirrorEventSeqs(id)], [])
+  const throwing = adapterFor({
+    snapshotEvents() {
+      throw new Error('boom')
+    },
+  })
+  assert.deepEqual([...throwing.mirrorEventSeqs(id)], [])
+
+  // A non-mirror id is refused outright.
+  assert.deepEqual([...both.mirrorEventSeqs('session-123')], [])
 })

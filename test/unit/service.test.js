@@ -459,10 +459,17 @@ test('connect mirrors the remote workspace directory into L1 descriptors', async
 
   const listed = await service.listHostMirrors(host.id)
   assert.equal(listed.connected, true)
+  // Without a session adapter there is nowhere to replay into, so L2 is not claimable
+  // and the host stays at the directory level.
   assert.equal(listed.level, 'L1')
-  assert.equal(listed.reason.code, 'history-unavailable')
+  assert.equal(listed.capabilities.history, false)
   assert.equal(listed.sessionsAvailable, false)
   assert.equal(listed.mirrors.length, 2)
+  assert.equal(
+    listed.mirrors.every((mirror) => mirror.level === 'L1'),
+    true,
+    'without a session adapter no history can be replayed, so descriptors stay L1',
+  )
   await service.shutdown()
 })
 

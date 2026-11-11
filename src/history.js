@@ -92,29 +92,42 @@ export function buildDiscoveryCommand(root, remoteSessionId) {
 }
 
 /**
- * Read at most `maxBytes` of a remote file. `|| true` keeps a missing file from
- * looking like a failed command; the empty output is classified by the parser.
+ * Read at most `maxBytes + 1` of a remote file.
+ *
+ * The extra byte is what distinguishes "the file is exactly at the cap" from "there
+ * is more": asking for one byte past the limit means a complete log whose size is
+ * exactly `maxBytes` is not misreported as truncated.
+ *
+ * `2>/dev/null` is deliberately **not** used here (unlike discovery): an unreadable
+ * log must surface `Permission denied` on stderr so it can be classified as
+ * `permission-denied` instead of looking like a missing log. `|| true` still keeps a
+ * non-zero exit from failing the command, so the empty stdout is classified by the
+ * caller rather than by the shell.
  * @param {string} file
  * @param {number} [maxBytes]
  * @returns {string}
  */
 export function buildReadCommand(file, maxBytes = HISTORY_LIMITS.maxBytes) {
-  return `head -c ${Math.max(1, Math.floor(maxBytes))} ${quote(file)} 2>/dev/null || true`
+  const limit = Math.max(1, Math.floor(maxBytes)) + 1
+  return `head -c ${limit} ${quote(file)} 2>&1 || true`
 }
 
 /**
- * Classify a failed read from the remote's stderr/stdout.
+ * Classify a failed read from the remote's combined output.
  *
- * `head -c` against an unreadable file prints "Permission denied" on stderr; a
- * directory typo prints nothing because of `2>/dev/null`, which is why the caller
- * probes the directory first.
+ * The read redirects stderr into stdout (`2>&1`), so a permission error arrives on
+ * stdout; both streams are inspected anyway because an SSH layer may separate them.
  * @param {{ code: number | null, stdout: string, stderr: string }} result
  * @returns {HistoryFailure | null}
  */
 export function classifyReadFailure(result) {
-  const stderr = String(result?.stderr ?? '')
-  if (/permission denied/i.test(stderr)) return 'permission-denied'
-  if (result?.code !== 0 && String(result?.stdout ?? '') === '') return 'read-failed'
+  const stdout = String(result?.stdout ?? '')
+  const output = `${String(result?.stderr ?? '')}\n${stdout}`
+  if (/permission denied/i.test(output)) return 'permission-denied'
+  // A successful command's stdout is the log itself, so "no such file" is only
+  // meaningful when the command actually failed.
+  if (result?.code !== 0 && /no such file/i.test(output)) return 'no-session-log'
+  if (result?.code !== 0 && stdout.trim() === '') return 'read-failed'
   return null
 }
 
@@ -480,6 +493,27 @@ export function retainEvents(events, maxEvents) {
 }
 
 /**
+ * The seq range a fold notice should announce.
+ *
+ * The retained window is the **tail**, so the folded prefix is not `1..folded`
+ * whenever the fetch itself already dropped records: `fetchRemoteHistory` keeps only
+ * the newest `HISTORY_LIMITS.maxEvents`, and `mirrorMaxEvents` then keeps the newest
+ * `N` of those. The honest range therefore runs from the first retained seq minus the
+ * folded count, up to just before the first retained seq.
+ *
+ * @param {{ firstKeptSeq?: number, folded?: number }} input
+ * @returns {{ from: number, to: number, folded: number }}
+ */
+export function foldNoticeRange(input) {
+  const folded = Number.isFinite(Number(input?.folded)) ? Math.max(0, Math.floor(Number(input.folded))) : 0
+  const firstKept = Number.isFinite(Number(input?.firstKeptSeq)) ? Math.floor(Number(input.firstKeptSeq)) : 1
+  if (folded === 0) return { from: 0, to: 0, folded: 0 }
+  const to = Math.max(0, firstKept - 1)
+  const from = Math.max(1, firstKept - folded)
+  return { from, to, folded }
+}
+
+/**
  * Read one remote session's history over SSH.
  *
  * Three bounded commands, each of which can fail into a typed reason:
@@ -541,9 +575,11 @@ export async function fetchRemoteHistory(ssh, input) {
     const text = String(read?.stdout ?? '')
     if (text.trim() === '') return { ...empty, file, reason: 'no-session-log' }
 
-    // `head -c` cutting the file is indistinguishable from a genuinely truncated
-    // write, and both mean "do not replay this window": report and retry later.
-    const truncated = Buffer.byteLength(text, 'utf8') >= maxBytes || read?.timedOut === true
+    // `head -c maxBytes + 1` was requested, so a length strictly greater than the cap
+    // means there IS more data. Comparing `>=` would mark a complete log that is
+    // exactly at the cap as permanently truncated.
+    const bytes = Buffer.byteLength(text, 'utf8')
+    const truncated = bytes > maxBytes || read?.timedOut === true
     if (truncated) return { ...empty, file, reason: 'log-truncated', truncated: true, bytes: maxBytes }
 
     const parsed = parseRemoteSessionLog(text)

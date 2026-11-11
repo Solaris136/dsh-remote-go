@@ -190,9 +190,10 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 | 解析 | JSON 数组 / `{events\|records\|messages\|history\|turns:[...]}` / JSONL；显式 `version != 1` 直接判 `unknown-version`，不猜 |
 | 映射 | `{ seq, type, data, at }`，`seq` 单调；缺 `seq` 时用 1 起的位置 |
 | 应用 | `applyEvents({ cursor, events: [] }, window)`：只应用 `seq > cursor`，输入顺序无关，重复 `seq` 取首个 |
-| 缺口 | 游标停在缺口前最后一个连续事件，`reason.code = "gap-unfilled"`，不跳过、不推过缺口 |
-| 去重 | 写入本地会话的事件带 `data.mirrorSeq`，append 前再与「会话里已有的 seq」比对，覆盖「append 成功但 cursor 未落盘」的窗口 |
-| 保留 | `mirrorMaxEvents`（默认 200）；首次同步折叠前缀并写 `mirror/history-folded`，之后溢出按缺口处理 |
+| 缺口 | 游标停在缺口前最后一个连续事件；随后按 §6 的「重置游标 + 全量重拉」恢复一次，仍不连续才判 `gap-unfilled` |
+| 去重 | 写入本地会话的事件带 `data.mirrorSeq`，append 前再与「会话里已有的 seq」比对（真机走 `snapshotEvents()`），覆盖「append 成功但 cursor 未落盘」的窗口 |
+| 保留 | `mirrorMaxEvents`（默认 200）截断为最新窗口；首次同步折叠前缀并写 `mirror/history-folded`（带真实的 `from`/`to`），之后溢出按缺口处理 |
+| 只读标识 | 每个镜像会话首次回放时写一条 `mirror/read-only`（非 surface），descriptor 同时带 `readOnly: true`，客户端据此标注「只读」 |
 
 **什么被保留**：角色/类型、正文文本（`text` 或 `content` 的文本段）、工具调用的名称 + 参数摘要（≤200 字符）+
 `toolCallId`、`isError`、时间戳。
@@ -238,7 +239,7 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 | 阶段 | 交付 | 验收标准 |
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
-| P1 ✅ | 历史回放（L2，**已交付**） | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口不推游标；`test/unit/history.test.js` + `test/integration/history.e2e.js` 覆盖，模拟远端提供日志夹具 |
+| P1 ✅ | 历史回放（L2，**已交付**） | 远端会话日志经 SSH 读入 → 本地镜像会话里可读，**并带只读标识**（`readOnly` + `mirror/read-only` 事件，P1 验收行要求）；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`test/unit/history.test.js` + `test/integration/history.e2e.js` 覆盖，模拟远端提供日志夹具 |
 | P2 | 事件流 + 输入转发（L3） | 本地发消息 → 远端执行 → 事件流回本地；`seq` 幂等与续传有用例覆盖 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 

@@ -291,12 +291,27 @@ test('L2 history replay projects remote history into the local mirror session', 
       })
       await connectHost(service, host.id, logs)
 
-      // The connect pipeline syncs mirrors and replays history.
-      for (let attempt = 0; attempt < 200; attempt += 1) {
+      // The connect pipeline syncs mirrors and replays history. Wait for the whole
+      // projection to settle (cursor, level *and* the read-only marker), not just the
+      // cursor: the marker is appended before the descriptor is stored, so a cursor-only
+      // wait can observe a half-finished sync under load.
+      const settled = async () => {
         const mirrors = await mirrorsOf(service, host.id)
-        if (mirrors.length === HISTORY_SESSIONS.length && mirrors.every((mirror) => mirror.cursor === 5)) break
+        return (
+          mirrors.length === HISTORY_SESSIONS.length &&
+          mirrors.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2' && mirror.readOnly === true) &&
+          appends.filter((entry) => entry.type === 'mirror/read-only').length === HISTORY_SESSIONS.length
+        )
+      }
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (await settled()) break
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
+      assert.equal(
+        await settled(),
+        true,
+        `the history projection never settled: ${JSON.stringify(await mirrorsOf(service, host.id))}`,
+      )
       const mirrors = await mirrorsOf(service, host.id)
       assert.equal(mirrors.length, HISTORY_SESSIONS.length, `expected ${HISTORY_SESSIONS.length} mirrors`)
       for (const mirror of mirrors) {
@@ -319,6 +334,27 @@ test('L2 history replay projects remote history into the local mirror session', 
         ((await mirrorsOf(service, host.id)) ?? []).every((mirror) => mirror.cursor === 5),
         true,
         'the cursor must not move when there is nothing new',
+      )
+
+      // ---- §10 P1: a replayed mirror is marked read-only ----
+      // The descriptor carries the flag (the client renders it) and the session gets
+      // one non-surface notice, so a reader can tell mirrored history from local input.
+      const readOnlyMirrors = await mirrorsOf(service, host.id)
+      assert.equal(
+        readOnlyMirrors.every((mirror) => mirror.readOnly === true),
+        true,
+        'a replayed mirror must be flagged read-only in the descriptor',
+      )
+      const markers = appends.filter((entry) => entry.type === 'mirror/read-only')
+      assert.equal(markers.length, HISTORY_SESSIONS.length, 'exactly one read-only marker per mirrored session')
+      assert.equal(
+        markers.every((entry) => entry.data.readOnly === true),
+        true,
+      )
+      assert.equal(
+        appends.filter((entry) => entry.type === 'mirror/read-only').length,
+        markers.length,
+        'a re-sync must not announce the marker again',
       )
     })
 
@@ -360,6 +396,78 @@ test('L2 history replay projects remote history into the local mirror session', 
       // Nothing was re-appended: the local sessions were empty, so the guard is the
       // cursor here and the descriptor must not have gone backwards.
       assert.ok(appends.length <= HISTORY_SESSIONS.length * 5, 'history must not be duplicated on restart')
+    })
+
+    await t.test('a version-mismatched host stops replaying and keeps its §7 reason', async () => {
+      // §7: "版本不一致 → 不建立镜像，降级 L1，并在会话上标注". The reviewer's probe found it
+      // doing the opposite: replaying and erasing the per-descriptor reason.
+      const logs = []
+      const { sessions, appends } = createSessionsService()
+      const stateDir = path.join(temp, 'state-mismatch')
+      const adapter = createSessionAdapter({
+        sessions,
+        logger: createLogger(logs),
+        mirrorRoot: path.join(stateDir, 'mirrors'),
+      })
+      const service = createService({
+        stateDir,
+        home: path.join(temp, 'home-mismatch'),
+        localVersion: '0.2.2-rc.1',
+        logs,
+        adapter,
+      })
+      await service.init()
+      const host = await service.saveHost({
+        name: 'sim-history-mismatch',
+        address: '127.0.0.1',
+        port: sim.state.sshPort,
+        username: CREDENTIALS.username,
+        auth: { type: 'password' },
+        keepAlive: 'keep',
+        bootstrap: { mode: 'reuse' },
+      })
+      await connectHost(service, host.id, logs)
+      // Wait for the *completed* projection, not just a level: the read-only marker is
+      // appended before the descriptor is persisted, so `cursor === 5 && readOnly`
+      // means the healthy sync really finished and the snapshot below is stable.
+      const ready = async () => {
+        const mirrors = await mirrorsOf(service, host.id)
+        return mirrors.length === HISTORY_SESSIONS.length && mirrors.every((m) => m.cursor === 5 && m.readOnly === true)
+      }
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        if (await ready()) break
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      assert.equal(await ready(), true, 'the healthy sync must complete before the mismatch probe')
+      const healthy = await mirrorsOf(service, host.id)
+      assert.equal(
+        healthy.every((m) => m.level === 'L2'),
+        true,
+        'the healthy sync must reach L2 first, otherwise the regression below proves nothing',
+      )
+      const cursorsBefore = healthy.map((mirror) => mirror.cursor)
+      const appendsBefore = appends.length
+
+      // Lie about the remote version, the way the reviewer did, then re-sync.
+      const runtime = service.runtimes.get(host.id)
+      assert.ok(runtime, 'the host runtime must exist after connect')
+      runtime.remote = { ...runtime.remote, version: '0.0.1-mismatch' }
+      runtime.facts = { ...(runtime.facts ?? {}), dshVersion: '0.0.1-mismatch' }
+      const refreshed = await service.syncHostMirrors(host.id)
+
+      assert.equal(appends.length, appendsBefore, 'a version-mismatched host must not replay history')
+      assert.deepEqual(
+        (await mirrorsOf(service, host.id)).map((mirror) => mirror.cursor),
+        cursorsBefore,
+        'a version-mismatched host must not advance the cursor',
+      )
+      assert.equal(refreshed.level, 'L1')
+      const after = await mirrorsOf(service, host.id)
+      assert.equal(
+        after.every((mirror) => mirror.level === 'L1' && mirror.reason?.code === 'version-mismatch'),
+        true,
+        `a mismatch must be annotated per descriptor, got ${JSON.stringify(after.map((m) => ({ level: m.level, reason: m.reason?.code })))}`,
+      )
     })
   } finally {
     await stopSimulator(sim.child)
@@ -424,6 +532,12 @@ test('a gap in the remote log stops the cursor and produces one bounded backfill
         assert.ok(mirror.reason?.message?.zh, 'the typed reason must carry a localised message')
       }
       assert.ok(logContains(logs, 'gap-unfilled'), 'the sync must report the gap')
+      // §6 recovery must be visible in the log: the plugin re-pulled from scratch
+      // instead of retrying the same unreachable window forever.
+      assert.ok(
+        logContains(logs, 'unreachable') || logContains(logs, 're-pulling'),
+        'the §6 recovery (reset cursor + full re-pull) must be logged',
+      )
 
       // The bounded backfill is one extra read per session per sync, not a loop: a
       // second sync repeats the same single attempt and still does not advance.

@@ -14,6 +14,7 @@ import {
   buildReadCommand,
   classifyReadFailure,
   fetchRemoteHistory,
+  foldNoticeRange,
   mapRemoteRecord,
   mapRemoteRecords,
   parseRemoteSessionLog,
@@ -35,7 +36,11 @@ test('remote paths and commands stay single-quoted and bounded', () => {
   assert.match(discovery, /-maxdepth 4/)
   assert.match(discovery, /-name '\*evil'\\'';\s?rm -rf \/\*'/)
   assert.match(discovery, /head -n 5$/)
-  assert.match(buildReadCommand('/a/b.json', 1024), /^head -c 1024 '\/a\/b\.json' 2>\/dev\/null \|\| true$/)
+  // The read asks for one byte past the cap (so "exactly at the cap" is not
+  // misread as truncated) and does NOT hide stderr, which is what makes a
+  // permission failure classifiable.
+  assert.match(buildReadCommand('/a/b.json', 1024), /^head -c 1025 '\/a\/b\.json' 2>&1 \|\| true$/)
+  assert.equal(buildReadCommand('/a/b.json', 1024).includes('2>/dev/null'), false)
 })
 
 test('a discovery listing picks the log, not its sidecars', () => {
@@ -76,8 +81,88 @@ test('the log parser accepts the shapes seen in practice and refuses unknown ver
 
 test('reads are classified into typed failures', () => {
   assert.equal(classifyReadFailure({ code: 0, stdout: 'x', stderr: '' }), null)
+  // The read merges stderr into stdout (`2>&1`), so a permission error arrives there.
+  assert.equal(classifyReadFailure({ code: 1, stdout: 'head: Permission denied\n', stderr: '' }), 'permission-denied')
   assert.equal(classifyReadFailure({ code: 1, stdout: '', stderr: 'head: Permission denied' }), 'permission-denied')
+  assert.equal(classifyReadFailure({ code: 1, stdout: 'head: No such file', stderr: '' }), 'no-session-log')
   assert.equal(classifyReadFailure({ code: 1, stdout: '', stderr: '' }), 'read-failed')
+})
+
+/**
+ * A `head -c` answer that behaves like the shell: honour the requested byte count and
+ * the stderr redirect. Without this the test cannot tell `2>/dev/null` apart from
+ * `2>&1`, which is exactly the bug being guarded.
+ * @param {string} body full file body
+ * @param {string} [stderr] what the command writes to stderr
+ */
+function headAnswer(body, stderr = '') {
+  return (command) => {
+    const count = Number(/^head -c (\d+) /.exec(command)?.[1] ?? body.length)
+    const merged = command.includes('2>&1')
+    const shown = Math.min(count, body.length)
+    return {
+      code: stderr === '' ? 0 : 1,
+      stdout: body.slice(0, shown) + (merged ? '' : ''),
+      stderr: merged ? '' : stderr,
+    }
+  }
+}
+
+/**
+ * Same, but models the shell exactly: with `2>/dev/null` the message is discarded,
+ * with `2>&1` it lands on stdout. Anything else keeps them separate, as SSH does.
+ */
+function deniedAnswer(command) {
+  const message = 'head: cannot open for reading: Permission denied\n'
+  if (command.includes('2>/dev/null')) return { code: 1, stdout: '', stderr: '' }
+  if (command.includes('2>&1')) return { code: 1, stdout: message, stderr: '' }
+  return { code: 1, stdout: '', stderr: message }
+}
+
+test('an unreadable log reports permission-denied, not no-session-log', async () => {
+  // Regression: the read used to send stderr to /dev/null, so the permission message
+  // never reached the plugin and this always degraded to `no-session-log`.
+  const denied = fakeSsh([
+    [/^test -d /, { code: 0, stdout: 'yes\n', stderr: '' }],
+    [/^find /, { code: 0, stdout: '/h/sessions/session-s.json\n', stderr: '' }],
+    [/^head -c /, deniedAnswer],
+  ])
+  const result = await fetchRemoteHistory(denied, { remoteDshHome: '/h', remoteSessionId: 's' })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'permission-denied')
+})
+
+test('a complete log exactly at the byte cap is not reported as truncated', async () => {
+  // Regression: `>= maxBytes` marked a log whose size is exactly the cap as truncated
+  // forever, because the read never asked for the extra byte that would prove it.
+  const payload = JSON.stringify({ version: 1, events: [{ seq: 1, role: 'user', text: 'x' }] })
+  const exactSize = Buffer.byteLength(payload, 'utf8')
+  const atCap = fakeSsh([
+    [/^test -d /, { code: 0, stdout: 'yes\n', stderr: '' }],
+    [/^find /, { code: 0, stdout: '/h/sessions/session-s.json\n', stderr: '' }],
+    [/^head -c /, headAnswer(payload)],
+  ])
+  const result = await fetchRemoteHistory(atCap, {
+    remoteDshHome: '/h',
+    remoteSessionId: 's',
+    maxBytes: exactSize,
+  })
+  assert.equal(result.reason, null)
+  assert.equal(result.ok, true)
+  assert.equal(result.truncated, false)
+
+  // One byte of real data past the cap still reports truncation.
+  const overCap = fakeSsh([
+    [/^test -d /, { code: 0, stdout: 'yes\n', stderr: '' }],
+    [/^find /, { code: 0, stdout: '/h/sessions/session-s.json\n', stderr: '' }],
+    [/^head -c /, headAnswer(`${payload} `)],
+  ])
+  const truncated = await fetchRemoteHistory(overCap, {
+    remoteDshHome: '/h',
+    remoteSessionId: 's',
+    maxBytes: exactSize,
+  })
+  assert.equal(truncated.reason, 'log-truncated')
 })
 
 test('records map to the event model, preserving text and summarising tool calls', () => {
@@ -312,7 +397,8 @@ test('fetchRemoteHistory reports truncation instead of replaying a partial log',
   const truncated = fakeSsh([
     [/^test -d /, { code: 0, stdout: 'yes\n', stderr: '' }],
     [/^find /, { code: 0, stdout: '/h/sessions/session-s.json\n', stderr: '' }],
-    [/^head -c /, { code: 0, stdout: 'x'.repeat(64), stderr: '' }],
+    // The read asks for maxBytes + 1, so a body of exactly that length proves more data.
+    [/^head -c /, { code: 0, stdout: 'x'.repeat(65), stderr: '' }],
   ])
   const result = await fetchRemoteHistory(truncated, {
     remoteDshHome: '/h',
@@ -322,4 +408,47 @@ test('fetchRemoteHistory reports truncation instead of replaying a partial log',
   assert.equal(result.ok, false)
   assert.equal(result.reason, 'log-truncated')
   assert.equal(result.events.length, 0)
+})
+
+test('the fold notice reports the range that was actually skipped', () => {
+  // Regression: the notice hardcoded `from: 1, to: folded`, which is wrong as soon as
+  // the fetch dropped records, because the retained window is the tail.
+  assert.deepEqual(foldNoticeRange({ firstKeptSeq: 6, folded: 2 }), { from: 4, to: 5, folded: 2 })
+  // A window starting later still reports a truthful range, never `1..folded`.
+  const long = foldNoticeRange({ firstKeptSeq: 1900, folded: 100 })
+  assert.deepEqual(long, { from: 1800, to: 1899, folded: 100 })
+  assert.notDeepEqual(long, { from: 1, to: 100, folded: 100 })
+  // Nothing folded: the notice is not written at all.
+  assert.deepEqual(foldNoticeRange({ firstKeptSeq: 5, folded: 0 }), { from: 0, to: 0, folded: 0 })
+  // Degenerate input degrades to a sane range instead of negatives.
+  assert.deepEqual(foldNoticeRange({ firstKeptSeq: 1, folded: 3 }), { from: 1, to: 0, folded: 3 })
+  assert.deepEqual(foldNoticeRange({}), { from: 0, to: 0, folded: 0 })
+})
+
+test('the docs do not claim L2 is unimplemented', async () => {
+  // The frozen-contract list drifted once already: it kept saying `applyEvents` had no
+  // caller and that `mirrorMaxEvents` was "尚未实现" after both shipped. Guard the two
+  // claims so a rebase cannot silently bring them back.
+  const { readFile } = await import('node:fs/promises')
+  const api = await readFile(new URL('../../docs/api.md', import.meta.url), 'utf8')
+  const design = await readFile(new URL('../../docs/session-design.md', import.meta.url), 'utf8')
+
+  assert.equal(/applyEvents[^。\n]*没有调用方/.test(api), false, 'api.md must not claim applyEvents has no caller')
+  assert.equal(
+    /mirrorMaxEvents[^。\n]*尚未实现/.test(api),
+    false,
+    'api.md must not claim mirrorMaxEvents is unimplemented',
+  )
+  assert.equal(/mirrorMaxEvents[^。\n]*尚未实现/.test(design), false, 'session-design.md must not claim it either')
+  // And it must positively document what L2 does.
+  assert.match(api, /mirror\/history-folded/, 'api.md documents the fold notice')
+  assert.match(design, /6\.1 L2 已落地/, 'session-design.md has the L2 section')
+
+  // Code and docs agree about what is still internal: the lease helpers, not the cursor.
+  const mirrorSource = await readFile(new URL('../../src/mirror.js', import.meta.url), 'utf8')
+  const internalBlocks = mirrorSource.split('@internal').slice(1)
+  assert.ok(internalBlocks.length > 0, 'the lease helpers are still marked @internal')
+  for (const marker of ['acquireLease', 'renewLease', 'expireLease', 'isLeaseHeldBy']) {
+    assert.equal(mirrorSource.includes(`@internal`) && mirrorSource.includes(`function ${marker}`), true)
+  }
 })
