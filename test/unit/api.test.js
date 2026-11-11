@@ -97,7 +97,7 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     const created = await call(api.base, '/hosts', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ host: { name: 'VM', address: 'tencent-vm', keepAlive: 'keep' } }),
+      body: JSON.stringify({ host: { name: 'VM', address: 'test-host', keepAlive: 'keep' } }),
     })
     assert.equal(created.status, 200)
     assert.equal(created.json.ok, true)
@@ -171,9 +171,9 @@ test('SSH alias discovery reads the local config through the service', async () 
     assert.equal(result.status, 200)
     assert.deepEqual(
       result.json.aliases.map((alias) => alias.alias),
-      ['tencent-vm'],
+      ['test-host'],
     )
-    assert.equal(result.json.aliases[0].host, '240d:c000:f05f:8d00:327e:8b66:5c18:0')
+    assert.equal(result.json.aliases[0].host, '2001:db8::1')
     assert.equal(result.json.aliases[0].user, 'ubuntu')
     assert.ok(result.json.knownHosts)
   } finally {

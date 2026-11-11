@@ -4,7 +4,7 @@
 - 测试主机：腾讯云 VM，Ubuntu 24.04 x86_64，用户 `ubuntu`，IPv6 `<已脱敏>`（本地 SSH 别名 `<host-alias>`；IPv4 回程不可用，全程走 IPv6）
 - 本地：Windows 11，DSH 0.2.2-rc.1，Chromium/Chrome 157.0.8103.39
 - 远端隔离根目录：`/home/ubuntu/.dsh-remote-go`（与旧 `~/.dsh` 完全隔离，未触碰）
-- 任务：task-1（owner `remote-env`）
+- 任务：远端环境自举与 V0 可行性验证
 
 ## 总体结论
 

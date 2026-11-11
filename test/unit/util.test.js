@@ -14,12 +14,12 @@ import {
 } from '../../src/util.js'
 
 test('parseSshDestination handles user, host and port shapes', () => {
-  assert.deepEqual(parseSshDestination('ubuntu@43.133.80.40'), { user: 'ubuntu', host: '43.133.80.40', port: null })
+  assert.deepEqual(parseSshDestination('ubuntu@192.0.2.10'), { user: 'ubuntu', host: '192.0.2.10', port: null })
   assert.deepEqual(parseSshDestination('ubuntu@example.com:2222'), { user: 'ubuntu', host: 'example.com', port: 2222 })
-  assert.deepEqual(parseSshDestination('tencent-vm'), { user: null, host: 'tencent-vm', port: null })
-  assert.deepEqual(parseSshDestination('[240d:c000:f05f:8d00:327e:8b66:5c18:0]:22'), {
+  assert.deepEqual(parseSshDestination('test-host'), { user: null, host: 'test-host', port: null })
+  assert.deepEqual(parseSshDestination('[2001:db8::1]:22'), {
     user: null,
-    host: '240d:c000:f05f:8d00:327e:8b66:5c18:0',
+    host: '2001:db8::1',
     port: 22,
   })
   assert.deepEqual(parseSshDestination('user@[::1]'), { user: 'user', host: '::1', port: null })
@@ -36,11 +36,11 @@ test('isLoopbackHost only accepts loopback literals', () => {
 })
 
 test('maskSshAddress keeps shape without secrets', () => {
-  assert.equal(maskSshAddress({ user: 'ubuntu', host: '43.133.80.40', port: 22 }), 'ubuntu@43.133.80.40')
-  assert.equal(maskSshAddress({ user: 'ubuntu', host: '43.133.80.40', port: 2222 }), 'ubuntu@43.133.80.40:2222')
+  assert.equal(maskSshAddress({ user: 'ubuntu', host: '192.0.2.10', port: 22 }), 'ubuntu@192.0.2.10')
+  assert.equal(maskSshAddress({ user: 'ubuntu', host: '192.0.2.10', port: 2222 }), 'ubuntu@192.0.2.10:2222')
   assert.equal(
-    maskSshAddress({ alias: 'tencent-vm', user: 'ubuntu', host: '240d::1', port: 22 }),
-    'tencent-vm (ubuntu@240d::1)',
+    maskSshAddress({ alias: 'test-host', user: 'ubuntu', host: '240d::1', port: 22 }),
+    'test-host (ubuntu@240d::1)',
   )
 })
 

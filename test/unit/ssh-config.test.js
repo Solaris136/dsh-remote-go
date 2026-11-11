@@ -13,8 +13,8 @@ const CONFIG = `# global defaults
 ServerAliveInterval 30
 IdentityFile ~/.ssh/id_rsa
 
-Host tencent-vm 43.133.80.40
-  HostName 240d:c000:f05f:8d00:327e:8b66:5c18:0
+Host test-host 192.0.2.10
+  HostName 2001:db8::1
   User ubuntu
   IdentityFile ~/.ssh/id_ed25519
 
@@ -32,11 +32,11 @@ Host *
 test('parseSshConfig collects global options, host blocks and unsupported keywords', () => {
   const parsed = parseSshConfig(CONFIG)
   assert.equal(parsed.globals.identityfile[0], '~/.ssh/id_rsa')
-  assert.equal(parsed.entries.length, 4) // tencent-vm, web-*, !web-prod web-*, Host *
+  assert.equal(parsed.entries.length, 4) // test-host, web-*, !web-prod web-*, Host *
   const negatedBlock = parsed.entries.find((entry) => entry.negated.length === 1)
   assert.deepEqual(negatedBlock.negated, ['web-prod'])
-  const multiPattern = parsed.entries.find((entry) => entry.patterns.includes('tencent-vm'))
-  assert.deepEqual(multiPattern.patterns, ['tencent-vm', '43.133.80.40'])
+  const multiPattern = parsed.entries.find((entry) => entry.patterns.includes('test-host'))
+  assert.deepEqual(multiPattern.patterns, ['test-host', '192.0.2.10'])
 })
 
 test('parseSshConfig records Include/Match as unsupported instead of guessing', () => {
@@ -50,8 +50,8 @@ test('parseSshConfig records Include/Match as unsupported instead of guessing', 
 
 test('resolveSshAlias applies host block options and identity files accumulate', () => {
   const parsed = parseSshConfig(CONFIG)
-  const alias = resolveSshAlias(parsed, 'tencent-vm', { home: '/home/u' })
-  assert.equal(alias.host, '240d:c000:f05f:8d00:327e:8b66:5c18:0')
+  const alias = resolveSshAlias(parsed, 'test-host', { home: '/home/u' })
+  assert.equal(alias.host, '2001:db8::1')
   assert.equal(alias.user, 'ubuntu')
   assert.equal(alias.port, 22)
   // IdentityFile is additive in OpenSSH: global then host-specific.
@@ -71,7 +71,7 @@ test('first obtained value wins across matching blocks', () => {
 test('discoverSshAliases returns concrete aliases only', () => {
   const parsed = parseSshConfig(CONFIG)
   const aliases = discoverSshAliases(parsed, { home: '/home/u' }).map((item) => item.alias)
-  assert.deepEqual(aliases, ['tencent-vm', '43.133.80.40'])
+  assert.deepEqual(aliases, ['test-host', '192.0.2.10'])
 })
 
 test('resolveDestination keeps literal user/port and inherits global identity files', () => {
@@ -84,10 +84,10 @@ test('resolveDestination keeps literal user/port and inherits global identity fi
 })
 
 test('resolveDestination resolves a config alias with config host/user/port', () => {
-  const resolved = resolveDestination('tencent-vm', { configText: CONFIG, home: '/home/u' })
+  const resolved = resolveDestination('test-host', { configText: CONFIG, home: '/home/u' })
   assert.equal(resolved.source, 'config')
-  assert.equal(resolved.alias, 'tencent-vm')
-  assert.equal(resolved.host, '240d:c000:f05f:8d00:327e:8b66:5c18:0')
+  assert.equal(resolved.alias, 'test-host')
+  assert.equal(resolved.host, '2001:db8::1')
   assert.equal(resolved.user, 'ubuntu')
 })
 
@@ -95,7 +95,7 @@ test('host pattern matching supports wildcards, case folding and negation', () =
   assert.equal(matchHostPattern('web-*', 'web-prod'), true)
   assert.equal(matchHostPattern('web-*', 'db-prod'), false)
   assert.equal(matchHostPattern('*.example.com', 'a.example.com'), true)
-  assert.equal(matchHostPattern('Tencent-VM', 'tencent-vm'), true)
+  assert.equal(matchHostPattern('Test-Host', 'test-host'), true)
   const entry = { patterns: ['web-*'], negated: ['web-prod'], options: {}, line: 1 }
   assert.equal(entryMatches(entry, 'web-dev'), true)
   assert.equal(entryMatches(entry, 'web-prod'), false)

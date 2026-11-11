@@ -180,7 +180,7 @@ export async function makeTestService(overrides = {}) {
     tailLog: async () => '',
     loadSshMaterial: async () => ({
       sshDir: '/home/test/.ssh',
-      configText: 'Host tencent-vm\n  HostName 240d:c000:f05f:8d00:327e:8b66:5c18:0\n  User ubuntu\n',
+      configText: 'Host test-host\n  HostName 2001:db8::1\n  User ubuntu\n',
       knownHostsText: '',
       configPath: '/home/test/.ssh/config',
       knownHostsPath: '/home/test/.ssh/known_hosts',
@@ -213,7 +213,7 @@ export async function waitFor(predicate, options = {}) {
 export async function createHost(service, overrides = {}) {
   return service.saveHost({
     name: 'Tencent VM',
-    address: 'tencent-vm',
+    address: 'test-host',
     port: 22,
     username: 'ubuntu',
     auth: { type: 'agent' },

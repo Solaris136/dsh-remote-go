@@ -38,7 +38,7 @@ test('sanitizeHostEntry validates and normalizes a first host', () => {
   const entry = sanitizeHostEntry(
     {
       name: '  腾讯云  ',
-      address: 'ubuntu@43.133.80.40:2222',
+      address: 'ubuntu@192.0.2.10:2222',
       auth: { type: 'key', keyPath: '~/.ssh/id_ed25519' },
       keepAlive: 'idle',
       idleMinutes: 30,
@@ -46,7 +46,7 @@ test('sanitizeHostEntry validates and normalizes a first host', () => {
     { settings },
   )
   assert.equal(entry.name, '腾讯云')
-  assert.equal(entry.address, 'ubuntu@43.133.80.40:2222')
+  assert.equal(entry.address, 'ubuntu@192.0.2.10:2222')
   assert.equal(entry.port, 2222)
   assert.equal(entry.username, 'ubuntu')
   assert.equal(entry.auth.type, 'key')
@@ -59,7 +59,7 @@ test('sanitizeHostEntry validates and normalizes a first host', () => {
 
 test('sanitizeHostEntry keeps an existing id and pinned fingerprint, rejects missing address', () => {
   const existing = { id: 'h_1', createdAt: '2026-01-01T00:00:00.000Z', pinnedFingerprint: 'SHA256:abc' }
-  const entry = sanitizeHostEntry({ id: 'h_1', address: 'tencent-vm' }, { settings: defaultSettings(), existing })
+  const entry = sanitizeHostEntry({ id: 'h_1', address: 'test-host' }, { settings: defaultSettings(), existing })
   assert.equal(entry.id, 'h_1')
   assert.equal(entry.createdAt, '2026-01-01T00:00:00.000Z')
   assert.equal(entry.pinnedFingerprint, 'SHA256:abc')
@@ -68,15 +68,15 @@ test('sanitizeHostEntry keeps an existing id and pinned fingerprint, rejects mis
 
 test('sanitizeHostEntry keeps an existing jump host when an edit omits it, and clears on empty', () => {
   const existing = { id: 'h_1', createdAt: '2026-01-01T00:00:00.000Z', jumpHost: 'bastion' }
-  const kept = sanitizeHostEntry({ id: 'h_1', address: 'tencent-vm' }, { settings: defaultSettings(), existing })
+  const kept = sanitizeHostEntry({ id: 'h_1', address: 'test-host' }, { settings: defaultSettings(), existing })
   assert.equal(kept.jumpHost, 'bastion')
   const cleared = sanitizeHostEntry(
-    { id: 'h_1', address: 'tencent-vm', jumpHost: '' },
+    { id: 'h_1', address: 'test-host', jumpHost: '' },
     { settings: defaultSettings(), existing },
   )
   assert.equal(cleared.jumpHost, null)
   const replaced = sanitizeHostEntry(
-    { id: 'h_1', address: 'tencent-vm', jumpHost: 'other-bastion' },
+    { id: 'h_1', address: 'test-host', jumpHost: 'other-bastion' },
     { settings: defaultSettings(), existing },
   )
   assert.equal(replaced.jumpHost, 'other-bastion')
