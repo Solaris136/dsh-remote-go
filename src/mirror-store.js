@@ -87,7 +87,11 @@ export class MirrorStore {
    *   dir: string,
    *   logger?: { warn?: (...args: any[]) => void },
    *   fsImpl?: typeof fs,
-   * }} options
+   *   lockStaleMs?: number,
+   *   lockWaitMs?: number,
+   *   lockRetryMs?: number,
+   * }} options `lock*Ms` exist so tests can exercise the timeout path without
+   * waiting the production intervals; they default to the module constants.
    */
   constructor(options) {
     this.dir = options.dir
@@ -95,6 +99,9 @@ export class MirrorStore {
     this.fs = options.fsImpl ?? fs
     this.file = path.join(this.dir, 'mirrors.json')
     this.lockFile = `${this.file}.lock`
+    this.lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS
+    this.lockWaitMs = options.lockWaitMs ?? LOCK_WAIT_MS
+    this.lockRetryMs = options.lockRetryMs ?? LOCK_RETRY_MS
     /** @type {MirrorStoreData} */
     this.data = emptyMirrorData()
     /** Path the last load moved a corrupt/future file to, if any. */
@@ -303,13 +310,12 @@ export class MirrorStore {
       } catch (error) {
         if (/** @type {any} */ (error)?.code !== 'EEXIST') throw error
         await this.#breakStaleLock()
-        if (Date.now() - started > LOCK_WAIT_MS) {
-          const timeout = (new Error('timed out waiting for another process to release the mirror store lock')(
-            /** @type {any} */ timeout,
-          ).code = 'ELOCKTIMEOUT')
+        if (Date.now() - started > this.lockWaitMs) {
+          const timeout = new Error('timed out waiting for another process to release the mirror store lock')
+          timeout.code = 'ELOCKTIMEOUT'
           throw timeout
         }
-        await sleep(LOCK_RETRY_MS)
+        await sleep(this.lockRetryMs)
       }
     }
   }
@@ -318,7 +324,7 @@ export class MirrorStore {
   async #breakStaleLock() {
     try {
       const info = await this.fs.stat(this.lockFile)
-      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) await this.#removeQuietly(this.lockFile)
+      if (Date.now() - info.mtimeMs > this.lockStaleMs) await this.#removeQuietly(this.lockFile)
     } catch {
       /* the lock disappeared or cannot be inspected: just retry the create */
     }

@@ -865,3 +865,41 @@ test(
     assert.deepEqual(leftovers, [], 'a failed write left temp or lock files behind')
   },
 )
+
+test('a lock that never goes stale times out with a coded error', async () => {
+  const fakeFs = {
+    async mkdir() {},
+    async open() {
+      const error = new Error('another writer holds the lock')
+      error.code = 'EEXIST'
+      throw error
+    },
+    // Always fresh: never old enough to be broken as stale.
+    async stat() {
+      return { mtimeMs: Date.now() }
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-timeout-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 60,
+    lockRetryMs: 5,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  await assert.rejects(
+    () => store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }]),
+    (error) => {
+      assert.equal(error.code, 'ELOCKTIMEOUT')
+      assert.match(error.message, /timed out waiting for another process/)
+      return true
+    },
+  )
+})
