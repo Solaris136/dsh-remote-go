@@ -9,6 +9,8 @@ test('mirrorMaxSessions defaults to 200, accepts 0 (unlimited) and clamps junk',
   assert.equal(sanitizeSettings({ mirrorMaxSessions: 'nope' }).mirrorMaxSessions, 200)
   assert.equal(sanitizeSettings({ mirrorMaxSessions: -5 }).mirrorMaxSessions, 0)
   assert.equal(sanitizeSettings({ mirrorMaxSessions: 1e9 }).mirrorMaxSessions, 5000)
+  // `null` means "unset", not "unlimited": only an explicit 0 disables the cap.
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: null }).mirrorMaxSessions, 200)
 })
 
 test('defaultSettings matches the documented defaults', () => {

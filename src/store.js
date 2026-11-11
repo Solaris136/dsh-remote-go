@@ -11,7 +11,7 @@
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import { readJsonFile, writeJsonAtomic } from './atomic-json.js'
+import { readJsonFile, withProcessLock, writeJsonAtomic } from './atomic-json.js'
 import { nowIso, randomId } from './util.js'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from './settings.js'
 
@@ -63,17 +63,23 @@ export class HostStore {
   }
 
   /**
+   * Serialize one file's writes through its own cross-process lock
+   * (`<file>.lock`) and the shared atomic writer. Each state file has a distinct
+   * lock path, and no caller holds one lock while taking another (`saveSettings`
+   * writes settings then secrets sequentially), so there is no lock nesting.
    * @param {string} file
    * @param {unknown} value
    * @param {number} mode
    */
   #writeJson(file, value, mode = 0o600) {
-    return writeJsonAtomic(file, value, {
-      dir: this.dir,
-      fs: this.fs,
-      logger: this.logger,
-      fileMode: mode,
-    })
+    return withProcessLock(`${file}.lock`, { fs: this.fs, logger: this.logger }, () =>
+      writeJsonAtomic(file, value, {
+        dir: this.dir,
+        fs: this.fs,
+        logger: this.logger,
+        fileMode: mode,
+      }),
+    )
   }
 
   async #persistHosts() {

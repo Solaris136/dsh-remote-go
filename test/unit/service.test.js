@@ -1083,3 +1083,49 @@ test('lowering mirrorMaxSessions never orphans a session it already created', as
   assert.equal(adapter.live.size, 3)
   await service.shutdown()
 })
+
+test('the sidebar group is kept when a capped batch fails but sessions are live', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b', 's-c'] },
+  })
+  /** @type {Map<string, any>} */
+  const live = new Map()
+  /** @type {any[]} */
+  const registered = []
+  const sessionAdapter = {
+    ensureMirrorSession(descriptor) {
+      live.set(descriptor.localSessionId, {})
+      return { ok: true, created: true, localSessionId: descriptor.localSessionId }
+    },
+    hasMirrorSession(localSessionId) {
+      return live.has(localSessionId)
+    },
+  }
+  const workspaceAdapter = {
+    ensureHostWorkspace: async (request) => {
+      registered.push(request)
+      return { ok: true, enabled: true, workspaceId: 'ws_mirror', title: `Remote: ${request.hostId}` }
+    },
+  }
+  const { service } = await makeTestService({
+    sessionAdapter,
+    workspaceAdapter,
+    sshFactory: registrySshFactory(stdout),
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => live.size === 3, { label: 'three live sessions' })
+
+  // Every create in the capped batch now fails, but the sessions from the
+  // earlier sync are still live, so the group must not be reported as empty.
+  sessionAdapter.ensureMirrorSession = () => ({ ok: false, reason: 'create-failed' })
+  await service.saveSettings({ mirrorMaxSessions: 1 })
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.truncated, 2)
+  assert.equal(synced.sessions.length, 1)
+  assert.equal(synced.sessions[0].ok, false)
+  assert.equal(synced.sidebar.ok, true)
+  assert.notEqual(synced.sidebar.reason, 'sessions-unavailable')
+  assert.equal(registered.length > 0, true)
+  await service.shutdown()
+})

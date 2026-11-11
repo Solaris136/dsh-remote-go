@@ -688,10 +688,16 @@ export class RemoteGoService extends EventEmitter {
       // No local sessions to group, so a workspace would only be an empty group.
       return { ok: true, enabled, reason: 'sessions-unavailable', path: null, workspaceId: null }
     }
-    const grouped = sessionResults.filter((entry) => entry?.ok === true).length
     if (active.length === 0) {
       return { ok: true, enabled, reason: 'no-mirrors', path: null, workspaceId: null }
     }
+    // Count every live mirror session, not only the ones this sync attempted: a
+    // capped batch whose creates all failed still has live sessions from earlier
+    // syncs, and reporting `sessions-unavailable` would contradict them.
+    const grouped =
+      typeof this.sessionAdapter.hasMirrorSession === 'function'
+        ? active.filter((descriptor) => this.sessionAdapter.hasMirrorSession(descriptor.localSessionId) === true).length
+        : sessionResults.filter((entry) => entry?.ok === true).length
     if (grouped === 0) {
       // Every `sessions.create` failed: registering now would show an empty group
       // that contradicts the documented `sessions-unavailable` meaning.

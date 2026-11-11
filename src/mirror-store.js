@@ -276,5 +276,12 @@ function sanitizeDescriptors(descriptors) {
  * @returns {import('./mirror.js').MirrorDescriptor}
  */
 function cloneDescriptor(descriptor) {
-  return { ...descriptor, capabilities: { ...descriptor.capabilities } }
+  return {
+    ...descriptor,
+    capabilities: { ...descriptor.capabilities },
+    reason:
+      descriptor.reason === null || descriptor.reason === undefined
+        ? null
+        : { code: descriptor.reason.code, message: { ...descriptor.reason.message } },
+  }
 }

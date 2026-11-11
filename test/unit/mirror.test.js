@@ -955,3 +955,25 @@ test('a lock that never goes stale times out with a coded error', async () => {
     },
   )
 })
+
+test('listMirrors returns deep copies so callers cannot corrupt the store', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-clone-'))
+  const store = new MirrorStore({ dir, logger: quiet })
+  await store.load()
+  await store.upsertMirrors([
+    {
+      hostId: 'h_1',
+      remoteSessionId: 'r1',
+      title: 't',
+      capabilities: { list: true, history: false, stream: false, input: false, approve: false },
+      reason: { code: 'version-mismatch', message: { zh: '旧', en: 'old' } },
+    },
+  ])
+  const [first] = store.listMirrors()
+  first.reason.message.zh = 'CORRUPTED'
+  first.capabilities.stream = true
+  const [second] = store.listMirrors()
+  assert.equal(second.reason.message.zh, '旧')
+  assert.equal(second.reason.code, 'version-mismatch')
+  assert.equal(second.capabilities.stream, false)
+})

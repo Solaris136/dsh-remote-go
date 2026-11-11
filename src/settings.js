@@ -94,7 +94,12 @@ export function sanitizeSettings(raw) {
     hostKeyPolicy: oneOf(input.hostKeyPolicy, ['first-use', 'strict'], defaults.hostKeyPolicy),
     saveTokens: boolean(input.saveTokens, defaults.saveTokens),
     mirrorToSidebar: boolean(input.mirrorToSidebar, defaults.mirrorToSidebar),
-    mirrorMaxSessions: numberIn(input.mirrorMaxSessions, 0, 5000, defaults.mirrorMaxSessions),
+    // `null` is not a value the user can choose: it means "unset", so it falls
+    // back to the default. Only an explicit 0 means unlimited.
+    mirrorMaxSessions:
+      input.mirrorMaxSessions === null
+        ? defaults.mirrorMaxSessions
+        : numberIn(input.mirrorMaxSessions, 0, 5000, defaults.mirrorMaxSessions),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
