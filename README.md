@@ -260,10 +260,19 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 - 桌面端欢迎页是独立 `file://` 页面，其语言跟随**系统语言**而非 `--lang`；用例会打印该页的
   `documentElement.lang` / `navigator.language` 与实际点击到的标签，语言不符时看日志即可定位，而不是表现为导航超时。
 
+另外 `[data-dsh-remote-go="styles"]` 在桌面端**不存在**（样式却已生效），所以“客户端已加载”一律按行为断言
+（插件 class + CSS 变量可解析），不用这个标记。
+
+缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
+`.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
+（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**（分支保护共 8 项必需检查：仓库规范、双平台单测、
+双平台打包、CodeQL 分析、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
+失败时都会上传截图与日志（`web-e2e-failure` / `desktop-e2e-failure` artifact）。
+
 ### 模拟远端主机（`e2e/sim`）
 
 镜像会话与历史回放等能力**不需要真实主机**即可验证：`e2e/sim/simulated-remote.mjs` 用 ssh2 在本机起一个真实 SSH
-端点（回环地址、固定凭据、只允许转发到自己的端口），并用一个 HTTP stub 扮演远端 DSH 的 web。
+端点（回环地址、默认凭据（可用 `--ssh-user/--ssh-password` 覆盖）、只允许转发到自己的端口），并用一个 HTTP stub 扮演远端 DSH 的 web。
 
 ```bash
 pnpm run sim:remote                                     # 自检：探针 → 隧道 → HTTP 200
@@ -273,14 +282,6 @@ node e2e/sim/simulated-remote.mjs --serve --workspace-fixture <file> --state-fil
 `--serve` 常驻；`--workspace-fixture` 指定远端 `storages/workspace.json` 的内容（用于构造多工作区/多会话场景），
 `--state-file` 指定状态文件（`node --test` 并行跑多个用例时需要各用各的）。隔离护栏：只绑回环、拒绝非回环配置退出、
 凭据必须匹配、转发目标限定自身端口。
-  另外 `[data-dsh-remote-go="styles"]` 在桌面端**不存在**（样式却已生效），所以“客户端已加载”一律按行为断言
-  （插件 class + CSS 变量可解析），不用这个标记。
-
-缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
-`.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
-（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**（分支保护共 8 项必需检查：仓库规范、双平台单测、
-双平台打包、CodeQL 分析、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
-失败时都会上传截图与日志（`web-e2e-failure` / `desktop-e2e-failure` artifact）。
 
 目录：
 
