@@ -945,10 +945,17 @@ test('syncHostMirrors keeps and marks a session the remote deleted', async () =>
   const kept = service.mirrorStore.listMirrors({ hostId: host.id })
   assert.equal(kept.length, 2)
   assert.equal(kept.find((mirror) => mirror.remoteSessionId === 's-b').status, 'remote-deleted')
-  // The plugin only ever read the registry; it never asked the remote to delete.
+  // The plugin only ever read the registry; it never asked the remote to delete. It may install
+  // its own read-side helpers (§6.3), so assert the *absence of a delete* rather than
+  // "only cat" — the latter would pass vacuously if a new read were added.
   assert.equal(
-    commands.every((command) => command.startsWith('cat ')),
+    commands.every((command) => !/\b(rm|unlink|rmdir)\b/.test(command)),
     true,
+  )
+  assert.equal(
+    commands.filter((command) => command.startsWith('cat ')).length > 0,
+    true,
+    'it does still read the registry',
   )
   await service.shutdown()
 })
