@@ -435,6 +435,58 @@ test('capability and descriptor normalization drop unknown data', () => {
 
 // (f) capability level ------------------------------------------------------
 
+test('planMirror stamps every descriptor with the decided level and reason', () => {
+  const decision = {
+    level: 'L1',
+    reason: { code: 'version-mismatch', detail: { zh: '版本不一致', en: 'Version mismatch' } },
+  }
+  const planned = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: l1Capabilities(),
+    now: NOW,
+    decision,
+  })
+  assert.equal(planned.length, 2)
+  for (const descriptor of planned) {
+    assert.equal(descriptor.level, 'L1')
+    assert.deepEqual(descriptor.reason, {
+      code: 'version-mismatch',
+      message: { zh: '版本不一致', en: 'Version mismatch' },
+    })
+  }
+
+  // A fully capable decision carries no downgrade reason.
+  const complete = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: { list: true, history: true, stream: true, input: true, approve: true },
+    now: NOW,
+    decision: { level: 'L3', reason: null },
+  })
+  assert.equal(complete[0].level, 'L3')
+  assert.equal(complete[0].reason, null)
+
+  // Without a decision the descriptor is the conservative directory baseline.
+  const bare = planMirror({ host: HOST, remoteWorkspaces: registry(), now: NOW })
+  assert.equal(bare[0].level, 'L1')
+  assert.equal(bare[0].reason, null)
+
+  // Persisted descriptors keep a valid annotation and drop an invalid one.
+  const roundTrip = normalizeMirrorDescriptor(planned[0])
+  assert.equal(roundTrip.level, 'L1')
+  assert.deepEqual(roundTrip.reason, planned[0].reason)
+  const invalid = normalizeMirrorDescriptor({ ...planned[0], level: 'L9', reason: { code: 42 } })
+  assert.equal(invalid.level, 'L1')
+  assert.equal(invalid.reason, null)
+  // `{ code, detail }` (the decideLevel shape) is accepted as well.
+  const fromDetail = normalizeMirrorDescriptor({
+    ...planned[0],
+    reason: { code: 'probe-missing', detail: { zh: '未探测', en: 'Not probed' } },
+  })
+  assert.deepEqual(fromDetail.reason, { code: 'probe-missing', message: { zh: '未探测', en: 'Not probed' } })
+})
+
 test('decideLevel downgrades with the reason codes the design names', () => {
   const full = { list: true, history: true, stream: true, input: true, approve: true }
   const versions = { hostVersion: '0.2.2-rc.1', localVersion: '0.2.2-rc.1' }
@@ -902,4 +954,163 @@ test('a lock that never goes stale times out with a coded error', async () => {
       return true
     },
   )
+})
+
+test('a contended lock open reported as EPERM is retried, not failed', async () => {
+  // Windows reports contention on an exclusive create as EPERM/EACCES rather than EEXIST when
+  // the other process is mid-create or mid-delete. Treating it as a hard failure broke the
+  // cross-process write on the Windows runner.
+  let attempts = 0
+  let opened = false
+  const fakeFs = {
+    async mkdir() {},
+    async open(file, flags) {
+      if (flags === 'wx' && String(file).endsWith('.lock')) {
+        attempts += 1
+        if (attempts <= 2) {
+          const error = new Error('operation not permitted')
+          error.code = 'EPERM'
+          throw error
+        }
+      }
+      opened = true
+      return {
+        async close() {},
+        async sync() {},
+        async writeFile() {},
+      }
+    },
+    async stat() {
+      return { mtimeMs: Date.now() }
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-eperm-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 2_000,
+    lockRetryMs: 5,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }])
+  assert.equal(opened, true, 'the write must eventually take the lock')
+  assert.equal(attempts, 3, 'each EPERM contention must be retried')
+})
+
+test('a lock that can never be created fails fast with its own error', async () => {
+  // ACL denial / read-only mount also surface as EACCES on create. Those must not be
+  // mistranslated into a 20 s ELOCKTIMEOUT that blames another process.
+  const fakeFs = {
+    async mkdir() {},
+    async open() {
+      const error = new Error('operation not permitted')
+      error.code = 'EACCES'
+      throw error
+    },
+    // The lock file never exists: nothing else can be holding it.
+    async stat() {
+      const error = new Error('not found')
+      error.code = 'ENOENT'
+      throw error
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-eacces-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 20_000,
+    lockRetryMs: 5,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  const started = Date.now()
+  await assert.rejects(
+    () => store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }]),
+    (error) => {
+      assert.equal(error.code, 'EACCES', 'the original permission error must survive')
+      return true
+    },
+  )
+  assert.ok(Date.now() - started < 5_000, 'a permanent lock failure must not wait out the full lock window')
+})
+
+test('contention that keeps reporting EPERM is retried while the lock is seen', async () => {
+  // The 300-row cross-process race on the Windows runner hits exactly this: the lock is
+  // created and unlinked constantly, so it is momentarily absent right when a retry begins.
+  // Once the lock has been observed, EPERM must keep retrying instead of failing fast.
+  let attempts = 0
+  let statCalls = 0
+  const fakeFs = {
+    async mkdir() {},
+    async open(file, flags) {
+      if (flags === 'wx' && String(file).endsWith('.lock')) {
+        attempts += 1
+        // Fail past the transient window, then succeed: only the "seen the lock" rule can
+        // carry this through, because a fail-fast rule would rethrow around 250 ms.
+        if (attempts <= 120) {
+          const error = new Error('operation not permitted')
+          error.code = 'EPERM'
+          throw error
+        }
+      }
+      return { async close() {}, async sync() {}, async writeFile() {} }
+    },
+    async stat() {
+      statCalls += 1
+      return { mtimeMs: Date.now() }
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-contended-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 20_000,
+    lockRetryMs: 2,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }])
+  assert.equal(attempts, 121, 'every contended attempt must be retried, not failed fast')
+  assert.ok(statCalls > 0, 'the lock must have been probed while contending')
+})
+
+test('listMirrors returns deep copies so callers cannot corrupt the store', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-clone-'))
+  const store = new MirrorStore({ dir, logger: quiet })
+  await store.load()
+  await store.upsertMirrors([
+    {
+      hostId: 'h_1',
+      remoteSessionId: 'r1',
+      title: 't',
+      capabilities: { list: true, history: false, stream: false, input: false, approve: false },
+      reason: { code: 'version-mismatch', message: { zh: '旧', en: 'old' } },
+    },
+  ])
+  const [first] = store.listMirrors()
+  first.reason.message.zh = 'CORRUPTED'
+  first.capabilities.stream = true
+  const [second] = store.listMirrors()
+  assert.equal(second.reason.message.zh, '旧')
+  assert.equal(second.reason.code, 'version-mismatch')
+  assert.equal(second.capabilities.stream, false)
 })

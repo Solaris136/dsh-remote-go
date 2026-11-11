@@ -67,6 +67,8 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  *   mirrorStore?: import('./mirror-store.js').MirrorStore,
  *   sessionAdapter?: {
  *     ensureMirrorSession: (descriptor: any) => any,
+ *     ensureMirrorCwd?: (descriptor: any) => Promise<string | null>,
+ *     hasMirrorSession?: (localSessionId: string) => boolean,
  *     removeMirrorSession?: (localSessionId: string) => any,
  *   } | null,
  *   workspaceAdapter?: {
@@ -472,6 +474,8 @@ export class RemoteGoService extends EventEmitter {
         reason: 'not-connected',
         sessionsAvailable: Boolean(this.sessionAdapter),
         ...this.#pendingResync(runtime),
+        truncated: 0,
+        skipped: 0,
         mirrors: this.mirrorStore.listMirrors({ hostId: id }),
       }
     }
@@ -514,6 +518,8 @@ export class RemoteGoService extends EventEmitter {
         reason: result.reason ?? 'unreadable',
         sessionsAvailable: Boolean(this.sessionAdapter),
         ...this.#pendingResync(runtime),
+        truncated: 0,
+        skipped: 0,
         mirrors: existing,
       }
     }
@@ -527,6 +533,8 @@ export class RemoteGoService extends EventEmitter {
         reason: 'empty-registry',
         sessionsAvailable: Boolean(this.sessionAdapter),
         ...this.#pendingResync(runtime),
+        truncated: 0,
+        skipped: 0,
         mirrors: existing,
       }
     }
@@ -537,10 +545,14 @@ export class RemoteGoService extends EventEmitter {
       capabilities: decision.capabilities,
       existing,
       now,
+      // §7: annotate every mirrored session with the level/reason decided for
+      // this host, not only the host summary.
+      decision,
     })
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
-    const sessions = await this.#ensureMirrorSessions(runtime, mirrors)
+    const sessionRun = await this.#ensureMirrorSessions(runtime, mirrors)
+    const sessions = sessionRun.results
     const sidebar = await this.#ensureHostWorkspace(runtime, mirrors, sessions)
     const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
     if (freshRequired > 0) {
@@ -563,6 +575,9 @@ export class RemoteGoService extends EventEmitter {
       markedDeleted: reconciled.markedDeleted,
       revived: reconciled.revived,
       sessions,
+      sessionLimit: sessionRun.limit,
+      truncated: sessionRun.truncated,
+      skipped: sessionRun.skipped,
       sidebar,
     }
   }
@@ -570,18 +585,28 @@ export class RemoteGoService extends EventEmitter {
   /**
    * Create the local DSH sessions that back the mirrors, when the host publishes
    * the optional `sessions` service. Absent adapter ⇒ no sessions, no error.
-   * Typed adapter failures are counted and logged instead of being swallowed:
-   * the connect log says how many descriptors got a local session and which
-   * distinct reasons failed (design §4: no silent pretend success).
+   *
+   * `mirrorMaxSessions` caps how many descriptors get a local session per sync
+   * (0 = unlimited). The cap only limits **creation**: it never removes an
+   * existing session, so lowering it cannot orphan sessions a previous sync
+   * created; descriptors beyond the cap whose session already exists are not
+   * reported as skipped. Typed adapter failures are counted and logged instead of
+   * being swallowed (design §4: no silent pretend success).
    * @param {any} runtime
    * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
+   * @returns {Promise<{ results: any[], limit: number, total: number, attempted: number, truncated: number, skipped: number }>}
    */
   async #ensureMirrorSessions(runtime, mirrors) {
-    if (!this.sessionAdapter) return []
     const active = mirrors.filter((descriptor) => descriptor.status === 'active')
+    const configured = Number(this.store.getSettings()?.mirrorMaxSessions ?? 0)
+    const limit = Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : 0
+    const selected = limit > 0 ? active.slice(0, limit) : active
+    const dropped = active.slice(selected.length)
+    const empty = { results: [], limit, total: active.length, attempted: selected.length, truncated: 0, skipped: 0 }
+    if (!this.sessionAdapter) return { ...empty, truncated: dropped.length, skipped: dropped.length }
     /** @type {any[]} */
     const results = []
-    for (const descriptor of active) {
+    for (const descriptor of selected) {
       try {
         // The per-host cwd must exist before the host keys storage off it.
         await this.sessionAdapter.ensureMirrorCwd?.(descriptor)
@@ -595,6 +620,12 @@ export class RemoteGoService extends EventEmitter {
         })
       }
     }
+    let skipped = 0
+    for (const descriptor of dropped) {
+      // A descriptor whose session already exists is merely over the cap for new
+      // creation; it is not skipped work and its session must stay alive.
+      if (this.sessionAdapter.hasMirrorSession?.(descriptor.localSessionId) !== true) skipped += 1
+    }
     const created = results.filter((entry) => entry?.ok === true).length
     const reasons = [
       ...new Set(results.filter((entry) => entry?.ok !== true).map((entry) => entry?.reason ?? 'unknown')),
@@ -603,10 +634,11 @@ export class RemoteGoService extends EventEmitter {
       runtime,
       'info',
       `mirror sessions: ${active.length} descriptor(s) / ${created} local session(s)` +
+        (dropped.length > 0 ? ` / truncated ${dropped.length}` : '') +
         (reasons.length > 0 ? ` (failed: ${reasons.join(', ')})` : ''),
     )
     if (reasons.length > 0) this.#log(runtime, 'debug', `mirror session failure reasons: ${reasons.join(', ')}`)
-    return results
+    return { results, limit, total: active.length, attempted: selected.length, truncated: dropped.length, skipped }
   }
 
   /**
@@ -656,10 +688,16 @@ export class RemoteGoService extends EventEmitter {
       // No local sessions to group, so a workspace would only be an empty group.
       return { ok: true, enabled, reason: 'sessions-unavailable', path: null, workspaceId: null }
     }
-    const grouped = sessionResults.filter((entry) => entry?.ok === true).length
     if (active.length === 0) {
       return { ok: true, enabled, reason: 'no-mirrors', path: null, workspaceId: null }
     }
+    // Count every live mirror session, not only the ones this sync attempted: a
+    // capped batch whose creates all failed still has live sessions from earlier
+    // syncs, and reporting `sessions-unavailable` would contradict them.
+    const grouped =
+      typeof this.sessionAdapter.hasMirrorSession === 'function'
+        ? active.filter((descriptor) => this.sessionAdapter.hasMirrorSession(descriptor.localSessionId) === true).length
+        : sessionResults.filter((entry) => entry?.ok === true).length
     if (grouped === 0) {
       // Every `sessions.create` failed: registering now would show an empty group
       // that contradicts the documented `sessions-unavailable` meaning.

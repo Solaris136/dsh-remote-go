@@ -42,6 +42,7 @@ const RUNTIME_SRC = [
   'src/version.js',
   'src/util.js',
   'src/redact.js',
+  'src/atomic-json.js',
   'src/layout.js',
   'src/constants.js',
   'src/local-version.js',

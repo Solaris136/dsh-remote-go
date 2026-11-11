@@ -300,6 +300,19 @@ test('a throwing sessions.create becomes a typed create-failed result', () => {
 
 // removal -------------------------------------------------------------------
 
+test('hasMirrorSession reports only live mirror_ sessions', () => {
+  const sessions = createFakeSessions()
+  const adapter = createSessionAdapter({ sessions, logger: quiet })
+  const mirror = descriptor()
+  assert.equal(adapter.hasMirrorSession(mirror.localSessionId), false)
+  adapter.ensureMirrorSession(mirror)
+  assert.equal(adapter.hasMirrorSession(mirror.localSessionId), true)
+  // Ids that are not mirror sessions are refused even if the store has them.
+  assert.equal(adapter.hasMirrorSession('session-123'), false)
+  assert.equal(adapter.hasMirrorSession(''), false)
+  assert.equal(createSessionAdapter({}).hasMirrorSession(mirror.localSessionId), false)
+})
+
 test('removeMirrorSession reports the fiber-owned caveat instead of pretending to delete', () => {
   const sessions = createFakeSessions()
   const adapter = createSessionAdapter({ sessions, logger: quiet })

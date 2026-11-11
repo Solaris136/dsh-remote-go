@@ -75,6 +75,7 @@ export const SURFACE_EVENT_TYPES = Object.freeze([
  *   available: () => boolean,
  *   ensureMirrorSession: (descriptor: any) => AdapterResult,
  *   ensureMirrorCwd: (descriptor: any) => Promise<string | null>,
+ *   hasMirrorSession: (localSessionId: string) => boolean,
  *   appendEvent: (localSessionId: string, event: any) => AdapterResult,
  *   removeMirrorSession: (localSessionId: string) => AdapterResult,
  * }}
@@ -119,6 +120,23 @@ export function createSessionAdapter(options = {}) {
     if (derived === null) return null
     const candidate = typeof descriptor?.localSessionId === 'string' ? descriptor.localSessionId.trim() : ''
     return candidate.startsWith(MIRROR_ID_PREFIX) && candidate === derived ? candidate : derived
+  }
+
+  /**
+   * Whether a mirror session is currently live locally.
+   *
+   * Used by the session cap to distinguish "over the creation cap" from
+   * "skipped": a descriptor whose session a previous sync already created is not
+   * orphaned by lowering `mirrorMaxSessions`.
+   * @param {string} localSessionId
+   * @returns {boolean}
+   */
+  function hasMirrorSession(localSessionId) {
+    const sessions = resolveSessions()
+    const id = typeof localSessionId === 'string' ? localSessionId.trim() : ''
+    if (id === '' || !id.startsWith(MIRROR_ID_PREFIX)) return false
+    if (!sessions || typeof sessions.get !== 'function') return false
+    return Boolean(sessions.get(id))
   }
 
   /**
@@ -301,7 +319,7 @@ export function createSessionAdapter(options = {}) {
     return createOptions
   }
 
-  return { available, ensureMirrorSession, ensureMirrorCwd, appendEvent, removeMirrorSession }
+  return { available, ensureMirrorSession, ensureMirrorCwd, hasMirrorSession, appendEvent, removeMirrorSession }
 }
 
 /**

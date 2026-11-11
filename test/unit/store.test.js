@@ -1,9 +1,115 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { promises as realFs, existsSync } from 'node:fs'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore, resolveDshHome, resolveStateDir } from '../../src/store.js'
+
+/**
+ * An fs shim that gates the first temp-file write so a test can interleave a
+ * second write deterministically. It works for both writer shapes the stores have
+ * used (`open(tmp, 'wx')` + handle write, and `writeFile(tmp, …)`), so the same
+ * test fails on a writer without a lock.
+ */
+function gatedFirstWriteFs() {
+  let openFirst = () => {}
+  const firstOpened = new Promise((resolve) => {
+    openFirst = () => resolve(undefined)
+  })
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = () => resolve(undefined)
+  })
+  let gated = false
+  /** @type {string[]} */
+  const opened = []
+  /** @type {string[]} */
+  const unlinked = []
+  let signalRename = () => {}
+  const renamed = new Promise((resolve) => {
+    signalRename = () => {
+      resolve(undefined)
+      // Keep later renames from re-resolving (Promise ignores them anyway).
+      signalRename = () => {}
+    }
+  })
+  /** @param {unknown} target */
+  const gateOnce = (target) => {
+    if (gated || typeof target !== 'string' || !target.endsWith('.tmp')) return false
+    gated = true
+    openFirst()
+    return true
+  }
+  const fsImpl = new Proxy(realFs, {
+    get(target, prop, receiver) {
+      if (prop === 'open') {
+        return async (/** @type {string} */ file, /** @type {string} */ flags, /** @type {number} */ mode) => {
+          const handle = await realFs.open(file, flags, mode)
+          opened.push(file)
+          if (!gateOnce(file)) return handle
+          return {
+            writeFile: async (/** @type {string} */ text, /** @type {string} */ encoding) => {
+              await gate
+              return handle.writeFile(text, encoding)
+            },
+            sync: () => handle.sync(),
+            close: () => handle.close(),
+          }
+        }
+      }
+      if (prop === 'writeFile') {
+        return async (/** @type {string} */ file, ...rest) => {
+          if (gateOnce(file)) await gate
+          return realFs.writeFile(file, ...rest)
+        }
+      }
+      if (prop === 'unlink') {
+        return async (/** @type {string} */ file) => {
+          unlinked.push(file)
+          return realFs.unlink(file)
+        }
+      }
+      if (prop === 'rename') {
+        return async (/** @type {string} */ from, /** @type {string} */ to) => {
+          const result = await realFs.rename(from, to)
+          if (typeof to === 'string' && to.endsWith('hosts.json')) signalRename()
+          return result
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+  return { fs: fsImpl, firstOpened, release, renamed, opened, unlinked }
+}
+
+/**
+ * Wrap the real fs and throw `EPERM` on the first `failures` renames whose target
+ * ends with `suffix` (Windows behaviour when another process briefly holds it).
+ * @param {string} suffix
+ * @param {number} failures
+ */
+function flakyRenameFs(suffix, failures) {
+  let remaining = failures
+  return new Proxy(realFs, {
+    get(target, prop, receiver) {
+      if (prop === 'rename') {
+        return async (/** @type {string} */ from, /** @type {string} */ to) => {
+          if (typeof to === 'string' && to.endsWith(suffix) && remaining > 0) {
+            remaining -= 1
+            const error = new Error('busy')
+            error.code = 'EPERM'
+            throw error
+          }
+          return realFs.rename(from, to)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
 
 async function tempStore() {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-'))
@@ -102,4 +208,65 @@ test('resolveDshHome prefers DSH_HOME and falls back to the user home', () => {
   assert.equal(resolveDshHome({ DSH_HOME: '/custom/dsh' }), '/custom/dsh')
   assert.equal(resolveDshHome({ USERPROFILE: 'C:\\Users\\u' }), path.join('C:\\Users\\u', '.dsh'))
   assert.equal(resolveStateDir('/custom/dsh'), path.join('/custom/dsh', 'remote-go'))
+})
+
+test('the shared atomic writer retries a busy rename for hosts.json', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-retry-'))
+  // Two transient EPERM failures, then success: the old writer threw at once.
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: flakyRenameFs('hosts.json', 2) })
+  await store.load()
+  const host = await store.upsertHost({ address: 'retry.example.com' })
+  assert.ok(host.id)
+  const raw = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
+  assert.equal(raw[0].address, 'retry.example.com')
+  const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'))
+  assert.deepEqual(leftovers, [])
+})
+
+test('a failed hosts.json write leaves no temp file behind', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-fail-'))
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: flakyRenameFs('hosts.json', 99) })
+  await store.load()
+  await assert.rejects(() => store.upsertHost({ address: 'fail.example.com' }))
+  const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'))
+  assert.deepEqual(leftovers, [])
+})
+
+test('concurrent host writes are serialized by the file lock (no lost update)', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-concurrent-'))
+  const shim = gatedFirstWriteFs()
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: shim.fs })
+  await store.load()
+
+  // Hold the first write's temp file open, start a second upsert, then let the
+  // first finish. Without a lock the older [one] snapshot lands last and drops
+  // host two; with the lock the second writer waits and persists both.
+  const first = store.upsertHost({ name: 'one', address: 'one.example.com' })
+  await shim.firstOpened
+  const second = store.upsertHost({ name: 'two', address: 'two.example.com' })
+  // Unlocked: the second rename lands while the first is still gated. Locked: it
+  // cannot, so the race times out and the gate is released.
+  await Promise.race([shim.renamed, new Promise((resolve) => setTimeout(resolve, 100))])
+  shim.release()
+  await Promise.all([first, second])
+
+  const onDisk = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
+  assert.deepEqual(
+    onDisk.map((host) => host.name).sort(),
+    store
+      .listHosts()
+      .map((host) => host.name)
+      .sort(),
+  )
+  assert.equal(onDisk.length, 2, 'both concurrent hosts must survive')
+  // The lock is real: it was created for the write and removed afterwards.
+  assert.equal(
+    shim.opened.some((file) => file.endsWith('hosts.json.lock')),
+    true,
+  )
+  assert.equal(
+    shim.unlinked.some((file) => file.endsWith('hosts.json.lock')),
+    true,
+  )
+  assert.equal(existsSync(path.join(dir, 'hosts.json.lock')), false)
 })

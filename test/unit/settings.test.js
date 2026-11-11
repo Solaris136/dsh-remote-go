@@ -2,6 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from '../../src/settings.js'
 
+test('mirrorMaxSessions defaults to 200, accepts 0 (unlimited) and clamps junk', () => {
+  assert.equal(defaultSettings().mirrorMaxSessions, 200)
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: 0 }).mirrorMaxSessions, 0)
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: 42 }).mirrorMaxSessions, 42)
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: 'nope' }).mirrorMaxSessions, 200)
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: -5 }).mirrorMaxSessions, 0)
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: 1e9 }).mirrorMaxSessions, 5000)
+  // `null` means "unset", not "unlimited": only an explicit 0 disables the cap.
+  assert.equal(sanitizeSettings({ mirrorMaxSessions: null }).mirrorMaxSessions, 200)
+})
+
 test('defaultSettings matches the documented defaults', () => {
   const settings = defaultSettings()
   assert.equal(settings.defaultPort, 22)
@@ -9,6 +20,7 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
   assert.equal(settings.mirrorToSidebar, true)
+  assert.equal(settings.mirrorMaxSessions, 200)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.targetVersion, 'local')
   assert.equal(settings.bootstrap.mode, 'auto')

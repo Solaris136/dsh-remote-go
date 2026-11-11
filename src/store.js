@@ -4,11 +4,14 @@
  *  - settings.json — plugin settings
  *  - secrets.json  — only when `saveTokens` is enabled; 0600, holds launch tokens
  *
- * Writes are atomic (tmp + rename) and the directory is 0700 on POSIX platforms.
+ * Writes go through the shared atomic writer (`./atomic-json.js`): 0700 directory,
+ * 0600 file, unique fsynced temp file, rename retry on Windows, cleanup on
+ * failure, and a cross-process lock. Reads stay tolerant (a corrupt file falls
+ * back to defaults instead of throwing).
  */
 import { promises as fs } from 'node:fs'
-import { existsSync } from 'node:fs'
 import path from 'node:path'
+import { readJsonFile, withProcessLock, writeJsonAtomic } from './atomic-json.js'
 import { nowIso, randomId } from './util.js'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from './settings.js'
 
@@ -30,8 +33,6 @@ export class HostStore {
     /** @type {Record<string, string>} */
     this.secrets = {}
     this.loaded = false
-    /** @type {Promise<void>} */
-    this.writeChain = Promise.resolve()
   }
 
   async load() {
@@ -57,31 +58,28 @@ export class HostStore {
    * @param {any} fallback
    */
   async #readJson(file, fallback) {
-    try {
-      if (!existsSync(file)) return fallback
-      const text = await this.fs.readFile(file, 'utf8')
-      return JSON.parse(text)
-    } catch (error) {
-      this.logger.warn?.(`[dsh-remote-go] cannot read ${path.basename(file)}:`, error)
-      return fallback
-    }
+    const result = await readJsonFile(file, { fs: this.fs, logger: this.logger })
+    return result.status === 'ok' ? result.value : fallback
   }
 
   /**
+   * Serialize one file's writes through its own cross-process lock
+   * (`<file>.lock`) and the shared atomic writer. Each state file has a distinct
+   * lock path, and no caller holds one lock while taking another (`saveSettings`
+   * writes settings then secrets sequentially), so there is no lock nesting.
    * @param {string} file
    * @param {unknown} value
    * @param {number} mode
    */
   #writeJson(file, value, mode = 0o600) {
-    const run = async () => {
-      await this.fs.mkdir(this.dir, { recursive: true, mode: 0o700 })
-      const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-      await this.fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode })
-      await this.fs.rename(tmp, file)
-    }
-    // Serialize writes so a crash cannot interleave two half-written files.
-    this.writeChain = this.writeChain.then(run, run)
-    return this.writeChain
+    return withProcessLock(`${file}.lock`, { fs: this.fs, logger: this.logger }, () =>
+      writeJsonAtomic(file, value, {
+        dir: this.dir,
+        fs: this.fs,
+        logger: this.logger,
+        fileMode: mode,
+      }),
+    )
   }
 
   async #persistHosts() {

@@ -15,6 +15,7 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   hostKeyPolicy: 'first-use' | 'strict',
  *   saveTokens: boolean,
  *   mirrorToSidebar: boolean,
+ *   mirrorMaxSessions: number,
  *   windowMode: 'panel' | 'external',
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
@@ -34,6 +35,9 @@ export function defaultSettings() {
     // Mirrored remote sessions are grouped into a sidebar workspace per host by
     // default; turning this off keeps them out of the sidebar entirely.
     mirrorToSidebar: true,
+    // Upper bound on local mirror sessions created per sync; 0 means unlimited.
+    // It only limits creation: a session a previous sync created is never removed.
+    mirrorMaxSessions: 200,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -90,6 +94,12 @@ export function sanitizeSettings(raw) {
     hostKeyPolicy: oneOf(input.hostKeyPolicy, ['first-use', 'strict'], defaults.hostKeyPolicy),
     saveTokens: boolean(input.saveTokens, defaults.saveTokens),
     mirrorToSidebar: boolean(input.mirrorToSidebar, defaults.mirrorToSidebar),
+    // `null` is not a value the user can choose: it means "unset", so it falls
+    // back to the default. Only an explicit 0 means unlimited.
+    mirrorMaxSessions:
+      input.mirrorMaxSessions === null
+        ? defaults.mirrorMaxSessions
+        : numberIn(input.mirrorMaxSessions, 0, 5000, defaults.mirrorMaxSessions),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
