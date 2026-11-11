@@ -49,6 +49,25 @@ import { SURFACE_EVENT_TYPES } from '../../src/session-adapter.js'
  * }} FakeSession
  */
 
+/**
+ * The host's rule for seeded creation, in one place so every double and the shared
+ * one cannot drift: with `meta.isSeeded === true` the caller must pass `seed` and
+ * `inheritedEventCount` explicitly (dsh-session throws exactly these two messages).
+ *
+ * Exported so a suite that keeps its own minimal double can enforce the same rule
+ * without copying it — the double stays local, the *contract* stays single-sourced.
+ * @param {any} options
+ */
+export function assertSeededCreateOptions(options) {
+  if (options?.meta?.isSeeded !== true) return
+  if (options.seed === undefined) {
+    throw new Error('seeded session requires an explicit constructor seed')
+  }
+  if (options.inheritedEventCount === undefined) {
+    throw new Error('seeded session requires an inherited event count')
+  }
+}
+
 /** @param {any} meta @param {string} id */
 function buildHeader(meta, id) {
   /** @type {Record<string, any>} */
@@ -135,12 +154,7 @@ export function createFakeSessions() {
     const sessionId = typeof id === 'string' && id !== '' ? id : `session-${(seqCounter += 1)}`
     if (live.has(sessionId)) throw new Error(`session ${sessionId} already exists`)
     // The live service rejects a seeded header that does not say what it inherited.
-    if (options?.meta?.isSeeded === true) {
-      if (options.seed === undefined) throw new Error('seeded session requires an explicit constructor seed')
-      if (options.inheritedEventCount === undefined) {
-        throw new Error('seeded session requires an inherited event count')
-      }
-    }
+    assertSeededCreateOptions(options)
     const session = makeSession(sessionId, options)
     calls.push({ op: 'create', id: sessionId, options })
     createCalls.push({ id: sessionId, options })

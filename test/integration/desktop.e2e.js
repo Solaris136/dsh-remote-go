@@ -36,6 +36,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
+import { activateByAriaLabel, activateRow, activateRowAndWaitFor, rowPresent, waitForRow } from './activation.js'
 import {
   assertBlockedIframe,
   assertNoNonLoopbackIframes,
@@ -71,6 +72,7 @@ const REPO_ROOT = path.resolve(HERE, '..', '..')
 
 const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account menu"], [aria-label="账号"]'
 const SETTINGS_LABELS = ['设置', 'Settings']
+const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
 const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
 // The onboarding affordance is localised. "Set up later" is what the shipped app renders in
 // English (observed on the Windows runner); "Configure later" was an assumption that made the
@@ -319,227 +321,37 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 }
 
 /**
- * Locate a row by its normalised text, verify it is actually clickable, and
- * activate it with a DOM click.
- *
- * Runs inside the page, so it must be self-contained. Two failure modes matter and
- * are both reported instead of guessed:
- *
- * - the row is `aria-disabled`/`pointer-events: none` (present, not yet actionable);
- * - an overlay is on top of it, so a coordinate click would be silently swallowed
- *   (hence the DOM click on the node, plus the `coveredBy` check).
- *
- * The return value is also the diagnostic: what matched, what got clicked, what is
- * on top, and whether a dialog was present.
- * @param {string[]} rawLabels
- */
-function activateRowInPage(rawLabels) {
-  const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-  const labels = rawLabels.map(strip)
-  const dialogs = document.querySelectorAll('[role="dialog"]').length
-  /** @param {Element | null} node */
-  const describeNode = (node) => {
-    if (!node) return null
-    const rect = node.getBoundingClientRect()
-    const style = getComputedStyle(node)
-    return {
-      tag: node.tagName.toLowerCase(),
-      role: node.getAttribute('role'),
-      testid: node.getAttribute('data-testid'),
-      ariaDisabled: node.getAttribute('aria-disabled'),
-      pointerEvents: style.pointerEvents,
-      text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
-      box: { width: Math.round(rect.width), height: Math.round(rect.height) },
-    }
-  }
-  // Same traversal as the readiness wait (`*`), so "ready" and "locatable" cannot
-  // disagree the way the old tag whitelist could.
-  const matches = []
-  for (const node of document.querySelectorAll('*')) {
-    if (labels.includes(strip(node.textContent))) matches.push(node)
-  }
-  if (matches.length === 0) return { clicked: false, reason: 'no-matching-node', dialogs }
-  // Smallest subtree wins: the label node, not every ancestor that contains it.
-  const row = matches.sort((left, right) => left.querySelectorAll('*').length - right.querySelectorAll('*').length)[0]
-  const clickable = row.closest('button, [role="menuitem"], [role="button"], [role="tab"], a, li') ?? row
-  const info = describeNode(clickable)
-  if (info.ariaDisabled === 'true' || info.pointerEvents === 'none') {
-    return { clicked: false, reason: 'not-actionable', row: info, dialogs }
-  }
-  if (info.box.width === 0 || info.box.height === 0) {
-    return { clicked: false, reason: 'not-laid-out', row: info, dialogs }
-  }
-  const rect = clickable.getBoundingClientRect()
-  const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-  if (hit && !clickable.contains(hit) && !hit.contains(clickable)) {
-    return { clicked: false, reason: 'covered', row: info, coveredBy: describeNode(hit), dialogs }
-  }
-  clickable.click()
-  return { clicked: true, reason: null, row: info, dialogs }
-}
-
-/**
- * Activate one element found by `aria-label` (the account menu button), with the
- * same actionability/overlay checks as `activateRowInPage`.
- * @param {string[]} rawLabels
- */
-function activateByAriaLabelInPage(rawLabels) {
-  const dialogs = document.querySelectorAll('[role="dialog"]').length
-  for (const label of rawLabels) {
-    const node = document.querySelector(`[aria-label="${label}"]`)
-    if (!node) continue
-    const rect = node.getBoundingClientRect()
-    const style = getComputedStyle(node)
-    if (node.getAttribute('aria-disabled') === 'true' || style.pointerEvents === 'none') {
-      return { clicked: false, reason: 'not-actionable', label, dialogs }
-    }
-    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-    if (hit && !node.contains(hit) && !hit.contains(node)) {
-      return {
-        clicked: false,
-        reason: 'covered',
-        label,
-        coveredBy: { tag: hit.tagName.toLowerCase(), testid: hit.getAttribute('data-testid') },
-        dialogs,
-      }
-    }
-    node.click()
-    return { clicked: true, reason: null, label, dialogs }
-  }
-  return { clicked: false, reason: 'no-matching-node', dialogs }
-}
-
-/**
- * Activate a nav row and verify the section it owns actually mounted.
- *
- * A click only counts once its effect is on screen: the old code trusted
- * `element.click()` and then waited for the section, so a click swallowed by a
- * re-render or an overlay became a 60 s timeout with no information. Each bounded
- * attempt re-locates (a handle from before a re-render is useless), activates, and
- * polls for the section; the failure message carries every attempt's result.
- * @param {import('puppeteer-core').Page} page
- * @param {{ labels: string[], selector: string, label: string, attempts?: number, appearTimeoutMs?: number, mountTimeoutMs?: number }} options
- */
-async function activateSectionItem(page, options) {
-  const { labels, selector, label, attempts = 4, appearTimeoutMs = 60_000, mountTimeoutMs = 20_000 } = options
-  const appeared = await page
-    .waitForFunction(
-      (rawLabels) => {
-        const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-        const wanted = rawLabels.map(strip)
-        return [...document.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
-      },
-      { timeout: appearTimeoutMs, polling: 150 },
-      labels,
-    )
-    .then(() => true)
-    .catch(() => false)
-  /** @type {any[]} */
-  const log = [{ step: 'row-appeared', ok: appeared }]
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const result = await page.evaluate(activateRowInPage, labels)
-    log.push({ attempt, result })
-    if (result.clicked) {
-      const mounted = await page
-        .waitForFunction(
-          (selector_) => {
-            const node = document.querySelector(selector_)
-            return node !== null && node.getBoundingClientRect().width > 0
-          },
-          { timeout: mountTimeoutMs, polling: 150 },
-          selector,
-        )
-        .then(() => true)
-        .catch(() => false)
-      log.push({ attempt, mounted })
-      if (mounted) return
-    }
-    await sleep(250)
-  }
-  throw new Error(
-    `${label} did not take effect after ${attempts} attempt(s): ${JSON.stringify({ attempts: log, page: await describePage(page) })}`,
-  )
-}
-
-/**
  * Make the shell's settings surface show the Remote-hosts entry (account menu →
- * Settings).
+ * Settings), verified by **the nav row the next step needs** rather than by
+ * `role="dialog"`: under load the desktop shell renders a loading view
+ * ("正在加载设置…") before anything dialog-like exists.
  *
- * Readiness is the **nav row the next step needs**, not `role="dialog"`: under load
- * the desktop shell renders the settings surface as a loading view ("正在加载设置…")
- * before anything dialog-like exists, so requiring a dialog proved too strict and
- * reported "the settings dialog never opened" while the surface was in fact loading.
- * Returns false when the bounded attempt did not take effect, so the caller retries
- * the whole chain.
- * @param {import('puppeteer-core').Page} page
+ * Readiness and activation use the same locator (`activation.js`), and every click
+ * is a DOM click that is checked for actionability and overlay coverage.
  */
 async function openSettingsSurface(page) {
-  if (await navRowPresent(page)) return true
+  if (await rowPresent(page, REMOTE_HOSTS_LABELS)) return true
   if (!(await page.$('[role="dialog"]'))) {
-    const menu = await page.evaluate(activateByAriaLabelInPage, ['账号菜单', 'Account menu', '账号', 'Account'])
+    const menu = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
     if (!menu.clicked) {
       console.log(`[desktop-e2e] account menu not activated: ${JSON.stringify(menu)}`)
       return false
     }
-    const menuReady = await page
-      .waitForFunction(
-        () => {
-          const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-          return [...document.querySelectorAll('*')].some((node) => {
-            const text = strip(node.textContent)
-            return (text === '设置' || text === 'Settings') && node.children.length <= 2
-          })
-        },
-        { timeout: 30_000, polling: 150 },
-      )
-      .then(() => true)
-      .catch(() => false)
+    const menuReady = await waitForRow(page, SETTINGS_LABELS, { timeoutMs: 30_000 })
     if (!menuReady) return false
   }
-  const settings = await page.evaluate(activateRowInPage, SETTINGS_LABELS)
+  const settings = await activateRow(page, SETTINGS_LABELS)
   if (!settings.clicked) {
     console.log(`[desktop-e2e] Settings entry not activated: ${JSON.stringify(settings)}`)
     return false
   }
-  // Effect check: the nav row (or the section itself, if it mounted directly).
-  return await page
-    .waitForFunction(
-      (rawLabels) => {
-        if (document.querySelector('[data-testid="settings-remote-section"]')) return true
-        const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-        const wanted = rawLabels.map(strip)
-        return [...document.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
-      },
-      { timeout: 60_000, polling: 150 },
-      REMOTE_HOSTS_LABELS,
-    )
-    .then(() => true)
-    .catch(() => false)
-}
-
-/**
- * Is the Remote-hosts nav row already on screen?
- * @param {import('puppeteer-core').Page} page
- */
-async function navRowPresent(page) {
-  return await page
-    .evaluate((rawLabels) => {
-      const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-      const wanted = rawLabels.map(strip)
-      return [...document.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
-    }, REMOTE_HOSTS_LABELS)
-    .catch(() => false)
+  return await waitForRow(page, REMOTE_HOSTS_LABELS, { timeoutMs: 60_000 })
 }
 
 /**
  * Account menu → Settings → Remote hosts, with every activation verified by its
- * effect and retried when it did not take.
- *
- * The retry is not a longer timeout: the section must actually mount, and when it
- * does not the surface is re-ensured and the row re-located/clicked again (the CI
- * failure was "found the entry but could not activate it" — element present, click
- * not effective). The final error carries each attempt's row/overlay/dialog
- * diagnosis.
+ * effect and retried when it did not take. Not a longer timeout: the section must
+ * mount, and when it does not the surface is re-ensured and the row re-located.
  * @param {import('puppeteer-core').Page} page
  */
 async function openRemoteHostsSection(page) {
@@ -554,10 +366,11 @@ async function openRemoteHostsSection(page) {
       continue
     }
     try {
-      await activateSectionItem(page, {
+      await activateRowAndWaitFor(page, {
         labels: REMOTE_HOSTS_LABELS,
         selector: '[data-testid="settings-remote-section"]',
         label: 'the Remote-hosts section',
+        describe: () => describePage(page),
         attempts: 2,
       })
       return

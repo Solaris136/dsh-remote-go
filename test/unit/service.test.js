@@ -9,6 +9,7 @@ import { createSessionAdapter } from '../../src/session-adapter.js'
 import { RemoteGoService } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
 import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
+import { assertSeededCreateOptions } from '../helpers/fake-sessions.js'
 
 /**
  * A `workspaceRegistry` double with the behaviour the plugin depends on:
@@ -584,7 +585,8 @@ test('removing a host actually drops local sessions when the host can delete the
   /** @type {Map<string, any>} */
   const live = new Map()
   const sessions = {
-    create(id) {
+    create(id, options) {
+      assertSeededCreateOptions(options)
       const session = { id, append() {} }
       live.set(id, session)
       return session

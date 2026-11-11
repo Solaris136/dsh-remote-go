@@ -18,6 +18,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { canonicalMirrorRoot, createSessionAdapter } from '../../src/session-adapter.js'
 import { createWorkspaceAdapter, hostWorkspaceTitle, WORKSPACE_TITLE_PREFIX } from '../../src/workspace-adapter.js'
+import { createFakeSessions } from '../helpers/fake-sessions.js'
 
 /**
  * A registry double with the durable-registry semantics the adapter needs.
@@ -321,17 +322,9 @@ test('the workspace path is exactly the cwd the session adapter gives its sessio
   try {
     const { registry } = createFakeRegistry()
     const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot: root })
-    /** @type {{ id: string, options: any }[]} */
-    const created = []
-    const sessions = {
-      create(id, options) {
-        created.push({ id, options })
-        return { id, append() {} }
-      },
-      get() {
-        return undefined
-      },
-    }
+    // Host-faithful double (audit C): the create contract is enforced, not accepted.
+    const sessions = createFakeSessions()
+    const created = sessions.createCalls
     const sessionAdapter = createSessionAdapter({ sessions, mirrorRoot: root })
     sessionAdapter.ensureMirrorSession({ hostId: 'h_abc', remoteSessionId: 'sess-1' })
 
@@ -552,16 +545,10 @@ test('canonicalMirrorRoot resolves a symlinked root so both adapters agree', asy
     // DSH_HOME reaches the root through a junction.
     const { registry } = createFakeRegistry()
     const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot: canonical })
-    /** @type {any[]} */
-    const created = []
+    const fakeSessions = createFakeSessions()
+    const created = fakeSessions.createCalls
     const sessionAdapter = createSessionAdapter({
-      sessions: {
-        create(id, options) {
-          created.push({ id, options })
-          return { id, append() {} }
-        },
-        get: () => undefined,
-      },
+      sessions: fakeSessions,
       mirrorRoot: canonical,
     })
     sessionAdapter.ensureMirrorSession({ hostId: 'h_abc', remoteSessionId: 'sess-1' })

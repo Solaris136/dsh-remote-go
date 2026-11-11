@@ -186,7 +186,43 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
   不要在脚本里 `Start-Process taskkill`。
 - 非 Windows 平台不受影响：这些参数在 POSIX 上被忽略。
 
-## 9. 安全相关
+## 9. 测试基础设施约定（三条硬规则）
+
+> **English abstract.** Three test-infrastructure rules, each derived from a real CI failure: (1) a wait predicate
+> must cover **every** state the assertions after it require; (2) an activation must use the **same** locator as its
+> readiness check, click via the DOM, and be verified by its effect; (3) a service double must **enforce** the host
+> contract instead of accepting any shape.
+
+这三条不是风格偏好，而是过去四个 CI 失败里三个的根因。改 `test/**` 时请对照执行：
+
+1. **等待谓词必须覆盖其后的断言（wait predicate ⊇ assertion）。**
+   `pollUntil` / `while` 轮询 / `waitForFunction` 返回真之后的第一段断言，涉及的每一个状态都必须在谓词里出现过。
+   反例：`history.e2e.js` 只等 `cursor === 2`，随后断言日志含 `gap-unfilled`——日志在持久化之后才写，于是
+   Windows 上偶发失败、ubuntu 上通过。现在谓词同时覆盖 cursor、level、reason 与日志行。
+   写测试时先写下断言，再把断言里的每个条件抄进谓词；不要用「再睡一会儿」掩盖窗口。
+   这条由 `test/unit/predicate-guard.test.js` 强制：它扫描 `test/integration/*.e2e.js` 的
+   `waitForMirrors` / `pollUntil` 谓词，与紧随其后 `assert.*` 读取的字段比对，缺字段就按 `file:line` 失败；
+   少数「瞬时快照」等待（断言读的是谓词匹配到的同一份快照）在 `TRANSIENT_SNAPSHOT_WAITS` 里逐条登记理由，
+   新增违规仍然失败，登记失效（违规消失）也会失败。
+
+2. **激活路径只能有一套定位器，且必须验证效果（one locator, DOM click, verified effect）。**
+   就绪检查与点击必须用同一个定位器（`test/integration/activation.js` 的 `activateRowInPage` 用 `*` 遍历），
+   否则「元素在」与「能点」会分叉，产生 `found the … entry but could not activate it`。
+   点击必须是 DOM `click()`（坐标点击会被任何浮层吞掉），点击前检查 `aria-disabled` / `pointer-events` /
+   有无布局盒；点击**必须**用有界轮询确认效果（目标区域真的挂载 / 对话框真的关闭），失败时重新定位并重试，
+   错误信息里打印 url、对话框数量、命中节点的 tag/role 与被什么覆盖。
+   遮挡判定必须**同源区分**：`elementFromPoint` 命中同一对话框内的节点（例如对话框自己的关闭按钮被自身背板
+   覆盖）**不算**外部遮挡——否则会拒绝点击本对话框的关闭控件，浮层永远关不掉；只有命中**另一个**对话框或
+   无关浮层才算遮挡。命中同源时照常点击，由「效果已验证」兜底。不要再写第二套 `clickByText`。
+
+3. **测试替身要比宿主更严格，而不是更宽松（fakes enforce the host contract）。**
+   替身接受的形状必须与真实宿主一致：`sessions.create` 在 `meta.isSeeded` 时必须要求显式 `seed` 与
+   `inheritedEventCount`（用 `test/helpers/fake-sessions.js` 的 `assertSeededCreateOptions`），重复 id 要抛错，
+   surface 事件必须带 intent，`Session` **没有** `events` 数组。反例：一个忽略 `create` 选项的替身让「每次镜像
+   会话创建都失败」这样的生产缺陷一路绿灯通过 CI。
+   需要钩子就放在替身里，**不要**为此给生产代码加分支或导出。
+
+## 10. 安全相关
 
 - 安全漏洞请**私下**报告，不要开公开 issue；渠道、时限与范围见 [SECURITY.md](SECURITY.md)。
 - 讨论安全问题时（哪怕只是怀疑）也不要贴真实凭据，用占位值复述现象。
@@ -194,7 +230,7 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 - 改动 SSH 认证、主机指纹策略、隧道监听地址、本地 HTTP API 鉴权、iframe URL 校验、远端自举命令模板时，
   请在 PR 描述里写明威胁模型与验证方式。
 
-## 9. 行为准则与许可
+## 11. 行为准则与许可
 
 - 参与即表示同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)（Contributor Covenant 2.1）。
 - 贡献按 [MIT](LICENSE) 授权发布。

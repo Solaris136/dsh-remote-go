@@ -325,17 +325,22 @@ async function connectHost(service, hostId, password, logs, timeoutMs = 90_000) 
  * @param {string} hostId
  * @param {string[]} logs
  * @param {number} expectedCount
+ * @param {{ expect?: (listed: any) => boolean }} [options] - extra settled state the
+ *   assertions require (audit A: a count-only wait is narrower than assertions on
+ *   level/capabilities/connected, which are then free to race the sync).
  * @param {number} [timeoutMs]
  */
-async function waitForMirrors(service, hostId, logs, expectedCount, timeoutMs = 30_000) {
+async function waitForMirrors(service, hostId, logs, expectedCount, options = {}, timeoutMs = 30_000) {
+  const expect = typeof options.expect === 'function' ? options.expect : () => true
   const started = Date.now()
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const listed = await service.listHostMirrors(hostId)
-    if (listed.mirrors.length === expectedCount) return listed
+    if (listed.mirrors.length === expectedCount && expect(listed)) return listed
     if (Date.now() - started > timeoutMs) {
       throw new Error(
-        `the connect pipeline never mirrored the directory (${listed.mirrors.length}/${expectedCount} descriptor(s))\n${tail(logs)}`,
+        `the connect pipeline never mirrored the directory (${listed.mirrors.length}/${expectedCount} descriptor(s), ` +
+          `level ${listed.level}, connected ${listed.connected}, capabilities ${JSON.stringify(listed.capabilities)})\n${tail(logs)}`,
       )
     }
     await sleep(25)
@@ -511,7 +516,14 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       assert.ok(service && ctx.hostId, 'the connect subtest did not run')
       // Connecting already mirrors the directory (the pipeline starts the sync
       // without awaiting it), so a plain panel read must show the remote sessions.
-      const afterConnect = await waitForMirrors(service, ctx.hostId, serviceLogs, FIXTURE_SESSIONS.length)
+      const afterConnect = await waitForMirrors(service, ctx.hostId, serviceLogs, FIXTURE_SESSIONS.length, {
+        // The assertions below cover all of this, so the wait must too (audit A).
+        expect: (listed) =>
+          listed.connected === true &&
+          listed.level === 'L1' &&
+          listed.sessionsAvailable === false &&
+          JSON.stringify(listed.capabilities) === JSON.stringify(L1_CAPABILITIES),
+      })
       assert.equal(afterConnect.connected, true)
       assert.equal(afterConnect.level, 'L1')
       assert.deepEqual(afterConnect.capabilities, L1_CAPABILITIES)
@@ -693,9 +705,15 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         const listed = await waitForMirrors(withAdapter, host.id, serviceLogs, FIXTURE_SESSIONS.length)
         assert.equal(listed.sessionsAvailable, true)
         // Wait for the background sync's session creation, which follows the
-        // descriptor write.
+        // descriptor write. The wait covers both facts the next assertions require
+        // (creates and live sessions), not just the counter (audit A).
         const deadline = Date.now() + 30_000
-        while (createCalls.length < FIXTURE_SESSIONS.length && Date.now() < deadline) await sleep(25)
+        while (
+          (createCalls.length < FIXTURE_SESSIONS.length || live.size < FIXTURE_SESSIONS.length) &&
+          Date.now() < deadline
+        ) {
+          await sleep(25)
+        }
         assert.equal(createCalls.length, FIXTURE_SESSIONS.length, 'one create per mirror descriptor')
         assert.equal(live.size, FIXTURE_SESSIONS.length, 'one live session per mirror descriptor')
 
