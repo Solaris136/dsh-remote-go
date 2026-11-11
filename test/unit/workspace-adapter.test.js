@@ -538,7 +538,10 @@ test('canonicalMirrorRoot resolves a symlinked root so both adapters agree', asy
     await symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir')
 
     const canonical = canonicalMirrorRoot(link)
-    assert.equal(canonical, await realpath(real))
+    // A junction may store the 8.3 short spelling of its target (GitHub's Windows
+    // runner does), so compare the fully resolved physical directories rather than
+    // the literal strings the junction happened to be created with.
+    assert.equal(await realpath(canonical), await realpath(real))
 
     // Both adapters are fed that one canonical root, so the session's cwd and the
     // workspace path are the same string by construction — even though the user's
@@ -575,7 +578,7 @@ test('canonicalMirrorRoot creates a missing root and falls back on failure', asy
   try {
     const missing = path.join(root, 'not-yet', 'mirrors')
     const canonical = canonicalMirrorRoot(missing)
-    assert.equal(canonical, await realpath(missing))
+    assert.equal(await realpath(canonical), await realpath(missing))
     assert.equal((await stat(canonical)).isDirectory(), true)
 
     // A path whose parent is a file cannot be created: fall back to the literal.

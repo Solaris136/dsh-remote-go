@@ -728,7 +728,9 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       await mkdir(realRoot, { recursive: true })
       await symlink(realRoot, linkRoot, process.platform === 'win32' ? 'junction' : 'dir')
       const mirrorRoot = canonicalMirrorRoot(linkRoot)
-      assert.equal(mirrorRoot, await realpath(realRoot), 'the mirror root is canonicalized')
+      // A junction may keep the 8.3 short spelling of its target (GitHub's Windows
+      // runner does), so compare the resolved physical directories, not the strings.
+      assert.equal(await realpath(mirrorRoot), await realpath(realRoot), 'the mirror root is canonicalized')
 
       /** @type {Map<string, any>} */
       const live = new Map()
