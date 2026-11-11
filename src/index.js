@@ -41,7 +41,7 @@ export function apply(ctx, config = {}) {
   // session header keeps our literal `meta.cwd`, so with a symlinked or junctioned
   // root the two spellings would otherwise disagree and grouping would depend on
   // the registry canonicalizing the header too (docs/session-design.md §4.3).
-  const mirrorRoot = canonicalMirrorRoot(path.join(stateDir, 'mirrors'), logger)
+  const mirrorRoot = canonicalMirrorRoot(path.join(stateDir, 'mirrors'), { logger })
   const sessionAdapter = createSessionAdapter({
     ctx,
     logger,

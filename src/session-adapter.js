@@ -333,9 +333,9 @@ export function mirrorHostDir(mirrorRoot, hostId) {
  * the mirror root is reached through a symlink or a Windows junction, the literal
  * spelling and the registry's canonical spelling differ, and sidebar grouping
  * then depends on the registry canonicalizing the *header* as well — an
- * assumption this plugin cannot verify. Realpathing the root once and giving the
- * same canonical root to both adapters makes the two spellings identical by
- * construction, on every filesystem.
+ * assumption this plugin cannot verify. Realpathing the root to a fixed point and
+ * giving the same canonical root to both adapters makes the two spellings
+ * identical, because a fixed point is what the registry's own `realpath` returns.
  *
  * Tolerant by design: the directory is created when missing (the plugin owns
  * `$DSH_HOME/remote-go/mirrors`), and any failure falls back to the literal path,
@@ -350,7 +350,17 @@ export function canonicalMirrorRoot(dir, options = {}) {
   if (literal === '') return literal
   try {
     mkdirSync(literal, { recursive: true, mode: 0o700 })
-    return realpathSync(literal)
+    // Iterate until stable: `fs.realpath` is not a spelling normaliser on every volume
+    // (Windows keeps an 8.3 short name as-is), so a single pass can return a path that
+    // resolves to something else. The host realpaths whatever we hand it, so we must hand
+    // it a fixed point or the workspace path and the session cwd would disagree.
+    let current = realpathSync(literal)
+    for (let pass = 0; pass < 3; pass += 1) {
+      const next = realpathSync(current)
+      if (next === current) break
+      current = next
+    }
+    return current
   } catch (error) {
     const logger = options.logger ?? console
     logger.warn?.('[dsh-remote-go] cannot canonicalize the mirror root; using the literal path:', error)

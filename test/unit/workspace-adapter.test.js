@@ -12,7 +12,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -542,6 +542,10 @@ test('canonicalMirrorRoot resolves a symlinked root so both adapters agree', asy
     // runner does), so compare the fully resolved physical directories rather than
     // the literal strings the junction happened to be created with.
     assert.equal(await realpath(canonical), await realpath(real))
+    // The host realpaths what we register, so our value must already be a fixed point;
+    // otherwise the registry and the session header can end up with different spellings
+    // (Windows keeps 8.3 short names through a single realpath pass).
+    assert.equal(await realpath(canonical), canonical, 'the canonical root must be a realpath fixed point')
 
     // Both adapters are fed that one canonical root, so the session's cwd and the
     // workspace path are the same string by construction — even though the user's
@@ -579,6 +583,7 @@ test('canonicalMirrorRoot creates a missing root and falls back on failure', asy
     const missing = path.join(root, 'not-yet', 'mirrors')
     const canonical = canonicalMirrorRoot(missing)
     assert.equal(await realpath(canonical), await realpath(missing))
+    assert.equal(await realpath(canonical), canonical, 'the canonical root must be a realpath fixed point')
     assert.equal((await stat(canonical)).isDirectory(), true)
 
     // A path whose parent is a file cannot be created: fall back to the literal.
@@ -590,4 +595,20 @@ test('canonicalMirrorRoot creates a missing root and falls back on failure', asy
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('the production call site hands canonicalMirrorRoot an options object', async () => {
+  // Regression: `canonicalMirrorRoot(dir, logger)` silently used console instead of the plugin
+  // logger, because the second parameter is an options bag (`{ logger }`), not a logger.
+  const source = await readFile(new URL('../../src/index.js', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /canonicalMirrorRoot\(\s*path\.join\(stateDir,\s*'mirrors'\),\s*\{\s*logger\s*\}\s*\)/,
+    'src/index.js must call canonicalMirrorRoot with an options object',
+  )
+  assert.equal(
+    /canonicalMirrorRoot\([^)]*,\s*logger\s*\)/.test(source),
+    false,
+    'src/index.js must not pass the logger itself as the options bag',
+  )
 })
