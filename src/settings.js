@@ -46,8 +46,6 @@ export function defaultSettings() {
     mirrorMaxEvents: 200,
     // L2 toggle: false keeps every mirror at L1 (directory only).
     mirrorHistory: true,
-    // Live event stream (§6.3). Turn off to fall back to the L2 log poll only.
-    mirrorStream: true,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -116,7 +114,6 @@ export function sanitizeSettings(raw) {
         ? defaults.mirrorMaxEvents
         : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
     mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
-    mirrorStream: boolean(input.mirrorStream, defaults.mirrorStream),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),

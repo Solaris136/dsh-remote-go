@@ -59,6 +59,7 @@ import {
   leaseExpiryFor,
   publishRemoteLease,
 } from './lease.js'
+import { mergeDescriptorDeltas, withMirrorWriter } from './mirror-writer.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -606,8 +607,14 @@ export class RemoteGoService extends EventEmitter {
       // nothing to replay into, so the descriptors must not claim L2.
       decision: this.sessionAdapter ? decision : { ...decision, level: 'L1' },
     })
-    const reconciled = reconcileMirrors({ existing, planned })
-    const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
+    // Reconcile through the single writer: it reads the current descriptors, applies the delta and
+    // persists, so a stream apply that landed meanwhile cannot be clobbered by this snapshot.
+    /** @type {any} */
+    let reconciled = reconcileMirrors({ existing, planned })
+    const mirrors = await this.#mutateMirrors(runtime, (current) => {
+      reconciled = reconcileMirrors({ existing: current.length > 0 ? current : existing, planned })
+      return reconciled.mirrors
+    })
     const sessionRun = await this.#ensureMirrorSessions(runtime, mirrors)
     const sessions = sessionRun.results
     // L2: replay history into the sessions that were just created (design §3 L2,
@@ -1108,9 +1115,6 @@ export class RemoteGoService extends EventEmitter {
           // re-acquiring and the epoch survives a restart (design §6.2).
           epoch: leaseFields.epoch,
           lease: leaseFields.lease,
-          // The file L2 actually discovered, reused by the stream (§6.3) so both paths tail the
-          // same log instead of each guessing a layout.
-          ...(typeof remote.file === 'string' && remote.file !== '' ? { streamFile: remote.file } : {}),
           fencedEpoch: null,
           conflicts: plan.conflicts.length > 0 ? plan.conflicts : descriptor.conflicts,
           conflictCount: (descriptor.conflictCount ?? 0) + plan.conflicts.length,
@@ -1128,7 +1132,9 @@ export class RemoteGoService extends EventEmitter {
     }
 
     const changed = updated.some((descriptor, index) => descriptor !== mirrors[index])
-    const persisted = changed ? await this.mirrorStore.replaceHostMirrors(runtime.id, updated) : updated
+    const persisted = changed
+      ? await this.#mutateMirrors(runtime, (current) => this.#mergeDelta(current, updated))
+      : updated
     const anyL2 = persisted.some((descriptor) => descriptor.status === 'active' && descriptor.level === 'L2')
     this.#log(
       runtime,
@@ -1976,6 +1982,32 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
+  /**
+   * The **single writer** for one host's descriptors (design §6.3).
+   *
+   * Delegates to `withMirrorWriter`, which owns the per-host queue: every descriptor mutation
+   * (sync reconcile, history apply, stream apply) goes through it, so two writers can never
+   * interleave a read and a persist and drop each other's cursor.
+   * @param {any} runtime
+   * @param {(current: any[]) => any[]} delta
+   * @returns {Promise<any[]>}
+   */
+  async #mutateMirrors(runtime, delta) {
+    return withMirrorWriter(
+      runtime,
+      () => this.mirrorStore.listMirrors({ hostId: runtime.id }),
+      (next) => this.mirrorStore.replaceHostMirrors(runtime.id, next),
+      delta,
+    )
+  }
+
+  /**
+   * Merge descriptor deltas onto the current set (monotonic cursor/epoch/conflictCount).
+   * @param {any[]} current @param {any[]} deltas
+   */
+  #mergeDelta(current, deltas) {
+    return mergeDescriptorDeltas(current, deltas)
+  }
   /**
    * Start a fresh writer-authority session for this connection (design §6.2).
    *
