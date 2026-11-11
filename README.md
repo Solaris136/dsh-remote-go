@@ -61,10 +61,14 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | 覆盖率门禁 | `pnpm run test:coverage` → 行 **90.97%** / 分支 **74.41%** / 函数 **86.51%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-workspace-rail.png`、`panel-remote-dsh.png`（含「工作区按远端分组」断言） |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`） |
-| 持续集成 | GitHub Actions：`Repository conventions` + 双平台单测 + 打包/市场条目校验；另有 CodeQL 与手动触发的真实主机 E2E |
+| 持续集成 | GitHub Actions：`Repository conventions`（规范 + 格式 + 覆盖率 + PR 标题）+ 双平台单测 + 打包/市场条目校验；另有 CodeQL 与手动触发的真实主机 E2E |
 | V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：同站 loopback iframe 可嵌入，无需同源反代 |
 
 > 端到端测试依赖一台可通过 SSH 访问、由你自行准备的主机（见 `e2e/remote/README.md`）；仓库不包含任何真实主机地址或凭据。
+
+真实验收截图（面板整页承载远端 DSH + 左侧工作区栏；截图时已隐藏远端地址）：
+
+![远端 DSH 在本地全局面板中整页打开](e2e/artifacts/panel-remote-dsh.png)
 
 ## 功能
 
@@ -229,7 +233,7 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 
 | 工作流 | 触发 | 内容 |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（规范检查 + 提交规范）、`Unit tests`（ubuntu/windows × Node 24）、`Publish artifact`（市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
+| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（仓库规范 + Prettier 格式 + 覆盖率门禁 + 提交规范）、`Unit tests`（ubuntu/windows × Node 24）、`Publish artifact`（市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
 | [`codeql.yml`](.github/workflows/codeql.yml) | push/PR `main` / 每周 | CodeQL 静态分析（`security-and-quality`） |
 | [`release.yml`](.github/workflows/release.yml) | `v*` 标签 / 手动 | 校验标签与版本一致 → 跑门禁 → 打包 → 发布 npm（有 token 时，含 provenance）→ 创建 GitHub Release |
 | [`e2e.yml`](.github/workflows/e2e.yml) | 仅手动 | 真实主机端到端：隔离 control DSH → SSH → 远端自举 → 面板 iframe 验收 → 上传证据 |

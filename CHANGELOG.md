@@ -12,7 +12,23 @@
 
 ## [Unreleased]
 
-(无)
+### 工程与仓库治理
+
+面向贡献者与发布流程，不改变产品行为：
+
+- 引入 Prettier 作为唯一格式化工具（`pnpm run format` / `format:check`，已接入 CI），
+  并用 `.git-blame-ignore-revs` 让格式提交不污染 `git blame`。
+- 新增零依赖的覆盖率门禁 `pnpm run test:coverage`（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%）；
+  当前基线 90.97 / 74.41 / 86.51（排除 `vendor/` 与测试自身）。
+- 新增仓库规范检查 `pnpm run lint`（必需文件、包元数据、版本一致性、换行/空白、密钥泄漏、workflow 约定）
+  与 `pnpm run verify` 聚合门禁。
+- 新增 CI 工作流 `Repository conventions` / `CodeQL` / `Release`（`v*` 标签触发，带 tag 与版本一致性断言、
+  provenance 发布与 GitHub Release），并补充 issue/PR 模板、Dependabot、CODEOWNERS。
+- 社区健康文件：`CONTRIBUTING`、`CODE_OF_CONDUCT`、`SECURITY`、`CHANGELOG`。
+- 仓库行尾统一为 LF（`.gitattributes`），Windows 入口脚本保持 CRLF。
+- E2E 工具链去机器化：不再硬编码个人路径或默认测试主机，改用 `E2E_SSH_ADDRESS` / `E2E_CHROME` /
+  `E2E_NODE` / `DSH_PNPM` / `PNPM_EXE` 与 PATH 解析。
+- 安全：清除已提交的 E2E 证据中的 cookie/token 值；文档与默认值不再包含测试主机地址。
 
 ## [1.0.0] - 2026-11-11
 
