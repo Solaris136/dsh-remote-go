@@ -9,7 +9,7 @@ import { createSessionAdapter } from '../../src/session-adapter.js'
 import { RemoteGoService } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
 import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
-import { createFakeSessions, assertSeededCreateOptions } from '../helpers/fake-sessions.js'
+import { assertSeededCreateOptions } from '../helpers/fake-sessions.js'
 
 /**
  * A `workspaceRegistry` double with the behaviour the plugin depends on:
