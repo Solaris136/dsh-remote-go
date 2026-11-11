@@ -202,4 +202,3 @@ test('summarizePlan is client-safe', () => {
   assert.equal(summary.steps.length, 3)
   assert.ok(summary.reason.zh.length > 0)
 })
-

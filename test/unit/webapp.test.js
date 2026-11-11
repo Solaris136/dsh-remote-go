@@ -202,5 +202,3 @@ test('exchangeTokenOverTunnel reports a failed handshake without throwing', asyn
     server.close()
   }
 })
-
-

@@ -4919,7 +4919,7 @@ window.__ModuleLoader__.load({
 .drg-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: min(560px, calc(100vw - 32px)); padding: 9px 16px; border-radius: var(--drg-radius-sm); background: var(--dsw-alias-toast-bg, CanvasText); color: var(--dsw-alias-toast-label, Canvas); font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
 .drg-toast[data-tone="error"] { background: var(--dsw-alias-state-error-primary, #d64545); color: #fff; }
 .drg-toast[data-tone="success"] { background: var(--dsw-alias-state-success-primary, #22a06b); color: #fff; }
-` 
+`
 
     /** Injects the panel styles once per mounted panel (removed on unmount). */
     function StyleSheet() {

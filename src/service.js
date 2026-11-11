@@ -1095,4 +1095,3 @@ export function maskAddress(entry) {
   const host = entry.address || '?'
   return `${user}${host}${port}`
 }
-

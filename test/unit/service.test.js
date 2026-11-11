@@ -314,5 +314,3 @@ test('listHostWorkspaces reads the remote registry over the live SSH session', a
   assert.match(calls[0], /storages\/workspace\.json/)
   await service.shutdown()
 })
-
-

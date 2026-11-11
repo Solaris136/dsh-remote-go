@@ -78,4 +78,3 @@ test('describeProbeCapabilities reports support and credentials', () => {
   assert.equal(capabilities.dsh.version, '0.2.2-rc.1')
   assert.equal(capabilities.modelCredentials.credentialsFile, false)
 })
-

@@ -361,4 +361,3 @@ export function manualPreparationHint(facts) {
     1200,
   )
 }
-
