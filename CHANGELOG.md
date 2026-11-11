@@ -3,7 +3,7 @@
 > **English abstract.** All notable, user-visible changes to `dsh-remote-go` are recorded here, newest first.
 > The format follows Keep a Changelog 1.1.0 and versions follow Semantic Versioning 2.0.0. Entries are written
 > in Chinese (the project's primary language) and describe user-visible behavior rather than individual
-> commits. Dates use `YYYY-MM-DD`; `1.0.0` is the first public release.
+> commits. Dates use `YYYY-MM-DD`; `0.1.0` is the current baseline and has not been published to npm yet.
 
 本文件记录本项目的所有重要变更。格式基于 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。日期为 `YYYY-MM-DD`。
@@ -31,9 +31,9 @@
 - 安全：清除已提交的 E2E 证据中的 cookie/token 值；文档与默认值不再包含测试主机地址。
 - 修复：接入向导的地址输入提示不再展示维护者自己的 SSH 别名，改用通用示例（`ubuntu@192.0.2.10` / `my-server`）。
 
-## [1.0.0] - 2026-11-11
+## [0.1.0] - 2026-11-11
 
-首个公开发布版本：在本地 DSH 的全局面板里，通过 SSH 整页使用服务器上的 DSH。
+首个版本（**尚未发布到 npm**，也无对应 tag）：在本地 DSH 的全局面板里，通过 SSH 整页使用服务器上的 DSH。
 
 ### 新增
 
@@ -93,5 +93,4 @@
 - **自举只走白名单模板**：Node 下载、`npx` 精确版本、隔离安装三类固定命令，不接受用户拼接的任意 shell；下载校验 SHA-256。
 - **脱敏**：诊断导出默认屏蔽 token、密码、私钥与家目录，降低贴日志时的泄漏风险。
 
-[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Solaris136/dsh-remote-go/commits/main
