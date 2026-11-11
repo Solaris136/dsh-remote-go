@@ -301,13 +301,20 @@ export function createSessionAdapter(options = {}) {
    * `meta.isSeeded` marks the session as a replay/projection, so a leftover mirror
    * is identifiable after a restart. DSH cannot carry `hostId`/`remoteSessionId`
    * in `meta` (fixed `SessionHeader`), so that lineage stays in `mirrors.json`.
-   * P0 has no seed because the directory level carries no history.
+   *
+   * The host requires an **explicit** seed *and* inherited event count whenever
+   * the header marks a session as seeded ("seeded session requires an explicit
+   * constructor seed" / "…an inherited event count"). The mirror inherits nothing
+   * at creation time — L2 appends the remote history afterwards — so both are
+   * passed explicitly as empty/zero. Omitting them made every mirror session
+   * creation fail in the real shell, so the mirrors were never replayable (and
+   * therefore never read-only).
    * @param {any} descriptor
-   * @returns {{ seed?: any[], meta?: Record<string, any> }}
+   * @returns {{ seed: any[], inheritedEventCount: number, meta: Record<string, any> }}
    */
   function buildCreateOptions(descriptor) {
-    /** @type {{ seed?: any[], meta?: Record<string, any> }} */
-    const createOptions = {}
+    /** @type {{ seed: any[], inheritedEventCount: number, meta: Record<string, any> }} */
+    const createOptions = { seed: [], inheritedEventCount: 0 }
     if (Array.isArray(descriptor?.seed) && descriptor.seed.length > 0) {
       createOptions.seed = descriptor.seed.map((event) => ({ ...event }))
     }

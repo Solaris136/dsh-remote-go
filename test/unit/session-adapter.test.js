@@ -101,7 +101,8 @@ test('ensureMirrorSession creates the local session and flags the restart re-pul
   const createCall = sessions.calls.find((call) => call.op === 'create')
   assert.equal(createCall.id, mirror.localSessionId)
   // Lineage marker: a leftover mirror session is identifiable as a projection.
-  assert.deepEqual(createCall.options, { meta: { isSeeded: true } })
+  // The seed is explicit (empty) because the host rejects `isSeeded` without one.
+  assert.deepEqual(createCall.options, { seed: [], inheritedEventCount: 0, meta: { isSeeded: true } })
 
   // A live session is found, not re-created, and needs no resync.
   const second = adapter.ensureMirrorSession(mirror)
@@ -117,7 +118,11 @@ test('each host gets its own mirror cwd under the mirror root', () => {
   const adapter = createSessionAdapter({ sessions, logger: quiet, mirrorRoot })
   adapter.ensureMirrorSession(descriptor({ hostId: 'h_1' }))
   const createCall = sessions.calls.find((call) => call.op === 'create')
-  assert.deepEqual(createCall.options, { meta: { cwd: path.join(mirrorRoot, 'h_1'), isSeeded: true } })
+  assert.deepEqual(createCall.options, {
+    seed: [],
+    inheritedEventCount: 0,
+    meta: { cwd: path.join(mirrorRoot, 'h_1'), isSeeded: true },
+  })
   // The remote workspace path is never leaked into the local session.
   assert.notEqual(createCall.options.meta.cwd, '/home/u/project-a')
 
@@ -162,6 +167,8 @@ test('a relative mirror root is ignored so the host default cwd is used', async 
   })
   adapter.ensureMirrorSession(descriptor())
   assert.deepEqual(sessions.calls.find((call) => call.op === 'create').options, {
+    seed: [],
+    inheritedEventCount: 0,
     meta: { isSeeded: true },
   })
 })
@@ -175,13 +182,19 @@ test('meta.cwd falls back to an absolute cwd and is omitted when relative', () =
   })
   absoluteAdapter.ensureMirrorSession(descriptor())
   assert.deepEqual(absolute.calls.find((call) => call.op === 'create').options, {
+    seed: [],
+    inheritedEventCount: 0,
     meta: { cwd: path.join(path.sep, 'home', 'u', 'project'), isSeeded: true },
   })
 
   const relative = createFakeSessions()
   const relativeAdapter = createSessionAdapter({ sessions: relative, logger: quiet, cwd: 'relative/dir' })
   relativeAdapter.ensureMirrorSession(descriptor())
-  assert.deepEqual(relative.calls.find((call) => call.op === 'create').options, { meta: { isSeeded: true } })
+  assert.deepEqual(relative.calls.find((call) => call.op === 'create').options, {
+    seed: [],
+    inheritedEventCount: 0,
+    meta: { isSeeded: true },
+  })
 })
 
 // (g) surface intents -------------------------------------------------------

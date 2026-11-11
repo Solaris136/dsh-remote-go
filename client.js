@@ -209,6 +209,10 @@ window.__ModuleLoader__.load({
       workspaceDefault: '默认',
       workspaceLocalOrigin: '本地',
       workspaceRemoteOrigin: '远端',
+      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
+      mirrorReadOnlyBadge: '只读镜像',
+      mirrorReadOnlyTitle: '{level} 只读镜像：{reason}',
+      mirrorReadOnlyReasonDefault: '远端历史以只读方式回放，本地暂不支持输入',
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
@@ -524,6 +528,10 @@ window.__ModuleLoader__.load({
       workspaceDefault: 'Default',
       workspaceLocalOrigin: 'Local',
       workspaceRemoteOrigin: 'Remote',
+      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
+      mirrorReadOnlyBadge: 'Read-only mirror',
+      mirrorReadOnlyTitle: 'Read-only {level} mirror: {reason}',
+      mirrorReadOnlyReasonDefault: 'Remote history is replayed read-only; local input is not supported yet',
 
       viewportConnecting: 'Connecting to "{name}"…',
       viewportOpening: 'Connecting to "{name}" and preparing the remote UI…',
@@ -1395,6 +1403,17 @@ window.__ModuleLoader__.load({
         }
       },
       /**
+       * Mirrored sessions of one remote host (contract §1 GET /hosts/:id/mirrors).
+       * The rail only needs `readOnly` to mark replayed sessions; a failure is
+       * tolerated by the caller, which then shows no badge instead of a guess.
+       * @param {string} hostId - host id.
+       * @returns {Promise<{mirrors: object[]}>} mirror payload.
+       */
+      async getHostMirrors(hostId) {
+        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/mirrors')
+        return { mirrors: Array.isArray(payload.mirrors) ? payload.mirrors : [] }
+      },
+      /**
        * Point the Host's active host at `hostId` so a reload reopens the same
        * remote panel (POST /hosts/:id/activate).
        * @param {string} hostId - host id.
@@ -1616,7 +1635,12 @@ window.__ModuleLoader__.load({
       const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
       return h(
         'span',
-        { className: 'drg-badge', 'data-tone': tone, title: props && props.title },
+        {
+          className: 'drg-badge',
+          'data-tone': tone,
+          title: props && props.title,
+          'data-testid': props && props.testId,
+        },
         props && props.children,
       )
     }
@@ -4436,6 +4460,7 @@ window.__ModuleLoader__.load({
           h(WorkspaceRail, {
             t,
             locale,
+            localeId: locale,
             hosts,
             activeHostId,
             onOpenHost: openHost,
@@ -4576,6 +4601,7 @@ window.__ModuleLoader__.load({
             status: host.status === 'connected' ? 'loading' : 'disconnected',
             connected: host.status === 'connected',
             workspaces: [],
+            mirrors: [],
             error: null,
             hostName: host.name || host.id,
           }
@@ -4589,6 +4615,7 @@ window.__ModuleLoader__.load({
               setRemotes((current) => ({
                 ...current,
                 [host.id]: {
+                  ...(current[host.id] || {}),
                   status: 'ready',
                   connected: payload.connected,
                   workspaces: payload.workspaces,
@@ -4602,6 +4629,7 @@ window.__ModuleLoader__.load({
               setRemotes((current) => ({
                 ...current,
                 [host.id]: {
+                  ...(current[host.id] || {}),
                   status: 'error',
                   connected: true,
                   workspaces: [],
@@ -4611,6 +4639,31 @@ window.__ModuleLoader__.load({
               }))
             },
           )
+          // Read-only markers come from the mirror list the Host already exposes.
+          // A failure only hides the badge: never claim read-only without data.
+          const loadMirrors = (retry) => {
+            api.getHostMirrors(host.id).then(
+              (payload) => {
+                if (!alive.current || token !== generation.current) return
+                setRemotes((current) => ({
+                  ...current,
+                  [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
+                }))
+                if (retry && payload.mirrors.length === 0) {
+                  // The connect-time sync may still be replaying history: retry once
+                  // (bounded, not a poll) so the marker appears without a manual refresh.
+                  setTimeout(() => {
+                    if (!alive.current || token !== generation.current) return
+                    loadMirrors(false)
+                  }, 1500)
+                }
+              },
+              () => {
+                // No badge rather than a stale or invented one.
+              },
+            )
+          }
+          loadMirrors(true)
         }
       }, [])
 
@@ -4652,6 +4705,35 @@ window.__ModuleLoader__.load({
             : String(workspace.id || '')
       const sessionsLabel = (workspace) =>
         t('workspaceRailSessions', { count: typeof workspace.sessionCount === 'number' ? workspace.sessionCount : 0 })
+      /** Read-only mirrors of one remote workspace (empty for local rows). */
+      const readOnlyMirrors = (workspace, kind, host) => {
+        if (kind !== 'remote' || !host) return []
+        const info = data.remotes[host.id]
+        const mirrors = Array.isArray(info && info.mirrors) ? info.mirrors : []
+        return mirrors.filter((mirror) => mirror && mirror.readOnly === true && mirror.workspaceId === workspace.id)
+      }
+      /**
+       * Visible read-only marker (design §10 P1): the rail row covering a
+       * replayed remote session says so, with the level and reason in its tooltip.
+       * Returns `null` when no mirror of the row is read-only, so a host whose
+       * history is unavailable never gets a misleading badge.
+       */
+      const readOnlyBadge = (workspace, kind, host) => {
+        const mirrors = readOnlyMirrors(workspace, kind, host)
+        if (mirrors.length === 0) return null
+        const first = mirrors[0]
+        const level = typeof first.level === 'string' ? first.level : ''
+        const reason = resolveText(first.reason && first.reason.message, locale)
+        return h(
+          Badge,
+          {
+            tone: 'idle',
+            testId: 'mirror-readonly-badge',
+            title: t('mirrorReadOnlyTitle', { level, reason: reason || t('mirrorReadOnlyReasonDefault') }),
+          },
+          t('mirrorReadOnlyBadge'),
+        )
+      }
       const workspaceRow = (workspace, kind, host) =>
         h(
           'button',
@@ -4674,6 +4756,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'drg-rail-item-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 14 })),
           h('span', { className: 'drg-rail-item-title' }, workspaceTitle(workspace)),
           workspace.isDefault === true ? h(Badge, { tone: 'idle' }, t('workspaceDefault')) : null,
+          readOnlyBadge(workspace, kind, host),
           h('span', { className: 'drg-rail-item-meta' }, sessionsLabel(workspace)),
         )
 

@@ -509,7 +509,11 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
   游标停在缺口前的最后一个连续事件——不会跳过缺口，也不会永远重试同一段不可达区间。
 - **只读标识**：回放过历史的镜像会话在 `MirrorView` 上带 `readOnly: true`，并在会话里写一条一次性的
   `mirror/read-only` 非 surface 事件（带 `capabilities: { input:false, stream:false, approve:false }`），
-  客户端据此标注「只读」；重复同步不会重复写入该通知。
+  客户端据此标注「只读」；重复同步不会重复写入该通知。客户端的可见标识在**插件面板的工作区栏**：远端工作区行
+  渲染 `只读镜像` / `Read-only mirror` 徽标（`data-testid="mirror-readonly-badge"`），tooltip 为
+  `<级别> 只读镜像：<原因>`（无 `reason` 时用「远端历史以只读方式回放…」的默认文案），只在 `readOnly === true`
+  时出现；徽标只在确有 `readOnly` 描述符时渲染，镜像列表读取失败则**不显示**而不是猜。DSH 尚未向插件暴露
+  会话头 slot，因此 Conversation UI 内部没有该徽标（见 session-design.md §10 P1 / §11 #8）。
 - **保留上限**：`mirrorMaxEvents`（默认 200，`0` = 不限）限制单次回放的事件窗口。超限时保留**最新**的 N 条并在
   会话里先写一条 `mirror/history-folded`（非 surface 事件，带真实的 `folded` / `from` / `to` / `retained`，
   以及 `retentionCap` / `fetchCap` 两个上限），然后从新的窗口起点继续；折叠只发生在首次同步（`cursor == 0`），

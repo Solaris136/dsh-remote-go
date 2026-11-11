@@ -42,6 +42,8 @@ import {
   assertFrameRefresh,
   assertLoopbackUrl,
   assertPanelToolbar,
+  assertReadOnlyBadge,
+  SIMULATED_HISTORY,
   connectSimulatedHost,
   describePanel,
   openRemotePanel,
@@ -624,7 +626,12 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       await withPanelDiagnostics(page, async () => {
         // Same simulated remote host as the web suite: a real connect through the
         // plugin's own API, then the panel is opened the way a user opens it.
-        sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
+        sim = await startSimulatedRemote({
+          stateFile: path.join(tempRoot, 'sim', 'sim.state.json'),
+          // Session logs make L2 replay succeed, so the mirrors are read-only and
+          // the rail must mark them.
+          historyFixture: SIMULATED_HISTORY,
+        })
         // The panel subtests are the only ones that need a *live* SSH endpoint, so
         // assert it explicitly: a dead simulator must be reported here, not as a
         // mysterious "panel never mounted".
@@ -669,6 +676,16 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         assert.equal(toolbar.hidden, '••••••')
         const refreshed = await assertFrameRefresh(page)
         assertLoopbackUrl(refreshed.iframeSrc, 'the refreshed panel iframe')
+      })
+    })
+
+    await t.test('the panel marks replayed remote sessions as read-only', async () => {
+      await withPanelDiagnostics(page, async () => {
+        // Same simulated host as above: its default registry has history, so the
+        // connect produced read-only mirrors. Locale-tolerant like every text
+        // assertion in this suite (Electron ignores `--lang`).
+        const badge = await assertReadOnlyBadge(page)
+        console.log(`[desktop-e2e] read-only badge: ${JSON.stringify(badge)}`)
       })
     })
 

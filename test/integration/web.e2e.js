@@ -45,6 +45,8 @@ import {
   assertFrameRefresh,
   assertLoopbackUrl,
   assertPanelToolbar,
+  assertReadOnlyBadge,
+  SIMULATED_HISTORY,
   connectSimulatedHost,
   describePanel,
   openRemotePanel,
@@ -583,7 +585,12 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         // A real connect against the repository's simulated remote host: no external
         // machine is needed, and the iframe therefore proves the *real* pipeline
         // (SSH → probe → remote start → loopback tunnel → iframe).
-        sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
+        sim = await startSimulatedRemote({
+          stateFile: path.join(tempRoot, 'sim', 'sim.state.json'),
+          // Session logs make L2 replay succeed, so the mirrors are read-only and
+          // the rail must mark them.
+          historyFixture: SIMULATED_HISTORY,
+        })
         // The panel subtests are the only ones that need a *live* SSH endpoint, so
         // assert it explicitly: a dead simulator must be reported here, not as a
         // mysterious "panel never mounted".
@@ -638,6 +645,16 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         // Refresh really rebuilds the frame and the rebuilt frame still loads the remote UI.
         const refreshed = await assertFrameRefresh(page)
         assertLoopbackUrl(refreshed.iframeSrc, 'the refreshed panel iframe')
+      })
+    })
+
+    await t.test('the panel marks replayed remote sessions as read-only', async () => {
+      await withPanelDiagnostics(page, async () => {
+        // The simulator serves two sessions with history, so the connect above
+        // already produced read-only mirrors: this asserts the visible marker the
+        // L2 replay needs, without another simulator or another connect.
+        const badge = await assertReadOnlyBadge(page, { hostId: simulatedHostId })
+        console.log(`[web-e2e] read-only badge: ${JSON.stringify(badge)}`)
       })
     })
 

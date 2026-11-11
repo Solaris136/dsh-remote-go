@@ -1006,6 +1006,94 @@ test('workspace rail renders local and per-host workspace groups', () => {
   assert.match(html, /本地工作区仍可在左侧边栏切换/)
 })
 
+/** Fold whitespace on **both** sides of a comparison; locale text is wrapped by the shell. */
+const squash = (value) =>
+  String(value === undefined || value === null ? '' : value)
+    .replace(/\s+/g, ' ')
+    .trim()
+
+test('workspace rail marks read-only mirrors in both locales, and only when read-only', () => {
+  const workspace = {
+    id: 'r_ws_1',
+    title: 'remote-proj',
+    path: '/home/u/proj',
+    sessionCount: 1,
+    origin: 'remote',
+    hostId: 'h_ro',
+  }
+  const mirror = {
+    localSessionId: 'mirror_h_ro_r1',
+    hostId: 'h_ro',
+    remoteSessionId: 'r1',
+    workspaceId: 'r_ws_1',
+    title: 'remote-proj · r1',
+    level: 'L2',
+    readOnly: true,
+    reason: null,
+    status: 'active',
+  }
+  const hosts = [hostView({ id: 'h_ro', name: '只读机', status: 'connected' })]
+  /** @param {object[]} mirrors @param {object} tFn @param {string} [localeId] */
+  const rail = (mirrors, tFn, localeId) =>
+    render(
+      React.createElement(plugin.components.WorkspaceRail, {
+        t: tFn,
+        localeId,
+        hosts,
+        initialWorkspaceData: {
+          local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
+          remotes: {
+            h_ro: {
+              status: 'ready',
+              connected: true,
+              hostName: '只读机',
+              workspaces: [workspace],
+              mirrors,
+              error: null,
+            },
+          },
+        },
+      }),
+    )
+
+  // zh: badge text and the default reason (a replayed L2 session has no reason code).
+  const zhMarkup = rail([mirror], t)
+  assert.match(zhMarkup, /data-testid="mirror-readonly-badge"/)
+  assert.match(squash(zhMarkup), new RegExp(squash('只读镜像')))
+  // The tooltip carries the level and why nothing can be typed into the session.
+  assert.ok(
+    zhMarkup.includes('title="L2 只读镜像：远端历史以只读方式回放，本地暂不支持输入"'),
+    'the zh badge tooltip must explain the level and reason',
+  )
+
+  // en: same data, English dictionary and locale.
+  const enMarkup = rail([mirror], enT, 'en')
+  assert.match(enMarkup, /data-testid="mirror-readonly-badge"/)
+  assert.match(squash(enMarkup), new RegExp(squash('Read-only mirror')))
+  assert.ok(
+    enMarkup.includes(
+      'title="Read-only L2 mirror: Remote history is replayed read-only; local input is not supported yet"',
+    ),
+    'the en badge tooltip must explain the level and reason',
+  )
+
+  // A descriptor reason (version mismatch) is carried into the tooltip in the active locale.
+  const mismatch = {
+    ...mirror,
+    reason: {
+      code: 'version-mismatch',
+      message: { zh: '版本不一致，只做目录镜像', en: 'Version mismatch: directory only' },
+    },
+  }
+  assert.match(squash(rail([mismatch], t)), new RegExp(squash('版本不一致，只做目录镜像')))
+  assert.match(squash(rail([mismatch], enT, 'en')), new RegExp(squash('Version mismatch: directory only')))
+
+  // Not read-only (history unavailable): no badge in either locale.
+  const plain = rail([{ ...mirror, readOnly: false, level: 'L1' }], t)
+  assert.doesNotMatch(plain, /data-testid="mirror-readonly-badge"/)
+  assert.doesNotMatch(rail([{ ...mirror, readOnly: false, level: 'L1' }], enT, 'en'), /mirror-readonly-badge/)
+})
+
 test('workspace rail renders empty, error and collapsed states', () => {
   const empty = render(
     React.createElement(plugin.components.WorkspaceRail, {

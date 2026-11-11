@@ -709,7 +709,9 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         const cwd = path.join(mirrorRoot, host.id)
         assert.equal((await stat(cwd)).isDirectory(), true, 'the per-host mirror cwd must exist')
         for (const call of createCalls) {
-          assert.deepEqual(call.options, { meta: { isSeeded: true, cwd } })
+          // `seed`/`inheritedEventCount` are explicit because the host rejects a
+          // seeded header without them (see src/session-adapter.js).
+          assert.deepEqual(call.options, { seed: [], inheritedEventCount: 0, meta: { isSeeded: true, cwd } })
         }
         // Descriptor ids are the ids handed to the sessions service.
         const descriptorIds = listed.mirrors.map((mirror) => mirror.localSessionId).sort()
