@@ -23,9 +23,15 @@
  * - Every wait is a bounded poll on state that changes; no fixed sleeps before a
  *   navigation. Timeouts dump the panel's observable state (frames, iframe src,
  *   toolbar labels) so a red run explains itself.
- * - Locale: the suites pin `--lang` (`DSH_E2E_LANG`, default `en-US`). Every text
- *   comparison normalises **both** sides and accepts the en/zh candidate, because
- *   asserting one language is how this class of bug reached CI four times.
+ * - Locale: every text comparison normalises **both** sides and accepts the en/zh
+ *   candidate, because asserting one language is how this class of bug reached CI
+ *   four times. The claim differs per shell, deliberately:
+ *     * `dsh web` **exercises both locales** — the suite pins `--lang`
+ *       (`DSH_E2E_LANG`, default `en-US`) and both `en-US` and `zh-CN` runs pass;
+ *     * the desktop shell is **locale-tolerant, not locale-exercised** — Electron
+ *       resolves the plugin locale from the app/OS locale rather than `--lang`, and
+ *       CI runs a single OS locale, so the assertions accept whichever language the
+ *       shell renders instead of pretending both were driven.
  */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -509,7 +515,9 @@ export async function assertPanelToolbar(page, options = {}) {
   const hidden = await pollUntil(
     async () => {
       const text = await page.$eval(PANEL.address, (node) => (node.textContent ?? '').trim())
-      return text === HIDDEN_ADDRESS ? text : null
+      // Both sides are folded: the address row is not localised today, but the
+      // "strip one side only" shape is exactly what broke the label comparisons.
+      return normalizeText(text) === normalizeText(HIDDEN_ADDRESS) ? text : null
     },
     { timeoutMs, intervalMs: 100, label: 'the address row to hide the address' },
   )
@@ -602,7 +610,9 @@ export async function switchPanelHost(page, options) {
         const shown = await page
           .$eval(`${PANEL.toolbar} .drg-toolbar-host`, (node) => (node.textContent ?? '').trim())
           .catch(() => null)
-        return shown === options.hostName ? shown : null
+        // Normalise both sides: a host name is user input, so a name with
+        // collapsing whitespace must still be recognised after switching.
+        return normalizeText(shown) === normalizeText(options.hostName) ? shown : null
       },
       {
         timeoutMs,
@@ -673,7 +683,10 @@ export async function stubNonLoopbackIframeUrl(page, options = {}) {
  * @returns {Promise<{ cardText: string, iframeSrcs: string[], panelIframe: string | null }>}
  */
 export async function assertBlockedIframe(page, options) {
-  const timeoutMs = options.timeoutMs ?? 90_000
+  // The card renders ~400 ms after the switch when the guard is intact, so a
+  // 30 s budget keeps a genuine regression fast instead of burning the full
+  // default. It is still far above the observed spread (CI is slower than local).
+  const timeoutMs = options.timeoutMs ?? 30_000
   await options.forceRefetch()
 
   const cardText = await pollUntil(

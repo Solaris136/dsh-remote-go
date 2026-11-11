@@ -27,16 +27,23 @@ const PANEL_ID = 'dsh-remote-go'
 /**
  * Execute client.js in a VM with a fake module loader and materialize the
  * registered factory with the real React. Returns the factory's plugin object.
+ *
+ * `options.fetch` is installed as the sandbox's global `fetch`, which the client
+ * resolves per request through `getFetch()`; that is what lets a unit test drive
+ * the real API layer (`api.openHost`) instead of matching source text.
+ * @param {{ fetch?: (input: any, init?: any) => Promise<any> }} [options]
  */
-function loadClientPlugin() {
+function loadClientPlugin(options = {}) {
   const sandbox = {
     console,
     setTimeout,
     clearTimeout,
     setInterval,
     clearInterval,
+    fetch: options.fetch,
   }
   sandbox.window = {
+    fetch: options.fetch,
     __ModuleLoader__: {
       load(declaration) {
         sandbox.__declaration = declaration
@@ -341,6 +348,90 @@ test('iframe URL guard blocks non-loopback addresses', () => {
 // ---------------------------------------------------------------------------
 // 4. key component renders (react-dom/server)
 // ---------------------------------------------------------------------------
+
+test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () => {
+  // Drive the real `api.openHost` through a stubbed transport. The positive
+  // control matters: a test that only checks rejection would also pass if the
+  // method rejected everything.
+  const requests = []
+  /** @type {string} */
+  let answer = 'http://127.0.0.1:54321/?token=abc123'
+  const client = loadClientPlugin({
+    fetch: async (endpoint) => {
+      requests.push(String(endpoint))
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { ok: true, url: answer, localPort: 54321, address: '127.0.0.1:54321' }
+        },
+      }
+    },
+  })
+  assert.equal(typeof client.api?.openHost, 'function', 'client.js must expose the Host-API client for this test')
+
+  const allowed = await client.api.openHost('h_test')
+  assert.equal(allowed, 'http://127.0.0.1:54321/?token=abc123')
+  assert.match(requests.at(-1), /\/dsh-remote-go\/api\/hosts\/h_test\/open$/)
+
+  for (const refusedUrl of [
+    'https://evil.example.com/?token=secret',
+    'http://10.0.0.5:54321/?token=secret',
+    'http://localhost:54321/?token=secret',
+    'http://127.0.0.1.evil.example.com/?token=secret',
+  ]) {
+    answer = refusedUrl
+    await assert.rejects(client.api.openHost('h_test'), (error) => {
+      assert.equal(error?.view?.code, 'blocked-iframe', `unexpected error view for ${refusedUrl}`)
+      // The refused URL must not be echoed back anywhere.
+      assert.doesNotMatch(String(error?.message ?? ''), /evil\.example\.com|10\.0\.0\.5|localhost/)
+      return true
+    })
+  }
+})
+
+test('RemoteViewport embeds a loopback iframeUrl and refuses a non-loopback one', () => {
+  const host = hostView()
+  const viewportProps = {
+    t,
+    host,
+    hosts: [host],
+    iframeKey: 0,
+    iframeLoading: false,
+    iframeError: null,
+    addressVisible: true,
+    enterNotice: false,
+    onBack: () => {},
+    onReconnect: () => {},
+    onRefreshFrame: () => {},
+    onSwitchHost: () => {},
+    onToggleAddress: () => {},
+    onOpenExternal: () => {},
+    onDiagnose: () => {},
+  }
+
+  // Positive control: a validated loopback URL really becomes the iframe src.
+  const embedded = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      ...viewportProps,
+      iframeUrl: 'http://127.0.0.1:54321/?token=abc123',
+    }),
+  )
+  assert.ok(testIdsOf(embedded).includes('remote-iframe'), 'a loopback URL must render the remote iframe')
+  assert.match(embedded, /src="http:\/\/127\.0\.0\.1:54321\/\?token=abc123"/)
+
+  // Render-layer guard: without it this URL would become the iframe src.
+  const refused = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      ...viewportProps,
+      iframeUrl: 'https://evil.example.com/?token=secret',
+    }),
+  )
+  assert.equal(testIdsOf(refused).includes('remote-iframe'), false, 'a non-loopback URL must not render an iframe')
+  assert.doesNotMatch(refused, /evil\.example\.com/)
+  assert.match(refused, /已阻止内嵌远端界面/)
+  assert.match(refused, /远端地址不是本地回环地址/)
+})
 
 test('empty host list renders the empty state and the first-server action', () => {
   const state = {

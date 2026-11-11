@@ -599,16 +599,25 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         const iframeSrcs = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
         assert.ok(iframeSrcs.length >= 1, 'the panel mounted no iframe')
         for (const src of iframeSrcs) assert.match(src, LOOPBACK_IFRAME, `non-loopback iframe src: ${src}`)
-        // The iframe points at the tunnel, not at the dsh web server itself.
+        // The iframe points at the tunnel, not at the dsh web server itself, and
+        // not at the simulated remote's own port either: bypassing the tunnel and
+        // embedding the remote listener directly would satisfy every other
+        // assertion here, so pin the tunnel as the only acceptable target.
         assert.notEqual(new URL(frame.iframeSrc).port, new URL(server.url).port)
+        assert.notEqual(
+          Number(new URL(frame.iframeSrc).port),
+          Number(sim.state.remotePort),
+          'the iframe embeds the simulated remote directly instead of going through the tunnel',
+        )
       })
     })
 
     await t.test('the panel toolbar affords reconnect, refresh, open-in-new-window and address hiding', async () => {
       await withPanelDiagnostics(page, async () => {
         const toolbar = await assertPanelToolbar(page)
-        // Print the labels that actually matched: the log then proves which locale
-        // branch this run exercised instead of leaving it to inference.
+        // Print the labels that actually matched: with `DSH_E2E_LANG` pinned, the log
+        // proves which locale branch this run exercised (en-US and zh-CN both pass
+        // for this shell, which does follow `--lang`).
         console.log(`[web-e2e] panel toolbar labels: ${JSON.stringify(toolbar.labels)}`)
         assert.match(toolbar.address, /127\.0\.0\.1:\d+/)
         assert.equal(toolbar.hidden, '••••••')
@@ -621,6 +630,10 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
     await t.test('a non-loopback iframe URL is refused instead of embedded', async () => {
       await withPanelDiagnostics(page, async () => {
         assert.ok(simulatedHostId, 'the simulated host was not connected')
+        // Snapshot the console log so a regression in the blocked path is reported
+        // here (as part of this subtest) rather than surfacing later as a vaguer
+        // "console errors" failure.
+        const errorsBefore = consoleErrors.length
         // A second connected host gives the toolbar's host switcher something to
         // switch to; the switch is what makes the client fetch `/open` again (the
         // client caches that URL per viewport mount by design).
@@ -635,6 +648,12 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
             forceRefetch: () => switchPanelHost(page, { hostId: second.hostId, hostName: 'simulated-remote-b' }),
           })
           assert.equal(blocked.panelIframe, null, 'a blocked URL produced an iframe')
+          // Attribute any console noise to the path that caused it.
+          assert.deepEqual(
+            consoleErrors.slice(errorsBefore),
+            [],
+            `the blocked path logged console errors:\n${consoleErrors.slice(errorsBefore).join('\n')}`,
+          )
         } finally {
           await guard.disable()
         }
