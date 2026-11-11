@@ -12,7 +12,18 @@ import {
   observeRemoteLease,
   renewLease,
 } from '../../src/mirror.js'
-import { buildLeaseReadCommand, fetchRemoteLease, parseRemoteLease, remoteLeaseFile } from '../../src/lease.js'
+import {
+  buildLeasePublishCommand,
+  buildLeaseReadCommand,
+  buildLeaseRecord,
+  buildLeaseReleaseCommand,
+  classifyPublishResult,
+  fetchRemoteLease,
+  leaseExpiryFor,
+  parseRemoteLease,
+  publishRemoteLease,
+  remoteLeaseFile,
+} from '../../src/lease.js'
 
 const TTL = 30_000
 
@@ -229,7 +240,7 @@ test('the remote authority read is typed and never throws', async () => {
     },
   )
   assert.equal(ok.ok, true)
-  assert.deepEqual(ok.report, { writer: 'w2', epoch: 3, expiresAt: null })
+  assert.deepEqual(ok.report, { writer: 'w2', epoch: 3, expiresAt: null, sessionKey: null })
 
   // No authority published is normal, not an error.
   const absent = await fetchRemoteLease(
@@ -289,9 +300,16 @@ test('the authority parser accepts the documented shapes only', () => {
     writer: 'w',
     epoch: 2,
     expiresAt: 10,
+    sessionKey: null,
   })
   // `owner` is accepted as an alias, and a numeric string epoch is tolerated.
-  assert.deepEqual(parseRemoteLease('{"owner":"w","epoch":"3"}'), { ok: true, writer: 'w', epoch: 3, expiresAt: null })
+  assert.deepEqual(parseRemoteLease('{"owner":"w","epoch":"3"}'), {
+    ok: true,
+    writer: 'w',
+    epoch: 3,
+    expiresAt: null,
+    sessionKey: null,
+  })
   for (const bad of ['', 'null', '[]', '"x"', '{}', '{"junk":true}']) {
     assert.equal(parseRemoteLease(bad).ok, false, `${bad} must be malformed`)
   }
@@ -350,4 +368,179 @@ test('a re-applied seq (cursor did not advance) is not counted twice', () => {
   const again = applyEvents({ cursor: 0, events: [], conflicts: first.state.conflicts, conflictCount: 1 }, [kept, lost])
   assert.equal(again.state.conflictCount, 1, 'the same (seq, kept, lost) pair merges')
   assert.equal(again.state.conflicts.length, 1)
+})
+
+test('a published record carries the writer, epoch, expiry and session key', () => {
+  const record = buildLeaseRecord({ writer: 'local:h', epoch: 4, expiresAt: 99_000, sessionKey: 'sk_abc' })
+  assert.deepEqual(record, { version: 1, writer: 'local:h', epoch: 4, expiresAt: 99_000, sessionKey: 'sk_abc' })
+  // The record is what the remote validates, so it must be self-describing.
+  assert.equal(record.epoch, 4)
+  // `expiresAt` is derived from the same clock the lease used, not from a second reading.
+  assert.equal(leaseExpiryFor({ startedAt: 1000, ttlMs: 30_000 }), 31_000)
+})
+
+test('the publish command is one opaque, quoted payload', () => {
+  const record = buildLeaseRecord({ writer: "w'ith", epoch: 2, expiresAt: 5, sessionKey: 'sk_x' })
+  const command = buildLeasePublishCommand('/h/remote-go/lease.json', record)
+  // A quote in any field must never break out of the shell word: the payload is base64.
+  assert.match(command, /^mkdir -p '\/h\/remote-go' 2>\/dev\/null; printf '%s' '[A-Za-z0-9+/=]+' \| \(base64 -d/)
+  assert.equal(command.includes("w'ith"), false, 'raw content never reaches the shell')
+  // Base64 round-trips to exactly the record.
+  const payload = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(command)[1]
+  assert.deepEqual(JSON.parse(Buffer.from(payload, 'base64').toString('utf8')), record)
+})
+
+test('a release is a tombstone that keeps the epoch and expires immediately', () => {
+  const command = buildLeaseReleaseCommand('/h/remote-go/lease.json', {
+    writer: 'local:h',
+    epoch: 7,
+    sessionKey: 'sk_x',
+    now: 12_345,
+  })
+  const payload = /printf '%s' '([A-Za-z0-9+/=]+)'/.exec(command)[1]
+  const record = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'))
+  assert.equal(record.epoch, 7, 'a release never lowers the epoch')
+  assert.equal(record.expiresAt, 12_345, 'and it expires immediately, so a takeover needs no TTL wait')
+})
+
+test('publish results are classified into typed refusals', () => {
+  assert.deepEqual(classifyPublishResult({ code: 0, stdout: '', stderr: '' }), { ok: true })
+  // The remote reports a refusal as one machine-readable line.
+  assert.deepEqual(classifyPublishResult({ code: 3, stdout: 'dsh-lease: stale-epoch 9\n', stderr: '' }), {
+    ok: false,
+    reason: 'stale-epoch',
+    remoteEpoch: 9,
+    message: 'dsh-lease: stale-epoch 9',
+  })
+  assert.equal(
+    classifyPublishResult({ code: 3, stdout: 'dsh-lease: writer-changed 4', stderr: '' }).reason,
+    'writer-changed',
+  )
+  assert.equal(
+    classifyPublishResult({ code: 3, stdout: 'dsh-lease: implausible-epoch 4', stderr: '' }).reason,
+    'implausible-epoch',
+  )
+  assert.equal(
+    classifyPublishResult({ code: 1, stdout: '', stderr: 'head: Permission denied' }).reason,
+    'permission-denied',
+  )
+  assert.equal(classifyPublishResult({ code: 1, stdout: '', stderr: 'boom' }).reason, 'publish-failed')
+})
+
+test('a refused publish is reported, never treated as allowed', async () => {
+  const sshOf = (answer) => ({ exec: async (command) => answer(command) })
+  const accepted = await publishRemoteLease(
+    sshOf(() => ({ code: 0, stdout: '', stderr: '' })),
+    {
+      remoteDshHome: '/h',
+      record: buildLeaseRecord({ writer: 'w', epoch: 1, expiresAt: 9, sessionKey: 'k' }),
+    },
+  )
+  assert.equal(accepted.ok, true)
+
+  const refusedPublish = await publishRemoteLease(
+    sshOf(() => ({ code: 3, stdout: 'dsh-lease: stale-epoch 5', stderr: '' })),
+    {
+      remoteDshHome: '/h',
+      record: buildLeaseRecord({ writer: 'w', epoch: 2, expiresAt: 9, sessionKey: 'k' }),
+    },
+  )
+  assert.equal(refusedPublish.ok, false)
+  assert.equal(refusedPublish.reason, 'stale-epoch')
+  assert.equal(refusedPublish.remoteEpoch, 5)
+
+  const noSsh = await publishRemoteLease(null, {
+    remoteDshHome: '/h',
+    record: buildLeaseRecord({ writer: 'w', epoch: 1, expiresAt: 9, sessionKey: 'k' }),
+  })
+  assert.equal(noSsh.ok, false)
+  assert.equal(noSsh.reason, 'ssh-unavailable')
+})
+
+test('an implausible epoch jump is refused instead of adopted', () => {
+  const state = acquireLease({ cursor: 0 }, { owner: 'w1', now: 1000, ttlMs: 30_000 }).state
+  // A jump beyond the window is the denial-of-service shape: adopting it would hand the lease
+  // to whoever publishes the biggest number.
+  const hostile = observeRemoteLease(state, { writer: 'attacker', epoch: 999_999 })
+  assert.equal(hostile.fenced, true)
+  assert.equal(hostile.suspicious, true)
+  assert.equal(hostile.reason, 'implausible-epoch')
+  assert.equal(hostile.epoch, 1, 'the high-water mark must NOT move')
+  assert.equal(hostile.state.epoch, 1)
+
+  // Inside the window it is still believed (a normal takeover after a long offline period).
+  const plausible = observeRemoteLease(state, { writer: 'w2', epoch: 1 + 500 })
+  assert.equal(plausible.fenced, true)
+  assert.equal(plausible.suspicious, undefined)
+  assert.equal(plausible.state.epoch, 1 + 500)
+})
+
+test('the per-session authority path is injective for hostile ids', () => {
+  // Regression: unpadded hex escapes collided (`"\u0002"+"5"` vs `"%"` both became `%25`), and
+  // truncation made `"x"*130` and `"x"*131` the same file. Colliding ids would share one lease
+  // and fence each other — the exact defect that made the authority per-session.
+  const ids = ['\u00025', '%', 'x'.repeat(130), 'x'.repeat(131), 'a/b', 'a%2Fb', '../../etc/passwd']
+  const paths = ids.map((id) => remoteLeaseFile('/h', id))
+  assert.equal(new Set(paths).size, ids.length, `distinct ids must not share a file: ${JSON.stringify(paths)}`)
+  // Traversal stays impossible: the segment never contains a separator.
+  for (const path of paths) {
+    const segment = path.slice('/h/remote-go/lease-'.length)
+    assert.equal(segment.includes('/'), false, `a session id must not inject a separator: ${segment}`)
+  }
+  // Exact filenames for the two collisions the reviewer found.
+  assert.equal(remoteLeaseFile('/h', '%'), '/h/remote-go/lease-%0025.json')
+  assert.equal(remoteLeaseFile('/h', '\u00025'), '/h/remote-go/lease-%00025.json')
+})
+
+test('the publish writes a sibling temp file and renames it', () => {
+  // A truncate-then-write leaves a window where a reader (or a crash) sees partial JSON, which
+  // is classified `lease-malformed` and treated as untrustworthy — a crash would become a lockout.
+  const command = buildLeasePublishCommand(
+    '/h/remote-go/lease-s.json',
+    buildLeaseRecord({
+      writer: 'w',
+      epoch: 1,
+      expiresAt: 2,
+      sessionKey: 'k',
+    }),
+  )
+  assert.match(
+    command,
+    /> '\/h\/remote-go\/lease-s\.json\.tmp' && mv '\/h\/remote-go\/lease-s\.json\.tmp' '\/h\/remote-go\/lease-s\.json'$/,
+  )
+  assert.equal(/ > '\/h\/remote-go\/lease-s\.json'$/.test(command), false, 'never truncate the live file')
+})
+
+test('integration waits assert the same end state they wait for', async () => {
+  // A wait predicate weaker than the assertions after it resolves on a *pre-condition* and turns
+  // a deterministic failure into a platform-timing flake. That cost three CI rounds:
+  // `reason !== null` matched the ordinary L2 `stream-unavailable` reason before the fence, and
+  // `cursor === 5` matched a half-settled mirror. Encode the rule so it cannot come back.
+  const { readdir, readFile } = await import('node:fs/promises')
+  const dir = new URL('../integration/', import.meta.url)
+  /** @type {string[]} */
+  const files = (await readdir(dir)).filter((name) => name.endsWith('.e2e.js'))
+  assert.ok(files.length > 0, 'the integration suites must exist')
+
+  /** Predicates that describe "something happened" rather than the asserted state. */
+  const WEAK = [/\.reason\s*!==\s*null/, /\.reason\s*!=\s*null/]
+  for (const file of files) {
+    const source = await readFile(new URL(file, dir), 'utf8')
+    const lines = source.split('\n')
+    lines.forEach((line, index) => {
+      // Only *wait* predicates matter: a plain assertion may legitimately test "not null".
+      if (!/waitForMirrors\(|const settled =|const ready =|for \(let attempt/.test(line)) return
+      // The predicate may span lines; look at the enclosing statement's neighbourhood.
+      const window = lines.slice(index, index + 8).join('\n')
+      for (const pattern of WEAK) {
+        if (pattern.test(window)) {
+          assert.fail(
+            `${file}:${index + 1} waits on a weak predicate (${pattern}). ` +
+              `Wait for the asserted end state instead: a predicate weaker than the assertions ` +
+              `after it resolves on a pre-condition and fails only on slow runners.`,
+          )
+        }
+      }
+    })
+  }
 })

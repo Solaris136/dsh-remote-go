@@ -88,6 +88,16 @@ const CONFLICT_TEXT_LIMIT = 120
 /** Default lease lifetime; the heartbeat renews well inside it. */
 export const MIRROR_LEASE_TTL_MS = 30_000
 
+/**
+ * How far an epoch may jump and still be believed (design §6.2 / §11 #9).
+ *
+ * Fencing is a ratchet — the highest number wins — which is exactly what makes it a cheap
+ * denial of service: anyone who can write the authority record can publish a huge epoch and
+ * fence the legitimate owner forever. Bounding the jump turns that into a refused, logged
+ * anomaly instead of a silent takeover. Kept in sync with `LEASE_LIMITS.epochJumpLimit`.
+ */
+export const DEFAULT_EPOCH_JUMP_LIMIT = 1000
+
 // ---------------------------------------------------------------- descriptor
 
 /**
@@ -780,15 +790,22 @@ export function assertWritable(state, options = {}) {
  * one per sync (`fenced: false` means "already known, stay quiet").
  *
  * @param {unknown} state
- * @param {{ writer?: unknown, epoch?: unknown, now?: unknown }} [report]
+ * An epoch that jumps far beyond ours is **not adopted**. Fencing is a ratchet, so adopting
+ * it hands the lease to whoever published the biggest number — a cheap denial of service for
+ * a third party that can write the authority file. The remote refuses such a jump too
+ * (`implausible-epoch`); this is the local half of the same rule, so a hostile or corrupt
+ * record cannot fence us from the read side either.
+ *
+ * @param {{ writer?: unknown, epoch?: unknown, now?: unknown, epochJumpLimit?: unknown }} [report]
  * @returns {{
  *   fenced: boolean,
  *   changed: boolean,
- *   reason?: 'fenced-by-newer-epoch' | 'writer-changed',
+ *   reason?: 'fenced-by-newer-epoch' | 'writer-changed' | 'implausible-epoch',
  *   holder?: string,
  *   epoch: number,
  *   state: MirrorState,
  *   readOnly: boolean,
+ *   suspicious?: boolean,
  * }}
  */
 export function observeRemoteLease(state, report = {}) {
@@ -802,6 +819,30 @@ export function observeRemoteLease(state, report = {}) {
   }
   const theirs = epoch === null ? 0 : epoch
   const ours = base.lease ?? null
+  const jumpLimit =
+    Number.isFinite(Number(report.epochJumpLimit)) && Number(report.epochJumpLimit) > 0
+      ? Math.floor(Number(report.epochJumpLimit))
+      : DEFAULT_EPOCH_JUMP_LIMIT
+  if (theirs > high + jumpLimit) {
+    // Refuse to believe it: stay fenced and readable, but do **not** raise our high-water mark,
+    // so a hostile record cannot ratchet us out of the lease permanently. The caller logs it.
+    return {
+      fenced: true,
+      changed: true,
+      suspicious: true,
+      reason: 'implausible-epoch',
+      holder: writer ?? ours?.owner,
+      epoch: high,
+      state: base,
+      readOnly: true,
+    }
+  }
+  if (theirs > high && writer !== null && ours === null && writer === (report.previousWriter ?? null)) {
+    // The same writer reconnecting: this is OUR own leftover record (a restart that did not
+    // release), not a takeover. Adopt the number and keep going — fencing ourselves would make
+    // every restart look like being defeated.
+    return { fenced: false, changed: false, epoch: theirs, state: { ...base, epoch: theirs }, readOnly: false }
+  }
   if (theirs > high) {
     // They hold a newer grant. Adopt the number (so we are fenced from now on), **drop our
     // own lease** — a fenced writer must not be able to renew the epoch it just lost — and

@@ -62,7 +62,7 @@ function createLogger(logs) {
 }
 
 /**
- * @param {{ stateFile: string, lease: { writer: string, epoch: number } | null }} options
+ * @param {{ stateFile: string, lease: { writer: string, epoch: number } | null, readFail?: boolean }} options
  */
 async function startSimulator(options) {
   rmSync(options.stateFile, { force: true })
@@ -79,6 +79,7 @@ async function startSimulator(options) {
     '--state-file',
     options.stateFile,
   ]
+  if (options.readFail === true) argv.push('--lease-read-fail')
   if (options.lease !== null) {
     const leaseFile = path.join(path.dirname(options.stateFile), 'lease.json')
     writeFileSync(leaseFile, `${JSON.stringify(options.lease)}\n`, 'utf8')
@@ -347,7 +348,18 @@ test('a mirror that is not fenced keeps writing and holds its own epoch', { time
     })
     await connectHost(service, host.id, logs)
 
-    const mirrors = await waitForMirrors(service, host.id, (list) => list.every((mirror) => mirror.cursor === 5))
+    // Predicate = the asserted end state, not a proxy: "cursor === 5" is also true mid-sync
+    // (before the lease is persisted), so waiting on it alone can read a half-settled mirror.
+    const mirrors = await waitForMirrors(service, host.id, (list) =>
+      list.every(
+        (mirror) =>
+          mirror.cursor === 5 &&
+          mirror.level === 'L2' &&
+          mirror.reason === null &&
+          mirror.writable === true &&
+          mirror.lease !== null,
+      ),
+    )
     for (const mirror of mirrors) {
       assert.equal(mirror.cursor, 5, 'an unfenced mirror replays as usual')
       assert.equal(mirror.level, 'L2')
@@ -443,7 +455,11 @@ test('a fenced mirror resumes once it can re-acquire a newer epoch', { timeout: 
     repointed.entry.port = sim.state.sshPort
     await connectHost(service, existing.id, resumedLogs)
     await service.syncHostMirrors(existing.id).catch(() => null)
-    const resumed = await waitForMirrors(service, existing.id, (list) => list.every((mirror) => mirror.reason === null))
+    // The assertions below also require a writable lease and the resumed cursor, so the wait
+    // must require them too — "reason === null" is satisfied before the lease is re-acquired.
+    const resumed = await waitForMirrors(service, existing.id, (list) =>
+      list.every((mirror) => mirror.reason === null && mirror.writable === true && mirror.cursor === 5),
+    )
     assert.equal(
       resumed.every((mirror) => mirror.reason === null),
       true,
@@ -539,6 +555,185 @@ test('a lease that expires during a slow sync refuses the write batch', { timeou
       mirrors.every((mirror) => mirror.cursor === 0),
       true,
       'and the cursor must not advance',
+    )
+  } finally {
+    if (service) await service.shutdown?.().catch?.(() => null)
+    await stopSimulator(sim.child)
+    rmSync(temp, { recursive: true, force: true })
+  }
+})
+
+test(
+  'two clients against one remote: exactly one writes, the other is fenced by the remote',
+  { timeout: 900_000 },
+  async () => {
+    // The decisive case §11 #10 said was missing: two *independent* descriptor stores. They both
+    // start at epoch 0 locally, but the remote only honours one authority record, so the second
+    // acquirer is refused by the remote — not merely by its own local check.
+    const temp = mkdtempSync(path.join(tmpdir(), 'dsh-lease-two-'))
+    const stateFile = path.join(temp, 'sim-state.json')
+    writeFileSync(path.join(temp, 'workspace.json'), `${JSON.stringify(WORKSPACE_FIXTURE, null, 2)}\n`, 'utf8')
+    writeFileSync(path.join(temp, 'history.json'), `${JSON.stringify(historyFixture(), null, 2)}\n`, 'utf8')
+    const sim = await startSimulator({ stateFile, lease: null })
+    /** @type {RemoteGoService[]} */
+    const services = []
+    try {
+      /** @param {string} name */
+      const makeClient = async (name) => {
+        const logs = []
+        const { sessions, appends } = createSessionsService()
+        const stateDir = path.join(temp, `state-${name}`)
+        const adapter = createSessionAdapter({
+          sessions,
+          logger: createLogger(logs),
+          mirrorRoot: path.join(stateDir, 'mirrors'),
+        })
+        const service = createService({
+          stateDir,
+          home: path.join(temp, `home-${name}`),
+          localVersion: '0.2.2-rc.1',
+          logs,
+          adapter,
+        })
+        await service.init()
+        services.push(service)
+        const host = await service.saveHost({
+          name: `client-${name}`,
+          address: '127.0.0.1',
+          port: sim.state.sshPort,
+          username: CREDENTIALS.username,
+          auth: { type: 'password' },
+          keepAlive: 'keep',
+          bootstrap: { mode: 'reuse' },
+        })
+        await connectHost(service, host.id, logs)
+        return { service, host, appends, logs, stateDir }
+      }
+
+      // Client A claims the lease and writes normally.
+      const a = await makeClient('a')
+      const aMirrors = await waitForMirrors(a.service, a.host.id, (list) => list.every((m) => m.cursor === 5))
+      assert.equal(
+        aMirrors.every((mirror) => mirror.cursor === 5 && mirror.reason === null),
+        true,
+        'the first client must be able to write',
+      )
+      assert.equal(
+        aMirrors.every((mirror) => mirror.writable === true),
+        true,
+      )
+      const aAppends = a.appends.filter((entry) => entry.type.endsWith('/message')).length
+      assert.equal(aAppends, HISTORY_SESSIONS.length * 5)
+
+      // Client B starts from its own epoch 0 and is *refused by the remote*: it may not take a
+      // lease A still holds, so it stays L1/read-only and appends nothing.
+      const b = await makeClient('b')
+      // "reason !== null" was the proxy that cost a CI round: `stream-unavailable` is a normal
+      // non-null L2 reason, so the wait resolved on B's pre-fence state. Wait for the fence itself.
+      const bMirrors = await waitForMirrors(b.service, b.host.id, (list) =>
+        list.every((mirror) => mirror.reason?.code === 'fenced' && mirror.readOnly === true),
+      )
+      assert.equal(
+        bMirrors.every((mirror) => mirror.reason?.code === 'fenced'),
+        true,
+        `the second client must be fenced, got ${JSON.stringify(bMirrors.map((m) => ({ code: m.reason?.code, epoch: m.epoch, cursor: m.cursor })))}`,
+      )
+      assert.equal(
+        bMirrors.every((mirror) => mirror.readOnly === true),
+        true,
+      )
+      assert.equal(
+        bMirrors.every((mirror) => mirror.cursor === 0),
+        true,
+        'and must not advance a cursor',
+      )
+      assert.equal(
+        b.appends.filter((entry) => entry.type.endsWith('/message')).length,
+        0,
+        'the second client must append nothing',
+      )
+
+      // Only one writer ever succeeded, and it was A.
+      assert.equal(a.appends.filter((entry) => entry.type.endsWith('/message')).length, aAppends)
+    } finally {
+      for (const service of services) await service.shutdown?.().catch?.(() => null)
+      await stopSimulator(sim.child)
+      rmSync(temp, { recursive: true, force: true })
+    }
+  },
+)
+
+test('a writer that cannot see the authority is still refused by the remote', { timeout: 900_000 }, async () => {
+  // The partition shape §11 #10 described: the writer cannot read the authority (permission
+  // denied, network path gone), so its local check passes and it believes it may write. Only
+  // the remote's refusal stops it — which is precisely what "enforced remotely" has to mean.
+  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-lease-blind-'))
+  const stateFile = path.join(temp, 'sim-state.json')
+  writeFileSync(path.join(temp, 'workspace.json'), `${JSON.stringify(WORKSPACE_FIXTURE, null, 2)}\n`, 'utf8')
+  writeFileSync(path.join(temp, 'history.json'), `${JSON.stringify(historyFixture(), null, 2)}\n`, 'utf8')
+  // A live, unexpired lease held by somebody else; reads are refused to us.
+  const sim = await startSimulator({
+    stateFile,
+    lease: { writer: 'other-client', epoch: 40, sessionKey: 'sk_other', expiresAt: Date.now() + 600_000 },
+    readFail: true,
+  })
+  /** @type {RemoteGoService | null} */
+  let service = null
+  try {
+    const logs = []
+    const { sessions, appends } = createSessionsService()
+    const stateDir = path.join(temp, 'state-blind')
+    const adapter = createSessionAdapter({
+      sessions,
+      logger: createLogger(logs),
+      mirrorRoot: path.join(stateDir, 'mirrors'),
+    })
+    service = createService({
+      stateDir,
+      home: path.join(temp, 'home-blind'),
+      localVersion: '0.2.2-rc.1',
+      logs,
+      adapter,
+    })
+    await service.init()
+    const host = await service.saveHost({
+      name: 'sim-lease-blind',
+      address: '127.0.0.1',
+      port: sim.state.sshPort,
+      username: CREDENTIALS.username,
+      auth: { type: 'password' },
+      keepAlive: 'keep',
+      bootstrap: { mode: 'reuse' },
+    })
+    await connectHost(service, host.id, logs)
+    await service.syncHostMirrors(host.id).catch(() => null)
+
+    // Same defect class: wait for the refusal, not for "any reason" (L2 has its own non-null
+    // reasons, which this test must not mistake for the remote's refusal).
+    const mirrors = await waitForMirrors(service, host.id, (list) =>
+      list.every((mirror) => mirror.reason?.code === 'fenced'),
+    )
+    assert.equal(
+      mirrors.every((mirror) => mirror.reason?.code === 'fenced'),
+      true,
+      `the remote must refuse the blind writer, got ${JSON.stringify(mirrors.map((m) => m.reason?.code))}`,
+    )
+    assert.equal(
+      appends.filter((entry) => entry.type.endsWith('/message')).length,
+      0,
+      'and nothing may be appended locally either',
+    )
+    assert.equal(
+      mirrors.every((mirror) => mirror.cursor === 0),
+      true,
+    )
+    // The refusal is visible as a typed reason in the sync log, not just an internal flag.
+    assert.ok(
+      logContains(logs, 'publish refused') || logContains(logs, 'stale-epoch'),
+      `the remote refusal must be reported, got: ${logs
+        .filter((l) => /lease/i.test(l))
+        .slice(-3)
+        .join(' | ')}`,
     )
   } finally {
     if (service) await service.shutdown?.().catch?.(() => null)
