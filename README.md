@@ -107,6 +107,10 @@ dsh plugin --profile web add /absolute/path/to/dsh-remote-go
 dsh plugin --profile web add dsh-remote-go
 ```
 
+> npm 包由 `.github/workflows/release.yml` 在 `v*` 标签上发布（需要仓库 secret `NPM_PUBLISH_TOKEN`）。在此之前可直接用
+> [Releases](https://github.com/Solaris136/dsh-remote-go/releases) 里附带的 `.tgz` 安装：
+> `dsh plugin --profile web add ./dsh-remote-go-<version>.tgz`。
+
 发布流程见 [docs/publish.md](docs/publish.md)；索引条目由 `pnpm run market:entry` 生成，并用官方
 `dsh-plugin-market-index` 校验（`pnpm run market:check`）。
 
