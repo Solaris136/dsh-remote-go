@@ -116,7 +116,6 @@ async function runExclusive(lockFile, options, task) {
  */
 async function acquireLock(lockFile, options) {
   const fsImpl = options.fs ?? fs
-  const logger = options.logger ?? console
   const staleMs = options.staleMs ?? LOCK_STALE_MS
   const waitMs = options.waitMs ?? LOCK_WAIT_MS
   const retryMs = options.retryMs ?? LOCK_RETRY_MS
