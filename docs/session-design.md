@@ -66,6 +66,21 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 选型：**分阶段做到 L3，但每一级都独立可用**。任何一级失败必须显式降级（例如事件流握手失败 → 停在 L2 并提示
 「只读，远端事件流不可用」），不允许静默假装成完全会话。
 
+## 4.1 前提能力（已在本机核实）
+
+设计依赖「插件能以宿主身份创建本地会话」这一能力，已通过 Cordis Inspect 对 `ctx.sessions`（host）核实：
+
+| 能力 | 签名要点 | 对本设计的用途 |
+|---|---|---|
+| 创建会话 | `create(id?, { seed, meta })` | 建立镜像会话；`seed` 可直接回放远端历史事件 |
+| 追加事件 | `Session.append(type, data)` | 把远端新增事件写入本地镜像会话 |
+| 分叉 | `fork(source, boundary?, childId?)` | 从远端某条消息处分叉出本地会话 |
+| 元数据 | `meta.cwd` 必须是绝对路径，`meta.parentSession` 记录血缘 | 标记该会话属于哪个远端主机/远端会话 |
+
+**关键约束（必须写进实现）**：`ctx.sessions` 只做内存存储，持久化由 agent 生命周期挂载的 session-log writer 负责——
+「a session published outside that lifecycle persists nothing」。镜像会话不走 agent 循环，因此：
+要么给它接一个 writer（P2 必须解决），要么接受**重启后重新同步**（P0/P1 可以接受，但要在 UI 上说明「重启后从远端重拉」）。
+
 ## 5. 数据通路
 
 ```text
