@@ -58,14 +58,16 @@ export function candidatePackageJsons(input = {}) {
   if (markerIndex >= 0) {
     out.push(path.join(argv1.slice(0, markerIndex + marker.length), 'package.json'))
   }
-  const resourcesPath = input.resourcesPath ?? (/** @type {any} */ (process)).resourcesPath
+  const resourcesPath = input.resourcesPath ?? /** @type {any} */ (process).resourcesPath
   if (typeof resourcesPath === 'string' && resourcesPath !== '') {
     out.push(path.join(resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
-    out.push(path.join(resourcesPath, 'app.asar.unpacked', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+    out.push(
+      path.join(resourcesPath, 'app.asar.unpacked', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
+    )
     out.push(path.join(resourcesPath, 'app', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
   }
   // Walk up from the CLI entry looking for a nested package.
-  let dir = argv1 ? path.dirname(argv1) : input.cwd ?? process.cwd()
+  let dir = argv1 ? path.dirname(argv1) : (input.cwd ?? process.cwd())
   for (let i = 0; i < 8; i += 1) {
     out.push(path.join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
     const parent = path.dirname(dir)
@@ -84,7 +86,9 @@ export function resolveTargetVersion(input) {
   const configured = String(input.configured ?? 'local').trim()
   if (configured !== '' && configured !== 'local' && configured !== 'auto') {
     const parsed = parseVersion(normalizeVersion(configured))
-    return parsed ? { targetVersion: normalizeVersion(configured), source: 'explicit' } : { targetVersion: null, source: 'unknown' }
+    return parsed
+      ? { targetVersion: normalizeVersion(configured), source: 'explicit' }
+      : { targetVersion: null, source: 'unknown' }
   }
   if (input.localVersion) return { targetVersion: input.localVersion, source: 'local' }
   return { targetVersion: null, source: 'unknown' }

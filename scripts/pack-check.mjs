@@ -86,12 +86,19 @@ if (tarball) {
   } catch (error) {
     fail(`cannot list tarball with tar: ${error.message}`)
   }
-  const entries = listing.split(/\r?\n/).filter(Boolean).map((line) => line.replace(/^package\//, ''))
+  const entries = listing
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => line.replace(/^package\//, ''))
   const missing = mustShip.filter((file) => !entries.includes(file))
   if (missing.length > 0) problems.push(`tarball is missing: ${missing.join(', ')}`)
-  const stray = entries.filter((file) => file.startsWith('test/') || file.startsWith('e2e/') || file.startsWith('_research/') || file.startsWith('docs/'))
+  const stray = entries.filter(
+    (file) =>
+      file.startsWith('test/') || file.startsWith('e2e/') || file.startsWith('_research/') || file.startsWith('docs/'),
+  )
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
-  if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js'))) problems.push('tarball does not contain src/*.js')
+  if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
+    problems.push('tarball does not contain src/*.js')
   console.log(`[pack-check] tarball entries: ${entries.length}`)
 }
 

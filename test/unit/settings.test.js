@@ -70,9 +70,15 @@ test('sanitizeHostEntry keeps an existing jump host when an edit omits it, and c
   const existing = { id: 'h_1', createdAt: '2026-01-01T00:00:00.000Z', jumpHost: 'bastion' }
   const kept = sanitizeHostEntry({ id: 'h_1', address: 'tencent-vm' }, { settings: defaultSettings(), existing })
   assert.equal(kept.jumpHost, 'bastion')
-  const cleared = sanitizeHostEntry({ id: 'h_1', address: 'tencent-vm', jumpHost: '' }, { settings: defaultSettings(), existing })
+  const cleared = sanitizeHostEntry(
+    { id: 'h_1', address: 'tencent-vm', jumpHost: '' },
+    { settings: defaultSettings(), existing },
+  )
   assert.equal(cleared.jumpHost, null)
-  const replaced = sanitizeHostEntry({ id: 'h_1', address: 'tencent-vm', jumpHost: 'other-bastion' }, { settings: defaultSettings(), existing })
+  const replaced = sanitizeHostEntry(
+    { id: 'h_1', address: 'tencent-vm', jumpHost: 'other-bastion' },
+    { settings: defaultSettings(), existing },
+  )
   assert.equal(replaced.jumpHost, 'other-bastion')
 })
 

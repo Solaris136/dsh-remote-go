@@ -10,7 +10,16 @@ import process from 'node:process'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const includeDirs = ['src', 'scripts', 'test', 'e2e/control']
 const includeFiles = ['index.js', 'client.js']
-const skipDirs = new Set(['node_modules', '_research', '_tools', 'artifacts', 'home', 'home-published', 'logs', 'vendor'])
+const skipDirs = new Set([
+  'node_modules',
+  '_research',
+  '_tools',
+  'artifacts',
+  'home',
+  'home-published',
+  'logs',
+  'vendor',
+])
 
 /** @param {string} dir @param {string[]} out */
 async function walk(dir, out) {
@@ -40,7 +49,8 @@ for (const file of includeFiles) {
 const failures = []
 for (const file of files) {
   const result = spawnSync(process.execPath, ['--check', file], { encoding: 'utf8' })
-  if (result.status !== 0) failures.push({ file: path.relative(root, file), error: (result.stderr || '').split('\n').slice(0, 6).join('\n') })
+  if (result.status !== 0)
+    failures.push({ file: path.relative(root, file), error: (result.stderr || '').split('\n').slice(0, 6).join('\n') })
 }
 if (failures.length > 0) {
   for (const failure of failures) console.error(`[check-syntax] FAIL ${failure.file}\n${failure.error}`)

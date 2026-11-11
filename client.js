@@ -259,7 +259,8 @@ window.__ModuleLoader__.load({
       fingerprintTitle: '主机指纹待确认',
       fingerprintBody: '首次连接需要确认这台服务器的 SSH 主机指纹。确认后会记住；指纹变化时会再次提示。',
       fingerprintChanged: '主机指纹已变化',
-      fingerprintChangedBody: '这台服务器的主机指纹与上次记录不一致，可能重装过系统，也可能存在中间人风险。确认无误后再继续。',
+      fingerprintChangedBody:
+        '这台服务器的主机指纹与上次记录不一致，可能重装过系统，也可能存在中间人风险。确认无误后再继续。',
       fingerprintKeyType: '密钥类型',
       fingerprintSha: 'SHA256 指纹',
       fingerprintPinned: '已记录指纹',
@@ -377,7 +378,8 @@ window.__ModuleLoader__.load({
       'settings.hostKeyPolicyFirstUse': '首次连接时询问',
       'settings.hostKeyPolicyStrict': '严格校验（指纹变化即失败）',
       'settings.saveTokens': '允许保存访问令牌',
-      'settings.saveTokensHint': '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
+      'settings.saveTokensHint':
+        '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
       'settings.saveTokensRisk': '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
       'settings.reconnect': '自动重连',
       'settings.reconnectEnabled': '断线后自动重连',
@@ -468,7 +470,8 @@ window.__ModuleLoader__.load({
       addHostTitle: 'Add server',
       editHostTitle: 'Edit server',
       deleteTitle: 'Delete this server?',
-      deleteBody: 'This removes the connection settings for "{name}" and disconnects it. Remote tasks keep running; you can add it again later.',
+      deleteBody:
+        'This removes the connection settings for "{name}" and disconnects it. Remote tasks keep running; you can add it again later.',
       deleteConfirm: 'Delete',
       deleteBusy: 'Deleting…',
       statusUnconfigured: 'Not configured',
@@ -494,7 +497,8 @@ window.__ModuleLoader__.load({
       cardEdit: 'Edit',
       cardDelete: 'Delete',
       errorReason: 'Reason: {detail}',
-      loopbackNote: 'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
+      loopbackNote:
+        'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
       statusUnknownHostTitle: 'Cannot read this host',
       statusUnknownHostBody: 'It may have been deleted, or its state has not synced yet.',
 
@@ -522,7 +526,8 @@ window.__ModuleLoader__.load({
       viewportLoadingFrame: 'Loading the remote UI…',
       viewportConnected: 'Remote UI ready',
       viewportDisconnected: 'Connection lost — remote tasks may still be running',
-      viewportDisconnectedBody: 'Automatic reconnect is handled locally; running remote tasks are not interrupted. You can also reconnect manually.',
+      viewportDisconnectedBody:
+        'Automatic reconnect is handled locally; running remote tasks are not interrupted. You can also reconnect manually.',
       viewportBack: 'Back to hosts',
       viewportSwitch: 'Switch host',
       viewportExternal: 'Open in new window',
@@ -533,9 +538,11 @@ window.__ModuleLoader__.load({
       viewportUnconfigured: 'This server is not connected yet',
       viewportUnconfiguredBody: 'Connect to use the remote DSH on this page.',
       enterNoticeTitle: 'You are operating a remote server',
-      enterNoticeBody: 'This window shows the remote DSH interface; everything runs remotely. Closing this window does not stop remote tasks.',
+      enterNoticeBody:
+        'This window shows the remote DSH interface; everything runs remotely. Closing this window does not stop remote tasks.',
       closeNoticeTitle: 'Remote tasks keep running',
-      closeNoticeBody: 'Back to the host list. The remote DSH and its running tasks keep running; reopen to return to this host.',
+      closeNoticeBody:
+        'Back to the host list. The remote DSH and its running tasks keep running; reopen to return to this host.',
       toolbarStatus: 'Status: {status}',
       remoteVersionShort: 'Remote {version}',
 
@@ -561,9 +568,11 @@ window.__ModuleLoader__.load({
       'phase.ready': 'Ready',
 
       fingerprintTitle: 'Confirm the host fingerprint',
-      fingerprintBody: "Confirm this server's SSH host key on first use. It is remembered after acceptance, and you are asked again if it changes.",
+      fingerprintBody:
+        "Confirm this server's SSH host key on first use. It is remembered after acceptance, and you are asked again if it changes.",
       fingerprintChanged: 'The host key has changed',
-      fingerprintChangedBody: 'The host key differs from the recorded one. The server may have been reinstalled — or this could be a man-in-the-middle. Continue only if you are sure.',
+      fingerprintChangedBody:
+        'The host key differs from the recorded one. The server may have been reinstalled — or this could be a man-in-the-middle. Continue only if you are sure.',
       fingerprintKeyType: 'Key type',
       fingerprintSha: 'SHA256 fingerprint',
       fingerprintPinned: 'Recorded fingerprint',
@@ -572,7 +581,8 @@ window.__ModuleLoader__.load({
       fingerprintReject: 'Cancel',
       fingerprintAccepting: 'Submitting…',
       passwordPromptTitle: 'Enter the SSH password',
-      passwordPromptBody: '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
+      passwordPromptBody:
+        '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
       passwordPromptLabel: 'Password',
       passwordPromptSubmit: 'Connect',
       passwordPromptRequired: 'Enter the password',
@@ -678,7 +688,8 @@ window.__ModuleLoader__.load({
       'settings.hostKeyPolicyFirstUse': 'Ask on first use',
       'settings.hostKeyPolicyStrict': 'Strict (fail when the key changes)',
       'settings.saveTokens': 'Allow saving access tokens',
-      'settings.saveTokensHint': 'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
+      'settings.saveTokensHint':
+        'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
       'settings.saveTokensRisk': 'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
       'settings.reconnect': 'Auto reconnect',
       'settings.reconnectEnabled': 'Reconnect after a drop',
@@ -932,7 +943,11 @@ window.__ModuleLoader__.load({
      */
     async function copyText(text) {
       try {
-        if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        if (
+          typeof navigator !== 'undefined' &&
+          navigator.clipboard &&
+          typeof navigator.clipboard.writeText === 'function'
+        ) {
           await navigator.clipboard.writeText(text)
           return true
         }
@@ -1216,7 +1231,10 @@ window.__ModuleLoader__.load({
      * @returns {Error} error carrying `.view`.
      */
     function apiError(view, cause) {
-      const text = resolveText(view && view.detail, 'zh') || resolveText(view && view.title, 'zh') || 'dsh-remote-go request failed'
+      const text =
+        resolveText(view && view.detail, 'zh') ||
+        resolveText(view && view.title, 'zh') ||
+        'dsh-remote-go request failed'
       const error = new Error(text)
       error.name = 'ApiError'
       error.view = view
@@ -1330,7 +1348,10 @@ window.__ModuleLoader__.load({
       },
       /** @param {string} hostId - host id. @returns {Promise<object>} diagnose report. */
       async diagnose(hostId) {
-        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/diagnose', { method: 'POST', body: {} })
+        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
+          method: 'POST',
+          body: {},
+        })
         return payload.report
       },
       /** @param {object} patch - partial SettingsView. @returns {Promise<object>} full SettingsView. */
@@ -1540,11 +1561,20 @@ window.__ModuleLoader__.load({
     const IconTrash = strokeIcon(['M4 7h16', 'M9 7V5h6v2', 'M6.5 7l1 13h9l1-13', 'M10 11v5', 'M14 11v5'])
     const IconPulse = strokeIcon(['M3 12h4l2.5-6 4 12 2.5-6H21'])
     const IconBack = strokeIcon(['M15 5l-7 7 7 7'])
-    const IconExternal = strokeIcon(['M14 4h6v6', 'M20 4l-9 9', 'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'])
+    const IconExternal = strokeIcon([
+      'M14 4h6v6',
+      'M20 4l-9 9',
+      'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
+    ])
     const IconClose = strokeIcon(['M6 6l12 12', 'M18 6L6 18'])
     const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
     const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
-    const IconWifi = strokeIcon(['M3.5 9.5a13 13 0 0 1 17 0', 'M6.5 13a8.5 8.5 0 0 1 11 0', 'M9.5 16.5a4 4 0 0 1 5 0', 'M12 20h.01'])
+    const IconWifi = strokeIcon([
+      'M3.5 9.5a13 13 0 0 1 17 0',
+      'M6.5 13a8.5 8.5 0 0 1 11 0',
+      'M9.5 16.5a4 4 0 0 1 5 0',
+      'M12 20h.01',
+    ])
     const IconFolder = strokeIcon([
       'M3.5 7A1.5 1.5 0 0 1 5 5.5h4.2l1.8 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17V7Z',
     ])
@@ -1638,7 +1668,10 @@ window.__ModuleLoader__.load({
     function Spinner(props) {
       return h('span', {
         className: 'drg-spinner',
-        style: { width: props && props.size ? props.size + 'px' : '16px', height: props && props.size ? props.size + 'px' : '16px' },
+        style: {
+          width: props && props.size ? props.size + 'px' : '16px',
+          height: props && props.size ? props.size + 'px' : '16px',
+        },
         'aria-hidden': 'true',
       })
     }
@@ -1699,9 +1732,7 @@ window.__ModuleLoader__.load({
           'data-testid': props.testId,
           onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.value) : undefined,
         },
-        options.map((option) =>
-          h('option', { key: option.value, value: option.value }, option.label),
-        ),
+        options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
       )
     }
 
@@ -1719,8 +1750,7 @@ window.__ModuleLoader__.load({
           checked: props.checked === true,
           disabled: props.disabled === true,
           'data-testid': props.testId,
-          onChange:
-            typeof props.onChange === 'function' ? (event) => props.onChange(event.target.checked) : undefined,
+          onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.checked) : undefined,
         }),
         h('span', null, props.label),
       )
@@ -1736,12 +1766,18 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'drg-notice', 'data-tone': tone, role: tone === 'error' ? 'alert' : 'status' },
-        h('span', { className: 'drg-notice-icon', 'aria-hidden': 'true' }, tone === 'error' ? h(IconAlert) : tone === 'success' ? h(IconCheck) : h(IconAlert)),
+        h(
+          'span',
+          { className: 'drg-notice-icon', 'aria-hidden': 'true' },
+          tone === 'error' ? h(IconAlert) : tone === 'success' ? h(IconCheck) : h(IconAlert),
+        ),
         h(
           'div',
           { className: 'drg-notice-body' },
           props.title ? h('div', { className: 'drg-notice-title' }, props.title) : null,
-          props.children !== undefined && props.children !== null ? h('div', { className: 'drg-notice-text' }, props.children) : null,
+          props.children !== undefined && props.children !== null
+            ? h('div', { className: 'drg-notice-text' }, props.children)
+            : null,
         ),
         typeof props.onDismiss === 'function'
           ? h(
@@ -1819,7 +1855,11 @@ window.__ModuleLoader__.load({
           footer: h(
             'div',
             { className: 'drg-row drg-row-end' },
-            h(Button, { variant: 'secondary', onClick: props.onCancel, disabled: props.busy === true }, props.cancelLabel),
+            h(
+              Button,
+              { variant: 'secondary', onClick: props.onCancel, disabled: props.busy === true },
+              props.cancelLabel,
+            ),
             h(Button, { variant: 'danger', onClick: props.onConfirm, busy: props.busy === true }, props.confirmLabel),
           ),
         },
@@ -1915,7 +1955,11 @@ window.__ModuleLoader__.load({
               h('span', { className: 'drg-card-strip-text' }, t('errorReason', { detail: reason || t(meta.hintKey) })),
               h(
                 'button',
-                { type: 'button', className: 'drg-linkbtn', onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined },
+                {
+                  type: 'button',
+                  className: 'drg-linkbtn',
+                  onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
+                },
                 t('cardDiagnose'),
               ),
             )
@@ -1965,14 +2009,24 @@ window.__ModuleLoader__.load({
           host.status === 'connected'
             ? h(
                 Button,
-                { variant: 'ghost', testId: 'host-disconnect', onClick: () => props.onDisconnect && props.onDisconnect(host), disabled: busy },
+                {
+                  variant: 'ghost',
+                  testId: 'host-disconnect',
+                  onClick: () => props.onDisconnect && props.onDisconnect(host),
+                  disabled: busy,
+                },
                 t('cardDisconnect'),
               )
             : null,
           !settingsMode && (host.status === 'disconnected' || host.status === 'error' || host.status === 'limited')
             ? h(
                 Button,
-                { variant: 'ghost', testId: 'host-reconnect', onClick: () => props.onReconnect && props.onReconnect(host), disabled: busy },
+                {
+                  variant: 'ghost',
+                  testId: 'host-reconnect',
+                  onClick: () => props.onReconnect && props.onReconnect(host),
+                  disabled: busy,
+                },
                 t('cardReconnect'),
               )
             : null,
@@ -2094,12 +2148,17 @@ window.__ModuleLoader__.load({
               h(IconPlus, { size: 14 }),
               h('span', null, settingsMode ? t('settingsAddHost') : t('addHost')),
             ),
-            h(Button, {
-              variant: 'ghost',
-              testId: settingsMode ? 'settings-host-refresh' : 'host-refresh',
-              onClick: props.onRefresh,
-              busy: loading,
-            }, h(IconRefresh, { size: 14 }), h('span', null, t('refresh'))),
+            h(
+              Button,
+              {
+                variant: 'ghost',
+                testId: settingsMode ? 'settings-host-refresh' : 'host-refresh',
+                onClick: props.onRefresh,
+                busy: loading,
+              },
+              h(IconRefresh, { size: 14 }),
+              h('span', null, t('refresh')),
+            ),
             h(IconButton, {
               icon: h(IconGear),
               label: settingsMode ? t('settingsPluginSettings') : t('settings'),
@@ -2109,12 +2168,16 @@ window.__ModuleLoader__.load({
           ),
         ),
         props.closeNotice === true
-          ? h(Notice, {
-              tone: 'info',
-              title: t('closeNoticeTitle'),
-              onDismiss: props.onDismissCloseNotice,
-              dismissLabel: t('dismiss'),
-            }, t('closeNoticeBody'))
+          ? h(
+              Notice,
+              {
+                tone: 'info',
+                title: t('closeNoticeTitle'),
+                onDismiss: props.onDismissCloseNotice,
+                dismissLabel: t('dismiss'),
+              },
+              t('closeNoticeBody'),
+            )
           : null,
         content,
       )
@@ -2138,8 +2201,17 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'drg-progress' },
-        h('div', { className: 'drg-progress-head' }, h(Spinner, { size: 22 }), h('h2', { className: 'drg-progress-title' }, t('viewportConnecting', { name }))),
-        h('p', { className: 'drg-progress-line', 'data-progress': host.progress ? host.progress.code : undefined }, progressText(t, host.progress)),
+        h(
+          'div',
+          { className: 'drg-progress-head' },
+          h(Spinner, { size: 22 }),
+          h('h2', { className: 'drg-progress-title' }, t('viewportConnecting', { name })),
+        ),
+        h(
+          'p',
+          { className: 'drg-progress-line', 'data-progress': host.progress ? host.progress.code : undefined },
+          progressText(t, host.progress),
+        ),
         h(
           'ol',
           { className: 'drg-phases' },
@@ -2148,7 +2220,11 @@ window.__ModuleLoader__.load({
             return h(
               'li',
               { key: phase, className: 'drg-phase', 'data-state': state },
-              h('span', { className: 'drg-phase-mark', 'aria-hidden': 'true' }, state === 'done' ? h(IconCheck, { size: 12 }) : null),
+              h(
+                'span',
+                { className: 'drg-phase-mark', 'aria-hidden': 'true' },
+                state === 'done' ? h(IconCheck, { size: 12 }) : null,
+              ),
               h('span', null, phaseLabel(t, phase)),
             )
           }),
@@ -2174,26 +2250,77 @@ window.__ModuleLoader__.load({
       const busy = props.busy === true
       return h(
         'div',
-        { className: 'drg-fingerprint', role: 'group', 'aria-label': t('fingerprintTitle'), 'data-testid': 'fingerprint-card' },
-        h('div', { className: 'drg-fingerprint-icon', 'data-tone': changed ? 'error' : 'warn', 'aria-hidden': 'true' }, h(IconAlert, { size: 22 })),
+        {
+          className: 'drg-fingerprint',
+          role: 'group',
+          'aria-label': t('fingerprintTitle'),
+          'data-testid': 'fingerprint-card',
+        },
+        h(
+          'div',
+          { className: 'drg-fingerprint-icon', 'data-tone': changed ? 'error' : 'warn', 'aria-hidden': 'true' },
+          h(IconAlert, { size: 22 }),
+        ),
         h('h2', { className: 'drg-fingerprint-title' }, changed ? t('fingerprintChanged') : t('fingerprintTitle')),
         h('p', { className: 'drg-fingerprint-body' }, changed ? t('fingerprintChangedBody') : t('fingerprintBody')),
         h(
           'dl',
           { className: 'drg-kv' },
-          keyType ? h('div', null, h('dt', null, t('fingerprintKeyType')), h('dd', null, h('code', null, keyType))) : null,
-          sha256 ? h('div', null, h('dt', null, t('fingerprintSha')), h('dd', null, h('code', { className: 'drg-break' }, sha256))) : null,
-          pinned && changed ? h('div', null, h('dt', null, t('fingerprintPinned')), h('dd', null, h('code', { className: 'drg-break' }, pinned))) : null,
+          keyType
+            ? h('div', null, h('dt', null, t('fingerprintKeyType')), h('dd', null, h('code', null, keyType)))
+            : null,
+          sha256
+            ? h(
+                'div',
+                null,
+                h('dt', null, t('fingerprintSha')),
+                h('dd', null, h('code', { className: 'drg-break' }, sha256)),
+              )
+            : null,
+          pinned && changed
+            ? h(
+                'div',
+                null,
+                h('dt', null, t('fingerprintPinned')),
+                h('dd', null, h('code', { className: 'drg-break' }, pinned)),
+              )
+            : null,
         ),
         props.error
-          ? h(Notice, { tone: 'error' }, resolveText(toErrorView(props.error).detail, locale) || t('error.actionFailed'))
+          ? h(
+              Notice,
+              { tone: 'error' },
+              resolveText(toErrorView(props.error).detail, locale) || t('error.actionFailed'),
+            )
           : null,
         h(
           'div',
           { className: 'drg-row drg-row-wrap' },
-          h(Button, { variant: 'primary', testId: 'fingerprint-accept', busy, onClick: () => props.onAccept && props.onAccept(true) }, t('fingerprintAccept')),
-          h(Button, { variant: 'secondary', testId: 'fingerprint-accept-once', disabled: busy, onClick: () => props.onAccept && props.onAccept(false) }, t('fingerprintAcceptOnce')),
-          h(Button, { variant: 'ghost', testId: 'fingerprint-reject', disabled: busy, onClick: props.onReject }, t('fingerprintReject')),
+          h(
+            Button,
+            {
+              variant: 'primary',
+              testId: 'fingerprint-accept',
+              busy,
+              onClick: () => props.onAccept && props.onAccept(true),
+            },
+            t('fingerprintAccept'),
+          ),
+          h(
+            Button,
+            {
+              variant: 'secondary',
+              testId: 'fingerprint-accept-once',
+              disabled: busy,
+              onClick: () => props.onAccept && props.onAccept(false),
+            },
+            t('fingerprintAcceptOnce'),
+          ),
+          h(
+            Button,
+            { variant: 'ghost', testId: 'fingerprint-reject', disabled: busy, onClick: props.onReject },
+            t('fingerprintReject'),
+          ),
         ),
       )
     }
@@ -2222,7 +2349,11 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'drg-error-steps' },
               h('div', { className: 'drg-section-label' }, t('next')),
-              h('ul', null, steps.map((step, index) => h('li', { key: String(index) }, step))),
+              h(
+                'ul',
+                null,
+                steps.map((step, index) => h('li', { key: String(index) }, step)),
+              ),
             )
           : null,
         h(
@@ -2234,7 +2365,9 @@ window.__ModuleLoader__.load({
           typeof props.onDiagnose === 'function'
             ? h(Button, { variant: 'secondary', testId: 'error-diagnose', onClick: props.onDiagnose }, t('diagnose'))
             : null,
-          typeof props.onBack === 'function' ? h(Button, { variant: 'ghost', testId: 'error-back', onClick: props.onBack }, t('back')) : null,
+          typeof props.onBack === 'function'
+            ? h(Button, { variant: 'ghost', testId: 'error-back', onClick: props.onBack }, t('back'))
+            : null,
         ),
       )
     }
@@ -2258,7 +2391,12 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'drg-toolbar-left' },
-          h(IconButton, { icon: h(IconBack), label: t('viewportBack'), testId: 'viewport-back', onClick: props.onBack }),
+          h(IconButton, {
+            icon: h(IconBack),
+            label: t('viewportBack'),
+            testId: 'viewport-back',
+            onClick: props.onBack,
+          }),
           h(StatusDot, { status: host.status, title: t(meta.labelKey) }),
           h('span', { className: 'drg-toolbar-host', title: host.name }, host.name || host.id),
           h('span', { className: 'drg-toolbar-status', 'data-status': host.status }, t(meta.labelKey)),
@@ -2293,10 +2431,43 @@ window.__ModuleLoader__.load({
                 ariaLabel: t('viewportSwitch'),
               })
             : null,
-          h(Button, { variant: 'ghost', testId: 'viewport-reconnect', onClick: props.onReconnect, disabled: host.status === 'connecting' }, t('reconnect')),
-          h(Button, { variant: 'ghost', testId: 'viewport-refresh', onClick: props.onRefreshFrame, disabled: host.status !== 'connected' }, t('refreshView')),
-          h(Button, { variant: 'ghost', testId: 'viewport-external', onClick: props.onOpenExternal, disabled: host.status !== 'connected' }, h(IconExternal, { size: 14 }), h('span', null, t('viewportExternal'))),
-          h(IconButton, { icon: h(IconPulse), label: t('diagnose'), testId: 'viewport-diagnose', onClick: props.onDiagnose }),
+          h(
+            Button,
+            {
+              variant: 'ghost',
+              testId: 'viewport-reconnect',
+              onClick: props.onReconnect,
+              disabled: host.status === 'connecting',
+            },
+            t('reconnect'),
+          ),
+          h(
+            Button,
+            {
+              variant: 'ghost',
+              testId: 'viewport-refresh',
+              onClick: props.onRefreshFrame,
+              disabled: host.status !== 'connected',
+            },
+            t('refreshView'),
+          ),
+          h(
+            Button,
+            {
+              variant: 'ghost',
+              testId: 'viewport-external',
+              onClick: props.onOpenExternal,
+              disabled: host.status !== 'connected',
+            },
+            h(IconExternal, { size: 14 }),
+            h('span', null, t('viewportExternal')),
+          ),
+          h(IconButton, {
+            icon: h(IconPulse),
+            label: t('diagnose'),
+            testId: 'viewport-diagnose',
+            onClick: props.onDiagnose,
+          }),
         ),
       )
     }
@@ -2313,7 +2484,8 @@ window.__ModuleLoader__.load({
       const locale = localeOf(props)
       const host = props.host || null
       const status = host ? host.status : 'unconfigured'
-      const iframeUrl = typeof props.iframeUrl === 'string' && isValidIframeUrl(props.iframeUrl) ? props.iframeUrl : null
+      const iframeUrl =
+        typeof props.iframeUrl === 'string' && isValidIframeUrl(props.iframeUrl) ? props.iframeUrl : null
       const invalidIframe = typeof props.iframeUrl === 'string' && props.iframeUrl.length > 0 && iframeUrl === null
       const iframeError = props.iframeError || null
       const iframeLoading = props.iframeLoading === true
@@ -2370,7 +2542,14 @@ window.__ModuleLoader__.load({
         body = h(
           'div',
           { className: 'drg-frame-wrap' },
-          iframeLoading ? h('div', { className: 'drg-frame-loading' }, h(Spinner, { size: 20 }), h('span', null, t('viewportLoadingFrame'))) : null,
+          iframeLoading
+            ? h(
+                'div',
+                { className: 'drg-frame-loading' },
+                h(Spinner, { size: 20 }),
+                h('span', null, t('viewportLoadingFrame')),
+              )
+            : null,
           h('iframe', {
             key: props.iframeKey || 0,
             className: 'drg-frame',
@@ -2384,7 +2563,12 @@ window.__ModuleLoader__.load({
           }),
         )
       } else {
-        body = h('div', { className: 'drg-loading drg-loading-viewport' }, h(Spinner, { size: 20 }), h('span', null, t('viewportOpening', { name: host.name || host.id })))
+        body = h(
+          'div',
+          { className: 'drg-loading drg-loading-viewport' },
+          h(Spinner, { size: 20 }),
+          h('span', null, t('viewportOpening', { name: host.name || host.id })),
+        )
       }
 
       return h(
@@ -2407,12 +2591,16 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'drg-viewport-notice' },
-              h(Notice, {
-                tone: 'info',
-                title: t('enterNoticeTitle'),
-                onDismiss: props.onDismissEnterNotice,
-                dismissLabel: t('dismiss'),
-              }, t('enterNoticeBody')),
+              h(
+                Notice,
+                {
+                  tone: 'info',
+                  title: t('enterNoticeTitle'),
+                  onDismiss: props.onDismissEnterNotice,
+                  dismissLabel: t('dismiss'),
+                },
+                t('enterNoticeBody'),
+              ),
             )
           : null,
         status === 'disconnected'
@@ -2426,7 +2614,11 @@ window.__ModuleLoader__.load({
                 ' ',
                 h(
                   'button',
-                  { type: 'button', className: 'drg-linkbtn', onClick: () => props.onReconnect && props.onReconnect(host) },
+                  {
+                    type: 'button',
+                    className: 'drg-linkbtn',
+                    onClick: () => props.onReconnect && props.onReconnect(host),
+                  },
                   t('reconnectNow'),
                 ),
               ),
@@ -2442,7 +2634,8 @@ window.__ModuleLoader__.load({
 
     /** Parse a positive integer, falling back when the input is not numeric. */
     function toInt(value, fallback) {
-      const number = typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
+      const number =
+        typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
       return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
     }
 
@@ -2556,7 +2749,9 @@ window.__ModuleLoader__.load({
       const initialHost = props.initialHost || null
       const total = 3
       const [step, setStep] = useState(1)
-      const [draft, setDraft] = useState(() => initialDraft(mode, initialHost, pathValue(props.state, 'settings', null)))
+      const [draft, setDraft] = useState(() =>
+        initialDraft(mode, initialHost, pathValue(props.state, 'settings', null)),
+      )
       const [password, setPassword] = useState('')
       const [authDirty, setAuthDirty] = useState(mode === 'add')
       const [nameTouched, setNameTouched] = useState(mode === 'edit')
@@ -2703,7 +2898,9 @@ window.__ModuleLoader__.load({
           text = formatDiagnoseText(report, host || { id: hostId, name: draft.name }, t, locale)
         } catch (error) {
           const view = toErrorView(error)
-          text = [t('diag.failed'), resolveText(view.title, locale), resolveText(view.detail, locale)].filter(Boolean).join('\n')
+          text = [t('diag.failed'), resolveText(view.title, locale), resolveText(view.detail, locale)]
+            .filter(Boolean)
+            .join('\n')
         }
         const ok = await copyText(text)
         setCopied(ok === true)
@@ -2715,7 +2912,11 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'drg-row drg-row-end' },
               h(Button, { variant: 'ghost', testId: 'wizard-cancel', onClick: handleCancel }, t('cancel')),
-              h(Button, { variant: 'primary', testId: 'wizard-next', busy: saving, onClick: handleSave }, saving ? t('wizard.savingHost') : t('wizard.saveAndTest')),
+              h(
+                Button,
+                { variant: 'primary', testId: 'wizard-next', busy: saving, onClick: handleSave },
+                saving ? t('wizard.savingHost') : t('wizard.saveAndTest'),
+              ),
             )
           : step === 2
             ? h(
@@ -2725,8 +2926,21 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'drg-row' },
-                  h(Button, { variant: 'secondary', testId: 'wizard-retry', busy: fingerprintBusy, onClick: handleRetryTest }, t('wizard.testRetry')),
-                  hostId ? h(Button, { variant: 'secondary', onClick: () => props.onDiagnose && props.onDiagnose(host || { id: hostId, name: draft.name }) }, t('diagnose')) : null,
+                  h(
+                    Button,
+                    { variant: 'secondary', testId: 'wizard-retry', busy: fingerprintBusy, onClick: handleRetryTest },
+                    t('wizard.testRetry'),
+                  ),
+                  hostId
+                    ? h(
+                        Button,
+                        {
+                          variant: 'secondary',
+                          onClick: () => props.onDiagnose && props.onDiagnose(host || { id: hostId, name: draft.name }),
+                        },
+                        t('diagnose'),
+                      )
+                    : null,
                 ),
               )
             : h(
@@ -2736,15 +2950,26 @@ window.__ModuleLoader__.load({
                 h(
                   'div',
                   { className: 'drg-row' },
-                  h(Button, { variant: 'secondary', onClick: handleCopyDiagnostics }, copied ? t('copied') : t('wizard.copyDiag')),
-                  h(Button, { variant: 'primary', testId: 'wizard-open', onClick: handleOpenRemote }, t('wizard.openRemote')),
+                  h(
+                    Button,
+                    { variant: 'secondary', onClick: handleCopyDiagnostics },
+                    copied ? t('copied') : t('wizard.copyDiag'),
+                  ),
+                  h(
+                    Button,
+                    { variant: 'primary', testId: 'wizard-open', onClick: handleOpenRemote },
+                    t('wizard.openRemote'),
+                  ),
                 ),
               )
 
       const stepBadge = (index, label) =>
         h(
           'li',
-          { className: 'drg-wizard-step', 'data-state': index < step ? 'done' : index === step ? 'current' : 'pending' },
+          {
+            className: 'drg-wizard-step',
+            'data-state': index < step ? 'done' : index === step ? 'current' : 'pending',
+          },
           h('span', { className: 'drg-wizard-step-index' }, String(index)),
           h('span', null, label),
         )
@@ -2756,21 +2981,29 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'drg-wizard-form' },
           formError
-            ? h(Notice, { tone: 'error' }, typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale))
+            ? h(
+                Notice,
+                { tone: 'error' },
+                typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale),
+              )
             : null,
           h(
             'div',
             { className: 'drg-form-grid' },
-            h(Field, { label: t('wizard.name') }, h(TextInput, {
-              value: draft.name,
-              placeholder: t('wizard.namePlaceholder'),
-              ariaLabel: t('wizard.name'),
-              testId: 'wizard-name',
-              onChange: (value) => {
-                setNameTouched(true)
-                patchDraft({ name: value })
-              },
-            })),
+            h(
+              Field,
+              { label: t('wizard.name') },
+              h(TextInput, {
+                value: draft.name,
+                placeholder: t('wizard.namePlaceholder'),
+                ariaLabel: t('wizard.name'),
+                testId: 'wizard-name',
+                onChange: (value) => {
+                  setNameTouched(true)
+                  patchDraft({ name: value })
+                },
+              }),
+            ),
             h(Field, { label: t('wizard.address'), hint: t('wizard.addressHint') }, [
               h(TextInput, {
                 key: 'address',
@@ -2816,100 +3049,136 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'drg-form-grid drg-form-grid-3' },
-            h(Field, { label: t('wizard.port') }, h(TextInput, {
-              type: 'number',
-              value: draft.port,
-              ariaLabel: t('wizard.port'),
-              testId: 'wizard-port',
-              onChange: (value) => patchDraft({ port: value }),
-            })),
-            h(Field, { label: t('wizard.username') }, h(TextInput, {
-              value: draft.username,
-              placeholder: t('wizard.usernamePlaceholder'),
-              ariaLabel: t('wizard.username'),
-              testId: 'wizard-username',
-              onChange: (value) => patchDraft({ username: value }),
-            })),
-            h(Field, { label: t('wizard.jumpHost') }, h(TextInput, {
-              value: draft.jumpHost,
-              placeholder: t('wizard.jumpHostPlaceholder'),
-              ariaLabel: t('wizard.jumpHost'),
-              testId: 'wizard-jump-host',
-              onChange: (value) => patchDraft({ jumpHost: value }),
-            })),
+            h(
+              Field,
+              { label: t('wizard.port') },
+              h(TextInput, {
+                type: 'number',
+                value: draft.port,
+                ariaLabel: t('wizard.port'),
+                testId: 'wizard-port',
+                onChange: (value) => patchDraft({ port: value }),
+              }),
+            ),
+            h(
+              Field,
+              { label: t('wizard.username') },
+              h(TextInput, {
+                value: draft.username,
+                placeholder: t('wizard.usernamePlaceholder'),
+                ariaLabel: t('wizard.username'),
+                testId: 'wizard-username',
+                onChange: (value) => patchDraft({ username: value }),
+              }),
+            ),
+            h(
+              Field,
+              { label: t('wizard.jumpHost') },
+              h(TextInput, {
+                value: draft.jumpHost,
+                placeholder: t('wizard.jumpHostPlaceholder'),
+                ariaLabel: t('wizard.jumpHost'),
+                testId: 'wizard-jump-host',
+                onChange: (value) => patchDraft({ jumpHost: value }),
+              }),
+            ),
           ),
-          h(Field, { label: t('wizard.auth'), hint: t('wizard.authHint') }, h(Select, {
-            value: draft.authType,
-            ariaLabel: t('wizard.auth'),
-            testId: 'wizard-auth',
-            options: [
-              { value: 'agent', label: t('wizard.authAgent') },
-              { value: 'key', label: t('wizard.authKey') },
-              { value: 'password', label: t('wizard.authPassword') },
-            ],
-            onChange: (value) => {
-              setAuthDirty(true)
-              patchDraft({ authType: value })
-            },
-          })),
+          h(
+            Field,
+            { label: t('wizard.auth'), hint: t('wizard.authHint') },
+            h(Select, {
+              value: draft.authType,
+              ariaLabel: t('wizard.auth'),
+              testId: 'wizard-auth',
+              options: [
+                { value: 'agent', label: t('wizard.authAgent') },
+                { value: 'key', label: t('wizard.authKey') },
+                { value: 'password', label: t('wizard.authPassword') },
+              ],
+              onChange: (value) => {
+                setAuthDirty(true)
+                patchDraft({ authType: value })
+              },
+            }),
+          ),
           draft.authType === 'key'
-            ? h(Field, { label: t('wizard.keyPath') }, h(TextInput, {
-                value: draft.keyPath,
-                placeholder: t('wizard.keyPathPlaceholder'),
-                ariaLabel: t('wizard.keyPath'),
-                testId: 'wizard-key-path',
-                onChange: (value) => {
-                  setAuthDirty(true)
-                  patchDraft({ keyPath: value })
-                },
-              }))
+            ? h(
+                Field,
+                { label: t('wizard.keyPath') },
+                h(TextInput, {
+                  value: draft.keyPath,
+                  placeholder: t('wizard.keyPathPlaceholder'),
+                  ariaLabel: t('wizard.keyPath'),
+                  testId: 'wizard-key-path',
+                  onChange: (value) => {
+                    setAuthDirty(true)
+                    patchDraft({ keyPath: value })
+                  },
+                }),
+              )
             : null,
           draft.authType === 'password'
-            ? h(Field, { label: t('wizard.password'), hint: t('wizard.passwordPlaceholder') }, h(TextInput, {
-                type: 'password',
-                value: password,
-                placeholder: t('wizard.passwordPlaceholder'),
-                ariaLabel: t('wizard.password'),
-                testId: 'wizard-password',
-                onChange: (value) => {
-                  setAuthDirty(true)
-                  setPassword(value)
-                },
-              }))
+            ? h(
+                Field,
+                { label: t('wizard.password'), hint: t('wizard.passwordPlaceholder') },
+                h(TextInput, {
+                  type: 'password',
+                  value: password,
+                  placeholder: t('wizard.passwordPlaceholder'),
+                  ariaLabel: t('wizard.password'),
+                  testId: 'wizard-password',
+                  onChange: (value) => {
+                    setAuthDirty(true)
+                    setPassword(value)
+                  },
+                }),
+              )
             : null,
           h(
             'div',
             { className: 'drg-form-grid drg-form-grid-3' },
-            h(Field, { label: t('wizard.keepAlive') }, h(Select, {
-              value: draft.keepAlive,
-              ariaLabel: t('wizard.keepAlive'),
-              testId: 'wizard-keep-alive',
-              options: [
-                { value: 'keep', label: t('wizard.keepAliveKeep') },
-                { value: 'stop', label: t('wizard.keepAliveStop') },
-                { value: 'idle', label: t('wizard.keepAliveIdle') },
-              ],
-              onChange: (value) => patchDraft({ keepAlive: value }),
-            })),
+            h(
+              Field,
+              { label: t('wizard.keepAlive') },
+              h(Select, {
+                value: draft.keepAlive,
+                ariaLabel: t('wizard.keepAlive'),
+                testId: 'wizard-keep-alive',
+                options: [
+                  { value: 'keep', label: t('wizard.keepAliveKeep') },
+                  { value: 'stop', label: t('wizard.keepAliveStop') },
+                  { value: 'idle', label: t('wizard.keepAliveIdle') },
+                ],
+                onChange: (value) => patchDraft({ keepAlive: value }),
+              }),
+            ),
             draft.keepAlive === 'idle'
-              ? h(Field, { label: t('wizard.idleMinutes') }, h(TextInput, {
-                  type: 'number',
-                  value: draft.idleMinutes,
-                  ariaLabel: t('wizard.idleMinutes'),
-                  testId: 'wizard-idle-minutes',
-                  onChange: (value) => patchDraft({ idleMinutes: value }),
-                }))
+              ? h(
+                  Field,
+                  { label: t('wizard.idleMinutes') },
+                  h(TextInput, {
+                    type: 'number',
+                    value: draft.idleMinutes,
+                    ariaLabel: t('wizard.idleMinutes'),
+                    testId: 'wizard-idle-minutes',
+                    onChange: (value) => patchDraft({ idleMinutes: value }),
+                  }),
+                )
               : null,
-            h(Field, { label: t('settings.hostKeyPolicy') }, h(Select, {
-              value: draft.hostKeyPolicy,
-              ariaLabel: t('settings.hostKeyPolicy'),
-              testId: 'wizard-host-key-policy',
-              options: [
-                { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-              ],
-              onChange: (value) => patchDraft({ hostKeyPolicy: value }),
-            })),
+            h(
+              Field,
+              { label: t('settings.hostKeyPolicy') },
+              h(Select, {
+                value: draft.hostKeyPolicy,
+                ariaLabel: t('settings.hostKeyPolicy'),
+                testId: 'wizard-host-key-policy',
+                options: [
+                  { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
+                  { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
+                ],
+                onChange: (value) => patchDraft({ hostKeyPolicy: value }),
+              }),
+            ),
           ),
           h(CheckRow, {
             checked: draft.autoReconnect !== false,
@@ -2946,11 +3215,7 @@ window.__ModuleLoader__.load({
                     onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
                     onBack: handleCancel,
                   })
-                : h(
-                    'div',
-                    null,
-                    h(ConnectProgress, { t, host }),
-                  ),
+                : h('div', null, h(ConnectProgress, { t, host })),
         )
       } else {
         const remote = host && host.remote ? host.remote : {}
@@ -2972,10 +3237,28 @@ window.__ModuleLoader__.load({
               'div',
               null,
               h('dt', null, t('wizard.versionMatch')),
-              h('dd', null, h(Badge, { tone: versionsMatch ? 'success' : 'warn' }, versionsMatch ? t('wizard.versionMatch') : t('wizard.versionMismatch'))),
+              h(
+                'dd',
+                null,
+                h(
+                  Badge,
+                  { tone: versionsMatch ? 'success' : 'warn' },
+                  versionsMatch ? t('wizard.versionMatch') : t('wizard.versionMismatch'),
+                ),
+              ),
             ),
-            h('div', null, h('dt', null, t('wizard.bootstrapLevel')), h('dd', null, remote.bootstrapLevel || t('unknown'))),
-            h('div', null, h('dt', null, t('wizard.uiReady')), h('dd', null, remote.uiReady === true ? t('wizard.uiReadyYes') : t('wizard.uiReadyNo'))),
+            h(
+              'div',
+              null,
+              h('dt', null, t('wizard.bootstrapLevel')),
+              h('dd', null, remote.bootstrapLevel || t('unknown')),
+            ),
+            h(
+              'div',
+              null,
+              h('dt', null, t('wizard.uiReady')),
+              h('dd', null, remote.uiReady === true ? t('wizard.uiReadyYes') : t('wizard.uiReadyNo')),
+            ),
           ),
           copied ? h(Notice, { tone: 'success' }, t('diag.copyDone')) : null,
         )
@@ -3038,13 +3321,16 @@ window.__ModuleLoader__.load({
       const address = displayAddress(target)
       lines.push(t('diag.host') + ': ' + (target.name || target.id || '') + (address ? ' (' + address + ')' : ''))
       if (report && typeof report.summary === 'string') lines.push('summary: ' + report.summary)
-      if (report && typeof report.generatedAt === 'string') lines.push(t('diag.generatedAt') + ': ' + report.generatedAt)
+      if (report && typeof report.generatedAt === 'string')
+        lines.push(t('diag.generatedAt') + ': ' + report.generatedAt)
       lines.push('')
       const checks = sortDiagnoseChecks(report && report.checks)
       for (const check of checks) {
         const title = resolveText(check.title, locale) || String(check.id || '')
         const detail = resolveText(check.detail, locale)
-        lines.push('[' + String(check.status || 'unknown').toUpperCase() + '] ' + title + (detail ? ' — ' + detail : ''))
+        lines.push(
+          '[' + String(check.status || 'unknown').toUpperCase() + '] ' + title + (detail ? ' — ' + detail : ''),
+        )
       }
       lines.push('')
       lines.push(t('diag.redacted'))
@@ -3082,7 +3368,8 @@ window.__ModuleLoader__.load({
         setCopied(ok === true)
       }
 
-      const summaryTone = report && report.summary === 'error' ? 'error' : report && report.summary === 'warning' ? 'warn' : 'success'
+      const summaryTone =
+        report && report.summary === 'error' ? 'error' : report && report.summary === 'warning' ? 'warn' : 'success'
       const summaryText =
         report && report.summary === 'error'
           ? t('diag.summaryError')
@@ -3110,7 +3397,13 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'drg-diag-head' },
             h(Badge, { tone: summaryTone }, summaryText),
-            report.generatedAt ? h('span', { className: 'drg-diag-time' }, t('diag.generatedAt') + ' ' + formatTime(report.generatedAt, locale)) : null,
+            report.generatedAt
+              ? h(
+                  'span',
+                  { className: 'drg-diag-time' },
+                  t('diag.generatedAt') + ' ' + formatTime(report.generatedAt, locale),
+                )
+              : null,
           ),
           h(
             'ul',
@@ -3119,11 +3412,19 @@ window.__ModuleLoader__.load({
               h(
                 'li',
                 { key: String(check.id || index), className: 'drg-diag-check', 'data-status': check.status },
-                h('span', { className: 'drg-diag-status', 'data-status': check.status }, checkStatusLabel(t, check.status)),
+                h(
+                  'span',
+                  { className: 'drg-diag-status', 'data-status': check.status },
+                  checkStatusLabel(t, check.status),
+                ),
                 h(
                   'div',
                   { className: 'drg-diag-check-body' },
-                  h('div', { className: 'drg-diag-check-title' }, resolveText(check.title, locale) || String(check.id || '')),
+                  h(
+                    'div',
+                    { className: 'drg-diag-check-title' },
+                    resolveText(check.title, locale) || String(check.id || ''),
+                  ),
                   resolveText(check.detail, locale)
                     ? h('div', { className: 'drg-diag-check-detail' }, resolveText(check.detail, locale))
                     : null,
@@ -3142,7 +3443,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'drg-drawer-backdrop', onClick: props.onClose, 'aria-hidden': 'true' }),
         h(
           'aside',
-          { className: 'drg-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('diag.title'), 'data-testid': 'diagnostics' },
+          {
+            className: 'drg-drawer',
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': t('diag.title'),
+            'data-testid': 'diagnostics',
+          },
           h(
             'div',
             { className: 'drg-drawer-head' },
@@ -3150,7 +3457,13 @@ window.__ModuleLoader__.load({
               'div',
               null,
               h('h2', { className: 'drg-drawer-title' }, t('diag.title')),
-              host ? h('p', { className: 'drg-drawer-subtitle' }, (host.name || host.id) + (displayAddress(host) ? ' · ' + displayAddress(host) : '')) : null,
+              host
+                ? h(
+                    'p',
+                    { className: 'drg-drawer-subtitle' },
+                    (host.name || host.id) + (displayAddress(host) ? ' · ' + displayAddress(host) : ''),
+                  )
+                : null,
             ),
             h(IconButton, { icon: h(IconClose), label: t('diag.close'), onClick: props.onClose }),
           ),
@@ -3158,8 +3471,16 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'drg-drawer-foot' },
-            h(Button, { variant: 'secondary', testId: 'diagnose-rerun', busy: status === 'loading', onClick: props.onRun }, t('diag.rerun')),
-            h(Button, { variant: 'primary', testId: 'diagnose-copy', onClick: handleCopy }, copied ? t('copied') : t('diag.copy')),
+            h(
+              Button,
+              { variant: 'secondary', testId: 'diagnose-rerun', busy: status === 'loading', onClick: props.onRun },
+              t('diag.rerun'),
+            ),
+            h(
+              Button,
+              { variant: 'primary', testId: 'diagnose-copy', onClick: handleCopy },
+              copied ? t('copied') : t('diag.copy'),
+            ),
           ),
         ),
       )
@@ -3249,7 +3570,11 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'drg-row drg-row-end' },
         h(Button, { variant: 'ghost', onClick: props.onClose }, t('cancel')),
-        h(Button, { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave }, t('settings.saveSettings')),
+        h(
+          Button,
+          { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave },
+          t('settings.saveSettings'),
+        ),
       )
 
       return h(
@@ -3269,20 +3594,28 @@ window.__ModuleLoader__.load({
             'section',
             { className: 'drg-settings-section' },
             h('h3', { className: 'drg-section-title' }, t('settings.window')),
-            h(Field, { label: t('settings.windowMode'), hint: t('settings.windowModeHint') }, h(Select, {
-              value: draft.windowMode,
-              ariaLabel: t('settings.windowMode'),
-              options: [
-                { value: 'panel', label: t('settings.windowModePanel') },
-                { value: 'external', label: t('settings.windowModeExternal') },
-              ],
-              onChange: set('windowMode'),
-            })),
-            h(Field, { label: t('settings.closeBehavior'), hint: t('settings.closeBehaviorHint') }, h(TextInput, {
-              value: t('settings.closeBehaviorValue'),
-              readOnly: true,
-              ariaLabel: t('settings.closeBehavior'),
-            })),
+            h(
+              Field,
+              { label: t('settings.windowMode'), hint: t('settings.windowModeHint') },
+              h(Select, {
+                value: draft.windowMode,
+                ariaLabel: t('settings.windowMode'),
+                options: [
+                  { value: 'panel', label: t('settings.windowModePanel') },
+                  { value: 'external', label: t('settings.windowModeExternal') },
+                ],
+                onChange: set('windowMode'),
+              }),
+            ),
+            h(
+              Field,
+              { label: t('settings.closeBehavior'), hint: t('settings.closeBehaviorHint') },
+              h(TextInput, {
+                value: t('settings.closeBehaviorValue'),
+                readOnly: true,
+                ariaLabel: t('settings.closeBehavior'),
+              }),
+            ),
           ),
           h(
             'section',
@@ -3291,44 +3624,64 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'drg-form-grid drg-form-grid-3' },
-              h(Field, { label: t('settings.defaultPort') }, h(TextInput, {
-                type: 'number',
-                value: draft.defaultPort,
-                ariaLabel: t('settings.defaultPort'),
-                onChange: set('defaultPort'),
-              })),
-              h(Field, { label: t('settings.defaultAuth') }, h(Select, {
-                value: draft.defaultAuth,
-                ariaLabel: t('settings.defaultAuth'),
-                options: [
-                  { value: 'agent', label: t('settings.defaultAuthAgent') },
-                  { value: 'key', label: t('settings.defaultAuthKey') },
-                  { value: 'password', label: t('settings.defaultAuthPassword') },
-                ],
-                onChange: set('defaultAuth'),
-              })),
-              h(Field, { label: t('settings.connectTimeout') }, h(TextInput, {
-                type: 'number',
-                value: draft.connectTimeoutSec,
-                ariaLabel: t('settings.connectTimeout'),
-                onChange: set('connectTimeoutSec'),
-              })),
+              h(
+                Field,
+                { label: t('settings.defaultPort') },
+                h(TextInput, {
+                  type: 'number',
+                  value: draft.defaultPort,
+                  ariaLabel: t('settings.defaultPort'),
+                  onChange: set('defaultPort'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.defaultAuth') },
+                h(Select, {
+                  value: draft.defaultAuth,
+                  ariaLabel: t('settings.defaultAuth'),
+                  options: [
+                    { value: 'agent', label: t('settings.defaultAuthAgent') },
+                    { value: 'key', label: t('settings.defaultAuthKey') },
+                    { value: 'password', label: t('settings.defaultAuthPassword') },
+                  ],
+                  onChange: set('defaultAuth'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.connectTimeout') },
+                h(TextInput, {
+                  type: 'number',
+                  value: draft.connectTimeoutSec,
+                  ariaLabel: t('settings.connectTimeout'),
+                  onChange: set('connectTimeoutSec'),
+                }),
+              ),
             ),
           ),
           h(
             'section',
             { className: 'drg-settings-section' },
             h('h3', { className: 'drg-section-title' }, t('settings.security')),
-            h(Field, { label: t('settings.hostKeyPolicy') }, h(Select, {
-              value: draft.hostKeyPolicy,
-              ariaLabel: t('settings.hostKeyPolicy'),
-              options: [
-                { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-              ],
-              onChange: set('hostKeyPolicy'),
-            })),
-            h(CheckRow, { checked: draft.saveTokens === true, label: t('settings.saveTokens'), onChange: set('saveTokens') }),
+            h(
+              Field,
+              { label: t('settings.hostKeyPolicy') },
+              h(Select, {
+                value: draft.hostKeyPolicy,
+                ariaLabel: t('settings.hostKeyPolicy'),
+                options: [
+                  { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
+                  { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
+                ],
+                onChange: set('hostKeyPolicy'),
+              }),
+            ),
+            h(CheckRow, {
+              checked: draft.saveTokens === true,
+              label: t('settings.saveTokens'),
+              onChange: set('saveTokens'),
+            }),
             h('p', { className: 'drg-field-hint' }, t('settings.saveTokensHint')),
             draft.saveTokens === true ? h(Notice, { tone: 'warn', title: t('settings.saveTokensRisk') }) : null,
             h('div', { className: 'drg-divider' }),
@@ -3341,18 +3694,26 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'drg-form-grid' },
-              h(Field, { label: t('settings.maxAttempts') }, h(TextInput, {
-                type: 'number',
-                value: draft.maxAttempts,
-                ariaLabel: t('settings.maxAttempts'),
-                onChange: set('maxAttempts'),
-              })),
-              h(Field, { label: t('settings.baseDelay') }, h(TextInput, {
-                type: 'number',
-                value: draft.baseDelayMs,
-                ariaLabel: t('settings.baseDelay'),
-                onChange: set('baseDelayMs'),
-              })),
+              h(
+                Field,
+                { label: t('settings.maxAttempts') },
+                h(TextInput, {
+                  type: 'number',
+                  value: draft.maxAttempts,
+                  ariaLabel: t('settings.maxAttempts'),
+                  onChange: set('maxAttempts'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.baseDelay') },
+                h(TextInput, {
+                  type: 'number',
+                  value: draft.baseDelayMs,
+                  ariaLabel: t('settings.baseDelay'),
+                  onChange: set('baseDelayMs'),
+                }),
+              ),
             ),
           ),
           h(
@@ -3362,33 +3723,49 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'drg-form-grid drg-form-grid-3' },
-              h(Field, { label: t('settings.targetVersion'), hint: t('settings.targetVersionHint') }, h(TextInput, {
-                value: draft.targetVersion,
-                ariaLabel: t('settings.targetVersion'),
-                onChange: set('targetVersion'),
-              })),
-              h(Field, { label: t('settings.mode') }, h(Select, {
-                value: draft.bootstrapMode,
-                ariaLabel: t('settings.mode'),
-                options: [
-                  { value: 'auto', label: t('settings.modeAuto') },
-                  { value: 'reuse', label: t('settings.modeReuse') },
-                  { value: 'npx', label: t('settings.modeNpx') },
-                  { value: 'isolated', label: t('settings.modeIsolated') },
-                ],
-                onChange: set('bootstrapMode'),
-              })),
-              h(Field, { label: t('settings.nodeVersion') }, h(TextInput, {
-                value: draft.nodeVersion,
-                ariaLabel: t('settings.nodeVersion'),
-                onChange: set('nodeVersion'),
-              })),
+              h(
+                Field,
+                { label: t('settings.targetVersion'), hint: t('settings.targetVersionHint') },
+                h(TextInput, {
+                  value: draft.targetVersion,
+                  ariaLabel: t('settings.targetVersion'),
+                  onChange: set('targetVersion'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.mode') },
+                h(Select, {
+                  value: draft.bootstrapMode,
+                  ariaLabel: t('settings.mode'),
+                  options: [
+                    { value: 'auto', label: t('settings.modeAuto') },
+                    { value: 'reuse', label: t('settings.modeReuse') },
+                    { value: 'npx', label: t('settings.modeNpx') },
+                    { value: 'isolated', label: t('settings.modeIsolated') },
+                  ],
+                  onChange: set('bootstrapMode'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.nodeVersion') },
+                h(TextInput, {
+                  value: draft.nodeVersion,
+                  ariaLabel: t('settings.nodeVersion'),
+                  onChange: set('nodeVersion'),
+                }),
+              ),
             ),
-            h(Field, { label: t('settings.remoteDir') }, h(TextInput, {
-              value: draft.remoteDir,
-              ariaLabel: t('settings.remoteDir'),
-              onChange: set('remoteDir'),
-            })),
+            h(
+              Field,
+              { label: t('settings.remoteDir') },
+              h(TextInput, {
+                value: draft.remoteDir,
+                ariaLabel: t('settings.remoteDir'),
+                onChange: set('remoteDir'),
+              }),
+            ),
           ),
           h(
             'section',
@@ -3397,22 +3774,30 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'drg-form-grid drg-form-grid-3' },
-              h(Field, { label: t('settings.language') }, h(Select, {
-                value: draft.language,
-                ariaLabel: t('settings.language'),
-                options: [
-                  { value: 'auto', label: t('settings.languageAuto') },
-                  { value: 'zh', label: t('settings.languageZh') },
-                  { value: 'en', label: t('settings.languageEn') },
-                ],
-                onChange: set('language'),
-              })),
-              h(Field, { label: t('settings.logLevel') }, h(Select, {
-                value: draft.logLevel,
-                ariaLabel: t('settings.logLevel'),
-                options: ['error', 'warn', 'info', 'debug'].map((level) => ({ value: level, label: level })),
-                onChange: set('logLevel'),
-              })),
+              h(
+                Field,
+                { label: t('settings.language') },
+                h(Select, {
+                  value: draft.language,
+                  ariaLabel: t('settings.language'),
+                  options: [
+                    { value: 'auto', label: t('settings.languageAuto') },
+                    { value: 'zh', label: t('settings.languageZh') },
+                    { value: 'en', label: t('settings.languageEn') },
+                  ],
+                  onChange: set('language'),
+                }),
+              ),
+              h(
+                Field,
+                { label: t('settings.logLevel') },
+                h(Select, {
+                  value: draft.logLevel,
+                  ariaLabel: t('settings.logLevel'),
+                  options: ['error', 'warn', 'info', 'debug'].map((level) => ({ value: level, label: level })),
+                  onChange: set('logLevel'),
+                }),
+              ),
             ),
           ),
           error ? h(Notice, { tone: 'error' }, resolveText(error.detail, locale)) : null,
@@ -3455,13 +3840,20 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'drg-row drg-row-end' },
             h(Button, { variant: 'ghost', onClick: props.onCancel }, t('cancel')),
-            h(Button, { variant: 'primary', testId: 'password-submit', busy: props.busy === true, onClick: submit }, t('passwordPromptSubmit')),
+            h(
+              Button,
+              { variant: 'primary', testId: 'password-submit', busy: props.busy === true, onClick: submit },
+              t('passwordPromptSubmit'),
+            ),
           ),
         },
         h('p', { className: 'drg-paragraph' }, t('passwordPromptBody', { name: host.name || host.id || '' })),
         h(
           Field,
-          { label: t('passwordPromptLabel'), error: localError || (typeof props.error === 'string' ? props.error : '') },
+          {
+            label: t('passwordPromptLabel'),
+            error: localError || (typeof props.error === 'string' ? props.error : ''),
+          },
           h(TextInput, {
             type: 'password',
             value: password,
@@ -3492,7 +3884,11 @@ window.__ModuleLoader__.load({
      */
     function Toast(props) {
       if (!props || !props.toast) return null
-      return h('div', { className: 'drg-toast', 'data-tone': props.toast.tone || 'info', role: 'status' }, props.toast.text)
+      return h(
+        'div',
+        { className: 'drg-toast', 'data-tone': props.toast.tone || 'info', role: 'status' },
+        props.toast.text,
+      )
     }
 
     //#endregion
@@ -3596,9 +3992,12 @@ window.__ModuleLoader__.load({
         if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
         if (typeof setTimeout === 'function') toastTimer.current = setTimeout(() => setToast(null), 4200)
       }
-      useEffect(() => () => {
-        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
-      }, [])
+      useEffect(
+        () => () => {
+          if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
+        },
+        [],
+      )
       const errorMessage = (error) => {
         const viewOfError = toErrorView(error)
         const title = resolveText(viewOfError.title, locale)
@@ -3652,7 +4051,8 @@ window.__ModuleLoader__.load({
 
       // Fetch `GET /hosts/:id/open` only for a connected host, and only once.
       useEffect(() => {
-        if (view !== 'viewport' || activeHostId === null || activeStatus !== 'connected' || iframeUrl !== null) return undefined
+        if (view !== 'viewport' || activeHostId === null || activeStatus !== 'connected' || iframeUrl !== null)
+          return undefined
         let cancelled = false
         setIframeLoading(true)
         setIframeError(null)
@@ -3710,17 +4110,20 @@ window.__ModuleLoader__.load({
       const performConnect = (host, password) => {
         if (!host || !host.id) return
         setBusyHostId(host.id)
-        api.connect(host.id, typeof password === 'string' ? { password } : {}).then(
-          () => {
-            setPasswordPrompt(null)
-            remote.refresh()
-          },
-          (error) => {
-            const message = errorMessage(error)
-            setPasswordPrompt(null)
-            notify(message, 'error')
-          },
-        ).finally(() => setBusyHostId(null))
+        api
+          .connect(host.id, typeof password === 'string' ? { password } : {})
+          .then(
+            () => {
+              setPasswordPrompt(null)
+              remote.refresh()
+            },
+            (error) => {
+              const message = errorMessage(error)
+              setPasswordPrompt(null)
+              notify(message, 'error')
+            },
+          )
+          .finally(() => setBusyHostId(null))
       }
 
       /**
@@ -3774,32 +4177,39 @@ window.__ModuleLoader__.load({
         }
         setPasswordPrompt({ ...pending, busy: true, error: null })
         setBusyHostId(host.id)
-        const connect = intent === 'reconnect'
-          ? api.disconnect(host.id, false)
-              .catch(() => {})
-              .then(() => api.connect(host.id, { password: value }))
-          : api.connect(host.id, { password: value })
-        connect.then(
-          () => {
-            setPasswordPrompt(null)
-            remote.refresh()
-          },
-          (error) => {
-            const message = errorMessage(error)
-            setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
-            notify(message, 'error')
-          },
-        ).finally(() => setBusyHostId(null))
+        const connect =
+          intent === 'reconnect'
+            ? api
+                .disconnect(host.id, false)
+                .catch(() => {})
+                .then(() => api.connect(host.id, { password: value }))
+            : api.connect(host.id, { password: value })
+        connect
+          .then(
+            () => {
+              setPasswordPrompt(null)
+              remote.refresh()
+            },
+            (error) => {
+              const message = errorMessage(error)
+              setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
+              notify(message, 'error')
+            },
+          )
+          .finally(() => setBusyHostId(null))
       }
       const cancelPassword = () => setPasswordPrompt(null)
 
       const disconnectHost = (host) => {
         if (!host) return
         setBusyHostId(host.id)
-        api.disconnect(host.id, false).then(
-          () => remote.refresh(),
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setBusyHostId(null))
+        api
+          .disconnect(host.id, false)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setBusyHostId(null))
       }
 
       const reconnectHost = (host) => {
@@ -3812,10 +4222,13 @@ window.__ModuleLoader__.load({
         setIframeError(null)
         setIframeLoading(true)
         setBusyHostId(host.id)
-        api.reconnect(host.id).then(
-          () => remote.refresh(),
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setBusyHostId(null))
+        api
+          .reconnect(host.id)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setBusyHostId(null))
       }
 
       const backToHosts = () => {
@@ -3867,21 +4280,35 @@ window.__ModuleLoader__.load({
 
       const acceptFingerprint = (remember) => {
         if (!activeHost) return
-        const sha256 = activeHost.fingerprint && typeof activeHost.fingerprint.sha256 === 'string' ? activeHost.fingerprint.sha256 : ''
+        const sha256 =
+          activeHost.fingerprint && typeof activeHost.fingerprint.sha256 === 'string'
+            ? activeHost.fingerprint.sha256
+            : ''
         setFingerprintBusy(true)
         setFingerprintError(null)
-        api.acceptFingerprint(activeHost.id, true, remember === true, sha256).then(
-          () => remote.refresh(),
-          (error) => setFingerprintError(toErrorView(error)),
-        ).finally(() => setFingerprintBusy(false))
+        api
+          .acceptFingerprint(activeHost.id, true, remember === true, sha256)
+          .then(
+            () => remote.refresh(),
+            (error) => setFingerprintError(toErrorView(error)),
+          )
+          .finally(() => setFingerprintBusy(false))
       }
 
       const runDiagnose = (host) => {
         if (!host || !host.id) return
         setDiagnose({ host, status: 'loading', report: null, error: null })
         api.diagnose(host.id).then(
-          (report) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current)),
-          (error) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'error', error: toErrorView(error) } : current)),
+          (report) =>
+            setDiagnose((current) =>
+              current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current,
+            ),
+          (error) =>
+            setDiagnose((current) =>
+              current && current.host && current.host.id === host.id
+                ? { ...current, status: 'error', error: toErrorView(error) }
+                : current,
+            ),
         )
       }
       const rerunDiagnose = () => {
@@ -3891,17 +4318,20 @@ window.__ModuleLoader__.load({
       const confirmDeleteHost = () => {
         if (!pendingDelete) return
         setDeleting(true)
-        api.deleteHost(pendingDelete.id).then(
-          () => {
-            setPendingDelete(null)
-            if (activeHostId === pendingDelete.id) {
-              setActiveHostId(null)
-              setView('hosts')
-            }
-            remote.refresh()
-          },
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setDeleting(false))
+        api
+          .deleteHost(pendingDelete.id)
+          .then(
+            () => {
+              setPendingDelete(null)
+              if (activeHostId === pendingDelete.id) {
+                setActiveHostId(null)
+                setView('hosts')
+              }
+              remote.refresh()
+            },
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setDeleting(false))
       }
 
       const saveSettings = async (patch) => {
@@ -4093,9 +4523,12 @@ window.__ModuleLoader__.load({
       const hostsRef = useRef(hosts)
       hostsRef.current = hosts
 
-      useEffect(() => () => {
-        alive.current = false
-      }, [])
+      useEffect(
+        () => () => {
+          alive.current = false
+        },
+        [],
+      )
 
       const refresh = useCallback(() => {
         const token = ++generation.current
@@ -4225,15 +4658,16 @@ window.__ModuleLoader__.load({
           h('span', { className: 'drg-rail-item-meta' }, sessionsLabel(workspace)),
         )
 
-      const retryButton = h(
-        'button',
-        { type: 'button', className: 'drg-linkbtn', onClick: refresh },
-        t('retry'),
-      )
+      const retryButton = h('button', { type: 'button', className: 'drg-linkbtn', onClick: refresh }, t('retry'))
 
       let localGroup
       if (data.local.status === 'loading') {
-        localGroup = h('div', { className: 'drg-rail-muted' }, h(Spinner, { size: 12 }), h('span', null, t('workspaceRailLoading')))
+        localGroup = h(
+          'div',
+          { className: 'drg-rail-muted' },
+          h(Spinner, { size: 12 }),
+          h('span', null, t('workspaceRailLoading')),
+        )
       } else if (data.local.status === 'error') {
         localGroup = h(
           'div',
@@ -4279,7 +4713,12 @@ window.__ModuleLoader__.load({
                 ),
           )
         } else if (info.status === 'loading') {
-          body = h('div', { className: 'drg-rail-muted' }, h(Spinner, { size: 12 }), h('span', null, t('workspaceRailLoading')))
+          body = h(
+            'div',
+            { className: 'drg-rail-muted' },
+            h(Spinner, { size: 12 }),
+            h('span', null, t('workspaceRailLoading')),
+          )
         } else if (info.status === 'error') {
           body = h(
             'div',
@@ -4410,9 +4849,12 @@ window.__ModuleLoader__.load({
         if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
         if (typeof setTimeout === 'function') toastTimer.current = setTimeout(() => setToast(null), 4200)
       }
-      useEffect(() => () => {
-        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
-      }, [])
+      useEffect(
+        () => () => {
+          if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
+        },
+        [],
+      )
       const errorMessage = (error) => {
         const view = toErrorView(error)
         const title = resolveText(view.title, locale)
@@ -4448,16 +4890,19 @@ window.__ModuleLoader__.load({
       const performConnect = (host, password) => {
         if (!host || !host.id) return
         setBusyHostId(host.id)
-        api.connect(host.id, typeof password === 'string' ? { password } : {}).then(
-          () => {
-            setPasswordPrompt(null)
-            remote.refresh()
-          },
-          (error) => {
-            setPasswordPrompt(null)
-            notify(errorMessage(error), 'error')
-          },
-        ).finally(() => setBusyHostId(null))
+        api
+          .connect(host.id, typeof password === 'string' ? { password } : {})
+          .then(
+            () => {
+              setPasswordPrompt(null)
+              remote.refresh()
+            },
+            (error) => {
+              setPasswordPrompt(null)
+              notify(errorMessage(error), 'error')
+            },
+          )
+          .finally(() => setBusyHostId(null))
       }
       const connectHost = (host, options) => {
         if (!host || !host.id) return
@@ -4479,32 +4924,39 @@ window.__ModuleLoader__.load({
         const host = pending.host
         setPasswordPrompt({ ...pending, busy: true, error: null })
         setBusyHostId(host.id)
-        const connect = pending.intent === 'reconnect'
-          ? api.disconnect(host.id, false)
-              .catch(() => {})
-              .then(() => api.connect(host.id, { password: value }))
-          : api.connect(host.id, { password: value })
-        connect.then(
-          () => {
-            setPasswordPrompt(null)
-            remote.refresh()
-          },
-          (error) => {
-            const message = errorMessage(error)
-            setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
-            notify(message, 'error')
-          },
-        ).finally(() => setBusyHostId(null))
+        const connect =
+          pending.intent === 'reconnect'
+            ? api
+                .disconnect(host.id, false)
+                .catch(() => {})
+                .then(() => api.connect(host.id, { password: value }))
+            : api.connect(host.id, { password: value })
+        connect
+          .then(
+            () => {
+              setPasswordPrompt(null)
+              remote.refresh()
+            },
+            (error) => {
+              const message = errorMessage(error)
+              setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
+              notify(message, 'error')
+            },
+          )
+          .finally(() => setBusyHostId(null))
       }
       const cancelPassword = () => setPasswordPrompt(null)
 
       const disconnectHost = (host) => {
         if (!host) return
         setBusyHostId(host.id)
-        api.disconnect(host.id, false).then(
-          () => remote.refresh(),
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setBusyHostId(null))
+        api
+          .disconnect(host.id, false)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setBusyHostId(null))
       }
       const reconnectHost = (host) => {
         if (!host) return
@@ -4513,18 +4965,29 @@ window.__ModuleLoader__.load({
           return
         }
         setBusyHostId(host.id)
-        api.reconnect(host.id).then(
-          () => remote.refresh(),
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setBusyHostId(null))
+        api
+          .reconnect(host.id)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setBusyHostId(null))
       }
 
       const runDiagnose = (host) => {
         if (!host || !host.id) return
         setDiagnose({ host, status: 'loading', report: null, error: null })
         api.diagnose(host.id).then(
-          (report) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current)),
-          (error) => setDiagnose((current) => (current && current.host && current.host.id === host.id ? { ...current, status: 'error', error: toErrorView(error) } : current)),
+          (report) =>
+            setDiagnose((current) =>
+              current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current,
+            ),
+          (error) =>
+            setDiagnose((current) =>
+              current && current.host && current.host.id === host.id
+                ? { ...current, status: 'error', error: toErrorView(error) }
+                : current,
+            ),
         )
       }
       const rerunDiagnose = () => {
@@ -4533,13 +4996,16 @@ window.__ModuleLoader__.load({
       const confirmDeleteHost = () => {
         if (!pendingDelete) return
         setDeleting(true)
-        api.deleteHost(pendingDelete.id).then(
-          () => {
-            setPendingDelete(null)
-            remote.refresh()
-          },
-          (error) => notify(errorMessage(error), 'error'),
-        ).finally(() => setDeleting(false))
+        api
+          .deleteHost(pendingDelete.id)
+          .then(
+            () => {
+              setPendingDelete(null)
+              remote.refresh()
+            },
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setDeleting(false))
       }
       const saveSettings = async (patch) => {
         const saved = await api.saveSettings(patch)

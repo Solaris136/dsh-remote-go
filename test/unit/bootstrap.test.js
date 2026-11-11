@@ -64,7 +64,13 @@ test('planBootstrap reuses the plugin isolated runtime (T0-local)', () => {
 
 test('planBootstrap prefers npx when Node is new enough (T1)', () => {
   const plan = planBootstrap({
-    facts: bareFacts({ nodePath: '/usr/bin/node', nodeVersion: '24.22.2', npmPath: '/usr/bin/npm', npmVersion: '11.19.1', npxPath: '/usr/bin/npx' }),
+    facts: bareFacts({
+      nodePath: '/usr/bin/node',
+      nodeVersion: '24.22.2',
+      npmPath: '/usr/bin/npm',
+      npmVersion: '11.19.1',
+      npxPath: '/usr/bin/npx',
+    }),
     targetVersion: TARGET,
     remoteDir: REMOTE_DIR,
   })
@@ -76,7 +82,13 @@ test('planBootstrap prefers npx when Node is new enough (T1)', () => {
 
 test('planBootstrap installs into an isolated directory when npx is unavailable (T2)', () => {
   const plan = planBootstrap({
-    facts: bareFacts({ nodePath: '/usr/bin/node', nodeVersion: '24.22.2', npmPath: '/usr/bin/npm', npmVersion: '11.19.1', npxPath: null }),
+    facts: bareFacts({
+      nodePath: '/usr/bin/node',
+      nodeVersion: '24.22.2',
+      npmPath: '/usr/bin/npm',
+      npmVersion: '11.19.1',
+      npxPath: null,
+    }),
     targetVersion: TARGET,
     remoteDir: REMOTE_DIR,
   })
@@ -127,7 +139,12 @@ test('planBootstrap rejects unsupported OS and invalid versions', () => {
 
 test('planBootstrap reports a dead end when nothing can be downloaded (T5)', () => {
   assert.throws(
-    () => planBootstrap({ facts: bareFacts({ curlPath: null, tarPath: null, sha256Path: null }), targetVersion: TARGET, remoteDir: REMOTE_DIR }),
+    () =>
+      planBootstrap({
+        facts: bareFacts({ curlPath: null, tarPath: null, sha256Path: null }),
+        targetVersion: TARGET,
+        remoteDir: REMOTE_DIR,
+      }),
     (error) => error.code === 'remote-dsh-missing',
   )
   const hint = manualPreparationHint(bareFacts())
@@ -136,9 +153,15 @@ test('planBootstrap reports a dead end when nothing can be downloaded (T5)', () 
 
 test('nodeDownloadNames maps the Linux architectures Node publishes', () => {
   assert.equal(nodeDownloadNames(DEFAULT_NODE_VERSION, 'x86_64').file, `node-v${DEFAULT_NODE_VERSION}-linux-x64.tar.xz`)
-  assert.equal(nodeDownloadNames(DEFAULT_NODE_VERSION, 'aarch64').file, `node-v${DEFAULT_NODE_VERSION}-linux-arm64.tar.xz`)
+  assert.equal(
+    nodeDownloadNames(DEFAULT_NODE_VERSION, 'aarch64').file,
+    `node-v${DEFAULT_NODE_VERSION}-linux-arm64.tar.xz`,
+  )
   assert.equal(nodeDownloadNames(DEFAULT_NODE_VERSION, 'riscv64'), null)
-  assert.equal(nodeDownloadStep({ downloadsDir: '/d', nodeDir: '/n', nodeBin: '/n/bin/node' }, DEFAULT_NODE_VERSION, 'riscv64'), null)
+  assert.equal(
+    nodeDownloadStep({ downloadsDir: '/d', nodeDir: '/n', nodeBin: '/n/bin/node' }, DEFAULT_NODE_VERSION, 'riscv64'),
+    null,
+  )
 })
 
 test('executeBootstrap runs steps in order and reports progress', async () => {
@@ -167,7 +190,11 @@ test('executeBootstrap throws a coded error naming the failed step', async () =>
     targetVersion: TARGET,
     remoteDir: REMOTE_DIR,
   })
-  const ssh = { async exec() { return { code: 1, stdout: '', stderr: 'npm ERR! network' } } }
+  const ssh = {
+    async exec() {
+      return { code: 1, stdout: '', stderr: 'npm ERR! network' }
+    },
+  }
   await assert.rejects(
     () => executeBootstrap(ssh, plan),
     (error) =>
@@ -184,13 +211,28 @@ test('verifyInstalledVersion checks the exact version for isolated installs', as
     targetVersion: TARGET,
     remoteDir: REMOTE_DIR,
   })
-  const ok = { async exec() { return { code: 0, stdout: `${TARGET}\n`, stderr: '' } } }
+  const ok = {
+    async exec() {
+      return { code: 0, stdout: `${TARGET}\n`, stderr: '' }
+    },
+  }
   assert.equal(await verifyInstalledVersion(ok, plan), TARGET)
 
-  const mismatch = { async exec() { return { code: 0, stdout: '0.2.1\n', stderr: '' } } }
-  await assert.rejects(() => verifyInstalledVersion(mismatch, plan), (error) => error.code === 'version-mismatch')
+  const mismatch = {
+    async exec() {
+      return { code: 0, stdout: '0.2.1\n', stderr: '' }
+    },
+  }
+  await assert.rejects(
+    () => verifyInstalledVersion(mismatch, plan),
+    (error) => error.code === 'version-mismatch',
+  )
 
-  const t0 = planBootstrap({ facts: makeFacts({ dshPath: '/dsh', dshVersion: TARGET }), targetVersion: TARGET, remoteDir: REMOTE_DIR })
+  const t0 = planBootstrap({
+    facts: makeFacts({ dshPath: '/dsh', dshVersion: TARGET }),
+    targetVersion: TARGET,
+    remoteDir: REMOTE_DIR,
+  })
   assert.equal(await verifyInstalledVersion(mismatch, t0), null)
 })
 

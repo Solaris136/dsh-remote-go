@@ -61,7 +61,10 @@ const CODE_TABLE = {
   },
   [ErrorCode.OFFLINE]: {
     retryable: true,
-    title: { zh: '远端缺少运行环境且离线包不可用', en: 'Remote runtime is missing and no offline package is available' },
+    title: {
+      zh: '远端缺少运行环境且离线包不可用',
+      en: 'Remote runtime is missing and no offline package is available',
+    },
   },
   [ErrorCode.INVALID_INPUT]: {
     retryable: false,
@@ -96,7 +99,13 @@ function make(code, detail, options) {
 }
 
 export const errors = {
-  network: (detail = { zh: '网络不可达，可能被防火墙拦截或地址写错。', en: 'The network is unreachable — check the address, port and firewall.' }, options) =>
+  network: (
+    detail = {
+      zh: '网络不可达，可能被防火墙拦截或地址写错。',
+      en: 'The network is unreachable — check the address, port and firewall.',
+    },
+    options,
+  ) =>
     make(ErrorCode.NETWORK, detail, {
       nextSteps: [
         { zh: '检查地址、端口与网络连通性', en: 'Check the address, port and network reachability' },
@@ -104,7 +113,10 @@ export const errors = {
       ],
       ...options,
     }),
-  auth: (detail = { zh: '远端拒绝了这次 SSH 认证。', en: 'The remote host rejected this SSH authentication.' }, options) =>
+  auth: (
+    detail = { zh: '远端拒绝了这次 SSH 认证。', en: 'The remote host rejected this SSH authentication.' },
+    options,
+  ) =>
     make(ErrorCode.AUTH, detail, {
       nextSteps: [
         { zh: '检查用户名与密钥 / SSH Agent', en: 'Check the user name and key / SSH agent' },
@@ -121,7 +133,10 @@ export const errors = {
       },
       {
         nextSteps: [
-          { zh: '确认服务器是否重装或更换了证书；确认后再更新指纹', en: 'Confirm the server was not reinstalled or tampered with before updating the pin' },
+          {
+            zh: '确认服务器是否重装或更换了证书；确认后再更新指纹',
+            en: 'Confirm the server was not reinstalled or tampered with before updating the pin',
+          },
         ],
         retryable: false,
         technical: `pinned=${pinned} actual=${actual}`,
@@ -130,31 +145,54 @@ export const errors = {
   hostKeyUnknown: (fingerprint) =>
     make(
       ErrorCode.HOST_KEY_UNKNOWN,
-      { zh: `首次连接该服务器（指纹 ${fingerprint}），需要你确认。`, en: `First connection to this host (fingerprint ${fingerprint}); confirmation required.` },
       {
-        nextSteps: [{ zh: '核对指纹后选择「接受并记住」或取消', en: 'Verify the fingerprint, then accept and remember it or cancel' }],
+        zh: `首次连接该服务器（指纹 ${fingerprint}），需要你确认。`,
+        en: `First connection to this host (fingerprint ${fingerprint}); confirmation required.`,
+      },
+      {
+        nextSteps: [
+          {
+            zh: '核对指纹后选择「接受并记住」或取消',
+            en: 'Verify the fingerprint, then accept and remember it or cancel',
+          },
+        ],
       },
     ),
   remoteDshMissing: (detail) =>
     make(
       ErrorCode.REMOTE_DSH_MISSING,
-      detail ?? { zh: '远端没有找到可用的 DSH，本机也无法自动准备运行环境。', en: 'No usable DSH was found and the runtime could not be prepared automatically.' },
+      detail ?? {
+        zh: '远端没有找到可用的 DSH，本机也无法自动准备运行环境。',
+        en: 'No usable DSH was found and the runtime could not be prepared automatically.',
+      },
       {
         nextSteps: [
-          { zh: '确认远端可以访问网络，或配置离线包', en: 'Check remote network access, or configure an offline package' },
-          { zh: '也可以在远端手动安装 DSH 后重试', en: 'You can also install DSH manually on the remote host and retry' },
+          {
+            zh: '确认远端可以访问网络，或配置离线包',
+            en: 'Check remote network access, or configure an offline package',
+          },
+          {
+            zh: '也可以在远端手动安装 DSH 后重试',
+            en: 'You can also install DSH manually on the remote host and retry',
+          },
         ],
       },
     ),
   remoteDshStartFailed: (tail) =>
     make(
       ErrorCode.REMOTE_DSH_START_FAILED,
-      { zh: '远端 DSH 进程没有成功打印 Web 地址，可能启动即失败。', en: 'The remote DSH process did not print its Web URL; startup likely failed.' },
+      {
+        zh: '远端 DSH 进程没有成功打印 Web 地址，可能启动即失败。',
+        en: 'The remote DSH process did not print its Web URL; startup likely failed.',
+      },
       {
         nextSteps: [
           { zh: '查看诊断里的远端日志尾部', en: 'Inspect the remote log tail in diagnostics' },
           { zh: '确认远端磁盘空间与端口可用', en: 'Check remote disk space and usable ports' },
-          { zh: '重试一次，若仍失败可手动在远端验证 `dsh --profile web --no-open`', en: 'Retry, or verify `dsh --profile web --no-open` manually on the remote host' },
+          {
+            zh: '重试一次，若仍失败可手动在远端验证 `dsh --profile web --no-open`',
+            en: 'Retry, or verify `dsh --profile web --no-open` manually on the remote host',
+          },
         ],
         technical: tail,
       },
@@ -162,7 +200,10 @@ export const errors = {
   remoteUiUnreachable: (detail) =>
     make(
       ErrorCode.REMOTE_UI_UNREACHABLE,
-      detail ?? { zh: '隧道的本地回环端口无法完成远端界面的鉴权握手。', en: 'The loopback tunnel could not complete the remote UI authentication handshake.' },
+      detail ?? {
+        zh: '隧道的本地回环端口无法完成远端界面的鉴权握手。',
+        en: 'The loopback tunnel could not complete the remote UI authentication handshake.',
+      },
       {
         nextSteps: [
           { zh: '点「重连」重试一次', en: 'Retry with Reconnect' },
@@ -188,15 +229,26 @@ export const errors = {
     make(
       ErrorCode.UNSUPPORTED_OS,
       { zh: `V1 仅支持 Linux 远端，检测到 ${os}。`, en: `V1 supports Linux remotes only; detected ${os}.` },
-      { nextSteps: [{ zh: '换一台 Linux 服务器，或等待后续版本', en: 'Use a Linux server, or wait for a later release' }], retryable: false },
+      {
+        nextSteps: [
+          { zh: '换一台 Linux 服务器，或等待后续版本', en: 'Use a Linux server, or wait for a later release' },
+        ],
+        retryable: false,
+      },
     ),
   offline: (detail) =>
     make(
       ErrorCode.OFFLINE,
-      detail ?? { zh: '远端缺少运行环境，且离线包不可用。', en: 'The remote runtime is missing and no offline package is available.' },
+      detail ?? {
+        zh: '远端缺少运行环境，且离线包不可用。',
+        en: 'The remote runtime is missing and no offline package is available.',
+      },
       {
         nextSteps: [
-          { zh: '让远端可以访问 nodejs.org 与 npm registry', en: 'Allow the remote host to reach nodejs.org and the npm registry' },
+          {
+            zh: '让远端可以访问 nodejs.org 与 npm registry',
+            en: 'Allow the remote host to reach nodejs.org and the npm registry',
+          },
           { zh: '或配置「离线包」后重试', en: 'Or configure an offline package and retry' },
         ],
       },
@@ -210,7 +262,10 @@ export const errors = {
   internal: (cause) =>
     make(
       ErrorCode.INTERNAL,
-      { zh: '插件内部出现异常，可重试或查看诊断。', en: 'The plugin hit an internal error; retry or check diagnostics.' },
+      {
+        zh: '插件内部出现异常，可重试或查看诊断。',
+        en: 'The plugin hit an internal error; retry or check diagnostics.',
+      },
       { technical: cause instanceof Error ? `${cause.name}: ${cause.message}` : String(cause ?? '') },
     ),
 }

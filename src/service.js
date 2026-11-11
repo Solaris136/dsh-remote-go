@@ -277,12 +277,18 @@ export class RemoteGoService extends EventEmitter {
       entry = await this.store.upsertHost(rawHost, { settings: this.store.getSettings() })
     } catch (error) {
       if (error instanceof Error && error.message === 'address is required') {
-        throw errors.invalidInput('address', { zh: '请填写服务器地址或 ~/.ssh/config 别名。', en: 'Enter a server address or an ~/.ssh/config alias.' })
+        throw errors.invalidInput('address', {
+          zh: '请填写服务器地址或 ~/.ssh/config 别名。',
+          en: 'Enter a server address or an ~/.ssh/config alias.',
+        })
       }
       if (error instanceof Error && error.message === 'address is invalid') {
         throw errors.invalidInput('address', { zh: '服务器地址格式不正确。', en: 'The server address is not valid.' })
       }
-      throw errors.invalidInput('host', { zh: `主机配置不合法：${error instanceof Error ? error.message : String(error)}`, en: `Invalid host entry: ${error instanceof Error ? error.message : String(error)}` })
+      throw errors.invalidInput('host', {
+        zh: `主机配置不合法：${error instanceof Error ? error.message : String(error)}`,
+        en: `Invalid host entry: ${error instanceof Error ? error.message : String(error)}`,
+      })
     }
     this.#ensureRuntime(entry)
     this.#emitState()
@@ -340,7 +346,14 @@ export class RemoteGoService extends EventEmitter {
     await this.init()
     const runtime = this.#runtime(id)
     if (!runtime.ssh?.connected) {
-      return { hostId: id, hostName: runtime.entry.name, connected: false, workspaces: [], initialized: false, defaultWorkspaceId: null }
+      return {
+        hostId: id,
+        hostName: runtime.entry.name,
+        connected: false,
+        workspaces: [],
+        initialized: false,
+        defaultWorkspaceId: null,
+      }
     }
     const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
     const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
@@ -353,7 +366,12 @@ export class RemoteGoService extends EventEmitter {
       reason: result.reason ?? null,
       initialized: result.initialized,
       defaultWorkspaceId: result.defaultWorkspaceId,
-      workspaces: result.workspaces.map((workspace) => ({ ...workspace, origin: 'remote', hostId: id, hostName: runtime.entry.name })),
+      workspaces: result.workspaces.map((workspace) => ({
+        ...workspace,
+        origin: 'remote',
+        hostId: id,
+        hostName: runtime.entry.name,
+      })),
     }
   }
 
@@ -364,7 +382,13 @@ export class RemoteGoService extends EventEmitter {
     const aliases = discoverAliasesFromConfig(parsed, { home: this.userHome() })
     const knownHosts = parseKnownHosts(material.knownHostsText)
     return {
-      aliases: aliases.map((alias) => ({ alias: alias.alias, host: alias.host, user: alias.user, port: alias.port, source: 'config' })),
+      aliases: aliases.map((alias) => ({
+        alias: alias.alias,
+        host: alias.host,
+        user: alias.user,
+        port: alias.port,
+        source: 'config',
+      })),
       knownHosts: summarizeKnownHosts(knownHosts),
     }
   }
@@ -400,7 +424,8 @@ export class RemoteGoService extends EventEmitter {
     await this.init()
     const runtime = this.#runtime(id)
     if (runtime.connectPromise) return { accepted: false, reason: 'already-connecting' }
-    if (runtime.status === 'connected' && runtime.ssh?.connected) return { accepted: false, reason: 'already-connected' }
+    if (runtime.status === 'connected' && runtime.ssh?.connected)
+      return { accepted: false, reason: 'already-connected' }
     runtime.password = options.password ?? runtime.password
     runtime.rememberFingerprint = options.rememberFingerprint !== false
     runtime.overrideVersion = options.overrideVersion === true
@@ -448,15 +473,27 @@ export class RemoteGoService extends EventEmitter {
   async confirmFingerprint(id, decision) {
     const runtime = this.#runtime(id)
     const pending = runtime.pendingHostKey
-    if (!pending) throw errors.invalidInput('fingerprint', { zh: '没有待确认的主机指纹。', en: 'No host key is pending confirmation.' })
+    if (!pending)
+      throw errors.invalidInput('fingerprint', {
+        zh: '没有待确认的主机指纹。',
+        en: 'No host key is pending confirmation.',
+      })
     if (decision.sha256 && pending.sha256 && decision.sha256 !== pending.sha256) {
-      throw errors.invalidInput('fingerprint', { zh: '确认的指纹与待确认的不一致。', en: 'The confirmed fingerprint does not match the pending one.' })
+      throw errors.invalidInput('fingerprint', {
+        zh: '确认的指纹与待确认的不一致。',
+        en: 'The confirmed fingerprint does not match the pending one.',
+      })
     }
     if (decision.accept && decision.remember) {
       await this.store.patchHost(runtime.id, { pinnedFingerprint: pending.sha256 })
       runtime.entry = { ...runtime.entry, pinnedFingerprint: pending.sha256 }
     }
-    runtime.fingerprint = { sha256: pending.sha256, keyType: pending.keyType, status: 'pinned', pinned: decision.remember ? pending.sha256 : null }
+    runtime.fingerprint = {
+      sha256: pending.sha256,
+      keyType: pending.keyType,
+      status: 'pinned',
+      pinned: decision.remember ? pending.sha256 : null,
+    }
     runtime.pendingHostKey = null
     runtime.status = 'connecting'
     runtime.progress = { code: 'auth-checking' }
@@ -473,7 +510,10 @@ export class RemoteGoService extends EventEmitter {
   openInfo(id) {
     const runtime = this.#runtime(id)
     if (runtime.status !== 'connected' || !runtime.tunnel || !runtime.token) {
-      throw errors.remoteUiUnreachable({ zh: '主机尚未连接，无法打开远端界面。', en: 'The host is not connected yet, so the remote UI cannot be opened.' })
+      throw errors.remoteUiUnreachable({
+        zh: '主机尚未连接，无法打开远端界面。',
+        en: 'The host is not connected yet, so the remote UI cannot be opened.',
+      })
     }
     return {
       url: `http://127.0.0.1:${runtime.tunnel.localPort}/?token=${encodeURIComponent(runtime.token)}`,
@@ -496,7 +536,11 @@ export class RemoteGoService extends EventEmitter {
       const settings = this.store.getSettings()
       this.#phase(runtime, 'ssh', 'ssh-connecting', { host: runtime.entry.name })
       await this.#openTransport(runtime, target)
-      this.#log(runtime, 'info', `SSH connected to ${target.host}:${target.port} as ${target.username ?? '(default)'} (fingerprint ${runtime.fingerprint?.sha256 ?? 'unknown'})`)
+      this.#log(
+        runtime,
+        'info',
+        `SSH connected to ${target.host}:${target.port} as ${target.username ?? '(default)'} (fingerprint ${runtime.fingerprint?.sha256 ?? 'unknown'})`,
+      )
 
       this.#phase(runtime, 'probe', 'probing')
       const facts = await this.probe(runtime.ssh, { remoteDir: runtime.entry.bootstrap.remoteDir })
@@ -539,12 +583,19 @@ export class RemoteGoService extends EventEmitter {
       try {
         const adopted = await this.adopt(runtime.ssh, layout)
         const adoptedVersion = adopted?.version ? normalizeVersion(adopted.version) : null
-        const expectVersion = plan.level === 'T0' || plan.level === 'T0-local' || plan.level === 'T1' ? plan.start.targetVersion : plan.start.targetVersion
+        const expectVersion =
+          plan.level === 'T0' || plan.level === 'T0-local' || plan.level === 'T1'
+            ? plan.start.targetVersion
+            : plan.start.targetVersion
         if (adopted && (!adoptedVersion || versionsEqual(adoptedVersion, expectVersion))) {
           webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
           this.#log(runtime, 'info', `adopted running remote web pid=${adopted.pid} port=${adopted.port}`)
         } else if (adopted) {
-          this.#log(runtime, 'info', `running remote web version ${adoptedVersion} != ${expectVersion}; starting a matching instance`)
+          this.#log(
+            runtime,
+            'info',
+            `running remote web version ${adoptedVersion} != ${expectVersion}; starting a matching instance`,
+          )
         }
       } catch (error) {
         this.#log(runtime, 'debug', 'adopt check failed:', error instanceof Error ? error.message : String(error))
@@ -575,7 +626,10 @@ export class RemoteGoService extends EventEmitter {
           throw errors.versionMismatch(parity.local ?? 'unknown', parity.remote ?? 'unknown')
         }
         if (!parity.same) {
-          runtime.warning = { zh: '正在沿用远端版本，界面可能与本地不一致。', en: 'Continuing with the remote version; the UI may differ from this machine.' }
+          runtime.warning = {
+            zh: '正在沿用远端版本，界面可能与本地不一致。',
+            en: 'Continuing with the remote version; the UI may differ from this machine.',
+          }
         }
       }
 
@@ -592,7 +646,9 @@ export class RemoteGoService extends EventEmitter {
           en: `The remote DSH on 127.0.0.1:${webInfo.port} did not respond (HTTP ${ui.status ?? 'none'}).`,
         })
       }
-      const exchange = await this.exchange(runtime.tunnel.localPort, webInfo.token, { timeoutMs: TUNNEL_PROBE_TIMEOUT_MS })
+      const exchange = await this.exchange(runtime.tunnel.localPort, webInfo.token, {
+        timeoutMs: TUNNEL_PROBE_TIMEOUT_MS,
+      })
       runtime.exchange = exchange
       if (!exchange.ok) {
         throw errors.remoteUiUnreachable({
@@ -642,7 +698,10 @@ export class RemoteGoService extends EventEmitter {
    * @param {import('./probe.js').ProbeFacts} facts
    */
   async #pickTargetVersion(runtime, facts) {
-    const resolved = this.resolveTarget({ configured: runtime.entry.bootstrap.targetVersion, localVersion: this.localVersion })
+    const resolved = this.resolveTarget({
+      configured: runtime.entry.bootstrap.targetVersion,
+      localVersion: this.localVersion,
+    })
     let targetVersion = resolved.targetVersion
     if (!targetVersion) {
       throw errors.invalidInput('targetVersion', {
@@ -678,7 +737,9 @@ export class RemoteGoService extends EventEmitter {
       username: entry.username || resolved.user || null,
       identityFiles: resolved.identityFiles ?? [],
       knownFingerprints,
-      jumpHost: entry.jumpHost ? resolveDestination(entry.jumpHost, { configText: material.configText, home: this.userHome() }) : null,
+      jumpHost: entry.jumpHost
+        ? resolveDestination(entry.jumpHost, { configText: material.configText, home: this.userHome() })
+        : null,
       entry,
     }
   }
@@ -694,7 +755,11 @@ export class RemoteGoService extends EventEmitter {
       host: resolved.host,
       port: resolved.port ?? 22,
       username: resolved.username ?? resolved.user ?? null,
-      auth: { type: runtime.entry.auth?.type ?? 'agent', keyPath: runtime.entry.auth?.keyPath ?? null, password: runtime.password ?? null },
+      auth: {
+        type: runtime.entry.auth?.type ?? 'agent',
+        keyPath: runtime.entry.auth?.keyPath ?? null,
+        password: runtime.password ?? null,
+      },
       identityFiles: resolved.identityFiles ?? [],
       hostKeyPolicy: runtime.entry.hostKeyPolicy ?? this.store.getSettings().hostKeyPolicy,
       pinnedFingerprint: runtime.entry.pinnedFingerprint ?? null,
@@ -757,7 +822,12 @@ export class RemoteGoService extends EventEmitter {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (runtime.pendingHostKey?.resolve === resolve) runtime.pendingHostKey = null
-        this.#set(runtime, { status: 'error', phase: null, progress: null, error: toErrorView(errors.hostKeyUnknown(info.sha256)) })
+        this.#set(runtime, {
+          status: 'error',
+          phase: null,
+          progress: null,
+          error: toErrorView(errors.hostKeyUnknown(info.sha256)),
+        })
         resolve(false)
       }, this.hostKeyConfirmTimeoutMs)
       runtime.pendingHostKey = {
@@ -820,7 +890,10 @@ export class RemoteGoService extends EventEmitter {
       return
     }
     runtime.reconnectAttempts += 1
-    const delay = randomDelay(settings.autoReconnect.baseDelayMs, settings.autoReconnect.baseDelayMs * 2 ** Math.min(runtime.reconnectAttempts, 4))
+    const delay = randomDelay(
+      settings.autoReconnect.baseDelayMs,
+      settings.autoReconnect.baseDelayMs * 2 ** Math.min(runtime.reconnectAttempts, 4),
+    )
     runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts, max: maxAttempts } }
     this.#emitState()
     runtime.reconnectTimer = setTimeout(() => {
@@ -868,7 +941,9 @@ export class RemoteGoService extends EventEmitter {
   async #stopRemoteQuietly(runtime) {
     try {
       if (runtime.ssh?.connected) {
-        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), { pid: runtime.remote.pid ?? undefined })
+        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), {
+          pid: runtime.remote.pid ?? undefined,
+        })
       }
     } catch (error) {
       this.#log(runtime, 'warn', 'idle stop failed:', error instanceof Error ? error.message : String(error))
@@ -921,7 +996,9 @@ export class RemoteGoService extends EventEmitter {
     this.#cancelIdleStop(runtime)
     if (options.stopRemote && runtime.ssh?.connected) {
       try {
-        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), { pid: runtime.remote.pid ?? undefined })
+        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), {
+          pid: runtime.remote.pid ?? undefined,
+        })
       } catch (error) {
         this.#log(runtime, 'warn', 'stop remote failed:', error instanceof Error ? error.message : String(error))
       }
@@ -966,7 +1043,10 @@ export class RemoteGoService extends EventEmitter {
       { zh: '认证方式', en: 'Authentication' },
       sshLive ? 'pass' : 'unknown',
       sshLive
-        ? { zh: `认证方式：${runtime.entry.auth?.type ?? 'agent'}（凭据不会保存在本机）`, en: `Method: ${runtime.entry.auth?.type ?? 'agent'} (no credentials are stored locally)` }
+        ? {
+            zh: `认证方式：${runtime.entry.auth?.type ?? 'agent'}（凭据不会保存在本机）`,
+            en: `Method: ${runtime.entry.auth?.type ?? 'agent'} (no credentials are stored locally)`,
+          }
         : { zh: '连接后检查', en: 'Checked after connecting' },
     )
 
@@ -977,7 +1057,10 @@ export class RemoteGoService extends EventEmitter {
       { zh: '主机指纹', en: 'Host key' },
       pinned && liveFingerprint ? (pinned === liveFingerprint ? 'pass' : 'fail') : pinned ? 'unknown' : 'unknown',
       pinned
-        ? { zh: `已记录 ${pinned}${liveFingerprint ? `，本次 ${liveFingerprint}` : ''}`, en: `Pinned ${pinned}${liveFingerprint ? `, this session ${liveFingerprint}` : ''}` }
+        ? {
+            zh: `已记录 ${pinned}${liveFingerprint ? `，本次 ${liveFingerprint}` : ''}`,
+            en: `Pinned ${pinned}${liveFingerprint ? `, this session ${liveFingerprint}` : ''}`,
+          }
         : liveFingerprint
           ? { zh: `本次会话 ${liveFingerprint}（尚未记录）`, en: `This session ${liveFingerprint} (not pinned yet)` }
           : { zh: '尚未记录指纹，首次连接时会询问。', en: 'No host key recorded yet; it is asked on first connect.' },
@@ -989,8 +1072,14 @@ export class RemoteGoService extends EventEmitter {
       { zh: '本地回环隧道', en: 'Loopback tunnel' },
       tunnel ? 'pass' : 'fail',
       tunnel
-        ? { zh: `127.0.0.1:${tunnel.localPort} → 远端 127.0.0.1:${runtime.remote.pid ? runtime.remote.pid : ''}`, en: `127.0.0.1:${tunnel.localPort} → remote loopback` }
-        : { zh: '隧道未建立（连接断开或尚未连接）。', en: 'The tunnel is not established (disconnected or not connected yet).' },
+        ? {
+            zh: `127.0.0.1:${tunnel.localPort} → 远端 127.0.0.1:${runtime.remote.pid ? runtime.remote.pid : ''}`,
+            en: `127.0.0.1:${tunnel.localPort} → remote loopback`,
+          }
+        : {
+            zh: '隧道未建立（连接断开或尚未连接）。',
+            en: 'The tunnel is not established (disconnected or not connected yet).',
+          },
     )
 
     const remotePort = runtime.remote.port ?? runtime.remote.localPort ?? 0
@@ -1001,7 +1090,10 @@ export class RemoteGoService extends EventEmitter {
       { zh: '远端 DSH 服务', en: 'Remote DSH service' },
       remoteAlive ? 'pass' : sshLive ? 'fail' : 'unknown',
       remoteAlive
-        ? { zh: `远端进程 pid=${runtime.remote.pid ?? '未知'}，本地端口 ${runtime.remote.localPort ?? '未知'}`, en: `Remote pid ${runtime.remote.pid ?? 'unknown'}, local port ${runtime.remote.localPort ?? 'unknown'}` }
+        ? {
+            zh: `远端进程 pid=${runtime.remote.pid ?? '未知'}，本地端口 ${runtime.remote.localPort ?? '未知'}`,
+            en: `Remote pid ${runtime.remote.pid ?? 'unknown'}, local port ${runtime.remote.localPort ?? 'unknown'}`,
+          }
         : { zh: '远端服务未确认在运行。', en: 'The remote service is not confirmed running.' },
     )
 
@@ -1011,8 +1103,14 @@ export class RemoteGoService extends EventEmitter {
       runtime.exchange?.ok ? (runtime.exchange.frameBlocked ? 'fail' : 'pass') : sshLive ? 'fail' : 'unknown',
       runtime.exchange?.ok
         ? runtime.exchange.frameBlocked
-          ? { zh: `可以打开，但禁止 iframe 嵌入（X-Frame-Options: ${runtime.exchange.xFrameOptions ?? '未知'}）。`, en: `Opens, but iframe embedding is blocked (X-Frame-Options: ${runtime.exchange.xFrameOptions ?? 'unknown'}).` }
-          : { zh: `页面标题：${runtime.exchange.title ?? '（无）'}`, en: `Page title: ${runtime.exchange.title ?? '(none)'}` }
+          ? {
+              zh: `可以打开，但禁止 iframe 嵌入（X-Frame-Options: ${runtime.exchange.xFrameOptions ?? '未知'}）。`,
+              en: `Opens, but iframe embedding is blocked (X-Frame-Options: ${runtime.exchange.xFrameOptions ?? 'unknown'}).`,
+            }
+          : {
+              zh: `页面标题：${runtime.exchange.title ?? '（无）'}`,
+              en: `Page title: ${runtime.exchange.title ?? '(none)'}`,
+            }
         : { zh: '尚未完成远端界面的鉴权握手。', en: 'The remote UI authentication handshake has not completed.' },
     )
 
@@ -1036,7 +1134,10 @@ export class RemoteGoService extends EventEmitter {
       runtime.facts
         ? credentials
           ? { zh: '远端已检测到模型凭据配置。', en: 'Remote model credentials were detected.' }
-          : { zh: '未检测到模型凭据；请在远端界面里配置。', en: 'No model credentials detected; configure them in the remote UI.' }
+          : {
+              zh: '未检测到模型凭据；请在远端界面里配置。',
+              en: 'No model credentials detected; configure them in the remote UI.',
+            }
         : { zh: '未探测远端环境。', en: 'Remote environment has not been probed.' },
     )
 
@@ -1046,8 +1147,14 @@ export class RemoteGoService extends EventEmitter {
       runtime.facts ? (runtime.facts.sshConnection ? 'pass' : 'unknown') : 'unknown',
       runtime.facts
         ? runtime.facts.sshConnection
-          ? { zh: '远端 DSH 经 SSH 会话启动，宿主桌面功能已关闭。', en: 'The remote DSH runs inside an SSH session, so host desktop features stay off.' }
-          : { zh: '远端未检测到 SSH 会话标记，目录对话框可能弹在远端屏幕上。', en: 'No SSH session marker on the remote; directory dialogs may appear on the remote screen.' }
+          ? {
+              zh: '远端 DSH 经 SSH 会话启动，宿主桌面功能已关闭。',
+              en: 'The remote DSH runs inside an SSH session, so host desktop features stay off.',
+            }
+          : {
+              zh: '远端未检测到 SSH 会话标记，目录对话框可能弹在远端屏幕上。',
+              en: 'No SSH session marker on the remote; directory dialogs may appear on the remote screen.',
+            }
         : { zh: '未探测远端环境。', en: 'Remote environment has not been probed.' },
     )
 

@@ -47,7 +47,10 @@ test('upsertHost with an existing id updates instead of duplicating', async () =
 test('patchHost merges fields and removeHost deletes', async () => {
   const { store } = await tempStore()
   const host = await store.upsertHost({ address: 'example.com' })
-  const patched = await store.patchHost(host.id, { lastOpenedAt: '2026-01-01T00:00:00.000Z', pinnedFingerprint: 'SHA256:abc' })
+  const patched = await store.patchHost(host.id, {
+    lastOpenedAt: '2026-01-01T00:00:00.000Z',
+    pinnedFingerprint: 'SHA256:abc',
+  })
   assert.equal(patched.lastOpenedAt, '2026-01-01T00:00:00.000Z')
   assert.equal(patched.pinnedFingerprint, 'SHA256:abc')
   assert.equal(await store.removeHost(host.id), true)

@@ -58,12 +58,24 @@ export function createApi(options) {
     if (typeof origin === 'string' && origin !== '') {
       const expected = options.getOrigin()
       if (!expected || origin.replace(/\/$/, '') !== expected.replace(/\/$/, '')) {
-        return { ok: false, status: 403, error: toErrorView(errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' })) }
+        return {
+          ok: false,
+          status: 403,
+          error: toErrorView(
+            errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
+          ),
+        }
       }
     }
     const secFetchSite = req.headers['sec-fetch-site']
     if (secFetchSite === 'cross-site') {
-      return { ok: false, status: 403, error: toErrorView(errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' })) }
+      return {
+        ok: false,
+        status: 403,
+        error: toErrorView(
+          errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
+        ),
+      }
     }
     return { ok: true }
   }
@@ -73,7 +85,16 @@ export function createApi(options) {
     const origin = authorizeOrigin(req)
     if (!origin.ok) return origin
     if (req.headers[API_HEADER] !== '1') {
-      return { ok: false, status: 403, error: toErrorView(errors.invalidInput(API_HEADER, { zh: '请求缺少本地插件标识头。', en: 'The request is missing the local plugin header.' })) }
+      return {
+        ok: false,
+        status: 403,
+        error: toErrorView(
+          errors.invalidInput(API_HEADER, {
+            zh: '请求缺少本地插件标识头。',
+            en: 'The request is missing the local plugin header.',
+          }),
+        ),
+      }
     }
     return { ok: true }
   }
@@ -102,7 +123,9 @@ export function createApi(options) {
           const text = Buffer.concat(chunks).toString('utf8').trim()
           resolve(text === '' ? {} : JSON.parse(text))
         } catch {
-          reject(errors.invalidInput('body', { zh: '请求体不是合法 JSON。', en: 'The request body is not valid JSON.' }))
+          reject(
+            errors.invalidInput('body', { zh: '请求体不是合法 JSON。', en: 'The request body is not valid JSON.' }),
+          )
         }
       })
       req.on('error', reject)
@@ -143,7 +166,10 @@ export function createApi(options) {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
       if (!url.pathname.startsWith(API_PREFIX)) {
-        sendJson(res, 404, { ok: false, error: toErrorView(errors.invalidInput('path', { zh: '未知 API 路径。', en: 'Unknown API path.' })) })
+        sendJson(res, 404, {
+          ok: false,
+          error: toErrorView(errors.invalidInput('path', { zh: '未知 API 路径。', en: 'Unknown API path.' })),
+        })
         return
       }
       const path = url.pathname.slice(API_PREFIX.length) || '/'
@@ -296,7 +322,12 @@ export function createApi(options) {
         }
       }
 
-      sendJson(res, 404, { ok: false, error: toErrorView(errors.invalidInput('path', { zh: `未知路径 ${method} ${path}`, en: `Unknown path ${method} ${path}` })) })
+      sendJson(res, 404, {
+        ok: false,
+        error: toErrorView(
+          errors.invalidInput('path', { zh: `未知路径 ${method} ${path}`, en: `Unknown path ${method} ${path}` }),
+        ),
+      })
     } catch (error) {
       const view = toErrorView(error)
       const status = isRemoteGoError(error) ? (view.code === 'invalid-input' ? 400 : 409) : 500

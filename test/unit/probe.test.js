@@ -1,11 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildProbeScript, describeProbeCapabilities, parseProbeOutput, probeRemote, toProbeFacts } from '../../src/probe.js'
+import {
+  buildProbeScript,
+  describeProbeCapabilities,
+  parseProbeOutput,
+  probeRemote,
+  toProbeFacts,
+} from '../../src/probe.js'
 import { makeFacts } from '../helpers/fake-remote.js'
 
 test('buildProbeScript emits every fact line and quotes the remote dir', () => {
   const script = buildProbeScript("~/.dsh/it's")
-  for (const marker of ['os\t', 'arch\t', 'node_version\t', 'npm_path\t', 'npx_path\t', 'dsh_version\t', 'curl_path\t', 'disk_free_kb\t', 'ssh_connection\t', 'run_registry\t']) {
+  for (const marker of [
+    'os\t',
+    'arch\t',
+    'node_version\t',
+    'npm_path\t',
+    'npx_path\t',
+    'dsh_version\t',
+    'curl_path\t',
+    'disk_free_kb\t',
+    'ssh_connection\t',
+    'run_registry\t',
+  ]) {
     assert.ok(script.includes(marker), `missing marker ${marker}`)
   }
   // Single quote inside the dir must be shell-quoted, not break out.
@@ -65,13 +82,26 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
   assert.equal(facts.os, 'Linux')
   assert.equal(facts.nodeVersion, '24.22.2')
 
-  const failing = { async exec() { return { code: 2, stdout: '', stderr: 'permission denied' } } }
-  await assert.rejects(() => probeRemote(failing, { remoteDir: '~/x' }), (error) => error.code === 'remote-dsh-missing')
+  const failing = {
+    async exec() {
+      return { code: 2, stdout: '', stderr: 'permission denied' }
+    },
+  }
+  await assert.rejects(
+    () => probeRemote(failing, { remoteDir: '~/x' }),
+    (error) => error.code === 'remote-dsh-missing',
+  )
 })
 
 test('describeProbeCapabilities reports support and credentials', () => {
   const capabilities = describeProbeCapabilities(
-    makeFacts({ nodeVersion: '22.19.0', dshVersion: '0.2.2-rc.1', credentialsFile: false, deepseekKeyEnv: false, providerEnvKeys: [] }),
+    makeFacts({
+      nodeVersion: '22.19.0',
+      dshVersion: '0.2.2-rc.1',
+      credentialsFile: false,
+      deepseekKeyEnv: false,
+      providerEnvKeys: [],
+    }),
   )
   assert.equal(capabilities.system.supported, true)
   assert.equal(capabilities.node.supported, false)

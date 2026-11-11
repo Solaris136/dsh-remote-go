@@ -19,7 +19,13 @@ const STORAGE = {
   },
   tables: {
     workspaces: {
-      'ws-default': { path: '/home/u/default-workspace', title: 'default-workspace', sessionIds: ['s1', 's2'], createdAt: 'c', updatedAt: 'u' },
+      'ws-default': {
+        path: '/home/u/default-workspace',
+        title: 'default-workspace',
+        sessionIds: ['s1', 's2'],
+        createdAt: 'c',
+        updatedAt: 'u',
+      },
       'ws-a': { path: '/home/u/proj-a', title: '', sessionIds: [] },
       'ws-b': { path: '/home/u/proj-b', title: 'project B', sessionIds: ['s3'], createdAt: 'c2', updatedAt: 'u2' },
       'ws-orphan': { path: '/home/u/orphan', title: 'orphan', sessionIds: [] },
@@ -48,7 +54,10 @@ test('parseWorkspaceStorage follows the global order and appends orphans', () =>
 test('parseWorkspaceStorage is defensive about missing/malformed data', () => {
   assert.deepEqual(parseWorkspaceStorage(null), { initialized: false, defaultWorkspaceId: null, workspaces: [] })
   assert.deepEqual(parseWorkspaceStorage('nope'), { initialized: false, defaultWorkspaceId: null, workspaces: [] })
-  const partial = parseWorkspaceStorage({ global: { initialized: true, workspaceIds: ['x'] }, tables: { workspaces: { x: { path: '/p/x' } } } })
+  const partial = parseWorkspaceStorage({
+    global: { initialized: true, workspaceIds: ['x'] },
+    tables: { workspaces: { x: { path: '/p/x' } } },
+  })
   assert.equal(partial.workspaces.length, 1)
   assert.equal(partial.workspaces[0].title, 'x')
   assert.equal(partial.workspaces[0].sessionCount, 0)
@@ -76,7 +85,10 @@ test('readLocalWorkspaces reads the local registry file and tolerates missing/co
 })
 
 test('remoteWorkspaceStoragePath and readRemoteWorkspaces use the SSH exec channel', async () => {
-  assert.equal(remoteWorkspaceStoragePath('/home/u/.dsh-remote-go/home/'), '/home/u/.dsh-remote-go/home/storages/workspace.json')
+  assert.equal(
+    remoteWorkspaceStoragePath('/home/u/.dsh-remote-go/home/'),
+    '/home/u/.dsh-remote-go/home/storages/workspace.json',
+  )
   const calls = []
   const ssh = {
     async exec(command) {
@@ -89,9 +101,17 @@ test('remoteWorkspaceStoragePath and readRemoteWorkspaces use the SSH exec chann
   assert.equal(result.workspaces.length, 4)
   assert.match(calls[0], /cat '\/home\/u\/\.dsh-remote-go\/home\/storages\/workspace\.json'/)
 
-  const missing = { async exec() { return { code: 0, stdout: '', stderr: '' } } }
+  const missing = {
+    async exec() {
+      return { code: 0, stdout: '', stderr: '' }
+    },
+  }
   assert.equal((await readRemoteWorkspaces(missing, '/home/u/home')).ok, false)
-  const broken = { async exec() { return { code: 0, stdout: '{oops', stderr: '' } } }
+  const broken = {
+    async exec() {
+      return { code: 0, stdout: '{oops', stderr: '' }
+    },
+  }
   const brokenResult = await readRemoteWorkspaces(broken, '/home/u/home')
   assert.equal(brokenResult.ok, false)
   assert.equal(brokenResult.reason, 'malformed')

@@ -100,7 +100,10 @@ export function knownHostFieldMatches(pattern, host, port) {
   // A plain `host` line also matches a non-default port only for SSH's default
   // behavior; be conservative and require the bracketed form for non-22.
   candidates.push(host, `[${host}]`)
-  const escaped = String(pattern).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  const escaped = String(pattern)
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
   const matcher = new RegExp(`^${escaped}$`, 'i')
   return candidates.some((candidate) => matcher.test(candidate))
 }

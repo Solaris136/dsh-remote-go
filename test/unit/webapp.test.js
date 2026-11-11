@@ -32,14 +32,23 @@ test('parseWebLine extracts loopback port and token', () => {
 })
 
 test('buildStartCommand produces pinned, loopback-only launch commands', () => {
-  const nodeBin = buildStartCommand(planWith({ kind: 'node-bin', nodePath: '/n/bin/node', dshBinPath: '/d/lib/bin.js', targetVersion: '0.2.2-rc.1' }), LAYOUT)
+  const nodeBin = buildStartCommand(
+    planWith({ kind: 'node-bin', nodePath: '/n/bin/node', dshBinPath: '/d/lib/bin.js', targetVersion: '0.2.2-rc.1' }),
+    LAYOUT,
+  )
   assert.ok(nodeBin.includes("DSH_HOME='/home/ubuntu/.dsh-remote-go/home'"), nodeBin)
   assert.match(nodeBin, /--profile web --no-open --port 0/)
 
-  const dsh = buildStartCommand(planWith({ kind: 'dsh', dshPath: '/usr/local/bin/dsh', targetVersion: '0.2.2-rc.1' }), LAYOUT)
+  const dsh = buildStartCommand(
+    planWith({ kind: 'dsh', dshPath: '/usr/local/bin/dsh', targetVersion: '0.2.2-rc.1' }),
+    LAYOUT,
+  )
   assert.match(dsh, /'\/usr\/local\/bin\/dsh' --profile web/)
 
-  const npx = buildStartCommand(planWith({ kind: 'npx', npxPath: '/usr/bin/npx', nodeBinDir: '/usr/bin', targetVersion: '0.2.2-rc.1' }), LAYOUT)
+  const npx = buildStartCommand(
+    planWith({ kind: 'npx', npxPath: '/usr/bin/npx', nodeBinDir: '/usr/bin', targetVersion: '0.2.2-rc.1' }),
+    LAYOUT,
+  )
   assert.match(npx, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
 })
 
@@ -61,29 +70,56 @@ test('startRemoteWeb parses the combined stdout and returns pid/port/token', asy
       return { code: 0, stdout: 'LINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n', stderr: '' }
     },
   }
-  const info = await startRemoteWeb(ssh, { plan: planWith({ kind: 'node-bin', nodePath: '/n', dshBinPath: '/d', targetVersion: '0.2.2-rc.1' }), layout: LAYOUT })
+  const info = await startRemoteWeb(ssh, {
+    plan: planWith({ kind: 'node-bin', nodePath: '/n', dshBinPath: '/d', targetVersion: '0.2.2-rc.1' }),
+    layout: LAYOUT,
+  })
   assert.equal(info.pid, 999)
   assert.equal(info.port, 41234)
   assert.equal(info.token, 'tok')
 })
 
 test('startRemoteWeb fails with coded errors when the remote dies or times out', async () => {
-  const dead = { async exec() { return { code: 3, stdout: 'EXITED:1\n---LOG---\ncrash', stderr: '' } } }
+  const dead = {
+    async exec() {
+      return { code: 3, stdout: 'EXITED:1\n---LOG---\ncrash', stderr: '' }
+    },
+  }
   await assert.rejects(
-    () => startRemoteWeb(dead, { plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }), layout: LAYOUT }),
+    () =>
+      startRemoteWeb(dead, {
+        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
+        layout: LAYOUT,
+      }),
     (error) => error.code === 'remote-dsh-start-failed' && /crash/.test(error.technical ?? ''),
   )
-  const timeout = { async exec() { return { code: 4, stdout: 'TIMEOUT\n---LOG---', stderr: '' } } }
+  const timeout = {
+    async exec() {
+      return { code: 4, stdout: 'TIMEOUT\n---LOG---', stderr: '' }
+    },
+  }
   await assert.rejects(
-    () => startRemoteWeb(timeout, { plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }), layout: LAYOUT }),
+    () =>
+      startRemoteWeb(timeout, {
+        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
+        layout: LAYOUT,
+      }),
     (error) => error.code === 'remote-dsh-start-failed',
   )
 })
 
 test('startRemoteWeb refuses a non-loopback advertised URL', async () => {
-  const ssh = { async exec() { return { code: 0, stdout: 'DONE:1:80\nLINE:dsh web: http://10.0.0.5:80/?token=x\n', stderr: '' } } }
+  const ssh = {
+    async exec() {
+      return { code: 0, stdout: 'DONE:1:80\nLINE:dsh web: http://10.0.0.5:80/?token=x\n', stderr: '' }
+    },
+  }
   await assert.rejects(
-    () => startRemoteWeb(ssh, { plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }), layout: LAYOUT }),
+    () =>
+      startRemoteWeb(ssh, {
+        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
+        layout: LAYOUT,
+      }),
     (error) => error.code === 'remote-ui-unreachable',
   )
 })
@@ -111,18 +147,30 @@ test('adoptRemoteWeb requires a live pid, a logged URL and a responsive server',
     { code: 0, stdout: 'dsh web: http://127.0.0.1:38123/?token=adopted\n', stderr: '' }, // grep log
     { code: 0, stdout: '200', stderr: '' }, // curl
   ]
-  const ssh = { async exec() { return responses.shift() ?? { code: 1, stdout: '', stderr: '' } } }
+  const ssh = {
+    async exec() {
+      return responses.shift() ?? { code: 1, stdout: '', stderr: '' }
+    },
+  }
   const adopted = await adoptRemoteWeb(ssh, LAYOUT)
   assert.equal(adopted.pid, 4242)
   assert.equal(adopted.token, 'adopted')
   assert.equal(adopted.version, '0.2.2-rc.1')
 
-  const dead = { async exec() { return { code: 1, stdout: '', stderr: '' } } }
+  const dead = {
+    async exec() {
+      return { code: 1, stdout: '', stderr: '' }
+    },
+  }
   assert.equal(await adoptRemoteWeb(dead, LAYOUT), null)
 })
 
 test('readWebLineFromLog reads the last readiness line', async () => {
-  const ssh = { async exec() { return { code: 0, stdout: 'dsh web: http://127.0.0.1:5000/?token=abc\n', stderr: '' } } }
+  const ssh = {
+    async exec() {
+      return { code: 0, stdout: 'dsh web: http://127.0.0.1:5000/?token=abc\n', stderr: '' }
+    },
+  }
   const parsed = await readWebLineFromLog(ssh, LAYOUT)
   assert.equal(parsed.port, 5000)
 })

@@ -118,7 +118,10 @@ test('published artifact installs and runs in a clean DSH profile', { timeout: 3
   const report = { startedAt: new Date().toISOString(), steps: [] }
   let proc = null
   try {
-    assert.ok(existsSync(DSH_BIN), `control DSH runtime missing at ${DSH_BIN}; install @deepseek-ai/dsh@0.2.2-rc.1 into e2e/control first`)
+    assert.ok(
+      existsSync(DSH_BIN),
+      `control DSH runtime missing at ${DSH_BIN}; install @deepseek-ai/dsh@0.2.2-rc.1 into e2e/control first`,
+    )
 
     // 1) pack
     const pnpm = resolvePnpmInvocation()
@@ -138,20 +141,19 @@ test('published artifact installs and runs in a clean DSH profile', { timeout: 3
     await rm(PUBLISHED_HOME, { recursive: true, force: true })
     await mkdir(PUBLISHED_HOME, { recursive: true })
     const pathParts = [NODE_BIN_DIR, ...(existsSync(PNPM_SHIM_DIR) ? [PNPM_SHIM_DIR] : []), process.env.PATH ?? '']
-    const install = await run(
-      process.execPath,
-      [DSH_BIN, 'plugin', '--profile', 'web', 'add', tarball],
-      {
-        env: {
-          DSH_HOME: PUBLISHED_HOME,
-          PATH: pathParts.join(path.delimiter),
-        },
-        timeoutMs: 240_000,
+    const install = await run(process.execPath, [DSH_BIN, 'plugin', '--profile', 'web', 'add', tarball], {
+      env: {
+        DSH_HOME: PUBLISHED_HOME,
+        PATH: pathParts.join(path.delimiter),
       },
-    )
+      timeoutMs: 240_000,
+    })
     assert.equal(install.code, 0, `installing the tarball failed:\n${install.stdout}\n${install.stderr}`)
     const profileManifest = await readJson(path.join(PUBLISHED_HOME, 'profiles', 'web', 'package.json'))
-    assert.ok(profileManifest.dsh.profile.bundles.includes('dsh-remote-go'), 'installed bundle must be selected in the profile')
+    assert.ok(
+      profileManifest.dsh.profile.bundles.includes('dsh-remote-go'),
+      'installed bundle must be selected in the profile',
+    )
     assert.match(JSON.stringify(profileManifest.dependencies ?? {}), /dsh-remote-go/)
     report.steps.push({ step: 'install-tarball', ok: true, bundles: profileManifest.dsh.profile.bundles })
 
@@ -164,16 +166,25 @@ test('published artifact installs and runs in a clean DSH profile', { timeout: 3
       const healthJson = await health.json()
       assert.equal(healthJson.ok, true)
 
-      const diagnostics = await fetch(`${control.origin}/dsh-remote-go/api/diagnostics/self`, { headers: { [API_HEADER]: '1' } })
+      const diagnostics = await fetch(`${control.origin}/dsh-remote-go/api/diagnostics/self`, {
+        headers: { [API_HEADER]: '1' },
+      })
       assert.equal(diagnostics.status, 200)
       const self = await diagnostics.json()
       assert.equal(self.plugin.id, 'dsh-remote-go')
       assert.equal(self.entry.id, 'dsh-remote-go')
       assert.equal(self.client.row.id, 'dsh-remote-go')
       const profileDir = path.join(PUBLISHED_HOME, 'profiles', 'web', 'node_modules')
-      assert.ok(self.client.clientPath.startsWith(profileDir), `client bundle must resolve inside the installed profile, got ${self.client.clientPath}`)
+      assert.ok(
+        self.client.clientPath.startsWith(profileDir),
+        `client bundle must resolve inside the installed profile, got ${self.client.clientPath}`,
+      )
       assert.ok(self.client.bundle.size > 1000)
-      assert.notEqual(self.client.clientPath, path.join(ROOT, 'client.js'), 'installed copy must not point at the development checkout')
+      assert.notEqual(
+        self.client.clientPath,
+        path.join(ROOT, 'client.js'),
+        'installed copy must not point at the development checkout',
+      )
       report.steps.push({
         step: 'clean-profile-activation',
         ok: true,
@@ -199,6 +210,10 @@ test('published artifact installs and runs in a clean DSH profile', { timeout: 3
   } finally {
     report.finishedAt = new Date().toISOString()
     await stopDsh(proc)
-    await writeFile(path.join(ARTIFACTS, 'publish-e2e-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8').catch(() => {})
+    await writeFile(
+      path.join(ARTIFACTS, 'publish-e2e-report.json'),
+      `${JSON.stringify(report, null, 2)}\n`,
+      'utf8',
+    ).catch(() => {})
   }
 })

@@ -129,7 +129,10 @@ export function parseSshDestination(raw) {
 /** @param {string | null | undefined} host */
 export function isLoopbackHost(host) {
   if (!host) return false
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
   if (normalized === 'localhost' || normalized === '::1') return true
   if (normalized === '::ffff:127.0.0.1') return true
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)

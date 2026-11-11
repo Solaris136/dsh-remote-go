@@ -46,7 +46,9 @@ if (!parse && override) {
     parse = (text) => yaml.load(text)
     console.log(`[check-workflows] using js-yaml: ${override}`)
   } catch (error) {
-    console.error(`[check-workflows] cannot load DSH_JS_YAML (${override}): ${error instanceof Error ? error.message : String(error)}`)
+    console.error(
+      `[check-workflows] cannot load DSH_JS_YAML (${override}): ${error instanceof Error ? error.message : String(error)}`,
+    )
   }
 }
 if (!parse) {
@@ -54,10 +56,14 @@ if (!parse) {
   const probe = spawnSync('python3', ['-c', 'import yaml; print("ok")'], { encoding: 'utf8' })
   if (probe.status === 0) {
     parse = (text) => {
-      const result = spawnSync('python3', ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'], {
-        input: text,
-        encoding: 'utf8',
-      })
+      const result = spawnSync(
+        'python3',
+        ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
+        {
+          input: text,
+          encoding: 'utf8',
+        },
+      )
       if (result.status !== 0) throw new Error(result.stderr)
       return JSON.parse(result.stdout)
     }
@@ -65,7 +71,9 @@ if (!parse) {
   }
 }
 if (!parse) {
-  console.error('[check-workflows] no YAML parser available: install the devDependencies, or set DSH_JS_YAML to a js-yaml entry path')
+  console.error(
+    '[check-workflows] no YAML parser available: install the devDependencies, or set DSH_JS_YAML to a js-yaml entry path',
+  )
   process.exit(2)
 }
 
@@ -80,7 +88,8 @@ for (const file of files) {
   try {
     const doc = /** @type {any} */ (parse(await readFile(full, 'utf8')))
     // Minimal structural assertions: workflows need `on` and `jobs`.
-    const problem = !doc || typeof doc !== 'object' ? 'not a mapping' : !doc.jobs ? 'missing jobs' : !doc.on ? 'missing on' : null
+    const problem =
+      !doc || typeof doc !== 'object' ? 'not a mapping' : !doc.jobs ? 'missing jobs' : !doc.on ? 'missing on' : null
     if (problem) throw new Error(problem)
     console.log(`[check-workflows] OK ${file} (jobs: ${Object.keys(doc.jobs).join(', ')})`)
   } catch (error) {

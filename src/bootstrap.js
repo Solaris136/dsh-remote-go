@@ -4,10 +4,7 @@
  * accepts user-composed shell (design §16.8).
  */
 import { errors } from './errors.js'
-import {
-  DEFAULT_NODE_VERSION,
-  NODE_DIST_BASE,
-} from './constants.js'
+import { DEFAULT_NODE_VERSION, NODE_DIST_BASE } from './constants.js'
 import { remoteLayout } from './layout.js'
 import { headTail, shellQuote } from './util.js'
 import { isNodeVersionSupported, normalizeVersion, parseVersion, versionsEqual } from './version.js'
@@ -77,7 +74,10 @@ export function nodeDownloadStep(layout, nodeVersion, arch) {
   const base = `${NODE_DIST_BASE}/v${normalizeVersion(nodeVersion)}`
   return {
     id: 'install-node',
-    title: { zh: `下载并校验 Node ${normalizeVersion(nodeVersion)}（无需 root）`, en: `Download and verify Node ${normalizeVersion(nodeVersion)} (no root)` },
+    title: {
+      zh: `下载并校验 Node ${normalizeVersion(nodeVersion)}（无需 root）`,
+      en: `Download and verify Node ${normalizeVersion(nodeVersion)} (no root)`,
+    },
     timeoutMs: 300_000,
     command: `set -eu
 mkdir -p ${dir}
@@ -106,7 +106,10 @@ export function isolatedInstallStep(layout, targetVersion, tools) {
   const pathPrefix = tools.nodeBinDir ? `PATH=${shellQuote(tools.nodeBinDir)}:"$PATH" ` : ''
   return {
     id: 'install-dsh-isolated',
-    title: { zh: `安装 DSH ${normalizeVersion(targetVersion)} 到用户目录（无需 root）`, en: `Install DSH ${normalizeVersion(targetVersion)} into the user directory (no root)` },
+    title: {
+      zh: `安装 DSH ${normalizeVersion(targetVersion)} 到用户目录（无需 root）`,
+      en: `Install DSH ${normalizeVersion(targetVersion)} into the user directory (no root)`,
+    },
     timeoutMs: 600_000,
     command: `set -eu
 mkdir -p ${dshHome}
@@ -153,7 +156,12 @@ export function planBootstrap(input) {
   const layout = remoteLayout(remoteDir, facts.home)
 
   if (mode !== 'isolated' && mode !== 'npx') {
-    if (facts.dshPath && facts.dshVersion && versionsEqual(facts.dshVersion, targetVersion) && isNodeVersionSupported(facts.nodeVersion)) {
+    if (
+      facts.dshPath &&
+      facts.dshVersion &&
+      versionsEqual(facts.dshVersion, targetVersion) &&
+      isNodeVersionSupported(facts.nodeVersion)
+    ) {
       return makePlan(
         'T0',
         { zh: `复用远端已安装的 DSH ${facts.dshVersion}`, en: `Reuse the remote DSH ${facts.dshVersion}` },
@@ -172,7 +180,10 @@ export function planBootstrap(input) {
     ) {
       return makePlan(
         'T0-local',
-        { zh: `复用本插件之前准备的隔离运行时 ${facts.isolatedDshVersion}`, en: `Reuse the isolated runtime prepared earlier (${facts.isolatedDshVersion})` },
+        {
+          zh: `复用本插件之前准备的隔离运行时 ${facts.isolatedDshVersion}`,
+          en: `Reuse the isolated runtime prepared earlier (${facts.isolatedDshVersion})`,
+        },
         [],
         {
           kind: 'node-bin',
@@ -197,7 +208,10 @@ export function planBootstrap(input) {
   const canNpx = Boolean(facts.npxPath) && systemNodeOk
   const canNpm = Boolean(facts.npmPath) && systemNodeOk
   const canDownloadNode =
-    Boolean(facts.curlPath) && Boolean(facts.tarPath) && Boolean(facts.sha256Path) && nodeDownloadNames(input.nodeVersion ?? DEFAULT_NODE_VERSION, facts.arch) !== null
+    Boolean(facts.curlPath) &&
+    Boolean(facts.tarPath) &&
+    Boolean(facts.sha256Path) &&
+    nodeDownloadNames(input.nodeVersion ?? DEFAULT_NODE_VERSION, facts.arch) !== null
 
   const wantNpx = mode === 'npx' || (mode === 'auto' && canNpx)
   if (wantNpx) {
@@ -209,24 +223,36 @@ export function planBootstrap(input) {
     }
     return makePlan(
       'T1',
-      { zh: `用 npx 精确版本 ${targetVersion} 启动（不全局安装）`, en: `Launch with npx pinned to ${targetVersion} (no global install)` },
+      {
+        zh: `用 npx 精确版本 ${targetVersion} 启动（不全局安装）`,
+        en: `Launch with npx pinned to ${targetVersion} (no global install)`,
+      },
       [],
-      { kind: 'npx', npxPath: facts.npxPath ?? 'npx', nodePath: facts.nodePath ?? undefined, nodeBinDir: facts.nodePath ? facts.nodePath.replace(/\/node$/, '') : undefined, targetVersion },
-        remoteDir,
-        facts.home,
-      )
+      {
+        kind: 'npx',
+        npxPath: facts.npxPath ?? 'npx',
+        nodePath: facts.nodePath ?? undefined,
+        nodeBinDir: facts.nodePath ? facts.nodePath.replace(/\/node$/, '') : undefined,
+        targetVersion,
+      },
+      remoteDir,
+      facts.home,
+    )
   }
 
   if ((mode === 'isolated' || mode === 'auto') && canNpm) {
     const nodeBin = facts.nodePath ?? 'node'
     return makePlan(
       'T2',
-      { zh: `安装 DSH ${targetVersion} 到远端用户目录（无需 root）`, en: `Install DSH ${targetVersion} into the remote user directory (no root)` },
+      {
+        zh: `安装 DSH ${targetVersion} 到远端用户目录（无需 root）`,
+        en: `Install DSH ${targetVersion} into the remote user directory (no root)`,
+      },
       [isolatedInstallStep(layout, targetVersion, { npmPath: facts.npmPath ?? 'npm', nodeBin })],
       { kind: 'node-bin', nodePath: nodeBin, dshBinPath: layout.dshBin, targetVersion },
-        remoteDir,
-        facts.home,
-      )
+      remoteDir,
+      facts.home,
+    )
   }
 
   if (canDownloadNode) {
@@ -241,11 +267,18 @@ export function planBootstrap(input) {
 mkdir -p ${[layout.root, layout.downloadsDir, layout.logsDir, layout.runDir, layout.home, layout.dshHome].map(shellQuote).join(' ')}`,
         },
         download,
-        isolatedInstallStep(layout, targetVersion, { npmPath: `${layout.nodeBin.replace(/\/node$/, '')}/npm`, nodeBin: layout.nodeBin, nodeBinDir: layout.nodeBinDir }),
+        isolatedInstallStep(layout, targetVersion, {
+          npmPath: `${layout.nodeBin.replace(/\/node$/, '')}/npm`,
+          nodeBin: layout.nodeBin,
+          nodeBinDir: layout.nodeBinDir,
+        }),
       ]
       return makePlan(
         'T3',
-        { zh: `远端无可用 Node：先下载 Node ${nodeVersion}（校验 SHA-256），再安装 DSH ${targetVersion}`, en: `No usable Node: download Node ${nodeVersion} (SHA-256 verified), then install DSH ${targetVersion}` },
+        {
+          zh: `远端无可用 Node：先下载 Node ${nodeVersion}（校验 SHA-256），再安装 DSH ${targetVersion}`,
+          en: `No usable Node: download Node ${nodeVersion} (SHA-256 verified), then install DSH ${targetVersion}`,
+        },
         steps,
         { kind: 'node-bin', nodePath: layout.nodeBin, dshBinPath: layout.dshBin, targetVersion },
         remoteDir,

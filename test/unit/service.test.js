@@ -106,7 +106,9 @@ test('refusing the host key keeps the host in error state', async () => {
 test('a version mismatch is refused before starting, and can be overridden', async () => {
   const facts = makeFacts({ dshPath: '/usr/local/bin/dsh', dshVersion: '0.2.1', nodeVersion: '24.22.2' })
   const { service } = await makeTestService({ facts })
-  const host = await createHost(service, { bootstrap: { mode: 'reuse', targetVersion: 'local', remoteDir: '~/.dsh-remote-go', nodeVersion: '24.22.2' } })
+  const host = await createHost(service, {
+    bootstrap: { mode: 'reuse', targetVersion: 'local', remoteDir: '~/.dsh-remote-go', nodeVersion: '24.22.2' },
+  })
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'error')
   assert.equal(service.snapshot().hosts[0].error.code, 'version-mismatch')
@@ -161,9 +163,12 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
   assert.equal(events.filter((event) => event.type === 'ssh').length, 1)
 
   events[0].ssh.simulateClose()
-  await waitFor(() => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting', {
-    label: 'disconnected',
-  })
+  await waitFor(
+    () => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting',
+    {
+      label: 'disconnected',
+    },
+  )
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { timeoutMs: 8000, label: 'reconnected' })
   assert.ok(events.filter((event) => event.type === 'ssh').length >= 2)
   await service.shutdown()
@@ -213,7 +218,17 @@ test('diagnose returns the documented checklist', async () => {
   assert.equal(report.redacted, true)
   assert.deepEqual(
     report.checks.map((check) => check.id),
-    ['ssh-reachable', 'auth', 'host-key', 'tunnel', 'remote-service', 'remote-ui', 'remote-version', 'model-credentials', 'desktop-guard'],
+    [
+      'ssh-reachable',
+      'auth',
+      'host-key',
+      'tunnel',
+      'remote-service',
+      'remote-ui',
+      'remote-version',
+      'model-credentials',
+      'desktop-guard',
+    ],
   )
   assert.equal(report.checks.find((check) => check.id === 'remote-version').status, 'pass')
   assert.equal(report.checks.find((check) => check.id === 'ssh-reachable').status, 'pass')
@@ -228,7 +243,10 @@ test('diagnose returns the documented checklist', async () => {
 
 test('invalid host input is rejected as invalid-input', async () => {
   const { service } = await makeTestService()
-  await assert.rejects(() => service.saveHost({ name: 'no address' }), (error) => error.code === 'invalid-input')
+  await assert.rejects(
+    () => service.saveHost({ name: 'no address' }),
+    (error) => error.code === 'invalid-input',
+  )
 })
 
 test('saving and removing hosts updates the snapshot', async () => {
@@ -267,7 +285,12 @@ test('listLocalWorkspaces reads the local DSH workspace registry', async () => {
     path.join(home, 'storages', 'workspace.json'),
     JSON.stringify({
       global: { initialized: true, defaultWorkspaceId: 'w1', workspaceIds: ['w1', 'w2'] },
-      tables: { workspaces: { w1: { path: '/p/one', title: 'one', sessionIds: [] }, w2: { path: '/p/two', title: 'two', sessionIds: ['s'] } } },
+      tables: {
+        workspaces: {
+          w1: { path: '/p/one', title: 'one', sessionIds: [] },
+          w2: { path: '/p/two', title: 'two', sessionIds: ['s'] },
+        },
+      },
     }),
     'utf8',
   )

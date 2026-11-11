@@ -36,7 +36,9 @@ export function parseWorkspaceStorage(value) {
   const table = root.tables?.workspaces && typeof root.tables.workspaces === 'object' ? root.tables.workspaces : {}
   const defaultWorkspaceId = typeof global.defaultWorkspaceId === 'string' ? global.defaultWorkspaceId : null
   /** @type {string[]} */
-  const ordered = Array.isArray(global.workspaceIds) ? global.workspaceIds.filter((id) => typeof id === 'string' && id in table) : []
+  const ordered = Array.isArray(global.workspaceIds)
+    ? global.workspaceIds.filter((id) => typeof id === 'string' && id in table)
+    : []
   // Any workspace missing from the order list still exists; append deterministically.
   for (const id of Object.keys(table)) if (!ordered.includes(id)) ordered.push(id)
   const workspaces = ordered.map((id) => {
@@ -91,7 +93,10 @@ export function remoteWorkspaceStoragePath(remoteDshHome) {
 export async function readRemoteWorkspaces(ssh, remoteDshHome, options = {}) {
   const file = remoteWorkspaceStoragePath(remoteDshHome)
   const quoted = `'${file.replaceAll("'", `'\\''`)}'`
-  const result = await ssh.exec(`cat ${quoted} 2>/dev/null || true`, { timeoutMs: options.timeoutMs ?? 15_000, maxBytes: 4 * 1024 * 1024 })
+  const result = await ssh.exec(`cat ${quoted} 2>/dev/null || true`, {
+    timeoutMs: options.timeoutMs ?? 15_000,
+    maxBytes: 4 * 1024 * 1024,
+  })
   if (result.code !== 0 || result.stdout.trim() === '') {
     return { ok: false, file, reason: 'missing', ...parseWorkspaceStorage(null) }
   }

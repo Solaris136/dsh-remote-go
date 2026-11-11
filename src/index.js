@@ -64,7 +64,8 @@ export function apply(ctx, config = {}) {
         await service.init()
         const detected = await detectLocalVersion({ ctx })
         if (detected.version) service.setLocalVersion(detected.version, detected.source)
-        if (!detected.version) logger.warn('could not detect the local DSH version; set an explicit bootstrap target version in settings')
+        if (!detected.version)
+          logger.warn('could not detect the local DSH version; set an explicit bootstrap target version in settings')
       } catch (error) {
         logger.error('initialization failed:', error)
       }
@@ -110,7 +111,7 @@ export function describeSelf(ctx, info) {
     const clientModules = ctx?.get?.('clientModules') ?? ctx?.clientModules
     const graph = clientModules?.graph?.()
     const clientPath = clientModules?.clientPath?.(PLUGIN_ID) ?? null
-    const row = Array.isArray(graph?.entries) ? graph.entries.find((item) => item.id === PLUGIN_ID) ?? null : null
+    const row = Array.isArray(graph?.entries) ? (graph.entries.find((item) => item.id === PLUGIN_ID) ?? null) : null
     /** @type {Record<string, unknown> | null} */
     let bundle = null
     if (clientPath) {
@@ -123,7 +124,9 @@ export function describeSelf(ctx, info) {
     }
     out.client = {
       graph: graph ? { rev: graph.rev ?? null, release: graph.release ?? null, entries: graph.entries.length } : null,
-      row: row ? { id: row.id, rev: row.rev, url: row.url, inject: row.inject ?? [], immediately: row.immediately === true } : null,
+      row: row
+        ? { id: row.id, rev: row.rev, url: row.url, inject: row.inject ?? [], immediately: row.immediately === true }
+        : null,
       clientPath,
       bundle,
     }
@@ -134,9 +137,17 @@ export function describeSelf(ctx, info) {
 }
 
 /** @returns {Record<string, (...args: any[]) => void>} */
-function createLogger() {  const tag = '[dsh-remote-go]'
+function createLogger() {
+  const tag = '[dsh-remote-go]'
   const write = (/** @type {'info'|'warn'|'error'|'debug'} */ level, /** @type {any[]} */ args) => {
-    const sink = level === 'debug' ? console.debug : level === 'error' ? console.error : level === 'warn' ? console.warn : console.info
+    const sink =
+      level === 'debug'
+        ? console.debug
+        : level === 'error'
+          ? console.error
+          : level === 'warn'
+            ? console.warn
+            : console.info
     try {
       sink?.call(console, tag, ...args)
     } catch {

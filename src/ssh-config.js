@@ -116,7 +116,8 @@ export function parseSshConfig(text) {
     if (!KNOWN_OPTIONS.has(keyword)) {
       // Unknown-but-harmless options are ignored; only flag keywords that would
       // change meaning if misread.
-      if (keyword === 'proxycommand' || keyword === 'certificatefile') unsupported.push({ line: lineNo, keyword: parsed.keyword })
+      if (keyword === 'proxycommand' || keyword === 'certificatefile')
+        unsupported.push({ line: lineNo, keyword: parsed.keyword })
       continue
     }
     if (parsed.value === '') {
@@ -141,7 +142,10 @@ export function parseSshConfig(text) {
  */
 export function matchHostPattern(pattern, value) {
   if (pattern === '*') return true
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.')
   return new RegExp(`^${escaped}$`, 'i').test(value)
 }
 

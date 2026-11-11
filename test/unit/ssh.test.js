@@ -43,18 +43,27 @@ test('verifyHostKey accepts a matching pinned fingerprint', async () => {
 test('verifyHostKey rejects a changed pinned fingerprint', async () => {
   const blob = makeKeyBlob()
   const ssh = new SshConnection({ host: 'example.com', pinnedFingerprint: 'SHA256:somethingelse' })
-  await assert.rejects(() => ssh.verifyHostKey(blob), (error) => error.code === 'host-key-changed')
+  await assert.rejects(
+    () => ssh.verifyHostKey(blob),
+    (error) => error.code === 'host-key-changed',
+  )
 })
 
 test('verifyHostKey accepts any fingerprint present in known_hosts', async () => {
   const blob = makeKeyBlob()
-  const ssh = new SshConnection({ host: 'example.com', knownHostFingerprints: ['SHA256:other', fingerprintFromBlob(blob)] })
+  const ssh = new SshConnection({
+    host: 'example.com',
+    knownHostFingerprints: ['SHA256:other', fingerprintFromBlob(blob)],
+  })
   assert.equal(await ssh.verifyHostKey(blob), true)
 })
 
 test('verifyHostKey rejects an unknown fingerprint under strict policy', async () => {
   const ssh = new SshConnection({ host: 'example.com', hostKeyPolicy: 'strict' })
-  await assert.rejects(() => ssh.verifyHostKey(makeKeyBlob()), (error) => error.code === 'host-key-unknown')
+  await assert.rejects(
+    () => ssh.verifyHostKey(makeKeyBlob()),
+    (error) => error.code === 'host-key-unknown',
+  )
 })
 
 test('verifyHostKey asks the UI on first use and honors the answer', async () => {
@@ -72,12 +81,18 @@ test('verifyHostKey asks the UI on first use and honors the answer', async () =>
   assert.equal(asked.keyType, 'ssh-ed25519')
 
   const reject = new SshConnection({ host: 'example.com', onHostKey: async () => false })
-  await assert.rejects(() => reject.verifyHostKey(blob), (error) => error.code === 'host-key-unknown')
+  await assert.rejects(
+    () => reject.verifyHostKey(blob),
+    (error) => error.code === 'host-key-unknown',
+  )
 })
 
 test('verifyHostKey refuses unknown keys when no UI is attached', async () => {
   const ssh = new SshConnection({ host: 'example.com' })
-  await assert.rejects(() => ssh.verifyHostKey(makeKeyBlob()), (error) => error.code === 'host-key-unknown')
+  await assert.rejects(
+    () => ssh.verifyHostKey(makeKeyBlob()),
+    (error) => error.code === 'host-key-unknown',
+  )
 })
 
 test('verifyHostKey can be told to accept unknown keys (automation)', async () => {
@@ -125,13 +140,21 @@ test('late ssh2 errors after a failed auth attempt never crash the host process'
   class FakeClient extends EventEmitter {
     connect() {
       queueMicrotask(() => {
-        this.emit('error', Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' }))
+        this.emit(
+          'error',
+          Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' }),
+        )
         this.emit('error', new Error('late teardown error'))
       })
     }
     end() {}
   }
-  const ssh = new SshConnection({ host: 'example.com', username: 'u', auth: { type: 'password', password: 'x' }, clientFactory: () => new FakeClient() })
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new FakeClient(),
+  })
   await assert.rejects(ssh.connect(), (error) => error?.code === 'auth')
   // The second error must be swallowed by the permanent listener; an unhandled
   // 'error' event would fail the whole test process here.
@@ -141,11 +164,18 @@ test('late ssh2 errors after a failed auth attempt never crash the host process'
 test('post-connect ssh errors are contained and reach optional listeners', async () => {
   const { EventEmitter } = await import('node:events')
   class FakeClient extends EventEmitter {
-    connect() { queueMicrotask(() => this.emit('ready')) }
+    connect() {
+      queueMicrotask(() => this.emit('ready'))
+    }
     end() {}
   }
   const fake = new FakeClient()
-  const ssh = new SshConnection({ host: 'example.com', username: 'u', auth: { type: 'password', password: 'x' }, clientFactory: () => fake })
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => fake,
+  })
   await ssh.connect()
   const seen = []
   ssh.on('error', (error) => seen.push(error.message))

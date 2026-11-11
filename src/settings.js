@@ -70,7 +70,10 @@ export function sanitizeSettings(raw) {
   const input = deepMerge(defaults, raw)
   const autoReconnect = isPlainObject(input.autoReconnect) ? input.autoReconnect : defaults.autoReconnect
   const bootstrap = isPlainObject(input.bootstrap) ? input.bootstrap : defaults.bootstrap
-  const targetVersion = typeof bootstrap.targetVersion === 'string' && bootstrap.targetVersion.trim() !== '' ? bootstrap.targetVersion.trim() : defaults.bootstrap.targetVersion
+  const targetVersion =
+    typeof bootstrap.targetVersion === 'string' && bootstrap.targetVersion.trim() !== ''
+      ? bootstrap.targetVersion.trim()
+      : defaults.bootstrap.targetVersion
   return {
     defaultPort: numberIn(input.defaultPort, 1, 65535, defaults.defaultPort),
     defaultAuth: oneOf(input.defaultAuth, ['agent', 'key', 'password'], defaults.defaultAuth),
@@ -88,8 +91,14 @@ export function sanitizeSettings(raw) {
     bootstrap: {
       targetVersion,
       mode: oneOf(bootstrap.mode, ['auto', 'reuse', 'npx', 'isolated'], defaults.bootstrap.mode),
-      remoteDir: typeof bootstrap.remoteDir === 'string' && bootstrap.remoteDir.trim() !== '' ? bootstrap.remoteDir.trim() : defaults.bootstrap.remoteDir,
-      nodeVersion: typeof bootstrap.nodeVersion === 'string' && /^v?\d+\.\d+\.\d+$/.test(bootstrap.nodeVersion.trim()) ? bootstrap.nodeVersion.trim() : defaults.bootstrap.nodeVersion,
+      remoteDir:
+        typeof bootstrap.remoteDir === 'string' && bootstrap.remoteDir.trim() !== ''
+          ? bootstrap.remoteDir.trim()
+          : defaults.bootstrap.remoteDir,
+      nodeVersion:
+        typeof bootstrap.nodeVersion === 'string' && /^v?\d+\.\d+\.\d+$/.test(bootstrap.nodeVersion.trim())
+          ? bootstrap.nodeVersion.trim()
+          : defaults.bootstrap.nodeVersion,
     },
   }
 }
@@ -111,14 +120,24 @@ export function sanitizeHostEntry(raw, options = {}) {
   if (!destination.host) throw new Error('address is invalid')
   const userInput = typeof raw.username === 'string' ? raw.username.trim() : ''
   const username = userInput || existing?.username || destination.user || ''
-  const authType = raw.auth && isPlainObject(raw.auth) ? oneOf(raw.auth.type, ['agent', 'key', 'password'], settings.defaultAuth) : existing?.auth?.type ?? settings.defaultAuth
-  const keyPath = raw.auth && isPlainObject(raw.auth) && typeof raw.auth.keyPath === 'string' ? raw.auth.keyPath.trim() : existing?.auth?.keyPath ?? ''
+  const authType =
+    raw.auth && isPlainObject(raw.auth)
+      ? oneOf(raw.auth.type, ['agent', 'key', 'password'], settings.defaultAuth)
+      : (existing?.auth?.type ?? settings.defaultAuth)
+  const keyPath =
+    raw.auth && isPlainObject(raw.auth) && typeof raw.auth.keyPath === 'string'
+      ? raw.auth.keyPath.trim()
+      : (existing?.auth?.keyPath ?? '')
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {}
   const bootstrapExisting = existing?.bootstrap ?? {}
   const keepAlive = oneOf(raw.keepAlive, ['keep', 'stop', 'idle'], existing?.keepAlive ?? 'keep')
-  const hostKeyPolicy = oneOf(raw.hostKeyPolicy, ['first-use', 'strict'], existing?.hostKeyPolicy ?? settings.hostKeyPolicy)
+  const hostKeyPolicy = oneOf(
+    raw.hostKeyPolicy,
+    ['first-use', 'strict'],
+    existing?.hostKeyPolicy ?? settings.hostKeyPolicy,
+  )
   return {
-    id: typeof raw.id === 'string' && raw.id !== '' ? raw.id : existing?.id ?? undefined,
+    id: typeof raw.id === 'string' && raw.id !== '' ? raw.id : (existing?.id ?? undefined),
     name: name || destination.host || destination.alias || 'remote',
     address,
     port: numberIn(raw.port ?? destination.port ?? existing?.port, 1, 65535, settings.defaultPort),
@@ -129,7 +148,7 @@ export function sanitizeHostEntry(raw, options = {}) {
         ? raw.jumpHost.trim() !== ''
           ? raw.jumpHost.trim()
           : null
-        : existing?.jumpHost ?? null,
+        : (existing?.jumpHost ?? null),
     keepAlive,
     idleMinutes: numberIn(raw.idleMinutes ?? existing?.idleMinutes, 1, 24 * 60, DEFAULT_IDLE_MINUTES),
     autoReconnect: boolean(raw.autoReconnect, existing?.autoReconnect ?? settings.autoReconnect.enabled),
@@ -137,21 +156,25 @@ export function sanitizeHostEntry(raw, options = {}) {
     pinnedFingerprint:
       typeof raw.pinnedFingerprint === 'string' && raw.pinnedFingerprint.startsWith('SHA256:')
         ? raw.pinnedFingerprint
-        : existing?.pinnedFingerprint ?? null,
+        : (existing?.pinnedFingerprint ?? null),
     bootstrap: {
-      mode: oneOf(bootstrapRaw.mode, ['auto', 'reuse', 'npx', 'isolated'], bootstrapExisting.mode ?? settings.bootstrap.mode),
+      mode: oneOf(
+        bootstrapRaw.mode,
+        ['auto', 'reuse', 'npx', 'isolated'],
+        bootstrapExisting.mode ?? settings.bootstrap.mode,
+      ),
       targetVersion:
         typeof bootstrapRaw.targetVersion === 'string' && bootstrapRaw.targetVersion.trim() !== ''
           ? bootstrapRaw.targetVersion.trim()
-          : bootstrapExisting.targetVersion ?? settings.bootstrap.targetVersion,
+          : (bootstrapExisting.targetVersion ?? settings.bootstrap.targetVersion),
       remoteDir:
         typeof bootstrapRaw.remoteDir === 'string' && bootstrapRaw.remoteDir.trim() !== ''
           ? bootstrapRaw.remoteDir.trim()
-          : bootstrapExisting.remoteDir ?? settings.bootstrap.remoteDir,
+          : (bootstrapExisting.remoteDir ?? settings.bootstrap.remoteDir),
       nodeVersion:
         typeof bootstrapRaw.nodeVersion === 'string' && /^v?\d+\.\d+\.\d+$/.test(bootstrapRaw.nodeVersion.trim())
           ? bootstrapRaw.nodeVersion.trim()
-          : bootstrapExisting.nodeVersion ?? settings.bootstrap.nodeVersion,
+          : (bootstrapExisting.nodeVersion ?? settings.bootstrap.nodeVersion),
     },
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),

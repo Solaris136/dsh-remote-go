@@ -42,7 +42,9 @@ export class HostStore {
       this.logger.warn?.('[dsh-remote-go] cannot create state directory:', error)
     }
     this.data.hosts = await this.#readJson(this.hostsFile, [])
-    this.data.hosts = Array.isArray(this.data.hosts) ? this.data.hosts.filter((item) => item && typeof item === 'object') : []
+    this.data.hosts = Array.isArray(this.data.hosts)
+      ? this.data.hosts.filter((item) => item && typeof item === 'object')
+      : []
     this.data.settings = sanitizeSettings(await this.#readJson(this.settingsFile, null))
     const secrets = await this.#readJson(this.secretsFile, null)
     this.secrets = secrets && typeof secrets === 'object' ? secrets : {}
@@ -112,7 +114,8 @@ export class HostStore {
    */
   async upsertHost(rawEntry, options = {}) {
     await this.load()
-    const existing = rawEntry && typeof rawEntry === 'object' && typeof rawEntry.id === 'string' ? this.getHost(rawEntry.id) : null
+    const existing =
+      rawEntry && typeof rawEntry === 'object' && typeof rawEntry.id === 'string' ? this.getHost(rawEntry.id) : null
     const entry = sanitizeHostEntry(rawEntry, { settings: options.settings ?? this.data.settings, existing })
     if (!entry.id) entry.id = randomId('h')
     const index = this.data.hosts.findIndex((item) => item.id === entry.id)
@@ -177,7 +180,7 @@ export class HostStore {
 
   /** @param {string} hostId */
   getToken(hostId) {
-    return this.data.settings.saveTokens ? this.secrets[hostId] ?? null : null
+    return this.data.settings.saveTokens ? (this.secrets[hostId] ?? null) : null
   }
 }
 

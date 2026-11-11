@@ -842,15 +842,20 @@ test('workspace rail renders local and per-host workspace groups', () => {
         hostName: '主机一',
         error: null,
         workspaces: [
-          { id: 'r_ws_1', title: 'remote-proj', path: '/home/ubuntu/proj', sessionCount: 2, origin: 'remote', hostId: 'h_one' },
+          {
+            id: 'r_ws_1',
+            title: 'remote-proj',
+            path: '/home/ubuntu/proj',
+            sessionCount: 2,
+            origin: 'remote',
+            hostId: 'h_one',
+          },
         ],
       },
       h_two: { status: 'disconnected', connected: false, hostName: '主机二', workspaces: [], error: null },
     },
   }
-  const html = render(
-    React.createElement(plugin.components.WorkspaceRail, { t, hosts, initialWorkspaceData }),
-  )
+  const html = render(React.createElement(plugin.components.WorkspaceRail, { t, hosts, initialWorkspaceData }))
   assert.match(html, /data-testid="workspace-rail"/)
   assert.match(html, /data-testid="workspace-local-group"/)
   assert.match(html, /data-testid="workspace-local-item"/)
@@ -968,7 +973,13 @@ test('every automation data-testid required by acceptance is rendered', () => {
         initialWorkspaceData: {
           local: { status: 'error', workspaces: [], defaultWorkspaceId: null, error: { code: 'network' } },
           remotes: {
-            h_err: { status: 'error', connected: true, hostName: '故障主机', workspaces: [], error: { code: 'network' } },
+            h_err: {
+              status: 'error',
+              connected: true,
+              hostName: '故障主机',
+              workspaces: [],
+              error: { code: 'network' },
+            },
           },
         },
       }),

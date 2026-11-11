@@ -149,7 +149,11 @@ test('diagnose returns a redacted report', async () => {
   const api = await startApi(service)
   try {
     const host = await createHost(service)
-    const result = await call(api.base, `/hosts/${host.id}/diagnose`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const result = await call(api.base, `/hosts/${host.id}/diagnose`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
     assert.equal(result.status, 200)
     assert.equal(result.json.report.redacted, true)
     assert.ok(Array.isArray(result.json.report.checks))
@@ -165,7 +169,10 @@ test('SSH alias discovery reads the local config through the service', async () 
   try {
     const result = await call(api.base, '/ssh/aliases')
     assert.equal(result.status, 200)
-    assert.deepEqual(result.json.aliases.map((alias) => alias.alias), ['tencent-vm'])
+    assert.deepEqual(
+      result.json.aliases.map((alias) => alias.alias),
+      ['tencent-vm'],
+    )
     assert.equal(result.json.aliases[0].host, '240d:c000:f05f:8d00:327e:8b66:5c18:0')
     assert.equal(result.json.aliases[0].user, 'ubuntu')
     assert.ok(result.json.knownHosts)
@@ -290,7 +297,9 @@ test('SSE still refuses cross-site callers without the header', async () => {
 
 test('GET /diagnostics/self proves host activation and client-module registration', async () => {
   const { service } = await makeTestService()
-  const api = await startApi(service, { diagnostics: () => ({ stateDir: '/tmp/dsh-remote-go', entry: { id: 'dsh-remote-go' } }) })
+  const api = await startApi(service, {
+    diagnostics: () => ({ stateDir: '/tmp/dsh-remote-go', entry: { id: 'dsh-remote-go' } }),
+  })
   try {
     const result = await call(api.base, '/diagnostics/self')
     assert.equal(result.status, 200)

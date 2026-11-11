@@ -69,7 +69,9 @@ function resolveChrome() {
  */
 async function startControlDsh(options) {
   if (!existsSync(DSH_BIN)) {
-    throw new Error(`control DSH runtime missing at ${DSH_BIN}; install it with: pnpm --dir e2e/control add --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1`)
+    throw new Error(
+      `control DSH runtime missing at ${DSH_BIN}; install it with: pnpm --dir e2e/control add --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1`,
+    )
   }
   const logLines = []
   const proc = spawn(process.execPath, [DSH_BIN, '--profile', 'web', '--no-open', '--port', '0'], {
@@ -106,7 +108,9 @@ async function startControlDsh(options) {
   }
   if (!url) {
     proc.kill()
-    throw new Error(`control DSH did not become ready.\nstdout:\n${stdout.slice(-4000)}\nstderr:\n${stderr.slice(-4000)}`)
+    throw new Error(
+      `control DSH did not become ready.\nstdout:\n${stdout.slice(-4000)}\nstderr:\n${stderr.slice(-4000)}`,
+    )
   }
   const parsed = new URL(url)
   const token = parsed.searchParams.get('token') || ''
@@ -188,398 +192,475 @@ async function cleanupHosts(origin) {
   }
 }
 
-test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel iframe', {
-  timeout: 420_000,
-  skip: SSH_ADDRESS ? false : 'set E2E_SSH_ADDRESS to an SSH host alias/address this machine can reach',
-}, async (t) => {
-  await mkdir(ARTIFACTS, { recursive: true })
-  /** @type {Record<string, unknown>} */
-  const report = { startedAt: new Date().toISOString(), sshAddress: SSH_ADDRESS, steps: [] }
-  const chromePath = resolveChrome()
-  assert.ok(chromePath, 'a Chrome/Edge executable is required for the browser half of the E2E (set E2E_CHROME)')
+test(
+  'dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel iframe',
+  {
+    timeout: 420_000,
+    skip: SSH_ADDRESS ? false : 'set E2E_SSH_ADDRESS to an SSH host alias/address this machine can reach',
+  },
+  async (t) => {
+    await mkdir(ARTIFACTS, { recursive: true })
+    /** @type {Record<string, unknown>} */
+    const report = { startedAt: new Date().toISOString(), sshAddress: SSH_ADDRESS, steps: [] }
+    const chromePath = resolveChrome()
+    assert.ok(chromePath, 'a Chrome/Edge executable is required for the browser half of the E2E (set E2E_CHROME)')
 
-  /** @type {Awaited<ReturnType<typeof startControlDsh>> | null} */
-  let control = null
-  /** @type {import('puppeteer-core').Browser | null} */
-  let browser = null
-  /** @type {string | null} */
-  let hostId = null
-  try {
-    // 1) isolated control DSH with this plugin installed in its profile
-    control = await startControlDsh({ log: () => {} })
-    report.control = { origin: control.origin, port: control.port }
-    t.diagnostic(`control DSH on ${control.origin}`)
-
-    const health = await api(control.origin, '/health')
-    assert.equal(health.status, 200, `plugin API not reachable: ${health.text}`)
-    report.steps.push({ step: 'health', ok: true })
-
-    const diagnostics = await api(control.origin, '/diagnostics/self')
-    assert.equal(diagnostics.status, 200)
-    const self = diagnostics.json
-    assert.equal(self?.plugin?.id, 'dsh-remote-go')
-    assert.ok(self?.entry?.id, 'host plugin entry must be live')
-    assert.ok(self?.client?.row?.id === 'dsh-remote-go', 'browser half must be registered in the client-module graph')
-    assert.ok(self?.client?.bundle?.size > 1000, 'client bundle must be readable')
-    report.steps.push({
-      step: 'activation',
-      ok: true,
-      hostEntry: self.entry,
-      clientRow: self.client.row,
-      clientBundleSize: self.client.bundle.size,
-      hostVersion: self.hostVersion,
-    })
-
-    // 2) connect the real test server through the plugin's own API
-    await cleanupHosts(control.origin)
-    const created = await api(control.origin, '/hosts', {
-      method: 'POST',
-      body: {
-        host: {
-          name: 'E2E test host',
-          address: SSH_ADDRESS,
-          username: 'ubuntu',
-          auth: { type: 'key', keyPath: '~/.ssh/id_rsa' },
-          keepAlive: 'stop',
-          autoReconnect: true,
-        },
-      },
-    })
-    assert.equal(created.status, 200, created.text)
-    hostId = created.json.host.id
-    report.host = { id: hostId, address: SSH_ADDRESS }
-
-    const connect = await api(control.origin, `/hosts/${hostId}/connect`, { method: 'POST', body: {} })
-    assert.equal(connect.status, 200, connect.text)
-    const connected = await waitForHostState(control.origin, hostId, (host) => host.status === 'connected' || host.status === 'error')
-    assert.equal(connected.status, 'connected', `connect failed: ${JSON.stringify(connected.error)}`)
-    assert.equal(connected.remote.uiReady, true)
-    assert.equal(connected.versionParity.status, 'same')
-    assert.ok(connected.remote.localPort > 0)
-    report.steps.push({
-      step: 'connect',
-      ok: true,
-      bootstrapLevel: connected.remote.bootstrapLevel,
-      remoteVersion: connected.remote.version,
-      remotePort: connected.remote.port,
-      localPort: connected.remote.localPort,
-      pid: connected.remote.pid,
-    })
-
-    const opened = await api(control.origin, `/hosts/${hostId}/open`)
-    assert.equal(opened.status, 200, opened.text)
-    assert.match(opened.json.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=/)
-    // The token URL must actually complete the cookie handshake through the tunnel.
-    const tokenized = await fetch(opened.json.url, { redirect: 'manual' })
-    assert.ok([302, 303].includes(tokenized.status), `unexpected token response ${tokenized.status}`)
-    const cookie = tokenized.headers.get('set-cookie') ?? ''
-    assert.match(cookie, /dsh-auth-/)
-    assert.match(cookie, /SameSite=Strict/i)
-    report.steps.push({ step: 'tunnel-token-cookie', ok: true, status: tokenized.status })
-
-    // 3) the browser half: Settings → 远程主机 → panel → workspace rail → iframe
-    browser = await puppeteer.launch({
-      executablePath: chromePath,
-      headless: true,
-      args: ['--disable-gpu', '--no-first-run', '--no-default-browser-check', '--window-size=1440,900', '--lang=zh-CN'],
-    })
-    const page = await browser.newPage()
-    await page.setViewport({ width: 1440, height: 900 })
-    const consoleErrors = []
-    page.on('console', (message) => {
-      if (message.type() === 'error') consoleErrors.push(message.text())
-    })
-    await page.goto(control.url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-    await page.waitForFunction(() => !location.search.includes('token='), { timeout: 30_000 })
-    await page.waitForSelector('[data-slot="sidebar"]', { timeout: 60_000 })
-
-    /** Dismiss the first-run preview notice / signed-out dialog that would block clicks. */
-    const dismissOverlays = async () => {
-      return page.evaluate(() => {
-        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
-        const target = dialogs.find((dialog) => /开始使用|Get started|预览版说明|preview/i.test(dialog.innerText ?? ''))
-        if (target) {
-          const close = target.querySelector('button[aria-label="关闭"], button[aria-label="Close"]')
-          if (close) { close.click(); return 'closed-dialog' }
-        }
-        const continueButton = Array.from(document.querySelectorAll('button')).find((button) =>
-          /^(继续|Continue|知道了|Got it)$/.test((button.textContent ?? '').trim()),
-        )
-        if (continueButton) { continueButton.click(); return 'continue' }
-        // The signed-out "开始使用 / Get started" onboarding card is not a
-        // role=dialog; its own close button is the reliable way out.
-        const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
-        for (const closer of closers) {
-          let node = closer
-          for (let depth = 0; depth < 5 && node; depth += 1) {
-            if (/开始使用|Get started/.test(node.innerText ?? '')) {
-              closer.click()
-              return 'closed-signin'
-            }
-            node = node.parentElement
-          }
-        }
-        return null
-      })
-    }
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const dismissed = await dismissOverlays()
-      if (!dismissed) break
-      await new Promise((resolve) => setTimeout(resolve, 400))
-    }
-
-    /** Click the first button/menu item whose whitespace-stripped text starts with a candidate. @param {string[]} texts */
-    const clickByText = (texts) =>
-      page.evaluate((candidates) => {
-        const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], a'))
-        const target = nodes.find((element) => {
-          const text = (element.textContent ?? '').replace(/\s+/g, '')
-          return candidates.some((candidate) => text === candidate || text.startsWith(candidate))
-        })
-        target?.click()
-        return target ? (target.textContent ?? '').replace(/\s+/g, ' ').trim() : null
-      }, texts)
-
-    // Product requirement: no sidebar entry any more.
-    assert.equal(
-      await page.evaluate(() => Boolean(document.querySelector('[data-testid="dsh-remote-go-sidebar"]'))),
-      false,
-      'the plugin must not register a sidebar entry',
-    )
-
-    // Open Settings from the signed-out/account menu.
-    const accountOpened = await page.evaluate(() => {
-      const button = document.querySelector('[data-slot="sidebar.settings"] button')
-      button?.click()
-      return Boolean(button)
-    })
-    assert.ok(accountOpened, 'sidebar settings/account trigger missing')
-    await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('[role="menuitem"], button')).some((element) => (element.textContent ?? '').replace(/\s+/g, '').startsWith('设置')),
-      { timeout: 15_000 },
-    )
-    const settingsClicked = await clickByText(['设置', 'Settings'])
-    assert.ok(settingsClicked, 'settings menu item not clickable')
-    await page.waitForFunction(
-      () => Array.from(document.querySelectorAll('button, [role="button"]')).some((element) => (element.textContent ?? '').replace(/\s+/g, '') === '远程主机' || (element.textContent ?? '').replace(/\s+/g, '') === 'Remotehosts'),
-      { timeout: 30_000 },
-    )
-    const sectionClicked = await clickByText(['远程主机', 'Remote hosts'])
-    assert.ok(sectionClicked, 'the 远程主机 settings section is not reachable')
-    await page.waitForSelector('[data-testid="settings-remote-section"]', { timeout: 30_000 })
-    await page.screenshot({ path: path.join(ARTIFACTS, 'settings-remote-section.png') })
-
-    // Open the remote panel for the connected host from its settings card. A DOM
-    // click is used because the signed-out onboarding card can overlap the card
-    // and swallow synthetic mouse events in the isolated control profile.
-    const openButton = `[data-testid="host-card"][data-host-id="${hostId}"] [data-testid="settings-host-open"]`
-    await page.waitForSelector(openButton, { timeout: 30_000 })
-    const openedViaDom = await page.evaluate((selector) => {
-      const element = document.querySelector(selector)
-      element?.click()
-      return Boolean(element)
-    }, openButton)
-    assert.ok(openedViaDom, 'the 打开远程界面 button was not clickable')
-    const panel = '[data-testid="dsh-remote-go-panel"]'
+    /** @type {Awaited<ReturnType<typeof startControlDsh>> | null} */
+    let control = null
+    /** @type {import('puppeteer-core').Browser | null} */
+    let browser = null
+    /** @type {string | null} */
+    let hostId = null
     try {
-      await page.waitForSelector(panel, { timeout: 30_000 })
-    } catch (error) {
-      await page.screenshot({ path: path.join(ARTIFACTS, 'panel-missing.png') }).catch(() => {})
-      throw error
-    }
-    // Opening the remote panel must close the settings dialog behind it.
-    assert.equal(
-      await page.evaluate(() => Boolean(document.querySelector('[data-testid="settings-remote-section"]'))),
-      false,
-      'the settings dialog should close when the remote panel opens',
-    )
+      // 1) isolated control DSH with this plugin installed in its profile
+      control = await startControlDsh({ log: () => {} })
+      report.control = { origin: control.origin, port: control.port }
+      t.diagnostic(`control DSH on ${control.origin}`)
 
-    // Workspace rail: local group + one group per remote host.
-    const railSelector = '[data-testid="workspace-rail"]'
-    await page.waitForSelector(railSelector, { timeout: 30_000 })
-    const rail = await page.evaluate((id) => {
-      const railElement = document.querySelector('[data-testid="workspace-rail"]')
-      return {
-        text: (railElement?.innerText ?? '').slice(0, 600),
-        hasLocalGroup: Boolean(document.querySelector('[data-testid="workspace-local-group"]')),
-        hasRemoteGroup: Boolean(document.querySelector(`[data-testid="workspace-remote-group"][data-host-id="${id}"]`)),
-        hasIframe: Boolean(document.querySelector('[data-testid="remote-iframe"]')),
-      }
-    }, hostId)
-    assert.ok(rail.hasLocalGroup, 'workspace rail must show the local workspace group')
-    assert.ok(rail.hasRemoteGroup, 'workspace rail must show a per-remote workspace group for the connected host')
-    assert.match(rail.text, /本地工作区|Local workspaces/)
-    // The seeded test host exposes two Workspaces; the rail must list them under
-    // the host's own group (remote workspaces are read from the remote registry).
-    const hostWorkspaces = await api(control.origin, `/hosts/${hostId}/workspaces`)
-    assert.equal(hostWorkspaces.status, 200, hostWorkspaces.text)
-    const remoteWorkspaces = hostWorkspaces.json.workspaces ?? []
-    if (remoteWorkspaces.length > 0) {
-      await page.waitForFunction(
-        () => document.querySelectorAll('[data-testid="workspace-remote-item"]').length > 0,
-        { timeout: 20_000 },
-      )
-      const remoteGroupText = await page.evaluate(() => document.querySelector('[data-testid="workspace-remote-group"]')?.innerText ?? '')
-      assert.ok(remoteGroupText.includes(remoteWorkspaces[0].title), `remote rail group does not list "${remoteWorkspaces[0].title}": ${remoteGroupText.slice(0, 200)}`)
-      report.steps.push({ step: 'remote-workspaces', ok: true, count: remoteWorkspaces.length })
-    }
-    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-workspace-rail.png') })
-    report.steps.push({ step: 'workspace-rail', ok: true, hasLocalGroup: rail.hasLocalGroup, hasRemoteGroup: rail.hasRemoteGroup, textSample: rail.text.slice(0, 120) })
+      const health = await api(control.origin, '/health')
+      assert.equal(health.status, 200, `plugin API not reachable: ${health.text}`)
+      report.steps.push({ step: 'health', ok: true })
 
-    const iframeSelector = '[data-testid="remote-iframe"]'
-    await page.waitForSelector(iframeSelector, { timeout: 60_000 })
-
-    const iframeHandle = await page.$(iframeSelector)
-    const iframeSrc = await page.evaluate((element) => element.getAttribute('src'), iframeHandle)
-    assert.match(iframeSrc ?? '', /^http:\/\/127\.0\.0\.1:\d+\/\?token=/, 'iframe must point at the loopback tunnel')
-    const sandbox = await page.evaluate((element) => element.getAttribute('sandbox'), iframeHandle)
-    assert.match(sandbox ?? '', /allow-scripts/)
-    assert.match(sandbox ?? '', /allow-same-origin/)
-
-    // Wait for the remote DSH document inside the iframe. Puppeteer's
-    // `contentFrame()` is the only reliable way to tell the iframe apart from the
-    // shell's own main frame (both are http://127.0.0.1:...).
-    const tunnelOrigin = new URL(iframeSrc).origin
-    const iframeElement = await page.$(iframeSelector)
-    assert.ok(iframeElement, 'iframe element handle missing')
-    const frameDeadline = Date.now() + 120_000
-    /** @type {import('puppeteer-core').Frame | null} */
-    let remoteFrame = null
-    while (Date.now() < frameDeadline) {
-      const candidate = await iframeElement.contentFrame()
-      if (candidate) {
-        try {
-          const url = candidate.url()
-          if (url.startsWith(tunnelOrigin)) {
-            const title = await candidate.evaluate(() => document.title)
-            if (title && title.includes('DeepSeek')) {
-              remoteFrame = candidate
-              break
-            }
-          }
-        } catch {
-          /* frame may still be navigating */
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500))
-    }
-    assert.ok(remoteFrame, 'the remote DSH document never loaded inside the iframe')
-    assert.ok(remoteFrame.url().startsWith(tunnelOrigin), `iframe frame lives on ${remoteFrame.url()}, expected ${tunnelOrigin}`)
-    // A fresh remote DSH_HOME shows the "preview build" notice and a signed-out
-    // card; dismiss both so the assertion covers the real shell.
-    const noticed = await remoteFrame
-      .evaluate(() => {
-        const text = document.body?.innerText ?? ''
-        let dismissed = 0
-        const continueButton = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
-        if (continueButton) {
-          continueButton.click()
-          dismissed += 1
-        }
-        const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
-        for (const closer of closers) {
-          let node = closer
-          for (let depth = 0; depth < 5 && node; depth += 1) {
-            if (/开始使用|Get started/.test(node.innerText ?? '')) {
-              closer.click()
-              dismissed += 1
-              break
-            }
-            node = node.parentElement
-          }
-          if (dismissed > 0) break
-        }
-        return { hadNotice: dismissed > 0, beforeNodes: document.querySelectorAll('*').length, beforeText: text.slice(0, 120) }
+      const diagnostics = await api(control.origin, '/diagnostics/self')
+      assert.equal(diagnostics.status, 200)
+      const self = diagnostics.json
+      assert.equal(self?.plugin?.id, 'dsh-remote-go')
+      assert.ok(self?.entry?.id, 'host plugin entry must be live')
+      assert.ok(self?.client?.row?.id === 'dsh-remote-go', 'browser half must be registered in the client-module graph')
+      assert.ok(self?.client?.bundle?.size > 1000, 'client bundle must be readable')
+      report.steps.push({
+        step: 'activation',
+        ok: true,
+        hostEntry: self.entry,
+        clientRow: self.client.row,
+        clientBundleSize: self.client.bundle.size,
+        hostVersion: self.hostVersion,
       })
-      .catch(() => ({ hadNotice: false, beforeNodes: 0, beforeText: '' }))
-    await new Promise((resolve) => setTimeout(resolve, 3_000))
-    const frameInfo = await remoteFrame.evaluate(() => ({
-      title: document.title,
-      text: (document.body?.innerText ?? '').slice(0, 400),
-      nodes: document.querySelectorAll('*').length,
-      hasComposer: Boolean(document.querySelector('textarea, [contenteditable="true"]')),
-    }))
-    assert.ok(frameInfo.title.includes('DeepSeek'), `unexpected remote title: ${frameInfo.title}`)
-    assert.ok(frameInfo.nodes > 100, `remote UI did not render (${frameInfo.nodes} nodes; notice=${JSON.stringify(noticed)})`)
-    // The frame must be the remote DSH, not the local shell: the local panel's
-    // toolbar strings never appear inside the remote document.
-    assert.ok(!frameInfo.text.includes('隐藏地址'), 'the iframe frame must be the remote document, not the local shell')
-    assert.ok(!frameInfo.text.includes('你正在操作远端服务器'), 'the local banner must not leak into the remote document')
 
-    // Cookie evidence for the tunnel authority (the iframe origin).
-    const cookies = await page.cookies(tunnelOrigin)
-    const authCookie = cookies.find((cookie) => cookie.name.startsWith('dsh-auth-'))
-    assert.ok(authCookie, 'the tunnel origin must hold the remote DSH auth cookie')
-    assert.equal(authCookie.sameSite, 'Strict')
-    assert.equal(authCookie.httpOnly, true)
+      // 2) connect the real test server through the plugin's own API
+      await cleanupHosts(control.origin)
+      const created = await api(control.origin, '/hosts', {
+        method: 'POST',
+        body: {
+          host: {
+            name: 'E2E test host',
+            address: SSH_ADDRESS,
+            username: 'ubuntu',
+            auth: { type: 'key', keyPath: '~/.ssh/id_rsa' },
+            keepAlive: 'stop',
+            autoReconnect: true,
+          },
+        },
+      })
+      assert.equal(created.status, 200, created.text)
+      hostId = created.json.host.id
+      report.host = { id: hostId, address: SSH_ADDRESS }
 
-    // Clear the local signed-out onboarding card (if any) before the evidence shots.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const dismissed = await dismissOverlays()
-      if (!dismissed) break
-      await new Promise((resolve) => setTimeout(resolve, 300))
-    }
-    await remoteFrame.evaluate(() => {
-      const continueButton = Array.from(document.querySelectorAll('button')).find((item) => (item.textContent ?? '').trim() === '继续')
-      if (continueButton) continueButton.click()
-      const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
-      for (const closer of closers) {
-        let node = closer
-        for (let depth = 0; depth < 5 && node; depth += 1) {
-          if (/开始使用|Get started/.test(node.innerText ?? '')) {
-            closer.click()
-            break
+      const connect = await api(control.origin, `/hosts/${hostId}/connect`, { method: 'POST', body: {} })
+      assert.equal(connect.status, 200, connect.text)
+      const connected = await waitForHostState(
+        control.origin,
+        hostId,
+        (host) => host.status === 'connected' || host.status === 'error',
+      )
+      assert.equal(connected.status, 'connected', `connect failed: ${JSON.stringify(connected.error)}`)
+      assert.equal(connected.remote.uiReady, true)
+      assert.equal(connected.versionParity.status, 'same')
+      assert.ok(connected.remote.localPort > 0)
+      report.steps.push({
+        step: 'connect',
+        ok: true,
+        bootstrapLevel: connected.remote.bootstrapLevel,
+        remoteVersion: connected.remote.version,
+        remotePort: connected.remote.port,
+        localPort: connected.remote.localPort,
+        pid: connected.remote.pid,
+      })
+
+      const opened = await api(control.origin, `/hosts/${hostId}/open`)
+      assert.equal(opened.status, 200, opened.text)
+      assert.match(opened.json.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=/)
+      // The token URL must actually complete the cookie handshake through the tunnel.
+      const tokenized = await fetch(opened.json.url, { redirect: 'manual' })
+      assert.ok([302, 303].includes(tokenized.status), `unexpected token response ${tokenized.status}`)
+      const cookie = tokenized.headers.get('set-cookie') ?? ''
+      assert.match(cookie, /dsh-auth-/)
+      assert.match(cookie, /SameSite=Strict/i)
+      report.steps.push({ step: 'tunnel-token-cookie', ok: true, status: tokenized.status })
+
+      // 3) the browser half: Settings → 远程主机 → panel → workspace rail → iframe
+      browser = await puppeteer.launch({
+        executablePath: chromePath,
+        headless: true,
+        args: [
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--window-size=1440,900',
+          '--lang=zh-CN',
+        ],
+      })
+      const page = await browser.newPage()
+      await page.setViewport({ width: 1440, height: 900 })
+      const consoleErrors = []
+      page.on('console', (message) => {
+        if (message.type() === 'error') consoleErrors.push(message.text())
+      })
+      await page.goto(control.url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      await page.waitForFunction(() => !location.search.includes('token='), { timeout: 30_000 })
+      await page.waitForSelector('[data-slot="sidebar"]', { timeout: 60_000 })
+
+      /** Dismiss the first-run preview notice / signed-out dialog that would block clicks. */
+      const dismissOverlays = async () => {
+        return page.evaluate(() => {
+          const dialogs = Array.from(document.querySelectorAll('[role="dialog"]'))
+          const target = dialogs.find((dialog) =>
+            /开始使用|Get started|预览版说明|preview/i.test(dialog.innerText ?? ''),
+          )
+          if (target) {
+            const close = target.querySelector('button[aria-label="关闭"], button[aria-label="Close"]')
+            if (close) {
+              close.click()
+              return 'closed-dialog'
+            }
           }
-          node = node.parentElement
+          const continueButton = Array.from(document.querySelectorAll('button')).find((button) =>
+            /^(继续|Continue|知道了|Got it)$/.test((button.textContent ?? '').trim()),
+          )
+          if (continueButton) {
+            continueButton.click()
+            return 'continue'
+          }
+          // The signed-out "开始使用 / Get started" onboarding card is not a
+          // role=dialog; its own close button is the reliable way out.
+          const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+          for (const closer of closers) {
+            let node = closer
+            for (let depth = 0; depth < 5 && node; depth += 1) {
+              if (/开始使用|Get started/.test(node.innerText ?? '')) {
+                closer.click()
+                return 'closed-signin'
+              }
+              node = node.parentElement
+            }
+          }
+          return null
+        })
+      }
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const dismissed = await dismissOverlays()
+        if (!dismissed) break
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+
+      /** Click the first button/menu item whose whitespace-stripped text starts with a candidate. @param {string[]} texts */
+      const clickByText = (texts) =>
+        page.evaluate((candidates) => {
+          const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="menuitem"], a'))
+          const target = nodes.find((element) => {
+            const text = (element.textContent ?? '').replace(/\s+/g, '')
+            return candidates.some((candidate) => text === candidate || text.startsWith(candidate))
+          })
+          target?.click()
+          return target ? (target.textContent ?? '').replace(/\s+/g, ' ').trim() : null
+        }, texts)
+
+      // Product requirement: no sidebar entry any more.
+      assert.equal(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="dsh-remote-go-sidebar"]'))),
+        false,
+        'the plugin must not register a sidebar entry',
+      )
+
+      // Open Settings from the signed-out/account menu.
+      const accountOpened = await page.evaluate(() => {
+        const button = document.querySelector('[data-slot="sidebar.settings"] button')
+        button?.click()
+        return Boolean(button)
+      })
+      assert.ok(accountOpened, 'sidebar settings/account trigger missing')
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('[role="menuitem"], button')).some((element) =>
+            (element.textContent ?? '').replace(/\s+/g, '').startsWith('设置'),
+          ),
+        { timeout: 15_000 },
+      )
+      const settingsClicked = await clickByText(['设置', 'Settings'])
+      assert.ok(settingsClicked, 'settings menu item not clickable')
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('button, [role="button"]')).some(
+            (element) =>
+              (element.textContent ?? '').replace(/\s+/g, '') === '远程主机' ||
+              (element.textContent ?? '').replace(/\s+/g, '') === 'Remotehosts',
+          ),
+        { timeout: 30_000 },
+      )
+      const sectionClicked = await clickByText(['远程主机', 'Remote hosts'])
+      assert.ok(sectionClicked, 'the 远程主机 settings section is not reachable')
+      await page.waitForSelector('[data-testid="settings-remote-section"]', { timeout: 30_000 })
+      await page.screenshot({ path: path.join(ARTIFACTS, 'settings-remote-section.png') })
+
+      // Open the remote panel for the connected host from its settings card. A DOM
+      // click is used because the signed-out onboarding card can overlap the card
+      // and swallow synthetic mouse events in the isolated control profile.
+      const openButton = `[data-testid="host-card"][data-host-id="${hostId}"] [data-testid="settings-host-open"]`
+      await page.waitForSelector(openButton, { timeout: 30_000 })
+      const openedViaDom = await page.evaluate((selector) => {
+        const element = document.querySelector(selector)
+        element?.click()
+        return Boolean(element)
+      }, openButton)
+      assert.ok(openedViaDom, 'the 打开远程界面 button was not clickable')
+      const panel = '[data-testid="dsh-remote-go-panel"]'
+      try {
+        await page.waitForSelector(panel, { timeout: 30_000 })
+      } catch (error) {
+        await page.screenshot({ path: path.join(ARTIFACTS, 'panel-missing.png') }).catch(() => {})
+        throw error
+      }
+      // Opening the remote panel must close the settings dialog behind it.
+      assert.equal(
+        await page.evaluate(() => Boolean(document.querySelector('[data-testid="settings-remote-section"]'))),
+        false,
+        'the settings dialog should close when the remote panel opens',
+      )
+
+      // Workspace rail: local group + one group per remote host.
+      const railSelector = '[data-testid="workspace-rail"]'
+      await page.waitForSelector(railSelector, { timeout: 30_000 })
+      const rail = await page.evaluate((id) => {
+        const railElement = document.querySelector('[data-testid="workspace-rail"]')
+        return {
+          text: (railElement?.innerText ?? '').slice(0, 600),
+          hasLocalGroup: Boolean(document.querySelector('[data-testid="workspace-local-group"]')),
+          hasRemoteGroup: Boolean(
+            document.querySelector(`[data-testid="workspace-remote-group"][data-host-id="${id}"]`),
+          ),
+          hasIframe: Boolean(document.querySelector('[data-testid="remote-iframe"]')),
+        }
+      }, hostId)
+      assert.ok(rail.hasLocalGroup, 'workspace rail must show the local workspace group')
+      assert.ok(rail.hasRemoteGroup, 'workspace rail must show a per-remote workspace group for the connected host')
+      assert.match(rail.text, /本地工作区|Local workspaces/)
+      // The seeded test host exposes two Workspaces; the rail must list them under
+      // the host's own group (remote workspaces are read from the remote registry).
+      const hostWorkspaces = await api(control.origin, `/hosts/${hostId}/workspaces`)
+      assert.equal(hostWorkspaces.status, 200, hostWorkspaces.text)
+      const remoteWorkspaces = hostWorkspaces.json.workspaces ?? []
+      if (remoteWorkspaces.length > 0) {
+        await page.waitForFunction(
+          () => document.querySelectorAll('[data-testid="workspace-remote-item"]').length > 0,
+          { timeout: 20_000 },
+        )
+        const remoteGroupText = await page.evaluate(
+          () => document.querySelector('[data-testid="workspace-remote-group"]')?.innerText ?? '',
+        )
+        assert.ok(
+          remoteGroupText.includes(remoteWorkspaces[0].title),
+          `remote rail group does not list "${remoteWorkspaces[0].title}": ${remoteGroupText.slice(0, 200)}`,
+        )
+        report.steps.push({ step: 'remote-workspaces', ok: true, count: remoteWorkspaces.length })
+      }
+      await page.screenshot({ path: path.join(ARTIFACTS, 'panel-workspace-rail.png') })
+      report.steps.push({
+        step: 'workspace-rail',
+        ok: true,
+        hasLocalGroup: rail.hasLocalGroup,
+        hasRemoteGroup: rail.hasRemoteGroup,
+        textSample: rail.text.slice(0, 120),
+      })
+
+      const iframeSelector = '[data-testid="remote-iframe"]'
+      await page.waitForSelector(iframeSelector, { timeout: 60_000 })
+
+      const iframeHandle = await page.$(iframeSelector)
+      const iframeSrc = await page.evaluate((element) => element.getAttribute('src'), iframeHandle)
+      assert.match(iframeSrc ?? '', /^http:\/\/127\.0\.0\.1:\d+\/\?token=/, 'iframe must point at the loopback tunnel')
+      const sandbox = await page.evaluate((element) => element.getAttribute('sandbox'), iframeHandle)
+      assert.match(sandbox ?? '', /allow-scripts/)
+      assert.match(sandbox ?? '', /allow-same-origin/)
+
+      // Wait for the remote DSH document inside the iframe. Puppeteer's
+      // `contentFrame()` is the only reliable way to tell the iframe apart from the
+      // shell's own main frame (both are http://127.0.0.1:...).
+      const tunnelOrigin = new URL(iframeSrc).origin
+      const iframeElement = await page.$(iframeSelector)
+      assert.ok(iframeElement, 'iframe element handle missing')
+      const frameDeadline = Date.now() + 120_000
+      /** @type {import('puppeteer-core').Frame | null} */
+      let remoteFrame = null
+      while (Date.now() < frameDeadline) {
+        const candidate = await iframeElement.contentFrame()
+        if (candidate) {
+          try {
+            const url = candidate.url()
+            if (url.startsWith(tunnelOrigin)) {
+              const title = await candidate.evaluate(() => document.title)
+              if (title && title.includes('DeepSeek')) {
+                remoteFrame = candidate
+                break
+              }
+            }
+          } catch {
+            /* frame may still be navigating */
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      assert.ok(remoteFrame, 'the remote DSH document never loaded inside the iframe')
+      assert.ok(
+        remoteFrame.url().startsWith(tunnelOrigin),
+        `iframe frame lives on ${remoteFrame.url()}, expected ${tunnelOrigin}`,
+      )
+      // A fresh remote DSH_HOME shows the "preview build" notice and a signed-out
+      // card; dismiss both so the assertion covers the real shell.
+      const noticed = await remoteFrame
+        .evaluate(() => {
+          const text = document.body?.innerText ?? ''
+          let dismissed = 0
+          const continueButton = Array.from(document.querySelectorAll('button')).find(
+            (item) => (item.textContent ?? '').trim() === '继续',
+          )
+          if (continueButton) {
+            continueButton.click()
+            dismissed += 1
+          }
+          const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+          for (const closer of closers) {
+            let node = closer
+            for (let depth = 0; depth < 5 && node; depth += 1) {
+              if (/开始使用|Get started/.test(node.innerText ?? '')) {
+                closer.click()
+                dismissed += 1
+                break
+              }
+              node = node.parentElement
+            }
+            if (dismissed > 0) break
+          }
+          return {
+            hadNotice: dismissed > 0,
+            beforeNodes: document.querySelectorAll('*').length,
+            beforeText: text.slice(0, 120),
+          }
+        })
+        .catch(() => ({ hadNotice: false, beforeNodes: 0, beforeText: '' }))
+      await new Promise((resolve) => setTimeout(resolve, 3_000))
+      const frameInfo = await remoteFrame.evaluate(() => ({
+        title: document.title,
+        text: (document.body?.innerText ?? '').slice(0, 400),
+        nodes: document.querySelectorAll('*').length,
+        hasComposer: Boolean(document.querySelector('textarea, [contenteditable="true"]')),
+      }))
+      assert.ok(frameInfo.title.includes('DeepSeek'), `unexpected remote title: ${frameInfo.title}`)
+      assert.ok(
+        frameInfo.nodes > 100,
+        `remote UI did not render (${frameInfo.nodes} nodes; notice=${JSON.stringify(noticed)})`,
+      )
+      // The frame must be the remote DSH, not the local shell: the local panel's
+      // toolbar strings never appear inside the remote document.
+      assert.ok(
+        !frameInfo.text.includes('隐藏地址'),
+        'the iframe frame must be the remote document, not the local shell',
+      )
+      assert.ok(
+        !frameInfo.text.includes('你正在操作远端服务器'),
+        'the local banner must not leak into the remote document',
+      )
+
+      // Cookie evidence for the tunnel authority (the iframe origin).
+      const cookies = await page.cookies(tunnelOrigin)
+      const authCookie = cookies.find((cookie) => cookie.name.startsWith('dsh-auth-'))
+      assert.ok(authCookie, 'the tunnel origin must hold the remote DSH auth cookie')
+      assert.equal(authCookie.sameSite, 'Strict')
+      assert.equal(authCookie.httpOnly, true)
+
+      // Clear the local signed-out onboarding card (if any) before the evidence shots.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const dismissed = await dismissOverlays()
+        if (!dismissed) break
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
+      await remoteFrame
+        .evaluate(() => {
+          const continueButton = Array.from(document.querySelectorAll('button')).find(
+            (item) => (item.textContent ?? '').trim() === '继续',
+          )
+          if (continueButton) continueButton.click()
+          const closers = Array.from(document.querySelectorAll('button[aria-label="关闭"], button[aria-label="Close"]'))
+          for (const closer of closers) {
+            let node = closer
+            for (let depth = 0; depth < 5 && node; depth += 1) {
+              if (/开始使用|Get started/.test(node.innerText ?? '')) {
+                closer.click()
+                break
+              }
+              node = node.parentElement
+            }
+          }
+        })
+        .catch(() => {})
+      await new Promise((resolve) => setTimeout(resolve, 800))
+      await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh.png') })
+      await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh-full.png'), fullPage: true })
+
+      report.steps.push({
+        step: 'browser-iframe',
+        ok: true,
+        iframeSrcOrigin: tunnelOrigin,
+        sandbox,
+        remoteTitle: frameInfo.title,
+        remoteNodes: frameInfo.nodes,
+        remoteHasComposer: frameInfo.hasComposer,
+        remoteNotice: noticed.hadNotice,
+        remoteTextSample: frameInfo.text.slice(0, 120),
+        authCookie: { name: authCookie.name, sameSite: authCookie.sameSite, httpOnly: authCookie.httpOnly },
+        consoleErrors: consoleErrors.slice(0, 10),
+        screenshots: [
+          'settings-remote-section.png',
+          'panel-workspace-rail.png',
+          'panel-remote-dsh.png',
+          'panel-remote-dsh-full.png',
+        ],
+      })
+      t.diagnostic(`remote UI rendered in panel: ${frameInfo.title} (${frameInfo.nodes} nodes)`)
+
+      // 4) cleanup: stop the remote web and remove the host
+      const stopped = await api(control.origin, `/hosts/${hostId}/disconnect`, {
+        method: 'POST',
+        body: { stopRemote: true },
+      })
+      assert.equal(stopped.status, 200)
+      const removed = await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
+      assert.equal(removed.status, 200)
+      const after = await api(control.origin, '/state')
+      assert.equal(after.json.state.hosts.length, 0)
+      report.steps.push({ step: 'cleanup', ok: true })
+      report.ok = true
+    } catch (error) {
+      report.ok = false
+      report.error = error instanceof Error ? `${error.stack ?? error.message}` : String(error)
+      throw error
+    } finally {
+      report.finishedAt = new Date().toISOString()
+      // Best-effort cleanup so a failed run does not leave a remote DSH running.
+      if (control && hostId) {
+        try {
+          await api(control.origin, `/hosts/${hostId}/disconnect`, { method: 'POST', body: { stopRemote: true } })
+          await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
+        } catch {
+          /* control may already be gone */
         }
       }
-    }).catch(() => {})
-    await new Promise((resolve) => setTimeout(resolve, 800))
-    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh.png') })
-    await page.screenshot({ path: path.join(ARTIFACTS, 'panel-remote-dsh-full.png'), fullPage: true })
-
-    report.steps.push({
-      step: 'browser-iframe',
-      ok: true,
-      iframeSrcOrigin: tunnelOrigin,
-      sandbox,
-      remoteTitle: frameInfo.title,
-      remoteNodes: frameInfo.nodes,
-      remoteHasComposer: frameInfo.hasComposer,
-      remoteNotice: noticed.hadNotice,
-      remoteTextSample: frameInfo.text.slice(0, 120),
-      authCookie: { name: authCookie.name, sameSite: authCookie.sameSite, httpOnly: authCookie.httpOnly },
-      consoleErrors: consoleErrors.slice(0, 10),
-      screenshots: ['settings-remote-section.png', 'panel-workspace-rail.png', 'panel-remote-dsh.png', 'panel-remote-dsh-full.png'],
-    })
-    t.diagnostic(`remote UI rendered in panel: ${frameInfo.title} (${frameInfo.nodes} nodes)`)
-
-    // 4) cleanup: stop the remote web and remove the host
-    const stopped = await api(control.origin, `/hosts/${hostId}/disconnect`, { method: 'POST', body: { stopRemote: true } })
-    assert.equal(stopped.status, 200)
-    const removed = await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
-    assert.equal(removed.status, 200)
-    const after = await api(control.origin, '/state')
-    assert.equal(after.json.state.hosts.length, 0)
-    report.steps.push({ step: 'cleanup', ok: true })
-    report.ok = true
-  } catch (error) {
-    report.ok = false
-    report.error = error instanceof Error ? `${error.stack ?? error.message}` : String(error)
-    throw error
-  } finally {
-    report.finishedAt = new Date().toISOString()
-    // Best-effort cleanup so a failed run does not leave a remote DSH running.
-    if (control && hostId) {
-      try {
-        await api(control.origin, `/hosts/${hostId}/disconnect`, { method: 'POST', body: { stopRemote: true } })
-        await api(control.origin, `/hosts/${hostId}`, { method: 'DELETE' })
-      } catch {
-        /* control may already be gone */
-      }
+      await writeFile(
+        path.join(ARTIFACTS, 'plugin-e2e-report.json'),
+        `${JSON.stringify(report, null, 2)}\n`,
+        'utf8',
+      ).catch(() => {})
+      if (browser) await browser.close().catch(() => {})
+      if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
     }
-    await writeFile(path.join(ARTIFACTS, 'plugin-e2e-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8').catch(() => {})
-    if (browser) await browser.close().catch(() => {})
-    if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
-  }
-})
+  },
+)

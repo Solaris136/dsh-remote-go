@@ -38,7 +38,10 @@ test('isLoopbackHost only accepts loopback literals', () => {
 test('maskSshAddress keeps shape without secrets', () => {
   assert.equal(maskSshAddress({ user: 'ubuntu', host: '43.133.80.40', port: 22 }), 'ubuntu@43.133.80.40')
   assert.equal(maskSshAddress({ user: 'ubuntu', host: '43.133.80.40', port: 2222 }), 'ubuntu@43.133.80.40:2222')
-  assert.equal(maskSshAddress({ alias: 'tencent-vm', user: 'ubuntu', host: '240d::1', port: 22 }), 'tencent-vm (ubuntu@240d::1)')
+  assert.equal(
+    maskSshAddress({ alias: 'tencent-vm', user: 'ubuntu', host: '240d::1', port: 22 }),
+    'tencent-vm (ubuntu@240d::1)',
+  )
 })
 
 test('shellQuote quotes single quotes correctly', () => {

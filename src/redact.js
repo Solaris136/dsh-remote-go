@@ -40,7 +40,8 @@ export function redactText(text, options = {}) {
 function redactValue(key, value) {
   const lowered = String(key).toLowerCase()
   if (typeof value === 'string') {
-    if (/(password|token|secret|passphrase|authorization|apikey|api_key|privatekey|cookie)/.test(lowered)) return '<redacted>'
+    if (/(password|token|secret|passphrase|authorization|apikey|api_key|privatekey|cookie)/.test(lowered))
+      return '<redacted>'
     return redactText(value)
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(key, item))

@@ -121,14 +121,16 @@ export async function makeTestService(overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-'))
   const store = new HostStore({ dir, logger: { warn() {}, info() {}, debug() {}, error() {} } })
   const events = []
-  const facts = overrides.facts ?? makeFacts({
-    isolatedNodePath: '/home/ubuntu/.dsh/remote-go/node/bin/node',
-    isolatedNodeVersion: '24.22.2',
-    isolatedDshVersion: '0.2.2-rc.1',
-    isolatedDshBinPath: '/home/ubuntu/.dsh/remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js',
-    nodeVersion: '22.19.0',
-    npxPath: null,
-  })
+  const facts =
+    overrides.facts ??
+    makeFacts({
+      isolatedNodePath: '/home/ubuntu/.dsh/remote-go/node/bin/node',
+      isolatedNodeVersion: '24.22.2',
+      isolatedDshVersion: '0.2.2-rc.1',
+      isolatedDshBinPath: '/home/ubuntu/.dsh/remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js',
+      nodeVersion: '22.19.0',
+      npxPath: null,
+    })
   const sshFactory =
     overrides.sshFactory ??
     ((options) => {
@@ -149,7 +151,15 @@ export async function makeTestService(overrides = {}) {
     execute: async () => ({}),
     startWeb:
       overrides.startWeb ??
-      (async () => ({ pid: 4242, port: 38123, token: 'tok_test_123', url: 'http://127.0.0.1:38123/?token=tok_test_123', logPath: '/tmp/web.log', startedAt: new Date().toISOString(), rawLine: '' })),
+      (async () => ({
+        pid: 4242,
+        port: 38123,
+        token: 'tok_test_123',
+        url: 'http://127.0.0.1:38123/?token=tok_test_123',
+        logPath: '/tmp/web.log',
+        startedAt: new Date().toISOString(),
+        rawLine: '',
+      })),
     stopWeb: overrides.stopWeb ?? (async () => ({ ok: true, output: 'STOPPED' })),
     waitUi: overrides.waitUi ?? (async () => ({ ok: true, status: 200 })),
     exchange:
@@ -193,7 +203,8 @@ export async function waitFor(predicate, options = {}) {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     if (await predicate()) return true
-    if (Date.now() - started > timeoutMs) throw new Error(`waitFor timed out${options.label ? `: ${options.label}` : ''}`)
+    if (Date.now() - started > timeoutMs)
+      throw new Error(`waitFor timed out${options.label ? `: ${options.label}` : ''}`)
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
 }

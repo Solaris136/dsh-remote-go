@@ -233,8 +233,11 @@ export async function readRunRegistry(ssh, layout) {
  * @param {ReturnType<typeof remoteLayout>} layout
  * @param {number} [lines]
  */
-export async function tailRemoteLog(ssh, layout, lines = 80) {  try {
-    const result = await ssh.exec(`tail -n ${Math.max(1, lines)} ${shellQuote(layout.logFile)} 2>/dev/null || true`, { timeoutMs: 15_000 })
+export async function tailRemoteLog(ssh, layout, lines = 80) {
+  try {
+    const result = await ssh.exec(`tail -n ${Math.max(1, lines)} ${shellQuote(layout.logFile)} 2>/dev/null || true`, {
+      timeoutMs: 15_000,
+    })
     return headTail(result.stdout, 6000)
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
@@ -250,7 +253,9 @@ export async function tailRemoteLog(ssh, layout, lines = 80) {  try {
  */
 export async function readWebLineFromLog(ssh, layout) {
   try {
-    const result = await ssh.exec(`grep 'dsh web:' ${shellQuote(layout.logFile)} 2>/dev/null | tail -n 1 || true`, { timeoutMs: 15_000 })
+    const result = await ssh.exec(`grep 'dsh web:' ${shellQuote(layout.logFile)} 2>/dev/null | tail -n 1 || true`, {
+      timeoutMs: 15_000,
+    })
     if (result.code !== 0 || !result.stdout.trim()) return null
     return parseWebLine(result.stdout)
   } catch {
@@ -288,7 +293,8 @@ export async function adoptRemoteWeb(ssh, layout) {
   if (!line) return null
   const status = await remoteHttpStatus(ssh, line.port)
   if (!(status === 200 || status === 302 || status === 401)) return null
-  const version = typeof registry?.version === 'string' && registry.version !== '' ? normalizeVersion(registry.version) : null
+  const version =
+    typeof registry?.version === 'string' && registry.version !== '' ? normalizeVersion(registry.version) : null
   return { pid, port: line.port, token: line.token, url: line.url, version, adopted: true }
 }
 
@@ -356,7 +362,11 @@ export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
   const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS
   const basePath = options.path ?? '/'
   const tokenPath = `/?token=${encodeURIComponent(token)}`
-  const first = await httpRequest({ port: localPort, path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`, timeoutMs })
+  const first = await httpRequest({
+    port: localPort,
+    path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`,
+    timeoutMs,
+  })
   const setCookies = first.headers['set-cookie'] ?? []
   const cookieNames = setCookies.map((cookie) => String(cookie).split(';')[0].split('=')[0]).filter(Boolean)
   const cookieHeader = setCookies.map((cookie) => String(cookie).split(';')[0]).join('; ')
@@ -370,9 +380,7 @@ export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(second.body)
   const xFrameOptions = second.headers['x-frame-options'] ?? null
   const csp = second.headers['content-security-policy'] ?? null
-  const frameBlocked =
-    Boolean(xFrameOptions) ||
-    (typeof csp === 'string' && /frame-ancestors/i.test(csp))
+  const frameBlocked = Boolean(xFrameOptions) || (typeof csp === 'string' && /frame-ancestors/i.test(csp))
   return {
     ok: second.status === 200 && second.body.length > 0,
     firstStatus: first.status,
