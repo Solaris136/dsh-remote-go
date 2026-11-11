@@ -122,11 +122,18 @@ function launchDesktop(input) {
   /** The app must be a real Electron app: never inherit run-as-node. */
   const env = { ...input.env, DSH_HOME: input.dshHome }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn(input.exe, [`--user-data-dir=${input.userDataDir}`, `--remote-debugging-port=${input.port}`], {
-    env,
-    windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const child = spawn(
+    input.exe,
+    [
+      `--user-data-dir=${input.userDataDir}`,
+      `--remote-debugging-port=${input.port}`,
+      // Force one UI language so the run cannot depend on the machine's locale: CI is
+      // en-US, and a developer machine may be anything. `DSH_E2E_LANG` overrides it
+      // (both `en-US` and `zh-CN` must pass — the labels are normalised).
+      `--lang=${process.env.DSH_E2E_LANG ?? 'en-US'}`,
+    ],
+    { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+  )
   /** @type {string[]} */
   const logs = []
   child.stdout?.on('data', (chunk) => logs.push(chunk.toString('utf8')))
@@ -230,8 +237,11 @@ async function dismissOnboarding(browser, consoleErrors) {
         .catch(() => null)
       const element = handle?.asElement()
       if (!element) return null
+      // Report the label that actually matched, so the log proves which locale path
+      // ran instead of always echoing the first (Chinese) candidate.
+      const picked = await element.evaluate((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim())
       await element.evaluate(activateElement)
-      return ONBOARDING_LABELS[0]
+      return picked || ONBOARDING_LABELS[0]
     },
     {
       timeoutMs: 60_000,
@@ -263,7 +273,7 @@ async function dismissOnboarding(browser, consoleErrors) {
     },
     { timeoutMs: 60_000, intervalMs: 300, label: 'the onboarding window to close' },
   )
-  return Boolean(clicked)
+  return clicked ?? null
 }
 
 /** @param {import('puppeteer-core').Page} page @param {string} selector @param {number} [timeout] */
@@ -273,8 +283,11 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 
 /** @param {import('puppeteer-core').Page} page @param {string[]} labels */
 async function clickByText(page, labels) {
-  const handle = await page.evaluateHandle((list) => {
+  const handle = await page.evaluateHandle((rawLabels) => {
     const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+    // Fold the candidates exactly like the DOM text: a label such as "Remote hosts"
+    // strips to "Remotehosts" and would otherwise never match.
+    const list = rawLabels.map(strip)
     const nodes = [
       ...document.querySelectorAll('button, [role="menuitem"], [role="button"], [role="tab"], a, li, div, span'),
     ]
@@ -339,78 +352,71 @@ async function describePage(page) {
  * Account menu -> Settings -> Remote hosts, bounded at every step and reporting
  * the renderer state when a step times out.
  *
- * The whole sequence is retried: right after onboarding the shell is still
- * attaching handlers, and a click on "Settings" can be swallowed (observed:
- * `dialogs: 0` after the click). Each attempt is bounded by a wait on the state
- * that must change, so a retry never turns into a fixed sleep.
+ * One pass, every step a bounded wait on the state that must change. The retries
+ * this used to carry existed only because the label comparison stripped whitespace
+ * from the DOM text but not from the candidate, so `Remote hosts`/`Set up later`
+ * could never match in English. Both sides are normalised now, so a loop would only
+ * mask a real failure.
  * @param {import('puppeteer-core').Page} page
  */
 async function openRemoteHostsSection(page) {
   await waitForSelector(page, ACCOUNT_MENU_SELECTOR, 120_000)
-  /** @type {string | null} */
-  let lastState = null
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    if (await page.$('[data-testid="settings-remote-section"]')) return
-    if (!(await page.$('[role="dialog"]'))) {
-      const menu = await clickByAriaLabel(page, ['账号菜单', 'Account menu', '账号', 'Account'])
-      if (!menu) {
-        lastState = JSON.stringify(await describePage(page))
-        continue
-      }
-    }
-    const hasSettings = await page
-      .waitForFunction(
-        () => {
-          const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-          return [...document.querySelectorAll('*')].some((node) => {
-            const text = strip(node.textContent)
-            return (text === '设置' || text === 'Settings') && node.children.length <= 2
-          })
-        },
-        { timeout: 20_000 },
-      )
-      .then(() => true)
-      .catch(() => false)
-    if (!hasSettings) {
-      lastState = JSON.stringify(await describePage(page))
-      await page.keyboard.press('Escape').catch(() => {})
-      continue
-    }
-    await clickByText(page, SETTINGS_LABELS)
-    const navReady = await page
-      .waitForFunction(
-        (labels) => {
-          const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-          return [...document.querySelectorAll('*')].some((node) => {
-            const text = strip(node.textContent)
-            return labels.includes(text) && node.children.length <= 3
-          })
-        },
-        { timeout: 30_000, polling: 200 },
-        REMOTE_HOSTS_LABELS,
-      )
-      .then(() => true)
-      .catch(() => false)
-    if (!navReady) {
-      lastState = JSON.stringify(await describePage(page))
-      await page.keyboard.press('Escape').catch(() => {})
-      continue
-    }
-    const nav = await clickByText(page, REMOTE_HOSTS_LABELS)
-    if (!nav) {
-      lastState = JSON.stringify(await describePage(page))
-      continue
-    }
-    const mounted = await page
-      .waitForSelector('[data-testid="settings-remote-section"]', { visible: true, timeout: 60_000 })
-      .then(() => true)
-      .catch(() => false)
-    if (mounted) return
-    lastState = JSON.stringify(await describePage(page))
+  if (!(await page.$('[role="dialog"]'))) {
+    const menu = await clickByAriaLabel(page, ['账号菜单', 'Account menu', '账号', 'Account'])
+    if (!menu) throw new Error(`could not open the account menu: ${JSON.stringify(await describePage(page))}`)
   }
-  throw new Error(
-    `could not reach the Remote-hosts section in the desktop shell after 5 attempts; last state: ${lastState ?? '(none)'}`,
-  )
+  const hasSettings = await page
+    .waitForFunction(
+      () => {
+        const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+        return [...document.querySelectorAll('*')].some((node) => {
+          const text = strip(node.textContent)
+          return (text === '设置' || text === 'Settings') && node.children.length <= 2
+        })
+      },
+      { timeout: 30_000 },
+    )
+    .then(() => true)
+    .catch(() => false)
+  if (!hasSettings) {
+    throw new Error(`the account menu did not offer a Settings entry: ${JSON.stringify(await describePage(page))}`)
+  }
+  await clickByText(page, SETTINGS_LABELS)
+  const navReady = await page
+    .waitForFunction(
+      (rawLabels) => {
+        const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+        const labels = rawLabels.map(strip)
+        return [...document.querySelectorAll('*')].some((node) => {
+          const text = strip(node.textContent)
+          return labels.includes(text) && node.children.length <= 3
+        })
+      },
+      { timeout: 60_000, polling: 200 },
+      REMOTE_HOSTS_LABELS,
+    )
+    .then(() => true)
+    .catch(() => false)
+  if (!navReady) {
+    throw new Error(
+      `the settings dialog did not offer a Remote hosts section: ${JSON.stringify(await describePage(page))}`,
+    )
+  }
+  const nav = await clickByText(page, REMOTE_HOSTS_LABELS)
+  if (!nav) throw new Error('found the Remote hosts entry but could not activate it')
+  const mounted = await page
+    .waitForFunction(
+      () => {
+        const node = document.querySelector('[data-testid="settings-remote-section"]')
+        return node !== null && node.getBoundingClientRect().width > 0
+      },
+      { timeout: 60_000, polling: 200 },
+    )
+    .then(() => true)
+    .catch(() => false)
+  if (!mounted) {
+    throw new Error(`the Remote-hosts section never mounted: ${JSON.stringify(await describePage(page))}`)
+  }
 }
 
 /**
@@ -514,7 +520,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       // A fresh profile opens a separate welcome window; "configure later" needs no
       // credentials and hands control to the app window.
       const skipped = await dismissOnboarding(browser, consoleErrors)
-      console.log(`[desktop-e2e] onboarding ${skipped ? 'dismissed with "configure later"' : 'not shown'}`)
+      console.log(`[desktop-e2e] onboarding ${skipped ? `dismissed via "${skipped}"` : 'not shown'}`)
 
       page = await findPage(browser, isAppUrl, 180_000)
       page.on('console', (message) => {
@@ -523,6 +529,10 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
       await page.setViewport({ width: 1400, height: 950 }).catch(() => {})
 
+      console.log(
+        `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,
+      )
+      await openRemoteHostsSection(page)
       await openRemoteHostsSection(page)
       const applied = await page.evaluate(() => {
         const section = document.querySelector('[data-testid="settings-remote-section"]')

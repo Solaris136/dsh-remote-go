@@ -103,8 +103,20 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 }
 
 /**
- * Tag the deepest element whose whitespace-stripped text equals a candidate, then
- * click it with a real mouse event. Deepest wins: the label span, not its wrapper.
+ * Compare UI labels the same way on both sides.
+ *
+ * The shells render labels with translated spacing (`Remote hosts`), and the DOM
+ * wraps them in extra whitespace, so both the candidate and the node text are
+ * folded the same way. Doing this on ONE side only is a trap that hides a whole
+ * locale: `strip('Remote hosts')` is `'Remotehosts'`, which never equals the
+ * unstripped `'Remote hosts'` — that is exactly why this suite passed in Chinese
+ * (no spaces to strip) and could never pass in English.
+ */
+const normaliseLabel = (value) => (value ?? '').replace(/\s+/g, '').trim()
+
+/**
+ * Tag the deepest element whose normalised text equals a normalised candidate, then
+ * activate it. Deepest wins: the label span, not its wrapper.
  * @param {import('puppeteer-core').Page} page
  * @param {string[]} candidates
  * @returns {Promise<string | null>}
@@ -112,10 +124,11 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 async function clickByText(page, candidates) {
   const matched = await page.evaluate((list) => {
     const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+    const wanted = list.map(strip)
     const nodes = [
       ...document.querySelectorAll('button, [role="menuitem"], [role="button"], [role="tab"], a, li, div, span'),
     ]
-    for (const candidate of list) {
+    for (const candidate of wanted) {
       const matches = nodes.filter((node) => strip(node.textContent) === candidate)
       if (matches.length === 0) continue
       const target = matches.sort(
@@ -128,7 +141,11 @@ async function clickByText(page, candidates) {
     return null
   }, candidates)
   if (!matched) return null
-  await page.click('[data-web-e2e-click="1"]')
+  // DOM-dispatched activation: a coordinate click is swallowed by any overlay that
+  // happens to cover the row, which is invisible in the failure output.
+  await page.evaluate(() => {
+    document.querySelector('[data-web-e2e-click="1"]')?.click()
+  })
   await unmark(page)
   return matched
 }
@@ -216,16 +233,19 @@ async function hasSettingsEntry(page) {
     })
   })
 }
-
 /**
- * Open the account menu. A fresh profile paints the shell before React attaches
- * its handlers, so a click can land on a dead button: retry, each attempt bounded
- * by a wait on the menu actually opening.
+ * Open the account menu and wait, bounded, for its Settings entry.
+ *
+ * A fresh profile paints the shell before the app's handlers are attached, so the
+ * first click can land on a dead button — a real interactivity race, not a label
+ * mismatch (that bug is fixed: both sides of every comparison are normalised). It is
+ * bounded to three clicks, each followed by a wait on the menu actually opening, so
+ * a genuine failure still fails fast instead of looping.
  * @param {import('puppeteer-core').Page} page
  */
 async function openAccountMenu(page) {
   await waitForSelector(page, ACCOUNT_MENU_SELECTOR)
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     await dismissFirstRunDialogs(page)
     if (await hasSettingsEntry(page)) return
     const clicked = await clickByAriaLabel(page, ACCOUNT_MENU_LABELS)
@@ -257,7 +277,8 @@ async function openAccountMenu(page) {
 }
 
 /**
- * Wait (bounded) for a clickable label to appear, then click it.
+ * Wait (bounded) for a clickable label to appear, then activate it.
+ * Both sides of the comparison are normalised — see `normaliseLabel`.
  * @param {import('puppeteer-core').Page} page
  * @param {string[]} labels
  * @param {{ timeout?: number, label: string }} options
@@ -266,9 +287,10 @@ async function waitAndClickByText(page, labels, options) {
   await page.waitForFunction(
     (list) => {
       const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+      const wanted = list.map(strip)
       return [...document.querySelectorAll('*')].some((node) => {
         const text = strip(node.textContent)
-        return list.includes(text) && node.children.length <= 2
+        return wanted.includes(text) && node.children.length <= 2
       })
     },
     { timeout: options.timeout ?? 60_000, polling: 200 },
@@ -279,70 +301,35 @@ async function waitAndClickByText(page, labels, options) {
   return clicked
 }
 
-/** Navigate account menu -> Settings -> Remote hosts. @param {import('puppeteer-core').Page} page */
-async function openRemoteHostsSection(page) {
-  // The sign-in prompt can arrive *after* Settings is opened and then covers the dialog, so a
-  // click on "Remote hosts" lands on the overlay. Retry the whole navigation, clearing any
-  // foreign dialog first — the first CI run failed exactly this way.
-  let lastError = null
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await dismissForeignDialogs(page)
-      if (!(await page.$('[data-testid="settings-remote-section"]'))) {
-        const settingsOpen = await page.$('[role="dialog"]')
-        if (!settingsOpen) {
-          await openAccountMenu(page)
-          const settings = await clickByText(page, SETTINGS_LABELS)
-          if (!settings) throw new Error('the account menu did not expose a clickable Settings entry')
-        }
-      }
-      await dismissForeignDialogs(page)
-      await waitAndClickByText(page, REMOTE_HOSTS_LABELS, {
-        label: 'the settings dialog did not offer a Remote hosts section',
-      })
-      await waitForSelector(page, '[data-testid="settings-remote-section"]')
-      return
-    } catch (error) {
-      lastError = error
-    }
-  }
-  throw lastError ?? new Error('the Remote hosts section could not be opened')
-}
-
 /**
- * Close a dialog that is not the settings dialog (the sign-in prompt), leaving Settings alone.
+ * Navigate account menu -> Settings -> Remote hosts, once.
+ *
+ * Every step is a bounded wait on the state that must change; there is no retry
+ * loop. A loop would only hide a deterministic failure — and this one was
+ * deterministic: the label comparison stripped whitespace from the DOM text but not
+ * from the candidate, so `Remote hosts` could never match in English. With both
+ * sides normalised, one pass is enough.
  * @param {import('puppeteer-core').Page} page
  */
-async function dismissForeignDialogs(page) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const cleared = await page.evaluate(() => {
-      const isSettings = (dialog) => (dialog.textContent ?? '').includes('Remote hosts')
-      const foreign = [...document.querySelectorAll('[role="dialog"]')].filter((node) => !isSettings(node))
-      if (foreign.length === 0) return false
-      for (const dialog of foreign) {
-        const close = dialog.querySelector('[aria-label="Close"], [aria-label="关闭"]')
-        if (close) {
-          close.click()
-          continue
-        }
-        const later = [...dialog.querySelectorAll('button')].find((node) =>
-          ['Set up later', '稍后配置', 'Configure later', 'Cancel', '取消'].includes((node.textContent ?? '').trim()),
-        )
-        if (later) later.click()
-      }
-      return true
-    })
-    if (!cleared) return
-    await page
-      .waitForFunction(
-        () => {
-          const isSettings = (dialog) => (dialog.textContent ?? '').includes('Remote hosts')
-          return [...document.querySelectorAll('[role="dialog"]')].every(isSettings)
-        },
-        { timeout: 10_000 },
-      )
-      .catch(() => {})
-  }
+async function openRemoteHostsSection(page) {
+  await dismissFirstRunDialogs(page)
+  await openAccountMenu(page)
+  const settings = await clickByText(page, SETTINGS_LABELS)
+  if (!settings) throw new Error('the account menu did not expose a clickable Settings entry')
+  // The settings dialog replaces the menu; wait for it before touching its nav.
+  await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, { timeout: 30_000 })
+  await waitAndClickByText(page, REMOTE_HOSTS_LABELS, {
+    label: 'the settings dialog did not offer a Remote hosts section',
+  })
+  // Existence is the contract; the contrast measurement below then requires real
+  // layout, so a zero-sized section cannot slip through.
+  await page.waitForFunction(
+    () => {
+      const node = document.querySelector('[data-testid="settings-remote-section"]')
+      return node !== null && node.getBoundingClientRect().width > 0
+    },
+    { timeout: 60_000, polling: 200 },
+  )
 }
 
 /**
@@ -462,6 +449,10 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         '--no-default-browser-check',
         '--disable-extensions',
         '--disable-background-networking',
+        // Force one UI language so the run cannot depend on the machine's locale: CI
+        // is en-US, and a developer machine may be anything. `DSH_E2E_LANG` overrides
+        // it (both `en-US` and `zh-CN` must pass — the labels are normalised).
+        `--lang=${process.env.DSH_E2E_LANG ?? 'en-US'}`,
         ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
       ],
     })
