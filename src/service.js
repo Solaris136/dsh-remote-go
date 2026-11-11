@@ -496,6 +496,22 @@ export class RemoteGoService extends EventEmitter {
    */
   async syncHostMirrors(id, options = {}) {
     await this.init()
+    const syncRuntime = this.runtimes.get(id)
+    if (syncRuntime) syncRuntime.syncing = true
+    try {
+      return await this.#syncHostMirrorsInner(id, options)
+    } finally {
+      if (syncRuntime) syncRuntime.syncing = false
+    }
+  }
+
+  /**
+   * The body of `syncHostMirrors`, split out so a background poller (§6.3, when activated) can be
+   * held off for its duration — both paths persist descriptors.
+   * @param {string} id @param {{ acknowledgeResync?: boolean }} [options]
+   */
+  async #syncHostMirrorsInner(id, options = {}) {
+    await this.init()
     const runtime = this.#runtime(id)
     if (runtime.mirrorSync) {
       // Never run two directory syncs at once for one host; coalesce on the
@@ -1092,6 +1108,9 @@ export class RemoteGoService extends EventEmitter {
           // re-acquiring and the epoch survives a restart (design §6.2).
           epoch: leaseFields.epoch,
           lease: leaseFields.lease,
+          // The file L2 actually discovered, reused by the stream (§6.3) so both paths tail the
+          // same log instead of each guessing a layout.
+          ...(typeof remote.file === 'string' && remote.file !== '' ? { streamFile: remote.file } : {}),
           fencedEpoch: null,
           conflicts: plan.conflicts.length > 0 ? plan.conflicts : descriptor.conflicts,
           conflictCount: (descriptor.conflictCount ?? 0) + plan.conflicts.length,

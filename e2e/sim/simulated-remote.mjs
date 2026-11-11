@@ -23,6 +23,11 @@
 //                                                             detect a seq hole and stop its cursor there
 //   --history-no-root                                           model a remote with no `sessions/` dir
 //                                                             (typed `sessions-dir-missing` path)
+//   --stream-fixture <file> (SIM_STREAM_FIXTURE)                 records the sim appends to a session
+//                                                             log *after* the client connected, so live
+//                                                             streaming is observable (`{ sessions: { id: [] } }`)
+//   --stream-fence                                              refuse every stream frame (the remote-side
+//                                                             refusal path, §6.3)
 //   --lease-fixture <file> (SIM_LEASE_FIXTURE)                  seed the writer authority at
 //                                                             `remote-go/lease.json` (`{ writer, epoch, expiresAt,
 //                                                             sessionKey }`). The sim then VALIDATES publishes:
@@ -133,7 +138,7 @@ const SIM = {
 }
 
 /** @typedef {{ code: number, stdout: string, stderr: string }} CommandResult */
-/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number, leaseWrites?: number, leaseRefusals?: number, suspiciousJumps?: number, authority?: any, authorityHistory?: any[] }} SimState */
+/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number, leaseWrites?: number, leaseRefusals?: number, suspiciousJumps?: number, authority?: any, authorityHistory?: any[], streamPolls?: number, streamRefusals?: number, streamExtra?: Record<string, any[]> }} SimState */
 
 // ---------------------------------------------------------------------------
 // Isolation guards: this is a simulator that must never be mistaken for, or
@@ -366,6 +371,46 @@ function loadWorkspaceAnswer() {
 }
 
 const WORKSPACE = loadWorkspaceAnswer()
+/**
+ * Live-stream behaviour for the simulated remote (§6.3).
+ *
+ * `extra` maps a session id to records appended "after the client connected", which is what makes
+ * live streaming observable; `fence` makes the authority refuse every frame regardless of epoch.
+ * @type {{ extra: Record<string, any[]>, fence: boolean }}
+ */
+const STREAM = loadStreamAnswer()
+
+/**
+ * @returns {{ extra: Record<string, any[]>, fence: boolean }}
+ */
+function loadStreamAnswer() {
+  /** @type {{ extra: Record<string, any[]>, fence: boolean }} */
+  const answer = { extra: {}, fence: args['stream-fence'] === true }
+  const requested = args['stream-fixture'] ?? process.env.SIM_STREAM_FIXTURE ?? null
+  if (requested === null) return answer
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    console.error('[sim] --stream-fixture needs a file path')
+    process.exit(2)
+  }
+  const resolved = path.resolve(requested)
+  /** @type {any} */
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(resolved, 'utf8'))
+  } catch (error) {
+    fatal(`stream fixture ${resolved}`, error)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`[sim] stream fixture ${resolved} must be an object`)
+    process.exit(2)
+  }
+  const extra = parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {}
+  for (const [id, events] of Object.entries(extra)) {
+    answer.extra[id] = Array.isArray(events) ? events : []
+  }
+  return answer
+}
+
 const HISTORY = loadHistoryAnswer()
 
 /**
@@ -655,6 +700,52 @@ function respond(command, sim) {
     return ok('')
   }
 
+  // 4c. Live event stream: the follow helper installed by src/stream.js (§6.3).
+  //
+  // The sim models the remote half of the channel: it validates the caller epoch (real
+  // enforcement lives in the installed script; the sim mirrors it so the refusal path is
+  // observable), then emits the log slice after the requested byte offset as JSONL records.
+  const follow = /^node '([^']*follow\.mjs)' '([A-Za-z0-9+/=]+)'$/.exec(cmd)
+  if (follow) {
+    sim.streamPolls = (sim.streamPolls ?? 0) + 1
+    let args = {}
+    try {
+      args = JSON.parse(Buffer.from(follow[2], 'base64').toString('utf8'))
+    } catch {
+      return ok(`${JSON.stringify({ ok: false, reason: 'log-malformed' })}\n`)
+    }
+    const sessionId = /session-([^./]+)\./.exec(String(args.logPath ?? ''))?.[1] ?? ''
+    // A fenced caller gets no frame: the authority refuses it here, on the remote side.
+    const authority = currentAuthority(sim, String(args.leasePath ?? ''))
+    if (
+      STREAM.fence === true ||
+      (authority !== null && Number(authority.expiresAt) > Date.now() && Number(args.epoch) < Number(authority.epoch))
+    ) {
+      sim.streamRefusals = (sim.streamRefusals ?? 0) + 1
+      const remoteEpoch = authority === null ? 0 : Number(authority.epoch)
+      return ok(`${JSON.stringify({ ok: false, reason: 'stale-epoch', remoteEpoch })}\n`)
+    }
+    // Records the sim appends after the client connected are what make the stream observable.
+    const base = historyEventsFor(HISTORY, sessionId, sim)
+    const extra = (sim.streamExtra ?? {})[sessionId] ?? []
+    const all = [...base, ...extra]
+    const body = `${all.map((event) => JSON.stringify(event)).join('\n')}\n`
+    const offset = Math.max(0, Math.min(Number(args.offset) || 0, Buffer.byteLength(body, 'utf8')))
+    const maxBytes = Math.max(1, Number(args.maxBytes) || 65536)
+    const slice = Buffer.from(body, 'utf8').subarray(offset, offset + maxBytes)
+    const text = slice.toString('utf8')
+    const cut = text.lastIndexOf('\n')
+    const usable = cut < 0 ? '' : text.slice(0, cut + 1)
+    const nextOffset = offset + Buffer.byteLength(usable, 'utf8')
+    const events = usable
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+      .map((line) => JSON.parse(line))
+    return ok(
+      `${JSON.stringify({ ok: true, offset: nextOffset, bytes: Buffer.byteLength(body, 'utf8'), events, truncated: slice.length >= maxBytes })}\n`,
+    )
+  }
   // 5. Run registry read (src/webapp.js readRunRegistry).
   if (/^cat '[^']*\/run\/web\.json'/.test(cmd)) {
     return ok(sim.started ? `${runRegistry(sim)}\n` : '')

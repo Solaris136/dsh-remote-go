@@ -251,6 +251,7 @@ export function planMirror(input = {}) {
         writable: previous?.writable === true,
         fencedEpoch: previous?.fencedEpoch ?? null,
         fencedWriter: previous?.fencedWriter ?? null,
+        streamFile: previous?.streamFile ?? null,
         conflicts: previous?.conflicts ?? [],
         conflictCount: previous?.conflictCount ?? 0,
       })
@@ -307,6 +308,8 @@ export function normalizeMirrorDescriptor(raw) {
     writable: record.writable === true,
     fencedEpoch: nonNegativeInteger(record.fencedEpoch) ?? null,
     fencedWriter: textOrNull(record.fencedWriter),
+    // The remote log path the L2 read discovered; the stream follows the same file (§6.3).
+    streamFile: textOrNull(record.streamFile),
     conflicts: Array.isArray(record.conflicts)
       ? capConflicts(
           record.conflicts.filter(isMirrorConflict).map((/** @type {MirrorConflict} */ conflict) => ({ ...conflict })),
