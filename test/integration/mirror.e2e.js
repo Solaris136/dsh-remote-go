@@ -7,13 +7,15 @@
  * real detached remote start → the real loopback tunnel → the real token
  * exchange → the real `readRemoteWorkspaces()` of a configurable fixture →
  * `planMirror()` → `MirrorStore` (mirrors.json) → `listHostMirrors()` →
- * `GET /hosts/:id/mirrors`.
+ * `GET /hosts/:id/mirrors`, plus the local landing of those mirrors: one
+ * `ctx.sessions` session per descriptor and one `ctx.workspaceRegistry`
+ * workspace per host whose canonical-cwd membership lists exactly those
+ * sessions.
  *
- * Not provable here: that a DSH sidebar actually renders those entries. The
- * sidebar is a browser component of a real DSH Host and the simulator only stubs
- * the remote web, so this suite stops at the API contract the sidebar consumes
- * (level L1 plus one descriptor per remote session, stable ids, cursor 0,
- * status active).
+ * Not provable here: that a real DSH sidebar renders the group (the sidebar is a
+ * browser component of a real DSH Host and the simulator only stubs the remote
+ * web). What is proven is the registry state the sidebar reads: a workspace at
+ * the mirror directory whose `sessionIds` is the set of mirrored sessions.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -35,6 +37,7 @@ import { RemoteGoService } from '../../src/service.js'
 import { createSessionAdapter } from '../../src/session-adapter.js'
 import { SshConnection } from '../../src/ssh.js'
 import { HostStore } from '../../src/store.js'
+import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
 import { readRemoteWorkspaces, remoteWorkspaceStoragePath } from '../../src/workspaces.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -252,7 +255,7 @@ async function startApi(service, logs) {
  * needed). Everything else — SSH transport, probe, remote start and tunnel — is
  * real. Because `resolveTarget` returns the probed remote version, version parity
  * is true by construction and is therefore NOT asserted anywhere below.
- * @param {{ stateDir: string, home: string, localVersion: string, logs: string[], adapter?: any }} options
+ * @param {{ stateDir: string, home: string, localVersion: string, logs: string[], adapter?: any, workspaceAdapter?: any }} options
  */
 function createService(options) {
   const logger = createLogger(options.logs)
@@ -264,6 +267,7 @@ function createService(options) {
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
     resolveTarget: () => ({ targetVersion: options.localVersion, source: 'test' }),
     sessionAdapter: options.adapter ?? null,
+    workspaceAdapter: options.workspaceAdapter ?? null,
   })
 }
 
@@ -338,6 +342,67 @@ async function waitForMirrors(service, hostId, logs, expectedCount, timeoutMs = 
 /** The descriptor fields that must not change across a successful re-sync. */
 function stablePart(mirrors) {
   return mirrors.map(({ mirroredAt, ...rest }) => rest)
+}
+
+/**
+ * A `workspaceRegistry` double that reproduces the one behaviour the sidebar
+ * depends on: every workspace's `sessionIds` is a canonical-cwd header index
+ * (the real registry filters the getter that way), so membership follows the
+ * session header's `meta.cwd` rather than an explicit attach call.
+ *
+ * `create`/`resolveByPath`/`delete` mirror the real service's contract:
+ * idempotent per canonical path, non-creating lookup, registration-only delete.
+ * @param {Map<string, any>} live session id → `{ id, cwd }`
+ */
+function createFakeWorkspaceRegistry(live) {
+  /** @type {Map<string, any>} */
+  const byPath = new Map()
+  /** @type {{ create: { path: string, title: string | undefined }[], delete: string[] }} */
+  const calls = { create: [], delete: [] }
+  let seq = 0
+  /** @param {unknown} value */
+  const canonical = (value) => (typeof value === 'string' && value !== '' ? path.resolve(value) : null)
+  const registry = {
+    calls,
+    async create(dir, title) {
+      calls.create.push({ path: dir, title })
+      const key = canonical(dir)
+      const existing = byPath.get(key)
+      if (existing) return existing
+      const workspace = {
+        id: `ws_${(seq += 1)}`,
+        path: key,
+        title: title ?? path.basename(String(dir)),
+        get sessionIds() {
+          return [...live.values()]
+            .filter((session) => canonical(session.cwd) === workspace.path)
+            .map((session) => session.id)
+        },
+        async setTitle(next) {
+          workspace.title = next
+        },
+      }
+      byPath.set(key, workspace)
+      return workspace
+    },
+    async resolveByPath(dir) {
+      return byPath.get(canonical(dir))
+    },
+    async delete(id) {
+      calls.delete.push(id)
+      for (const [key, workspace] of byPath) {
+        if (workspace.id === id) {
+          byPath.delete(key)
+          return true
+        }
+      }
+      return false
+    },
+    list() {
+      return [...byPath.values()]
+    },
+  }
+  return registry
 }
 
 test('remote sessions appear as local mirror sessions, end to end', { timeout: 180_000 }, async (t) => {
@@ -649,6 +714,88 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         assert.deepEqual(createCalls.map((call) => call.id).sort(), descriptorIds)
       } finally {
         await withAdapter.shutdown()
+      }
+    })
+
+    await t.test('the sidebar workspace groups exactly the mirrored sessions', async () => {
+      assert.ok(simulator && ctx.remoteVersion, 'the simulator subtest did not run')
+      const stateDir = path.join(temp, 'state-sidebar')
+      // The real plugin builds this root (src/index.js): `$DSH_HOME/remote-go/mirrors`.
+      const mirrorRoot = path.join(stateDir, 'mirrors')
+      /** @type {Map<string, any>} */
+      const live = new Map()
+      const sessions = {
+        create(id, options) {
+          const session = { id, cwd: options?.meta?.cwd ?? null, append() {} }
+          live.set(id, session)
+          return session
+        },
+        get(id) {
+          return live.get(id)
+        },
+      }
+      const registry = createFakeWorkspaceRegistry(live)
+      const logger = createLogger(serviceLogs)
+      const sessionAdapter = createSessionAdapter({ sessions, logger, mirrorRoot })
+      const workspaceAdapter = createWorkspaceAdapter({ registry, logger, mirrorRoot })
+      const withSidebar = createService({
+        stateDir,
+        home: path.join(temp, 'dsh-home-sidebar'),
+        localVersion: ctx.remoteVersion,
+        logs: serviceLogs,
+        adapter: sessionAdapter,
+        workspaceAdapter,
+      })
+      await withSidebar.init()
+      const host = await withSidebar.saveHost({
+        name: 'simulated-remote-sidebar',
+        address: '127.0.0.1',
+        port: simulator.state.sshPort,
+        username: CREDENTIALS.username,
+        auth: { type: 'password' },
+        keepAlive: 'keep',
+        bootstrap: { mode: 'reuse' },
+      })
+      try {
+        await connectHost(withSidebar, host.id, CREDENTIALS.password, serviceLogs)
+        const listed = await waitForMirrors(withSidebar, host.id, serviceLogs, FIXTURE_SESSIONS.length)
+        // Both follow the descriptor write in the background connect sync.
+        const deadline = Date.now() + 30_000
+        while ((live.size < FIXTURE_SESSIONS.length || registry.list().length !== 1) && Date.now() < deadline) {
+          await sleep(25)
+        }
+
+        const workspaces = registry.list()
+        assert.equal(workspaces.length, 1, 'exactly one sidebar workspace per host')
+        const workspace = workspaces[0]
+        const mirrorCwd = path.join(mirrorRoot, host.id)
+        assert.equal(workspace.path, path.resolve(mirrorCwd), 'the workspace owns the mirror sessions cwd')
+        assert.equal(workspace.title, `Remote: ${host.name}`, 'the title names the remote host')
+        // Membership is derived from the canonical cwd, so this is the number the
+        // sidebar will actually render — and it must equal the mirrored sessions.
+        assert.equal(workspace.sessionIds.length, FIXTURE_SESSIONS.length)
+        assert.equal(workspace.sessionIds.length, listed.mirrors.length)
+        assert.deepEqual([...workspace.sessionIds].sort(), listed.mirrors.map((mirror) => mirror.localSessionId).sort())
+        // Every live mirror session really is keyed off that one directory.
+        for (const session of live.values()) assert.equal(path.resolve(session.cwd), workspace.path)
+
+        // The sync payload reports the registration the sidebar just gained, and
+        // a re-sync reuses it instead of creating a duplicate.
+        const synced = await withSidebar.syncHostMirrors(host.id)
+        assert.equal(synced.sidebar.ok, true)
+        assert.equal(synced.sidebar.workspaceId, workspace.id)
+        assert.equal(synced.sidebar.created, false, 'a re-sync must reuse the registration')
+        assert.equal(synced.sidebar.title, `Remote: ${host.name}`)
+        assert.equal(registry.calls.create.length, 1, 'the registry was asked to create exactly once')
+        assert.equal(registry.list().length, 1)
+
+        // Deleting the host removes the registration; the directory is retained.
+        await withSidebar.removeHost(host.id)
+        assert.deepEqual(registry.list(), [])
+        assert.equal(registry.calls.delete.length, 1)
+        assert.equal((await stat(mirrorCwd)).isDirectory(), true, 'the mirror directory is retained')
+      } finally {
+        await withSidebar.shutdown()
       }
     })
 

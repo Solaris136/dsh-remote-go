@@ -116,6 +116,7 @@ export class FakeTunnel {
  *   localVersion?: string | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   sessionAdapter?: any,
+ *   workspaceAdapter?: any,
  * }} [overrides]
  */
 export async function makeTestService(overrides = {}) {
@@ -188,6 +189,7 @@ export async function makeTestService(overrides = {}) {
     }),
     hostKeyConfirmTimeoutMs: overrides.hostKeyConfirmTimeoutMs ?? 2000,
     sessionAdapter: overrides.sessionAdapter ?? null,
+    workspaceAdapter: overrides.workspaceAdapter ?? null,
   })
   await service.init()
   return { service, store, dir, events, facts }

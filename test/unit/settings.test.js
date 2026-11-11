@@ -8,6 +8,7 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.defaultAuth, 'agent')
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
+  assert.equal(settings.mirrorToSidebar, true)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.targetVersion, 'local')
   assert.equal(settings.bootstrap.mode, 'auto')
@@ -31,6 +32,9 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal(settings.bootstrap.nodeVersion, defaultSettings().bootstrap.nodeVersion)
   assert.equal(settings.bootstrap.targetVersion, 'local')
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
+  // A malformed opt-out must fall back to the documented default (on).
+  assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, true)
+  assert.equal(sanitizeSettings({ mirrorToSidebar: false }).mirrorToSidebar, false)
 })
 
 test('sanitizeHostEntry validates and normalizes a first host', () => {

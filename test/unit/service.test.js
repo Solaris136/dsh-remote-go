@@ -545,6 +545,166 @@ test('removing a host actually drops local sessions when the host can delete the
   await service.shutdown()
 })
 
+test('connect registers one sidebar workspace per host with the host name', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  /** @type {{ hostId?: string, hostName?: string, enabled?: boolean }[]} */
+  const calls = []
+  const workspaceAdapter = {
+    async ensureHostWorkspace(request) {
+      calls.push(request)
+      return {
+        ok: true,
+        enabled: true,
+        reason: null,
+        hostId: request.hostId,
+        path: `/mirrors/${request.hostId}`,
+        title: `Remote: ${request.hostName}`,
+        workspaceId: 'ws_mirror',
+        created: true,
+        renamed: false,
+      }
+    },
+  }
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    sessionAdapter: {
+      ensureMirrorSession: (descriptor) => ({ ok: true, created: true, localSessionId: descriptor.localSessionId }),
+    },
+    sshFactory: registrySshFactory(stdout),
+  })
+  const host = await createHost(service)
+  const synced0 = await service.connect(host.id)
+  assert.equal(synced0.accepted, true)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+  await waitFor(() => calls.length > 0, { label: 'the sidebar workspace registration' })
+
+  assert.equal(calls[0].hostId, host.id)
+  assert.equal(calls[0].hostName, host.name)
+  assert.equal(calls[0].enabled, true)
+
+  // The sync response exposes what the sidebar registration did, so the client
+  // (and this test) never has to guess.
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.sidebar.ok, true)
+  assert.equal(synced.sidebar.workspaceId, 'ws_mirror')
+  assert.equal(synced.sidebar.title, `Remote: ${host.name}`)
+  await service.shutdown()
+})
+
+test('mirrorToSidebar:false never registers a sidebar workspace', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  /** @type {any[]} */
+  const calls = []
+  const workspaceAdapter = {
+    async ensureHostWorkspace(request) {
+      calls.push(request)
+      return { ok: true, enabled: true, workspaceId: 'ws_mirror' }
+    },
+  }
+  const { service } = await makeTestService({ workspaceAdapter, sshFactory: registrySshFactory(stdout) })
+  await service.saveSettings({ mirrorToSidebar: false })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.synced, true)
+  assert.equal(synced.sidebar.enabled, false)
+  assert.equal(synced.sidebar.reason, 'disabled')
+  assert.deepEqual(calls, [], 'the adapter must not be asked when the setting is off')
+  await service.shutdown()
+})
+
+test('removing a host removes its sidebar workspace registration', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  /** @type {string[]} */
+  const removed = []
+  const workspaceAdapter = {
+    ensureHostWorkspace: async () => ({ ok: true, enabled: true, workspaceId: 'ws_mirror' }),
+    removeHostWorkspace: async (request) => {
+      removed.push(request.hostId)
+      return { ok: true, removed: true, workspaceId: 'ws_mirror', path: '/mirrors/x' }
+    },
+  }
+  const { service } = await makeTestService({ workspaceAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+
+  await service.removeHost(host.id)
+  assert.deepEqual(removed, [host.id])
+  await service.shutdown()
+})
+
+test('a throwing workspace adapter cannot fail the sync or the host removal', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  const workspaceAdapter = {
+    ensureHostWorkspace: async () => {
+      throw new Error('registry exploded')
+    },
+    removeHostWorkspace: async () => {
+      throw new Error('delete exploded')
+    },
+  }
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    sessionAdapter: {
+      ensureMirrorSession: (descriptor) => ({ ok: true, created: true, localSessionId: descriptor.localSessionId }),
+    },
+    sshFactory: registrySshFactory(stdout),
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.synced, true, 'a sidebar failure must not roll back the directory sync')
+  assert.equal(synced.sidebar.ok, false)
+  assert.equal(synced.sidebar.reason, 'adapter-error')
+  const runtime = service.runtimes.get(host.id)
+  assert.equal(
+    runtime.logs.some((entry) => entry.line.includes('mirror sidebar workspace failed')),
+    true,
+  )
+
+  // Host removal must complete too (the mirror rows are what really matter).
+  const removedHost = await service.removeHost(host.id)
+  assert.equal(removedHost.ok, true)
+  assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 0)
+  await service.shutdown()
+})
+
+test('without a sessions service no empty sidebar group is created', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  /** @type {any[]} */
+  const calls = []
+  const workspaceAdapter = {
+    async ensureHostWorkspace(request) {
+      calls.push(request)
+      return { ok: true, enabled: true, workspaceId: 'ws_mirror' }
+    },
+  }
+  const { service } = await makeTestService({ workspaceAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.sidebar.reason, 'sessions-unavailable')
+  assert.deepEqual(calls, [])
+  await service.shutdown()
+})
+
 test('syncHostMirrors keeps and marks a session the remote deleted', async () => {
   let sessionIds = ['s-a', 's-b']
   const commands = []

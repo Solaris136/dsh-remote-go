@@ -727,6 +727,7 @@ test('settings modal renders contract fields and the save action', () => {
     autoReconnect: { enabled: true, maxAttempts: 3, baseDelayMs: 1000 },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
+    mirrorToSidebar: true,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -745,6 +746,8 @@ test('settings modal renders contract fields and the save action', () => {
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)
+  assert.match(html, /镜像会话/)
+  assert.match(html, /显示在本地侧边栏/)
   assert.match(html, /自举/)
   assert.match(html, /保存设置/)
 })
