@@ -65,6 +65,15 @@ import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 /** Milliseconds a paused host-key handshake waits for the user. */
 export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
 
+/**
+ * How long `removeHost` waits for an in-flight mirror sync to settle before deleting anyway.
+ *
+ * The tombstone (see `mirrorDeleted`) is what makes deletion correct; this wait only lets a
+ * running sync finish its session appends tidily. It is bounded on purpose: a wedged queue must
+ * never make a host undeletable.
+ */
+const DELETE_WAIT_MS = 5_000
+
 /** @typedef {'unconfigured'|'connecting'|'fingerprint-pending'|'connected'|'disconnected'|'error'|'limited'} HostStatus */
 /** @typedef {'ssh'|'probe'|'bootstrap'|'start'|'tunnel'|'ready'} ConnectPhase */
 
@@ -361,6 +370,19 @@ export class RemoteGoService extends EventEmitter {
   async removeHost(id) {
     await this.init()
     const runtime = this.runtimes.get(id)
+    if (runtime) {
+      // Tombstone **before the first await**, so a descriptor write that is already queued (or
+      // that gets queued behind the removal) cannot put this host's mirrors back. This is what
+      // makes the deletion durable against an in-flight sync. See design §6.3.
+      runtime.mirrorDeleted = true
+      this.#log(runtime, 'info', 'mirror host removed: descriptor writes are now no-ops')
+      // Let a running sync settle so its session appends finish before the host record goes.
+      // Bounded: a wedged queue must not make the host undeletable.
+      await Promise.race([
+        runtime.mirrorSync?.catch?.(() => null) ?? Promise.resolve(),
+        new Promise((resolve) => setTimeout(resolve, DELETE_WAIT_MS).unref?.()),
+      ])
+    }
     if (runtime) await this.#teardownRuntime(runtime, { stopRemote: runtime.entry.keepAlive === 'stop' ? true : false })
     this.runtimes.delete(id)
     await this.store.removeHost(id)
@@ -1984,9 +2006,7 @@ export class RemoteGoService extends EventEmitter {
       runtime,
       () => this.mirrorStore.listMirrors({ hostId: runtime.id }),
       (next) => this.mirrorStore.replaceHostMirrors(runtime.id, next),
-      // The guard is *inside* the queued delta: a write enqueued before the deletion but executed
-      // after it must also be a no-op, otherwise the queue would only reorder the resurrection.
-      (current) => (runtime.mirrorDeleted === true ? current : delta(current)),
+      delta,
     )
   }
 

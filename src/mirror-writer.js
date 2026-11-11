@@ -27,7 +27,12 @@
  */
 export async function withMirrorWriter(runtime, read, write, delta) {
   return withMirrorQueue(runtime, async () => {
+    // A deleted host must never have its descriptors written back — on *any* path, including a
+    // write that was enqueued before the deletion and runs after it. The check therefore lives
+    // here, inside the queued operation, rather than in a caller: every write inherits it, and it
+    // is testable without a test reimplementing the guard. See docs/session-design.md §6.3.
     const current = read()
+    if (runtime.mirrorDeleted === true) return current
     const next = delta(current)
     if (!Array.isArray(next)) return current
     return write(next)

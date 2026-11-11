@@ -328,9 +328,11 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 
 - **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)` 让任意镜像操作排进同一条链；
   `removeHost` 的删除通过它执行，因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
-- **墓碑优先于排序。** 删除一开始就置 `runtime.mirrorDeleted = true`；`#mutateMirrors` 把这个判断放在**排队的
-  delta 内部**，所以哪怕某次写入是在删除**之前**入队、在删除**之后**才执行，它也只会写回 `current`，不会复活。
-  队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
+- **墓碑优先于排序。** `removeHost` 在**第一个 `await` 之前**就置 `runtime.mirrorDeleted = true`；这个判断放在
+  `withMirrorWriter` 的**排队操作内部**（`src/mirror-writer.js`），所以哪怕某次写入是在删除**之前**入队、在删除
+  **之后**才执行，它也只返回 `current`、不写回，不会复活。队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
+  把判断放在 `withMirrorWriter` 而不是某个调用方，是为了让**所有**写入路径自动继承它，也让它可以被测试直接驱动
+  （不必在测试里复制一份守卫逻辑）。
 - **合并是更新，不是 upsert。** `mergeDescriptorDeltas` 只改 `current` 里已存在的描述符；delta 指向一个已经
   不存在的 `localSessionId` 时**丢弃**它——那正意味着「快照读完之后它被删了」。新建描述符是 reconcile 的职责
   （它返回计划的全集），不是 merge 的。

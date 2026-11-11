@@ -194,74 +194,19 @@ test('deletion ordered against an in-flight sync leaves nothing behind', async (
   assert.deepEqual(rows, [], 'the deleted host keeps no descriptors')
 })
 
-test('a write enqueued before a deletion but run after it is a no-op', async () => {
-  // The tombstone covers the ordering the queue cannot: a write enqueued *before* the deletion
-  // still runs (the queue is FIFO), so the guard has to be inside the delta.
-  /** @type {any[]} */
-  let rows = [{ localSessionId: 'mirror_a', cursor: 0 }]
-  /** @type {any} */
-  const runtime = { id: 'h_tombstone' }
-  /** @type {() => void} */
-  let release = () => {}
-  const gate = new Promise((resolve) => {
-    release = () => resolve(undefined)
-  })
-
-  const held = withMirrorWriter(
-    runtime,
-    () => rows.map((entry) => ({ ...entry })),
-    async (next) => {
-      await gate
-      rows = next
-      return rows
-    },
-    (current) => (runtime.mirrorDeleted === true ? current : mergeDescriptorDeltas(current, current)),
-  )
-  // The host is removed while the write is in flight.
-  runtime.mirrorDeleted = true
-  rows = []
-  release()
-  await held
-
-  assert.deepEqual(rows, [], 'the tombstoned write must not put the descriptors back')
-})
-
-test('every descriptor mutation goes through the mirror queue', async () => {
-  // Structural guard, same spirit as the wait-predicate scanner: the resurrection bug came from a
-  // *direct* store call bypassing the queue, so assert the shape rather than trusting review.
-  const { readFile } = await import('node:fs/promises')
-  const source = await readFile(new URL('../../src/service.js', import.meta.url), 'utf8')
-
-  // Every `removeHostMirrors` / `replaceHostMirrors` call must be inside a queue helper call.
-  const offenders = []
-  source.split('\n').forEach((line, index) => {
-    const isCall = /\.(removeHostMirrors|replaceHostMirrors)\??\.\(/.test(line)
-    if (!isCall) return
-    // Allowed: the two queue-owning callbacks and the queue helpers' own bodies.
-    if (/withMirrorQueue|withMirrorWriter/.test(line)) return
-    if (/removeHostMirrors\?\.\(hostId\)/.test(line)) return
-    if (/replaceHostMirrors\(runtime\.id, next\)/.test(line)) return
-    if (false) {
-      return
-    }
-    offenders.push(`service.js:${index + 1} → ${line.trim()}`)
-  })
-  assert.deepEqual(offenders, [], 'descriptor mutations must go through the queue, not the store directly')
-})
-
-test('removing a host while a sync write is queued leaves no mirrors behind', async () => {
-  // The practical case from the PR: a sync is mid-flight when the user removes the host. Driven
-  // through the real `removeHost`, with the in-flight write represented by a promise we control —
-  // no sleeps, and no SSH (the mirror store is the only collaborator involved).
+test('the tombstone is set by removeHost, not by the test', async () => {
+  // The previous version of this file set `runtime.mirrorDeleted` itself, so it could never fail
+  // for a missing assignment — the "test asserts against a seam it introduced" failure mode.
+  // This one only calls production code and then checks the flag it relies on.
   const { RemoteGoService } = await import('../../src/service.js')
   const { HostStore } = await import('../../src/store.js')
   const { mkdtempSync, rmSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const path = await import('node:path')
 
-  const dir = mkdtempSync(path.join(tmpdir(), 'dsh-delete-race-'))
+  const dir = mkdtempSync(path.join(tmpdir(), 'dsh-tombstone-'))
   const quiet = { warn() {}, info() {}, debug() {}, error() {} }
-  /** @type {RemoteGoService | null} */
+  /** @type {any} */
   let service = null
   try {
     service = new RemoteGoService({
@@ -276,48 +221,127 @@ test('removing a host while a sync write is queued leaves no mirrors behind', as
     })
     await service.init()
     const host = await service.saveHost({
-      name: 'delete-race',
+      name: 'tombstone',
       address: '127.0.0.1',
       username: 'sim',
       auth: { type: 'password' },
     })
-    // A persisted descriptor for this host, as a completed sync would have written.
-    await service.mirrorStore.replaceHostMirrors(host.id, [
-      { localSessionId: 'mirror_a', hostId: host.id, remoteSessionId: 'a', cursor: 3 },
-    ])
-
-    // Put a write in flight that *will* restore the descriptors once released (the pre-fix shape).
     const runtime = service.runtimes.get(host.id)
-    /** @type {() => void} */
-    let release = () => {}
-    const gate = new Promise((resolve) => {
-      release = () => resolve(undefined)
-    })
-    const inFlight = withMirrorWriter(
-      runtime,
-      () => service.mirrorStore.listMirrors({ hostId: host.id }),
-      async (next) => {
-        await gate
-        // The tombstone must make this a no-op even though it was enqueued first.
-        return runtime.mirrorDeleted === true
-          ? service.mirrorStore.listMirrors({ hostId: host.id })
-          : service.mirrorStore.replaceHostMirrors(host.id, next)
-      },
-      (current) => (runtime.mirrorDeleted === true ? current : current.map((entry) => ({ ...entry, cursor: 9 }))),
-    )
-
-    // The host is removed while that write is still parked.
-    const removal = service.removeHost(host.id)
-    release()
-    await Promise.all([inFlight, removal])
-
-    assert.deepEqual(
-      service.mirrorStore.listMirrors({ hostId: host.id }),
-      [],
-      'a deleted host must keep no descriptors, even with a write in flight',
+    assert.equal(runtime.mirrorDeleted === true, false, 'a live host is not tombstoned')
+    await service.removeHost(host.id)
+    assert.equal(
+      runtime.mirrorDeleted,
+      true,
+      'removeHost must tombstone the runtime itself; the write guard is inert without it',
     )
   } finally {
     await service?.shutdown?.().catch?.(() => null)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("delete-then-reconcile cannot recreate the deleted host's mirrors", async () => {
+  // The sharp case: reconcile returns the WHOLE planned set, so update-never-upsert does not
+  // protect it — when the write lands after deletion, `current` is [] and reconcile plans every
+  // session as new. Driven through the real `removeHost` and the real `withMirrorWriter`; nothing
+  // here hands the writer a tombstone.
+  const { RemoteGoService } = await import('../../src/service.js')
+  const { HostStore } = await import('../../src/store.js')
+  const { mkdtempSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const path = await import('node:path')
+
+  const dir = mkdtempSync(path.join(tmpdir(), 'dsh-delete-reconcile-'))
+  const quiet = { warn() {}, info() {}, debug() {}, error() {} }
+  /** @type {any} */
+  let service = null
+  try {
+    service = new RemoteGoService({
+      store: new HostStore({ dir, logger: quiet }),
+      home: dir,
+      localVersion: '0.2.2-rc.1',
+      logger: quiet,
+      loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
+      resolveTarget: () => ({ targetVersion: '0.2.2-rc.1', source: 'test' }),
+      sessionAdapter: null,
+      workspaceAdapter: null,
+    })
+    await service.init()
+    const host = await service.saveHost({
+      name: 'delete-reconcile',
+      address: '127.0.0.1',
+      username: 'sim',
+      auth: { type: 'password' },
+    })
+    /** @type {any} */
+    const planned = [{ localSessionId: 'mirror_a', hostId: host.id, remoteSessionId: 'a', cursor: 0 }]
+    await service.mirrorStore.replaceHostMirrors(host.id, planned)
+    const runtime = service.runtimes.get(host.id)
+
+    // The dangerous order, deterministically: let the deletion *complete*, then attempt a
+    // reconcile-shaped write (which returns the whole planned set, so update-never-upsert cannot
+    // save it). Nothing here hands the writer a tombstone — it must come from `removeHost`.
+    await service.removeHost(host.id)
+
+    await withMirrorWriter(
+      runtime,
+      () => service.mirrorStore.listMirrors({ hostId: host.id }),
+      (next) => service.mirrorStore.replaceHostMirrors(host.id, next),
+      () => planned.map((entry) => ({ ...entry })),
+    )
+    assert.deepEqual(
+      service.mirrorStore.listMirrors({ hostId: host.id }),
+      [],
+      'the reconcile write must be a no-op once the host is deleted',
+    )
+  } finally {
+    await service?.shutdown?.().catch?.(() => null)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+test('every descriptor store mutation is inside a queue-owning method', async () => {
+  // Structural guard, same spirit as the wait-predicate scanner: the resurrection bug came from a
+  // *direct* store call bypassing the queue, so assert the shape rather than trusting review.
+  //
+  // The criterion is structural, not textual: split the class into method bodies and require every
+  // `removeHostMirrors` / `replaceHostMirrors` call to sit inside the two methods that own the
+  // queue. An earlier version matched a literal spelling (and only the optional-call form), so a
+  // plain `store.replaceHostMirrors(...)` bypass was invisible to it.
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../../src/service.js', import.meta.url), 'utf8')
+
+  /** Offsets of every method body in the class: `  async #name(` / `  #name(` / `  async name(`. */
+  const bodies = []
+  const methodRe = /^ {2}(?:async )?(#?[A-Za-z_$][\w$]*)\([^)]*\) \{$/gm
+  /** @type {RegExpExecArray | null} */
+  let match = methodRe.exec(source)
+  while (match !== null) {
+    const name = match[1]
+    const bodyStart = match.index + match[0].length
+    // The body ends at the next top-level member, i.e. the next `\n  }` followed by a blank line.
+    const rest = source.slice(bodyStart)
+    const closeAt = rest.search(/\n {2}\}/)
+    const bodyEnd = closeAt < 0 ? source.length : bodyStart + closeAt
+    // Private members keep their `#`; normalise so the allow-list reads as method names.
+    bodies.push({ name: name.replace(/^#/, ''), start: match.index, end: bodyEnd })
+    match = methodRe.exec(source)
+  }
+  assert.ok(bodies.length > 0, 'the service methods must be discoverable')
+
+  /** The only methods allowed to touch the descriptor store: they own the per-host queue. */
+  const ALLOWED = new Set(['mutateMirrors', 'removeMirrorsForHost'])
+  const offenders = []
+  for (const issue of source.matchAll(/\.(removeHostMirrors|replaceHostMirrors)\s*\??\.?\s*\(/g)) {
+    const at = issue.index ?? 0
+    const owner = bodies.find((body) => at > body.start && at < body.end)
+    if (owner === undefined || !ALLOWED.has(owner.name)) {
+      const line = source.slice(0, at).split('\n').length
+      offenders.push(`service.js:${line} → ${issue[0]} (owner: ${owner?.name ?? '<top level>'})`)
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    'descriptor store calls must live inside #mutateMirrors or #removeMirrorsForHost, which own the queue',
+  )
 })
