@@ -3,7 +3,7 @@
   "kind": "v0-iframe-embed-check",
   "wrapperUrl": "http://127.0.0.1:58420/",
   "remoteUrl": "http://127.0.0.1:45905/",
-  "seedUrlRedacted": "http://127.0.0.1:45905/?token=hXGRV0<redacted>(len=43)",
+  "seedUrlRedacted": "http://127.0.0.1:45905/?token=<REDACTED>(len=43)",
   "chromePath": "C:\\Users\\zhang\\scoop\\shims\\chrome.exe",
   "timeoutMs": 45000,
   "checks": [

@@ -93,7 +93,7 @@ log_mtime=2026-11-11 00:16:55.732554545 +0800
 pidfile_mtime=2026-11-11 00:16:49.428511195 +0800
 log_mode=600 pidfile_mode=600
 log_content_redacted:
-dsh web: http://127.0.0.1:45905/?token=hXGRV0<redacted>
+dsh web: http://127.0.0.1:45905/?token=<REDACTED>
 derived_process_start_epoch=1794327410 log_ready_epoch=1794327415 startup_seconds=5
 
 ===== D. DSH_HOME layout (isolated) =====
@@ -117,11 +117,11 @@ PID=1381088
 STARTUP_SECONDS=6
 NODE_VERSION=v24.22.2
 DSH_VERSION=0.2.2-rc.1
-URL_REDACTED=http://127.0.0.1:33033/?token=0rnP3Y...(len=43)
+URL_REDACTED=http://127.0.0.1:33033/?token=<REDACTED>(len=43)
 probe_probe_http=401
 probe_log:
 # dsh-remote-go start 2026-11-10T16:29:08Z DSH_HOME=/home/ubuntu/.dsh-remote-go/.timing-probe/home
-dsh web: http://127.0.0.1:33033/?token=0rnP3Y<redacted>
+dsh web: http://127.0.0.1:33033/?token=<REDACTED>
 # dsh-remote-go up pid=1381088 port=33033 dsh=0.2.2-rc.1 node=v24.22.2 in 6s
 STOP_OK
 ALREADY_STOPPED=0
