@@ -57,21 +57,25 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install the DSH harness
-        # `--ignore-scripts` keeps pnpm 11 from failing on build-script approval
-        # prompts for optional native deps (node-pty & friends); the settings UI
-        # this test drives needs none of them. The published package declares
-        # `bin: {"dsh": "lib/bin.js"}`, so the next step is the real check.
-        run: pnpm add --global --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1
-
-      - name: Put the global bin directory on PATH
-        # Some runner images do not export pnpm's global bin dir, which would make
-        # the next step fail for the wrong reason.
-        run: pnpm bin -g >> "$GITHUB_PATH"
+        # Installed with npm, not `pnpm add --global --ignore-scripts`:
+        # - the harness needs its native addon (`node-addon-require-builtin`), and
+        #   `--ignore-scripts` skips building it, so `dsh` died with
+        #   "Cannot find module .../require_builtin.node" on the first CI run;
+        # - npm runs install scripts without pnpm 11's build-approval gate;
+        # - a local directory means no global bin/PATH juggling either.
+        run: |
+          mkdir -p "${{ runner.temp }}/harness"
+          cd "${{ runner.temp }}/harness"
+          npm init -y >/dev/null
+          npm install --no-fund --no-audit --loglevel=error @deepseek-ai/dsh@0.2.2-rc.1
+          node node_modules/@deepseek-ai/dsh/lib/bin.js --version
 
       - name: Report tool versions
+        env:
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
         run: |
           echo "node $(node --version), pnpm $(pnpm --version)"
-          echo "dsh $(dsh --version)"
+          echo "dsh $(node "$DSH_CLI_JS" --version)"
 
       - name: Setup Chrome
         id: chrome
@@ -85,6 +89,8 @@ jobs:
       - name: Run the web E2E
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          # The suite resolves the harness from this path, so no global bin is needed.
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
           DSH_WEB_E2E_ARTIFACTS: ${{ runner.temp }}/web-e2e-artifacts
         run: node --test test/integration/web.e2e.js
 

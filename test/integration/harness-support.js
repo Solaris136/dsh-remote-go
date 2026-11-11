@@ -49,7 +49,7 @@ export function sleep(ms) {
  * sampling, so it is both faster and less flaky.
  * @template T
  * @param {() => Promise<T | null | undefined> | T | null | undefined} check
- * @param {{ timeoutMs?: number, intervalMs?: number, label: string }} options
+ * @param {{ timeoutMs?: number, intervalMs?: number, label: string, diagnose?: () => Promise<string | null | undefined> }} options
  * @returns {Promise<T>}
  */
 export async function pollUntil(check, options) {
@@ -68,8 +68,21 @@ export async function pollUntil(check, options) {
     }
     await sleep(intervalMs)
   }
+  // A timeout on a UI poll is otherwise undiagnosable from the log alone, so let the caller
+  // describe the state it was waiting on (what the window shows, which page it is on).
+  let detail = ''
+  if (options.diagnose) {
+    try {
+      const described = await options.diagnose()
+      if (described) detail = ` — ${described}`
+    } catch {
+      /* diagnostics must never mask the timeout */
+    }
+  }
   throw new Error(
-    `${options.label} timed out after ${timeoutMs}ms` + (lastError ? ` (last error: ${String(lastError)})` : ''),
+    `${options.label} timed out after ${timeoutMs}ms` +
+      (lastError ? ` (last error: ${String(lastError)})` : '') +
+      detail,
   )
 }
 

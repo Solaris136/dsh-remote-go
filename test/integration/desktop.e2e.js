@@ -213,10 +213,12 @@ async function dismissOnboarding(browser, consoleErrors) {
       const handle = await welcome
         .evaluateHandle((labels) => {
           const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-          const button = [...document.querySelectorAll('button')].find((node) =>
-            labels.includes(strip(node.textContent)),
-          )
-          return button ?? null
+          // The onboarding affordance is a <button> locally but need not be one: accept any
+          // clickable-looking node so a markup change in the app does not strand the run.
+          const candidates = [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"], div, span')]
+          const exact = candidates.find((node) => labels.includes(strip(node.textContent)))
+          const partial = candidates.find((node) => labels.some((label) => strip(node.textContent).startsWith(label)))
+          return exact ?? partial ?? null
         }, ONBOARDING_LABELS)
         .catch(() => null)
       const element = handle?.asElement()
@@ -224,7 +226,27 @@ async function dismissOnboarding(browser, consoleErrors) {
       await element.evaluate(activateElement)
       return ONBOARDING_LABELS[0]
     },
-    { timeoutMs: 60_000, intervalMs: 400, label: 'the "configure later" onboarding button' },
+    {
+      timeoutMs: 60_000,
+      intervalMs: 400,
+      label: 'the "configure later" onboarding button',
+      // A timeout here is otherwise undiagnosable from the log alone: dump what the window
+      // actually shows (url, title, and every visible label) so the next run explains itself.
+      diagnose: async () => {
+        const snapshot = await welcome
+          .evaluate(() => ({
+            url: location.href,
+            title: document.title,
+            text: (document.body?.innerText ?? '').replace(/\s+/g, ' ').slice(0, 400),
+            labels: [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"]')]
+              .map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim())
+              .filter(Boolean)
+              .slice(0, 30),
+          }))
+          .catch((error) => ({ error: String(error?.message ?? error) }))
+        return `onboarding window: ${JSON.stringify(snapshot)}`
+      },
+    },
   )
   // Wait for the onboarding window to close (it is the observable effect).
   await pollUntil(
