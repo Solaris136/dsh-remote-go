@@ -1,0 +1,13 @@
+# Commits whose diffs are pure whitespace/formatting churn.
+#
+# `git blame` can skip them so the interesting history stays readable:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honours this file automatically for blame views.
+
+# chore: normalize line endings to LF
+7fc5a95dc7398bff77be8389db97556f5f18511e
+
+# style: apply the Prettier format across the codebase
+9eff095e532bea7027af51cd2f1677e9819f6eae
