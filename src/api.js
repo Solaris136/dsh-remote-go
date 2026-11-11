@@ -306,6 +306,10 @@ export function createApi(options) {
           sendJson(res, 200, { ok: true, ...(await service.listHostMirrors(id)) })
           return
         }
+        if (method === 'POST' && action === 'mirrors' && segments[3] === 'sync') {
+          sendJson(res, 200, { ok: true, ...(await service.syncHostMirrors(id)) })
+          return
+        }
         if (method === 'GET' && action === 'open') {
           sendJson(res, 200, { ok: true, ...service.openInfo(id) })
           return

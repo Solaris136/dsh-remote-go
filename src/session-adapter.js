@@ -24,7 +24,8 @@
  * No DSH package is imported: the service object (or a `ctx` that can resolve
  * it) is injected, so every branch is unit-testable with a fake.
  */
-import { decideResync, mirrorSessionId } from './mirror.js'
+import path from 'node:path'
+import { MIRROR_ID_PREFIX, decideResync, mirrorSessionId } from './mirror.js'
 
 /** Event types the host projects as conversation content (design §4.1). */
 export const SURFACE_EVENT_TYPES = Object.freeze([
@@ -63,9 +64,12 @@ export const SURFACE_EVENT_TYPES = Object.freeze([
  * @param {{
  *   ctx?: any,
  *   sessions?: any,
+ *   mirrorRoot?: string | null,
  *   cwd?: string | null,
  *   logger?: { warn?: (...args: any[]) => void },
- * }} [options]
+ * }} [options] `mirrorRoot` is the per-host session cwd root; `cwd` is the
+ * fallback used when no mirror root is configured. Both must be absolute to be
+ * passed to the host (`meta.cwd` is validated).
  * @returns {{
  *   available: () => boolean,
  *   ensureMirrorSession: (descriptor: any) => AdapterResult,
@@ -97,6 +101,25 @@ export function createSessionAdapter(options = {}) {
   }
 
   /**
+   * Resolve the local session id of a descriptor.
+   *
+   * A persisted/remote-supplied id is only trusted when it carries the `mirror_`
+   * prefix and equals the value derived from `hostId` + `remoteSessionId`;
+   * otherwise it is re-derived. This keeps a corrupt or hostile descriptor from
+   * addressing an unrelated local session.
+   * @param {any} descriptor
+   * @returns {string | null}
+   */
+  function resolveLocalSessionId(descriptor) {
+    const hostId = typeof descriptor?.hostId === 'string' ? descriptor.hostId : ''
+    const remoteSessionId = typeof descriptor?.remoteSessionId === 'string' ? descriptor.remoteSessionId : ''
+    const derived = mirrorSessionId(hostId, remoteSessionId)
+    if (derived === null) return null
+    const candidate = typeof descriptor?.localSessionId === 'string' ? descriptor.localSessionId.trim() : ''
+    return candidate.startsWith(MIRROR_ID_PREFIX) && candidate === derived ? candidate : derived
+  }
+
+  /**
    * Create (or find) the local session for one mirror descriptor.
    *
    * Synchronous by design: the host `sessions` service is an in-memory store, so
@@ -110,12 +133,7 @@ export function createSessionAdapter(options = {}) {
    */
   function ensureMirrorSession(descriptor) {
     const sessions = resolveSessions()
-    const hostId = typeof descriptor?.hostId === 'string' ? descriptor.hostId : ''
-    const remoteSessionId = typeof descriptor?.remoteSessionId === 'string' ? descriptor.remoteSessionId : ''
-    const localSessionId =
-      typeof descriptor?.localSessionId === 'string' && descriptor.localSessionId.trim() !== ''
-        ? descriptor.localSessionId.trim()
-        : mirrorSessionId(hostId, remoteSessionId)
+    const localSessionId = resolveLocalSessionId(descriptor)
     if (localSessionId === null) {
       return { ok: false, reason: 'invalid-descriptor', localSessionId: null }
     }
@@ -147,16 +165,21 @@ export function createSessionAdapter(options = {}) {
    * Append one remote event to the local mirror session.
    *
    * `surfaceOp: 'append'` is added only for the five surface event types; other
-   * events are appended with the two-argument form the host expects.
+   * events are appended with the two-argument form the host expects. The target
+   * must be a mirror session id (`mirror_` prefix), so this helper can never
+   * inject events into an unrelated local session.
    *
    * @param {string} localSessionId
    * @param {any} event `{ type, data }`
    * @returns {AdapterResult}
    */
   function appendEvent(localSessionId, event) {
-    const id = typeof localSessionId === 'string' ? localSessionId : ''
+    const id = typeof localSessionId === 'string' ? localSessionId.trim() : ''
     const type = typeof event?.type === 'string' ? event.type.trim() : ''
-    if (id === '' || type === '') return { ok: false, reason: 'invalid-event', localSessionId: id || null }
+    if (id === '' || !id.startsWith(MIRROR_ID_PREFIX)) {
+      return { ok: false, reason: 'invalid-session-id', localSessionId: id || null }
+    }
+    if (type === '') return { ok: false, reason: 'invalid-event', localSessionId: id }
     const sessions = resolveSessions()
     if (!sessions || typeof sessions.get !== 'function') {
       return { ok: false, reason: 'sessions-unavailable', localSessionId: id }
@@ -209,9 +232,35 @@ export function createSessionAdapter(options = {}) {
   }
 
   /**
-   * Translate a descriptor into `create` options. `meta.cwd` is only passed when
-   * it is absolute (the host rejects anything else); P0 has no seed because the
-   * directory level carries no history.
+   * The local working directory for one mirror session.
+   *
+   * All mirrors sharing `$DSH_HOME` as cwd would look identical and would write
+   * into the plugin's own state directory. Each host gets its own directory under
+   * the mirror root instead. The remote workspace path is never used: it is a
+   * remote path that may not exist on this machine. `null` means "no absolute
+   * cwd available", so the host default applies.
+   * @param {any} descriptor
+   * @returns {string | null}
+   */
+  function mirrorCwd(descriptor) {
+    if (typeof options.mirrorRoot === 'string' && options.mirrorRoot.trim() !== '') {
+      const hostSegment = String(descriptor?.hostId ?? '')
+        .replace(/[^A-Za-z0-9._-]/g, '_')
+        .replace(/^\.+$/, '')
+      return path.join(options.mirrorRoot.trim(), hostSegment || 'unknown')
+    }
+    const cwd = typeof descriptor?.cwd === 'string' ? descriptor.cwd : options.cwd
+    return isAbsolutePath(cwd) ? cwd : null
+  }
+
+  /**
+   * Translate a descriptor into `create` options.
+   *
+   * `meta.cwd` is only passed when absolute (the host rejects anything else) and
+   * `meta.isSeeded` marks the session as a replay/projection, so a leftover mirror
+   * is identifiable after a restart. DSH cannot carry `hostId`/`remoteSessionId`
+   * in `meta` (fixed `SessionHeader`), so that lineage stays in `mirrors.json`.
+   * P0 has no seed because the directory level carries no history.
    * @param {any} descriptor
    * @returns {{ seed?: any[], meta?: Record<string, any> }}
    */
@@ -221,8 +270,11 @@ export function createSessionAdapter(options = {}) {
     if (Array.isArray(descriptor?.seed) && descriptor.seed.length > 0) {
       createOptions.seed = descriptor.seed.map((event) => ({ ...event }))
     }
-    const cwd = typeof descriptor?.cwd === 'string' ? descriptor.cwd : options.cwd
-    if (isAbsolutePath(cwd)) createOptions.meta = { cwd }
+    /** @type {Record<string, any>} */
+    const meta = { isSeeded: true }
+    const cwd = mirrorCwd(descriptor)
+    if (cwd !== null) meta.cwd = cwd
+    createOptions.meta = meta
     return createOptions
   }
 
@@ -231,8 +283,7 @@ export function createSessionAdapter(options = {}) {
 
 /** @param {unknown} value @returns {boolean} */
 function isAbsolutePath(value) {
-  if (typeof value !== 'string' || value.trim() === '') return false
-  return /^[\\/]/.test(value) || /^[A-Za-z]:[\\/]/.test(value)
+  return typeof value === 'string' && value.trim() !== '' && path.isAbsolute(value.trim())
 }
 
 /** @param {unknown} error @returns {string} */

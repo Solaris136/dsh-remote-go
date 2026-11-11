@@ -120,3 +120,18 @@ test('remoteWorkspaceStoragePath and readRemoteWorkspaces use the SSH exec chann
   assert.equal(brokenResult.ok, false)
   assert.equal(brokenResult.reason, 'malformed')
 })
+
+test('sessionIds are deduplicated so sessionCount keeps the v1 count of sessions', () => {
+  // Duplicates and non-string junk are not separate sessions; the v1 count must
+  // equal the deduplicated list the L1 mirror plans one descriptor per.
+  const parsed = parseWorkspaceStorage({
+    global: { initialized: true, workspaceIds: ['ws'] },
+    tables: {
+      workspaces: { ws: { path: '/p/ws', sessionIds: ['a', 'a', '', 'b', 42, 'b', 'c'] } },
+    },
+  })
+  const [workspace] = parsed.workspaces
+  assert.deepEqual(workspace.sessionIds, ['a', 'b', 'c'])
+  assert.equal(workspace.sessionCount, 3)
+  assert.equal(workspace.sessionCount, new Set(workspace.sessionIds).size)
+})

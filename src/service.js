@@ -176,6 +176,7 @@ export class RemoteGoService extends EventEmitter {
       reconnectTimer: null,
       idleTimer: null,
       connectPromise: null,
+      mirrorSync: null,
       closing: false,
       logs: [],
     }
@@ -312,6 +313,15 @@ export class RemoteGoService extends EventEmitter {
     if (runtime) await this.#teardownRuntime(runtime, { stopRemote: runtime.entry.keepAlive === 'stop' ? true : false })
     this.runtimes.delete(id)
     await this.store.removeHost(id)
+    // Drop the local mirror sessions and their descriptors with the host, so no
+    // orphan session points at a host the user just deleted.
+    for (const descriptor of this.mirrorStore.listMirrors({ hostId: id })) {
+      try {
+        this.sessionAdapter?.removeMirrorSession?.(descriptor.localSessionId)
+      } catch (error) {
+        this.logger.warn?.('[dsh-remote-go] cannot remove a mirror session:', error)
+      }
+    }
     await this.mirrorStore?.removeHostMirrors?.(id)
     if (this.activeHostId === id) this.activeHostId = null
     this.#emitState()
@@ -405,6 +415,7 @@ export class RemoteGoService extends EventEmitter {
       level: decision.level,
       reason: decision.reason,
       capabilities: decision.capabilities,
+      sessionsAvailable: Boolean(this.sessionAdapter),
       mirrors: this.mirrorStore.listMirrors({ hostId: id }),
     }
   }
@@ -413,18 +424,27 @@ export class RemoteGoService extends EventEmitter {
    * Re-read the remote workspace registry and reconcile the mirror descriptors
    * (design §4 L1). Never creates or deletes anything on the remote; a session
    * that disappeared from the registry is kept and marked `remote-deleted`
-   * (design §7).
+   * (design §7). The result also carries the per-session adapter outcomes so the
+   * "restart → re-pull from the remote" notice is reachable from the API.
    * @param {string} id
    */
   async syncHostMirrors(id) {
     await this.init()
     const runtime = this.#runtime(id)
+    if (runtime.mirrorSync) {
+      // Never run two directory syncs at once for one host; coalesce on the
+      // in-flight one started by the connect pipeline.
+      await runtime.mirrorSync.catch(() => null)
+    }
     if (!runtime.ssh?.connected) {
       return {
         hostId: id,
         connected: false,
         synced: false,
         reason: 'not-connected',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        resyncRequired: 0,
+        notice: null,
         mirrors: this.mirrorStore.listMirrors({ hostId: id }),
       }
     }
@@ -451,7 +471,29 @@ export class RemoteGoService extends EventEmitter {
     if (!result.ok) {
       // Offline or unreadable: keep the last known descriptors instead of
       // marking every remote session deleted (design §7 "host not connected").
-      return { hostId: runtime.id, synced: false, reason: result.reason ?? 'unreadable', mirrors: existing }
+      return {
+        hostId: runtime.id,
+        synced: false,
+        reason: result.reason ?? 'unreadable',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        resyncRequired: 0,
+        notice: null,
+        mirrors: existing,
+      }
+    }
+    if (existing.length > 0 && result.workspaces.length === 0) {
+      // A parseable but empty registry is far more likely to be a transient
+      // (fresh/partially-written) remote file than "the user deleted every
+      // session". Keep every record instead of marking all of them deleted.
+      return {
+        hostId: runtime.id,
+        synced: false,
+        reason: 'empty-registry',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        resyncRequired: 0,
+        notice: null,
+        mirrors: existing,
+      }
     }
     const now = nowIso()
     const planned = planMirror({
@@ -463,36 +505,88 @@ export class RemoteGoService extends EventEmitter {
     })
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
+    const sessions = this.#ensureMirrorSessions(runtime, mirrors)
+    const resyncRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
+    const notice = sessions.find((entry) => entry?.resync?.notice)?.resync.notice ?? null
     return {
       hostId: runtime.id,
       synced: true,
       level: decision.level,
       reason: decision.reason,
+      sessionsAvailable: Boolean(this.sessionAdapter),
       mirrors,
       markedDeleted: reconciled.markedDeleted,
       revived: reconciled.revived,
-      sessions: this.#ensureMirrorSessions(mirrors),
+      sessions,
+      resyncRequired,
+      notice,
     }
   }
 
   /**
    * Create the local DSH sessions that back the mirrors, when the host publishes
    * the optional `sessions` service. Absent adapter ⇒ no sessions, no error.
+   * Typed adapter failures are counted and logged instead of being swallowed:
+   * the connect log says how many descriptors got a local session and which
+   * distinct reasons failed (design §4: no silent pretend success).
+   * @param {any} runtime
    * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
    */
-  #ensureMirrorSessions(mirrors) {
+  #ensureMirrorSessions(runtime, mirrors) {
     if (!this.sessionAdapter) return []
+    const active = mirrors.filter((descriptor) => descriptor.status === 'active')
     /** @type {any[]} */
     const results = []
-    for (const descriptor of mirrors) {
-      if (descriptor.status !== 'active') continue
+    for (const descriptor of active) {
       try {
         results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
       } catch (error) {
-        this.logger.warn?.('[dsh-remote-go] mirror session failed:', error)
+        results.push({
+          ok: false,
+          reason: 'adapter-error',
+          localSessionId: descriptor.localSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
       }
     }
+    const created = results.filter((entry) => entry?.ok === true).length
+    const reasons = [
+      ...new Set(results.filter((entry) => entry?.ok !== true).map((entry) => entry?.reason ?? 'unknown')),
+    ]
+    this.#log(
+      runtime,
+      'info',
+      `mirror sessions: ${active.length} descriptor(s) / ${created} local session(s)` +
+        (reasons.length > 0 ? ` (failed: ${reasons.join(', ')})` : ''),
+    )
+    if (reasons.length > 0) this.#log(runtime, 'debug', `mirror session failure reasons: ${reasons.join(', ')}`)
     return results
+  }
+
+  /** Start one directory sync without blocking the caller. @param {any} runtime */
+  #startMirrorSync(runtime) {
+    if (runtime.mirrorSync) return runtime.mirrorSync
+    runtime.mirrorSync = this.#syncMirrors(runtime)
+      .then((synced) => {
+        if (synced.mirrors.length > 0) {
+          this.#log(runtime, 'info', `mirror directory: ${synced.mirrors.length} session(s), level ${synced.level}`)
+        }
+        return synced
+      })
+      .catch((error) => {
+        // A mirror failure must never take the connection down (design §4).
+        this.#log(
+          runtime,
+          'warn',
+          'mirror directory sync failed:',
+          error instanceof Error ? error.message : String(error),
+        )
+        return null
+      })
+      .finally(() => {
+        runtime.mirrorSync = null
+      })
+    return runtime.mirrorSync
   }
 
   /** Read-only SSH discovery for the wizard (design §15.1). */
@@ -794,21 +888,10 @@ export class RemoteGoService extends EventEmitter {
       this.#attachDisconnectHandler(runtime)
       this.#emitState()
       this.#log(runtime, 'info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${runtime.tunnel.localPort}`)
-      // P0: mirror the remote directory once the host is usable. A mirror
-      // failure must never take the connection down (design §4).
-      try {
-        const synced = await this.#syncMirrors(runtime)
-        if (synced.mirrors.length > 0) {
-          this.#log(runtime, 'info', `mirror directory: ${synced.mirrors.length} session(s), level ${synced.level}`)
-        }
-      } catch (error) {
-        this.#log(
-          runtime,
-          'warn',
-          'mirror directory sync failed:',
-          error instanceof Error ? error.message : String(error),
-        )
-      }
+      // P0: mirror the remote directory AFTER `connected` is published, and never
+      // await it: a slow remote read must not delay the connect response or the
+      // ready state. Failures are logged, never fatal.
+      this.#startMirrorSync(runtime)
     } catch (error) {
       const view = toErrorView(error)
       runtime.error = view

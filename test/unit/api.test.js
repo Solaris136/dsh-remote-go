@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createApi } from '../../src/api.js'
-import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createSessionAdapter } from '../../src/session-adapter.js'
+import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 
@@ -349,6 +350,7 @@ test('GET /hosts/:id/mirrors serves the persisted directory mirrors', async () =
     assert.equal(before.json.level, 'L1')
     assert.equal(before.json.capabilities.list, true)
     assert.equal(before.json.capabilities.stream, false)
+    assert.equal(before.json.sessionsAvailable, false)
 
     await service.mirrorStore.upsertMirrors([
       { hostId: host.id, remoteSessionId: 'remote-1', title: 'Project A · remote-1', cursor: 7 },
@@ -365,7 +367,57 @@ test('GET /hosts/:id/mirrors serves the persisted directory mirrors', async () =
     assert.equal(mirror.status, 'active')
     assert.equal(mirror.capabilities.list, true)
     assert.equal(mirror.capabilities.stream, false)
-    assert.match(mirror.localSessionId, /^mirror_[a-z0-9]{14}$/)
+    assert.match(mirror.localSessionId, /^mirror_[a-z0-9]{25}$/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /hosts/:id/mirrors/sync exposes the restart re-pull notice', async () => {
+  const stdout = JSON.stringify({
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'] },
+    tables: { workspaces: { 'ws-1': { path: '/home/u/proj', title: 'proj', sessionIds: ['remote-1'] } } },
+  })
+  // A real adapter over an empty in-memory sessions store: the mirror session
+  // does not exist (as after a restart), so the sync must report `resyncRequired`.
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+  }
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
+  const { service } = await makeTestService({
+    sessionAdapter,
+    sshFactory: (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) }),
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+    // Wait for the connect-time sync to finish before simulating the restart.
+    await waitFor(() => !service.runtimes.get(host.id).mirrorSync)
+    // Simulate a restart: the descriptor survives, the in-memory session does not.
+    live.clear()
+    const result = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(result.status, 200)
+    assert.equal(result.json.ok, true)
+    assert.equal(result.json.synced, true)
+    assert.equal(result.json.mirrors.length, 1)
+    assert.equal(result.json.sessionsAvailable, true)
+    // The local session persists nothing, so the API surfaces the re-pull path.
+    assert.equal(result.json.resyncRequired, 1)
+    assert.equal(result.json.sessions[0].resync.reason, 'local-session-missing')
+    assert.match(result.json.notice.en, /re-pull/i)
+    assert.equal(live.size, 1)
   } finally {
     await api.close()
     await service.shutdown()

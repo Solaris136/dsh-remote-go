@@ -8,6 +8,7 @@
  */
 import { API_PREFIX, PLUGIN_ID } from './constants.js'
 import { statSync } from 'node:fs'
+import path from 'node:path'
 import { createApi } from './api.js'
 import { detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
@@ -31,9 +32,13 @@ export function apply(ctx, config = {}) {
   const store = new HostStore({ dir: stateDir, logger })
   // Mirror sessions are an optional host capability: without `ctx.sessions` the
   // adapter answers typed `sessions-unavailable` and the plugin keeps working.
-  // The local DSH home is the session cwd: it is a real local absolute path,
-  // while the remote workspace path may not exist on this machine.
-  const sessionAdapter = createSessionAdapter({ ctx, logger, cwd: home })
+  // Each host gets its own cwd under `$DSH_HOME/remote-go/mirrors/<hostId>`; the
+  // remote workspace path is never used (it may not exist on this machine).
+  const sessionAdapter = createSessionAdapter({
+    ctx,
+    logger,
+    mirrorRoot: path.join(stateDir, 'mirrors'),
+  })
   const service = new RemoteGoService({
     store,
     home,

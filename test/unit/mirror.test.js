@@ -273,8 +273,9 @@ test('planMirror is deterministic and the stable-id derivation is stable', () =>
   )
 
   const [first] = forward
-  assert.match(first.localSessionId, /^mirror_[a-z0-9]{14}$/)
-  assert.equal(first.localSessionId.length, 'mirror_'.length + 14)
+  // sha256 truncated to 128 bits, base36, fixed 25-character shape.
+  assert.match(first.localSessionId, /^mirror_[a-z0-9]{25}$/)
+  assert.equal(first.localSessionId.length, 'mirror_'.length + 25)
   assert.equal(first.localSessionId, mirrorSessionId(HOST.id, first.remoteSessionId))
   // Stable across calls, distinct per host and per remote session.
   assert.equal(mirrorSessionId('h_1', 'r1'), mirrorSessionId('h_1', 'r1'))
@@ -286,6 +287,39 @@ test('planMirror is deterministic and the stable-id derivation is stable', () =>
 
   // Deterministic ids survive a plan/read cycle.
   assert.equal(normalizeMirrorDescriptor(first).localSessionId, first.localSessionId)
+})
+
+test('planMirror advances mirroredAt on every successful read and preserves it without one', () => {
+  const first = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: l1Capabilities(),
+    now: '2026-11-10T00:00:00.000Z',
+  })
+  assert.equal(first.find((descriptor) => descriptor.remoteSessionId === 'r1').mirroredAt, '2026-11-10T00:00:00.000Z')
+
+  // A second successful directory read MUST move the "last successful sync" time.
+  const second = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: l1Capabilities(),
+    existing: first,
+    now: NOW,
+  })
+  assert.equal(second.find((descriptor) => descriptor.remoteSessionId === 'r1').mirroredAt, NOW)
+  assert.equal(second.find((descriptor) => descriptor.remoteSessionId === 'r2').mirroredAt, NOW)
+
+  // Failure/partial paths pass no `now`, so the last known time is preserved.
+  const partial = planMirror({
+    host: HOST,
+    remoteWorkspaces: registry(),
+    capabilities: l1Capabilities(),
+    existing: second,
+  })
+  assert.equal(partial.find((descriptor) => descriptor.remoteSessionId === 'r1').mirroredAt, NOW)
+  // A never-synced descriptor stays null rather than inventing a time.
+  const never = planMirror({ host: HOST, remoteWorkspaces: registry(), capabilities: l1Capabilities() })
+  assert.equal(never[0].mirroredAt, null)
 })
 
 test('planMirror degrades on malformed input and preserves an existing cursor', () => {
@@ -316,7 +350,6 @@ test('planMirror degrades on malformed input and preserves an existing cursor', 
   })
   const kept = replanned.find((descriptor) => descriptor.remoteSessionId === 'r1')
   assert.equal(kept.cursor, 42)
-  assert.equal(kept.mirroredAt, '2026-11-10T00:00:00.000Z')
   const fresh = replanned.find((descriptor) => descriptor.remoteSessionId === 'r2')
   assert.equal(fresh.cursor, 0)
   assert.equal(fresh.mirroredAt, NOW)
@@ -349,11 +382,19 @@ test('planMirror degrades on malformed input and preserves an existing cursor', 
 test('capability and descriptor normalization drop unknown data', () => {
   assert.deepEqual(normalizeCapabilities(null), l1Capabilities())
   assert.deepEqual(normalizeCapabilities('nope'), l1Capabilities())
+  // Only a literal `true` confirms a capability: truthy lookalikes do not.
   assert.deepEqual(normalizeCapabilities({ stream: true, input: 1 }), {
     list: true,
     history: false,
     stream: true,
-    input: true,
+    input: false,
+    approve: false,
+  })
+  assert.deepEqual(normalizeCapabilities({ stream: 'yes', approve: {} }), {
+    list: true,
+    history: false,
+    stream: false,
+    input: false,
     approve: false,
   })
   assert.equal(normalizeCapabilities(['history']).list, false)
@@ -375,6 +416,20 @@ test('capability and descriptor normalization drop unknown data', () => {
   assert.equal(migrated.status, 'active')
   assert.equal('unknown' in migrated, false)
   assert.equal(normalizeMirrorDescriptor({ hostId: 'h', remoteSessionId: 'r', status: 'gone' }).status, 'active')
+
+  // A persisted localSessionId is never trusted: it must be the derived id.
+  const unrelated = normalizeMirrorDescriptor({
+    hostId: 'h_1',
+    remoteSessionId: 'r1',
+    localSessionId: 'session-123',
+  })
+  assert.equal(unrelated.localSessionId, mirrorSessionId('h_1', 'r1'))
+  const wrongMirror = normalizeMirrorDescriptor({
+    hostId: 'h_1',
+    remoteSessionId: 'r1',
+    localSessionId: mirrorSessionId('h_2', 'r1'),
+  })
+  assert.equal(wrongMirror.localSessionId, mirrorSessionId('h_1', 'r1'))
 })
 
 // (f) capability level ------------------------------------------------------
@@ -404,6 +459,11 @@ test('decideLevel downgrades with the reason codes the design names', () => {
   const noHistory = decideLevel({ ...versions, probe: { ...full, history: false } })
   assert.equal(noHistory.level, 'L1')
   assert.equal(noHistory.reason.code, 'history-unavailable')
+  // An unreadable remote directory is checked before the history/stream gates:
+  // the mirror cannot even be listed, so L3 is never claimed.
+  const noList = decideLevel({ ...versions, probe: { ...full, list: false } })
+  assert.equal(noList.level, 'L1')
+  assert.equal(noList.reason.code, 'list-unavailable')
   assert.equal(decideLevel({ ...versions, probe: null }).reason.code, 'probe-missing')
   assert.equal(
     decideLevel({ hostVersion: null, localVersion: '0.2.2-rc.1', probe: full }).reason.code,
@@ -450,9 +510,13 @@ test('MirrorStore round-trips descriptors and writes 0700/0600 files', async () 
   )
 })
 
-test('MirrorStore asks for 0600 files inside a 0700 directory and writes atomically', async () => {
+test('MirrorStore asks for 0600 files inside a 0700 directory and fsyncs atomically', async () => {
+  /** @type {any[]} */
+  const opens = []
   /** @type {any[]} */
   const writes = []
+  /** @type {any[]} */
+  const syncs = []
   /** @type {any[]} */
   const renames = []
   /** @type {any[]} */
@@ -461,8 +525,17 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and writes atomica
     async mkdir(target, options) {
       mkdirs.push({ target, options })
     },
-    async writeFile(target, text, options) {
-      writes.push({ target, text, options })
+    async open(target, flags, mode) {
+      opens.push({ target, flags, mode })
+      return {
+        async writeFile(text, encoding) {
+          writes.push({ target, text, encoding })
+        },
+        async sync() {
+          syncs.push(target)
+        },
+        async close() {},
+      }
     },
     async rename(from, to) {
       renames.push({ from, to })
@@ -476,36 +549,67 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and writes atomica
   await store.load()
   await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1', title: 'one' }])
 
+  const file = path.join(dir, 'mirrors.json')
   assert.equal(mkdirs[0].options.mode, 0o700)
   assert.equal(mkdirs[0].options.recursive, true)
+  // Temp file: exclusive create (`wx`) with a random suffix, 0600.
+  const tmpOpen = opens.find((entry) => entry.target.endsWith('.tmp'))
+  assert.ok(tmpOpen)
+  assert.equal(tmpOpen.flags, 'wx')
+  assert.equal(tmpOpen.mode, 0o600)
+  assert.match(tmpOpen.target, /[0-9a-f-]{36}\.tmp$/)
   assert.equal(writes.length, 1)
-  assert.equal(writes[0].options.mode, 0o600)
-  assert.equal(writes[0].options.encoding, 'utf8')
+  assert.equal(writes[0].encoding, 'utf8')
   assert.match(writes[0].text, /"version": 1/)
+  // fsync runs on the temp file and on the directory (best effort).
+  assert.equal(syncs.includes(tmpOpen.target), true)
+  assert.equal(syncs.includes(dir), true)
   assert.equal(renames.length, 1)
-  assert.equal(renames[0].to, path.join(dir, 'mirrors.json'))
-  assert.match(renames[0].from, /\.tmp$/)
-  assert.notEqual(renames[0].from, renames[0].to)
+  assert.equal(renames[0].to, file)
+  assert.equal(renames[0].from, tmpOpen.target)
 })
 
-test('MirrorStore tolerates a corrupt file and migrates unknown fields', async () => {
+test('MirrorStore quarantines a corrupt file instead of destroying it', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-bad-'))
   const file = path.join(dir, 'mirrors.json')
-  await writeFile(file, '{broken', 'utf8')
+  // Seed a usable record, then truncate it (a crash mid-write, a bad editor).
+  const seed = new MirrorStore({ dir, logger: quiet })
+  await seed.load()
+  await seed.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1', title: 'kept' }])
+  await writeFile(file, '{"version":1,"mirrors":[{"hostId":"h_1","remoteSessionId":"r1"', 'utf8')
+
   /** @type {unknown[][]} */
   const warnings = []
   const corrupted = new MirrorStore({ dir, logger: { warn: (...args) => warnings.push(args) } })
   assert.deepEqual(await corrupted.load(), { version: MIRROR_STORE_VERSION, mirrors: [] })
   assert.equal(warnings.length > 0, true)
+  const aside = (await readdir(dir)).filter((name) => name.startsWith('mirrors.json.corrupt-'))
+  assert.equal(aside.length, 1)
+  assert.match(await readFile(path.join(dir, aside[0]), 'utf8'), /"remoteSessionId":"r1"/)
 
-  // Legacy bare-array envelope, unknown fields dropped, missing fields
-  // defaulted, unusable records skipped.
-  const legacy = [
-    { hostId: 'h_1', remoteSessionId: 'r1', extra: 'must be dropped', capabilities: ['list', 'history'], cursor: '12' },
-    { hostId: 'h_1' },
-    { junk: true },
-  ]
-  await writeFile(file, JSON.stringify(legacy), 'utf8')
+  // The next write starts a fresh canonical file; the bad bytes stay aside.
+  await corrupted.upsertMirrors([{ hostId: 'h_2', remoteSessionId: 'r2', title: 'new' }])
+  const canonical = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(canonical.mirrors.length, 1)
+  assert.equal(canonical.mirrors[0].remoteSessionId, 'r2')
+  assert.match(await readFile(path.join(dir, aside[0]), 'utf8'), /"remoteSessionId":"r1"/)
+
+  // Tolerant read of a legacy bare array with unknown fields and bad records.
+  await writeFile(
+    file,
+    JSON.stringify([
+      {
+        hostId: 'h_1',
+        remoteSessionId: 'r1',
+        extra: 'must be dropped',
+        capabilities: ['list', 'history'],
+        cursor: '12',
+      },
+      { hostId: 'h_1' },
+      { junk: true },
+    ]),
+    'utf8',
+  )
   const migrated = new MirrorStore({ dir, logger: quiet })
   await migrated.load()
   const descriptors = migrated.listMirrors()
@@ -521,6 +625,51 @@ test('MirrorStore tolerates a corrupt file and migrates unknown fields', async (
 
   assert.deepEqual(sanitizeMirrorStore('nope'), { version: MIRROR_STORE_VERSION, mirrors: [] })
   assert.deepEqual(sanitizeMirrorStore(null), { version: MIRROR_STORE_VERSION, mirrors: [] })
+})
+
+test('MirrorStore never reinterprets a newer envelope version', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-future-'))
+  const file = path.join(dir, 'mirrors.json')
+  const future = { version: MIRROR_STORE_VERSION + 10, mirrors: [{ newShape: true }] }
+  await writeFile(file, JSON.stringify(future), 'utf8')
+
+  /** @type {unknown[][]} */
+  const warnings = []
+  const store = new MirrorStore({ dir, logger: { warn: (...args) => warnings.push(args) } })
+  // The newer file is not reinterpreted as this build's schema: nothing is read.
+  assert.deepEqual(await store.load(), { version: MIRROR_STORE_VERSION, mirrors: [] })
+  assert.equal(warnings.length > 0, true)
+  const aside = (await readdir(dir)).filter((name) => name.startsWith('mirrors.json.future-'))
+  assert.equal(aside.length, 1)
+  // The newer payload is kept byte-for-byte, not overwritten in place.
+  assert.deepEqual(JSON.parse(await readFile(path.join(dir, aside[0]), 'utf8')), future)
+
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1', title: 'v1' }])
+  const canonical = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(canonical.version, MIRROR_STORE_VERSION)
+  assert.equal(canonical.mirrors.length, 1)
+  assert.deepEqual(JSON.parse(await readFile(path.join(dir, aside[0]), 'utf8')), future)
+})
+
+test('two MirrorStore instances writing at once keep both rows', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-concurrent-'))
+  const left = new MirrorStore({ dir, logger: quiet })
+  const right = new MirrorStore({ dir, logger: quiet })
+  await Promise.all([
+    left.upsertMirrors([{ hostId: 'h_left', remoteSessionId: 'r1', title: 'left' }]),
+    right.upsertMirrors([{ hostId: 'h_right', remoteSessionId: 'r1', title: 'right' }]),
+  ])
+  const reloaded = new MirrorStore({ dir, logger: quiet })
+  await reloaded.load()
+  assert.deepEqual(
+    reloaded.listMirrors().map((descriptor) => descriptor.hostId),
+    ['h_left', 'h_right'],
+  )
+  // No temp file survives either writer.
+  assert.deepEqual(
+    (await readdir(dir)).filter((name) => name.endsWith('.tmp')),
+    [],
+  )
 })
 
 test('MirrorStore replaces one host, removes records and survives a reload', async () => {

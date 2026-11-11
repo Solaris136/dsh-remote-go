@@ -47,9 +47,19 @@ export function parseWorkspaceStorage(value) {
     const rawTitle = typeof entry.title === 'string' ? entry.title.trim() : ''
     const rawPath = typeof entry.path === 'string' ? entry.path : ''
     const title = rawTitle || rawPath.split(/[\\/]/).filter(Boolean).pop() || id
-    const sessionIds = Array.isArray(entry.sessionIds)
-      ? entry.sessionIds.filter((sessionId) => typeof sessionId === 'string' && sessionId !== '')
-      : []
+    // One entry per distinct session: duplicates are not separate sessions, and
+    // `sessionCount` must keep its v1 meaning (number of sessions) and equal the
+    // deduplicated list the L1 mirror plans one descriptor per.
+    const seen = new Set()
+    /** @type {string[]} */
+    const sessionIds = []
+    if (Array.isArray(entry.sessionIds)) {
+      for (const raw of entry.sessionIds) {
+        if (typeof raw !== 'string' || raw === '' || seen.has(raw)) continue
+        seen.add(raw)
+        sessionIds.push(raw)
+      }
+    }
     return {
       id,
       title,

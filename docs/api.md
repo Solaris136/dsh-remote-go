@@ -347,9 +347,10 @@ data: {}
     "detail": { "zh": "远端没有可用的历史回放接口，只做目录镜像（L1）。", "en": "The remote exposes no history replay…" }
   },
   "capabilities": { "list": true, "history": false, "stream": false, "input": false, "approve": false },
+  "sessionsAvailable": true,
   "mirrors": [
     {
-      "localSessionId": "mirror_0abc123def4567",
+      "localSessionId": "mirror_1a2b3c4d5e6f7g8h9i0j1k2l3",
       "hostId": "h_x",
       "remoteSessionId": "session-42",
       "workspaceId": "ws_1",
@@ -375,7 +376,7 @@ interface MirrorCapabilities {
 }
 
 interface MirrorView {
-  /** 稳定派生：`mirror_` + 14 位 base36（hostId + remoteSessionId 的双哈希，见 src/mirror.js） */
+  /** 稳定派生：`mirror_` + 25 位 base36（sha256(hostId + NUL + remoteSessionId) 截断 128 位） */
   localSessionId: string
   hostId: string
   remoteSessionId: string
@@ -385,31 +386,79 @@ interface MirrorView {
   /** 已镜像到的远端事件序号（1 起；0 = 尚未同步），重连后从这里续传 */
   cursor: number
   capabilities: MirrorCapabilities
-  /** 最后一次成功同步时间（ISO），离线时表示「最后已知状态」；从未同步为 null */
+  /** 最后一次成功同步时间（ISO）；失败/部分同步路径保留旧值，从未同步为 null */
   mirroredAt: string | null
   /** 远端会话被删除时只标记，不删除本地记录（设计 §7） */
   status: 'active' | 'remote-deleted'
 }
 ```
 
+### `POST /hosts/:id/mirrors/sync`
+
+立即重读远端工作区注册表并同步镜像目录，然后返回每个镜像会话在**本地**的落地结果。这是「重启后从远端重拉」提示的
+入口（`GET /mirrors` 只读，不创建会话）。未连接时返回 `synced:false, reason:"not-connected"`，不报错。
+
+```json
+{
+  "ok": true,
+  "hostId": "h_x",
+  "synced": true,
+  "level": "L1",
+  "reason": { "code": "history-unavailable", "detail": { "zh": "…", "en": "…" } },
+  "sessionsAvailable": true,
+  "markedDeleted": [],
+  "revived": [],
+  "resyncRequired": 1,
+  "notice": { "zh": "本地镜像会话在重启后不保留…", "en": "Mirror sessions do not survive a restart yet…" },
+  "sessions": [
+    {
+      "ok": true,
+      "created": true,
+      "localSessionId": "mirror_1a2b3c4d5e6f7g8h9i0j1k2l3",
+      "cursor": 0,
+      "resync": { "needed": true, "from": 0, "reason": "local-session-missing", "notice": { "zh": "…", "en": "…" } },
+      "notice": { "zh": "…", "en": "…" }
+    }
+  ],
+  "mirrors": [MirrorView]
+}
+```
+
+`synced:false` 的两种情况都**不改动**已持久化的镜像状态：`reason:"unreadable"`（注册表读不到/不可解析）与
+`reason:"empty-registry"`（注册表可解析但 0 个工作区，通常是一次写入中途的瞬时状态）。`sessions[]` 是适配器的
+原始结果（`ok:false` 时带 `reason`，如 `sessions-unavailable` / `create-failed`）；`resyncRequired` 是
+`resync.needed === true` 的数量。
+
 ### `GET /local/workspaces`、`GET /hosts/:id/workspaces` 的追加字段
 
 v1.1 在这两个端点的 `workspaces[]` 每个工作区对象上**追加** `sessionIds: string[]`（注册表里的会话 id，
-顺序与原文件一致）。L1 目录镜像据此为每个远端会话建立一条 `MirrorView`。v1 已有字段语义不变；
-不关心镜像的客户端可以忽略该字段。
+保持原文件顺序、**按 id 去重**）。`sessionCount` 保持 v1 语义（该工作区的会话数）并且恒等于
+`new Set(sessionIds).size`，也就是 L1 为每个远端会话建立的镜像条数。v1 已有字段语义不变；不关心镜像的客户端
+可以忽略 `sessionIds`。
 
 v1.1 约束：
 
 1. `level` 由能力探测决定：版本不一致 → `L1` + `reason.code="version-mismatch"`；版本未知 → `L1` +
-   `version-unknown`；无历史回放 → `L1` + `history-unavailable`；无事件流 → `L2` + `stream-unavailable`；
+   `version-unknown`；无可用探测 → `L1` + `probe-missing`；目录不可读 → `L1` + `list-unavailable`；
+   无历史回放 → `L1` + `history-unavailable`；无事件流 → `L2` + `stream-unavailable`；
    无输入/审批 → `L2` + `input-unavailable` / `approve-unavailable`。P0 只实现 `L1`。
-2. `reason` 为 `null` 表示已达到该级最高能力；`code` 沿用 §0 的 `ErrorView.code` 命名，另加 `probe-missing`、
-   `history-unavailable`、`stream-unavailable`、`input-unavailable`、`approve-unavailable`、`version-unknown`。
-3. 本地镜像会话由 Host 通过宿主 `ctx.sessions` 创建（`create(id, { seed, meta })`），该服务是**可选**的：
-   缺失时本端点仍返回目录描述，只是没有可点开的本地会话，插件其余功能不受影响。
-4. 持久化限制：`ctx.sessions` 只做内存存储，镜像会话在插件重启后不保留（P0 不挂载 session-log writer）。
-   重启后 Host 重新创建会话并从远端重新拉取（`cursor` 归零），客户端应提示「重启后从远端重拉」。
-5. 远端会话被删除时，本地记录保留并标记 `status="remote-deleted"`；Host 不会调用远端删除接口。
-6. 写入语义：同一镜像会话同时只允许一个写入者；租约过期或发现第二个写入者时转为只读并提示，绝不并发写。
-   P0 只实现租约判定（`src/mirror.js`），输入转发与审批回传在 L3 落地。
-7. 镜像记录沿用 §3 安全约束：0700 目录、0600 文件、原子写；不含任何凭据或 token。
+2. 能力探测**只认字面 `true`**：`{ "stream": "yes" }`、`{ "input": 1 }` 都不算确认（`stream/input = false`）。
+3. `reason` 为 `null` 表示已达到该级最高能力；`code` 沿用 §0 的 `ErrorView.code` 命名，另加 `probe-missing`、
+   `list-unavailable`、`history-unavailable`、`stream-unavailable`、`input-unavailable`、`approve-unavailable`、
+   `version-unknown`。
+4. 本地镜像会话由 Host 通过宿主 `ctx.sessions` 创建（`create(id, { seed, meta })`，`meta` 带 `isSeeded: true`
+   标记与 `$DSH_HOME/remote-go/mirrors/<hostId>` 工作目录），该服务是**可选**的：缺失时端点仍返回目录描述，
+   只是没有可点开的本地会话，插件其余功能不受影响。
+5. 持久化限制：`ctx.sessions` 只做内存存储，镜像会话在插件重启后不保留（P0 不挂载 session-log writer）。
+   重启后 Host 重新创建会话并从远端重新拉取（`cursor` 归零）；该提示由 `POST /hosts/:id/mirrors/sync` 的
+   `resyncRequired` / `notice` / `sessions[].resync` 返回，客户端应展示「重启后从远端重拉」。
+6. 远端会话被删除时，本地记录保留并标记 `status="remote-deleted"`；Host 不会调用远端删除接口。注册表可解析但
+   为空时按瞬时状态处理（`reason:"empty-registry"`），不批量标记删除。
+7. 写入语义：同一镜像会话同时只允许一个写入者；租约过期或发现第二个写入者时转为只读并提示，绝不并发写。
+   **P0 未接线**：`src/mirror.js` 里的游标合并（`applyEvents`）与租约判定（`acquireLease` 等）是带 `@internal`
+   标记的纯函数，没有调用方；事件流、输入转发、审批回传在 L3 才落地，v1.1 不声称已交付 §6。
+8. 事件上限 `mirrorMaxEvents`（保留首尾、折叠中段、标注「已折叠」）**尚未实现**，P0 也不缓存事件；
+   它随 L3 事件存储一起落地（见 session-design.md §11）。
+9. 镜像记录沿用 §3 安全约束：0700 目录、0600 文件、原子写（随机临时名 + `wx` + fsync + 目录 fsync）；
+   损坏或更高 `version` 的文件会被**另存**为 `mirrors.json.corrupt-<ts>` / `mirrors.json.future-<ts>` 而不是
+   被覆盖；不含任何凭据或 token。

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import { SURFACE_EVENT_TYPES, createSessionAdapter } from '../../src/session-adapter.js'
 import { decideResync, l1Capabilities, mirrorSessionId } from '../../src/mirror.js'
 
@@ -78,7 +79,8 @@ test('ensureMirrorSession creates the local session and flags the restart re-pul
 
   const createCall = sessions.calls.find((call) => call.op === 'create')
   assert.equal(createCall.id, mirror.localSessionId)
-  assert.deepEqual(createCall.options, {})
+  // Lineage marker: a leftover mirror session is identifiable as a projection.
+  assert.deepEqual(createCall.options, { meta: { isSeeded: true } })
 
   // A live session is found, not re-created, and needs no resync.
   const second = adapter.ensureMirrorSession(mirror)
@@ -88,25 +90,61 @@ test('ensureMirrorSession creates the local session and flags the restart re-pul
   assert.equal(sessions.calls.filter((call) => call.op === 'create').length, 1)
 })
 
-test('meta.cwd is passed only when it is an absolute path', () => {
+test('each host gets its own mirror cwd under the mirror root', () => {
+  const sessions = createFakeSessions()
+  const mirrorRoot = path.join(path.sep === '\\' ? 'C:\\dsh\\remote-go' : '/dsh/remote-go', 'mirrors')
+  const adapter = createSessionAdapter({ sessions, logger: quiet, mirrorRoot })
+  adapter.ensureMirrorSession(descriptor({ hostId: 'h_1' }))
+  const createCall = sessions.calls.find((call) => call.op === 'create')
+  assert.deepEqual(createCall.options, { meta: { cwd: path.join(mirrorRoot, 'h_1'), isSeeded: true } })
+  // The remote workspace path is never leaked into the local session.
+  assert.notEqual(createCall.options.meta.cwd, '/home/u/project-a')
+
+  // Host ids are sanitized into a single path segment.
+  const hostile = createFakeSessions()
+  const hostileAdapter = createSessionAdapter({ sessions: hostile, logger: quiet, mirrorRoot })
+  hostileAdapter.ensureMirrorSession(descriptor({ hostId: '../evil/host' }))
+  const hostileCall = hostile.calls.find((call) => call.op === 'create')
+  assert.equal(hostileCall.options.meta.cwd, path.join(mirrorRoot, '.._evil_host'))
+  assert.equal(hostileCall.options.meta.cwd.includes('..' + path.sep), false)
+})
+
+test('meta.cwd falls back to an absolute cwd and is omitted when relative', () => {
   const absolute = createFakeSessions()
   const absoluteAdapter = createSessionAdapter({
     sessions: absolute,
     logger: quiet,
-    cwd: '/home/u/project',
+    cwd: path.join(path.sep, 'home', 'u', 'project'),
   })
   absoluteAdapter.ensureMirrorSession(descriptor())
   assert.deepEqual(absolute.calls.find((call) => call.op === 'create').options, {
-    meta: { cwd: '/home/u/project' },
+    meta: { cwd: path.join(path.sep, 'home', 'u', 'project'), isSeeded: true },
   })
 
   const relative = createFakeSessions()
   const relativeAdapter = createSessionAdapter({ sessions: relative, logger: quiet, cwd: 'relative/dir' })
   relativeAdapter.ensureMirrorSession(descriptor())
-  assert.deepEqual(relative.calls.find((call) => call.op === 'create').options, {})
+  assert.deepEqual(relative.calls.find((call) => call.op === 'create').options, { meta: { isSeeded: true } })
 })
 
 // (g) surface intents -------------------------------------------------------
+
+test('a persisted localSessionId is never trusted over the derived one', () => {
+  const sessions = createFakeSessions()
+  const adapter = createSessionAdapter({ sessions, logger: quiet })
+  const derived = mirrorSessionId('h_1', 'r1')
+
+  const hostile = descriptor({ localSessionId: 'session-123' })
+  const result = adapter.ensureMirrorSession(hostile)
+  assert.equal(result.ok, true)
+  assert.equal(result.localSessionId, derived)
+  assert.equal(sessions.calls.find((call) => call.op === 'create').id, derived)
+  assert.equal(sessions.live.has('session-123'), false)
+
+  const otherMirror = descriptor({ localSessionId: mirrorSessionId('h_2', 'r1') })
+  const second = adapter.ensureMirrorSession(otherMirror)
+  assert.equal(second.localSessionId, derived)
+})
 
 test('surface events are appended with a surfaceOp intent, other events with two arguments', () => {
   const sessions = createFakeSessions()
@@ -144,11 +182,13 @@ test('surface events are appended with a surfaceOp intent, other events with two
   assert.deepEqual(lastCall.args, ['request/header', { reason: 'initial' }])
 })
 
-test('appendEvent refuses malformed events and unknown sessions without throwing', () => {
+test('appendEvent refuses malformed events, non-mirror ids and unknown sessions without throwing', () => {
   const sessions = createFakeSessions()
   const adapter = createSessionAdapter({ sessions, logger: quiet })
 
-  assert.equal(adapter.appendEvent('', { type: 'user/message' }).reason, 'invalid-event')
+  // Only `mirror_` ids may be written to: never an unrelated local session.
+  assert.equal(adapter.appendEvent('', { type: 'user/message' }).reason, 'invalid-session-id')
+  assert.equal(adapter.appendEvent('session-123', { type: 'user/message' }).reason, 'invalid-session-id')
   assert.equal(adapter.appendEvent('mirror_x', { data: {} }).reason, 'invalid-event')
   assert.equal(adapter.appendEvent('mirror_x', null).reason, 'invalid-event')
 

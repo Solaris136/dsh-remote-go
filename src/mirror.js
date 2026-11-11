@@ -9,13 +9,20 @@
  *
  * P0 scope is the L1 directory mirror: the remote workspace registry becomes one
  * mirror descriptor per remote session. L2 (history replay) and L3 (stream,
- * input, approvals) layer on the same descriptor/state shapes: the `cursor`
- * merge and the write lease below already implement their §6 semantics.
+ * input, approvals) layer on the same descriptor/state shapes. The §6 cursor
+ * merge and write-lease helpers below are implemented but **not wired in P0**
+ * (they are marked `@internal`): no event stream, event store or writer exists
+ * yet, and the docs must not claim they are delivered.
+ *
+ * TODO(P1/P3): `mirrorMaxEvents` retention (keep head/tail, fold the middle,
+ * mark "collapsed") is part of design §6 and is deliberately NOT implemented or
+ * advertised here; it lands with the L3 event store.
  *
  * Every exported function degrades to a typed result instead of throwing, per
  * design §4: "any level that fails must degrade explicitly, never silently
  * pretend to be a complete session".
  */
+import { createHash } from 'node:crypto'
 import { normalizeVersion, versionsEqual } from './version.js'
 
 /**
@@ -48,8 +55,11 @@ export const MIRROR_CAPABILITIES = Object.freeze(['list', 'history', 'stream', '
 /** Capability levels, ordered from the directory baseline to a full session. */
 export const MIRROR_LEVELS = Object.freeze({ L1: 'L1', L2: 'L2', L3: 'L3' })
 
-/** Prefix of the derived local session id. */
-const MIRROR_ID_PREFIX = 'mirror_'
+/**
+ * Prefix of the derived local session id.
+ * Exported so the session adapter can gate ids that come from persisted data.
+ */
+export const MIRROR_ID_PREFIX = 'mirror_'
 
 /** Remote event sequence numbers are 1-based (see `applyEvents`). */
 const FIRST_EVENT_SEQ = 1
@@ -65,15 +75,16 @@ const FIRST_EVENT_SEQ = 1
  *
  * ```text
  * key            = `${hostId}\u0000${remoteSessionId}`
- * localSessionId = "mirror_" + base36(fnv1a(key)).padStart(7, "0")
- *                            + base36(sdbm(key)).padStart(7, "0")
+ * digest         = sha256(key)                      // first 16 bytes = 128 bits
+ * localSessionId = "mirror_" + base36(digest).padStart(25, "0")
  * ```
  *
- * The NUL separator keeps `("a", "b:c")` and `("a:b", "c")` distinct, and the
- * two independent 32-bit hashes make an accidental collision vanishingly
- * unlikely at the session counts one remote host can hold. No crypto import is
- * needed, which keeps this module dependency-free. The result is always
- * `mirror_` + 14 lowercase base36 characters (20 characters total).
+ * SHA-256 is used because the remote session id is remote-controlled input: a
+ * non-cryptographic hash would let a remote host mine collisions and collide two
+ * mirror records. The 128-bit truncation keeps the id short (32 characters) while
+ * staying far out of birthday-collision range for realistic session counts. The
+ * NUL separator keeps `("a", "b:c")` and `("a:b", "c")` distinct. The result is
+ * always `mirror_` + 25 lowercase base36 characters (32 characters total).
  *
  * @param {string} hostId
  * @param {string} remoteSessionId
@@ -83,45 +94,23 @@ export function mirrorSessionId(hostId, remoteSessionId) {
   const host = typeof hostId === 'string' ? hostId.trim() : ''
   const remote = typeof remoteSessionId === 'string' ? remoteSessionId.trim() : ''
   if (host === '' || remote === '') return null
-  const key = `${host}\u0000${remote}`
-  const word = (/** @type {number} */ value) => value.toString(36).padStart(7, '0')
-  return `${MIRROR_ID_PREFIX}${word(fnv1a(key))}${word(sdbm(key))}`
-}
-
-/**
- * FNV-1a 32-bit hash (deterministic across platforms and Node versions).
- * @param {string} text
- * @returns {number}
- */
-function fnv1a(text) {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193) >>> 0
-  }
-  return hash >>> 0
-}
-
-/**
- * SDBM 32-bit hash (independent second word for the id above).
- * @param {string} text
- * @returns {number}
- */
-function sdbm(text) {
-  let hash = 0
-  for (let index = 0; index < text.length; index += 1) {
-    hash = (text.charCodeAt(index) + (hash << 6) + (hash << 16) - hash) >>> 0
-  }
-  return hash >>> 0
+  const digest = createHash('sha256').update(`${host}\u0000${remote}`).digest()
+  const truncated = digest.subarray(0, 16)
+  const encoded = BigInt(`0x${truncated.toString('hex')}`)
+    .toString(36)
+    .padStart(25, '0')
+  return `${MIRROR_ID_PREFIX}${encoded}`
 }
 
 /**
  * Normalize a capability probe into the five booleans of design §3.
  *
  * Accepts an object (`{ stream: true, ... }`), an array of supported capability
- * names (`['list', 'history']`), or anything else. Unknown or malformed input
- * degrades to the L1 baseline instead of throwing: a mirror must never claim a
- * capability the probe did not confirm.
+ * names (`['list', 'history']`), or anything else. A capability is ON only when
+ * the probe says the literal `true`: `{ input: 1 }` or `{ stream: 'yes' }` are
+ * not confirmations and must not become `true` (design §4: never claim a
+ * capability the probe did not confirm). Unknown or malformed input degrades to
+ * the L1 baseline instead of throwing.
  *
  * @param {unknown} value
  * @returns {MirrorCapabilities}
@@ -135,8 +124,8 @@ export function normalizeCapabilities(value) {
   if (!value || typeof value !== 'object') return capabilities
   for (const name of MIRROR_CAPABILITIES) {
     const raw = /** @type {Record<string, unknown>} */ (value)[name]
-    if (typeof raw === 'boolean') capabilities[name] = raw
-    else if (raw !== undefined) capabilities[name] = Boolean(raw)
+    if (raw === undefined) continue
+    capabilities[name] = raw === true
   }
   return capabilities
 }
@@ -156,8 +145,11 @@ export function l1Capabilities() {
  * One descriptor per remote session id, keyed by `hostId` + `remoteSessionId`.
  * Because L1 only carries workspace-level data, `title` is a placeholder
  * (`<workspace title> · <remote session id prefix>`) and L2 replaces it with the
- * remote session title. A previous descriptor keeps its `cursor` and `mirroredAt`
- * so an update never resets the sync position; a new one starts at cursor 0.
+ * remote session title. A previous descriptor keeps its `cursor` so an update
+ * never resets the sync position; `mirroredAt` always advances to the caller's
+ * `now` because a plan is only derived after a successful registry read. When the
+ * caller passes no `now` (failure/partial path) the previous `mirroredAt` is
+ * preserved.
  *
  * Ordering is deterministic and independent of the input order: descriptors sort
  * by `hostId`, then `workspaceId` (nulls last), then `remoteSessionId`.
@@ -201,7 +193,8 @@ export function planMirror(input = {}) {
         title: mirrorTitle(baseTitle, remoteSessionId),
         cursor: previous ? previous.cursor : 0,
         capabilities: { ...capabilities },
-        mirroredAt: previous?.mirroredAt ?? mirroredAt,
+        // Last successful sync time: advance on every planned (successful) read.
+        mirroredAt: mirroredAt ?? previous?.mirroredAt ?? null,
         status: 'active',
       })
     }
@@ -212,10 +205,13 @@ export function planMirror(input = {}) {
 /**
  * Normalize one persisted/seeded descriptor (tolerant read + migration).
  *
- * Unknown fields are dropped, missing fields are defaulted, and a missing
- * `localSessionId` is re-derived from the stable id function. A record without a
- * usable `hostId`/`remoteSessionId` cannot be keyed and is reported as `null` so
- * the caller can drop it instead of writing a broken mirror.
+ * Unknown fields are dropped, missing fields are defaulted. A persisted
+ * `localSessionId` is only trusted when it carries the `mirror_` prefix **and**
+ * equals the value derived from `hostId` + `remoteSessionId`; anything else is
+ * re-derived, so a corrupted or hand-edited file cannot point a mirror at an
+ * unrelated local session. A record without a usable `hostId`/`remoteSessionId`
+ * cannot be keyed and is reported as `null` so the caller can drop it instead of
+ * writing a broken mirror.
  *
  * @param {unknown} raw
  * @returns {MirrorDescriptor | null}
@@ -228,9 +224,12 @@ export function normalizeMirrorDescriptor(raw) {
   if (hostId === null || remoteSessionId === null) return null
   const derived = mirrorSessionId(hostId, remoteSessionId)
   if (derived === null) return null
+  const candidate = textOrNull(record.localSessionId)
+  const localSessionId =
+    candidate !== null && candidate.startsWith(MIRROR_ID_PREFIX) && candidate === derived ? candidate : derived
   const title = textOrNull(record.title) ?? remoteSessionId
   return {
-    localSessionId: textOrNull(record.localSessionId) ?? derived,
+    localSessionId,
     hostId,
     remoteSessionId,
     workspaceId: textOrNull(record.workspaceId),
@@ -300,6 +299,8 @@ export function reconcileMirrors(input = {}) {
 
 /**
  * The seq the next remote event must carry (`cursor + 1`).
+ *
+ * @internal P0 does not wire this: the L3 event stream (not built) will call it.
  * @param {unknown} state
  * @returns {number}
  */
@@ -309,6 +310,9 @@ export function nextCursor(state) {
 
 /**
  * Merge a batch of remote events into a mirror state (design §6).
+ *
+ * @internal P0 does not wire this: no remote event stream or event store exists
+ * yet, so §6 is implemented as a pure helper only. L3 will call it.
  *
  * Rules:
  * - only `seq > cursor` is applied, so replaying a batch twice is idempotent;
@@ -355,6 +359,8 @@ export function applyEvents(state, events) {
 
 /**
  * Compact, client-safe view of a mirror state.
+ *
+ * @internal P0 does not wire this: it ships with the L3 event stream.
  * @param {unknown} state
  * @returns {{
  *   cursor: number,
@@ -383,6 +389,9 @@ export function summarize(state) {
 /**
  * Acquire the single-writer lease (design §6: heartbeat renewal, never
  * concurrent writers).
+ *
+ * @internal P0 does not wire this: no local writer exists yet, so the lease is a
+ * pure helper. L3 input forwarding will call it.
  *
  * A live lease held by another owner is refused with a typed result instead of
  * being overwritten; the returned `readOnly: true` is what the mirror reports to
@@ -437,6 +446,8 @@ export function acquireLease(state, options = {}) {
 
 /**
  * Renew a held lease (heartbeat). An expired lease cannot be renewed silently:
+ *
+ * @internal P0 does not wire this: L3 input forwarding will call it.
  * the holder must re-acquire, so this returns `lease-expired` and `readOnly`.
  *
  * @param {unknown} state
@@ -489,6 +500,8 @@ export function renewLease(state, options = {}) {
 
 /**
  * Whether `owner` may write right now.
+ *
+ * @internal P0 does not wire this: L3 input forwarding will call it.
  * @param {unknown} state
  * @param {string} owner
  * @param {number} now epoch milliseconds
@@ -505,6 +518,8 @@ export function isLeaseHeldBy(state, owner, now) {
 /**
  * Drop an expired lease. `readOnly: true` means "the mirror has no writer and
  * must be presented as read-only" (design §6/§7); a live lease is left alone.
+ *
+ * @internal P0 does not wire this: L3 input forwarding will call it.
  *
  * @param {unknown} state
  * @param {{ now?: number }} [options]
@@ -534,7 +549,8 @@ export function expireLease(state, options = {}) {
  *
  * Downgrade rules, in order: an unknown version or a version mismatch stops at
  * L1 (`version-unknown` / `version-mismatch`, the code docs/api.md already names);
- * a missing probe stops at L1 (`probe-missing`); no history replay stops at L1
+ * a missing probe stops at L1 (`probe-missing`); an unreadable remote directory
+ * stops at L1 (`list-unavailable`); no history replay stops at L1
  * (`history-unavailable`); no event stream stops at L2 (`stream-unavailable`);
  * no input or approval channel stops at L2 (`input-unavailable` /
  * `approve-unavailable`). Only a fully verified probe reaches L3 with
@@ -584,6 +600,12 @@ export function decideLevel(input = {}) {
     return build(MIRROR_LEVELS.L1, 'probe-missing', {
       zh: '尚未探测远端会话能力，只做目录镜像（L1）。',
       en: 'Remote session capabilities have not been probed, so the mirror stays at L1.',
+    })
+  }
+  if (!capabilities.list) {
+    return build(MIRROR_LEVELS.L1, 'list-unavailable', {
+      zh: '远端会话目录不可读，只保留本地已知记录（L1）。',
+      en: 'The remote session directory is unreadable, so only the last known local records remain (L1).',
     })
   }
   if (!capabilities.history) {
