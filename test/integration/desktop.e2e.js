@@ -218,6 +218,14 @@ async function dismissOnboarding(browser, consoleErrors) {
   welcome.on('console', (message) => {
     if (message.type() === 'error') consoleErrors.push(`welcome: ${message.text()}`)
   })
+  // The welcome window has its own locale resolution: unlike the main renderer it does
+  // NOT follow the `--lang` switch (it goes through the app's getLocale(), i.e. the OS
+  // locale). Log it, so a locale surprise is visible in the log instead of showing up
+  // as a mysterious timeout.
+  const welcomeLocale = await welcome
+    .evaluate(() => [document.documentElement.lang || '(none)', navigator.language, navigator.languages])
+    .catch(() => '(unavailable)')
+  console.log(`[desktop-e2e] welcome window locale=${JSON.stringify(welcomeLocale)}`)
   const clicked = await pollUntil(
     async () => {
       const handle = await welcome

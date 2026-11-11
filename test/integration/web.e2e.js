@@ -103,16 +103,14 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 }
 
 /**
- * Compare UI labels the same way on both sides.
+ * All label matching goes through this rule: fold the candidates **and** the node
+ * text the same way (`.replace(/\s+/g, '').trim()`), inside the page function.
  *
- * The shells render labels with translated spacing (`Remote hosts`), and the DOM
- * wraps them in extra whitespace, so both the candidate and the node text are
- * folded the same way. Doing this on ONE side only is a trap that hides a whole
- * locale: `strip('Remote hosts')` is `'Remotehosts'`, which never equals the
- * unstripped `'Remote hosts'` — that is exactly why this suite passed in Chinese
- * (no spaces to strip) and could never pass in English.
+ * Doing it on one side only is a trap that hides an entire locale: `strip('Remote
+ * hosts')` is `'Remotehosts'`, which never equals the unstripped `'Remote hosts'`.
+ * That is exactly why this suite passed in Chinese (no spaces to strip) while every
+ * English run failed to find the nav row.
  */
-const normaliseLabel = (value) => (value ?? '').replace(/\s+/g, '').trim()
 
 /**
  * Tag the deepest element whose normalised text equals a normalised candidate, then
@@ -278,7 +276,7 @@ async function openAccountMenu(page) {
 
 /**
  * Wait (bounded) for a clickable label to appear, then activate it.
- * Both sides of the comparison are normalised — see `normaliseLabel`.
+ * Both sides of the comparison are normalised — see the note above `clickByText`.
  * @param {import('puppeteer-core').Page} page
  * @param {string[]} labels
  * @param {{ timeout?: number, label: string }} options
@@ -381,7 +379,6 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
 
   const dshHome = path.join(tempRoot, 'home')
   const userDataDir = path.join(tempRoot, 'browser')
-  const artifactsDir = process.env.DSH_WEB_E2E_ARTIFACTS ?? path.join(tempRoot, 'artifacts')
   mkdirSync(dshHome, { recursive: true })
   /** @type {Record<string, string | undefined>} */
   const childEnv = { ...process.env, DSH_HOME: dshHome }

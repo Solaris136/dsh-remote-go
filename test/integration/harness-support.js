@@ -13,7 +13,7 @@
  * `pnpm run verify` still passes there by skipping.
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -556,9 +556,15 @@ export async function writeFailureArtifacts(input) {
   }
 }
 
-/** A fresh temp workspace under the OS temp dir. @param {string} prefix */
+/**
+ * A fresh temp workspace under the OS temp dir.
+ *
+ * `mkdtempSync` rather than a hand-built `prefix-<timestamp>-<random>` name: it
+ * creates the directory atomically, with a name the caller cannot predict and mode
+ * 0700, which is what the `js/insecure-temporary-file` rule asks for. Callers write
+ * shims, profiles and artifacts into the returned path.
+ * @param {string} prefix
+ */
 export function makeTempRoot(prefix) {
-  const base = path.join(tmpdir(), `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`)
-  mkdirSync(base, { recursive: true })
-  return base
+  return mkdtempSync(path.join(tmpdir(), `${prefix}-`))
 }
