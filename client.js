@@ -5196,7 +5196,12 @@ window.__ModuleLoader__.load({
 
 .drg-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--drg-radius-sm); border: 1px solid transparent; cursor: pointer; background: transparent; color: inherit; transition: background-color 120ms ease, border-color 120ms ease, opacity 120ms ease; white-space: nowrap; }
 .drg-btn:disabled { cursor: default; opacity: 0.55; }
-.drg-btn-primary { background: var(--drg-primary); color: var(--drg-on-primary); border-color: transparent; font-weight: 500; }
+.drg-btn-primary { background: var(--drg-primary); border-color: transparent; font-weight: 500; }
+/* Two classes plus the label span: the app ships its own element-level button colour rule, so a
+   single-class declaration loses the cascade and the label renders in the same colour as the
+   fill (invisible text on the primary button). */
+.drg-btn.drg-btn-primary,
+.drg-btn.drg-btn-primary .drg-btn-label { color: var(--drg-on-primary); }
 .drg-btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
 .drg-btn-secondary { border-color: var(--drg-border); background: var(--drg-surface); }
 .drg-btn-secondary:hover:not(:disabled) { background: var(--drg-hover); }
