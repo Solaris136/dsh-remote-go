@@ -209,6 +209,10 @@ window.__ModuleLoader__.load({
       workspaceDefault: '默认',
       workspaceLocalOrigin: '本地',
       workspaceRemoteOrigin: '远端',
+      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
+      mirrorReadOnlyBadge: '只读镜像',
+      mirrorReadOnlyTitle: '{level} 只读镜像：{reason}',
+      mirrorReadOnlyReasonDefault: '远端历史以只读方式回放，本地暂不支持输入',
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
@@ -524,6 +528,10 @@ window.__ModuleLoader__.load({
       workspaceDefault: 'Default',
       workspaceLocalOrigin: 'Local',
       workspaceRemoteOrigin: 'Remote',
+      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
+      mirrorReadOnlyBadge: 'Read-only mirror',
+      mirrorReadOnlyTitle: 'Read-only {level} mirror: {reason}',
+      mirrorReadOnlyReasonDefault: 'Remote history is replayed read-only; local input is not supported yet',
 
       viewportConnecting: 'Connecting to "{name}"…',
       viewportOpening: 'Connecting to "{name}" and preparing the remote UI…',
@@ -1395,6 +1403,17 @@ window.__ModuleLoader__.load({
         }
       },
       /**
+       * Mirrored sessions of one remote host (contract §1 GET /hosts/:id/mirrors).
+       * The rail only needs `readOnly` to mark replayed sessions; a failure is
+       * tolerated by the caller, which then shows no badge instead of a guess.
+       * @param {string} hostId - host id.
+       * @returns {Promise<{mirrors: object[]}>} mirror payload.
+       */
+      async getHostMirrors(hostId) {
+        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/mirrors')
+        return { mirrors: Array.isArray(payload.mirrors) ? payload.mirrors : [] }
+      },
+      /**
        * Point the Host's active host at `hostId` so a reload reopens the same
        * remote panel (POST /hosts/:id/activate).
        * @param {string} hostId - host id.
@@ -1616,7 +1635,12 @@ window.__ModuleLoader__.load({
       const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
       return h(
         'span',
-        { className: 'drg-badge', 'data-tone': tone, title: props && props.title },
+        {
+          className: 'drg-badge',
+          'data-tone': tone,
+          title: props && props.title,
+          'data-testid': props && props.testId,
+        },
         props && props.children,
       )
     }
@@ -4436,6 +4460,7 @@ window.__ModuleLoader__.load({
           h(WorkspaceRail, {
             t,
             locale,
+            localeId: locale,
             hosts,
             activeHostId,
             onOpenHost: openHost,
@@ -4526,6 +4551,34 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Mirror-list polling policy.
+     *
+     * Replay settles asynchronously *after* the panel mounts, and the slot props
+     * carry no mirror/sync progress signal (`HostView` has host status only), so
+     * the list is polled **until it settles** rather than a fixed number of times:
+     * a fixed attempt budget silently missed the badge whenever replay outran it.
+     *
+     * - `settled()` says when to stop: a read-only mirror exists, or descriptors
+     *   exist and none is planned at L2 (nothing left to replay). An empty list is
+     *   not settled — the descriptors may not have been written yet.
+     * - The deadline bounds the whole loop, so a host that never replays stops
+     *   polling (and simply shows no badge) instead of spinning forever.
+     */
+    const MIRROR_POLL_INTERVAL_MS = 1000
+    const MIRROR_POLL_DEADLINE_MS = 45_000
+
+    /**
+     * @param {readonly any[] | null | undefined} mirrors - `/hosts/:id/mirrors` rows.
+     * @returns {boolean} whether polling can stop.
+     */
+    function mirrorsSettled(mirrors) {
+      if (!Array.isArray(mirrors) || mirrors.length === 0) return false
+      if (mirrors.some((mirror) => mirror && mirror.readOnly === true)) return true
+      // Nothing planned at L2: replay is not in flight for this host.
+      return !mirrors.some((mirror) => mirror && mirror.level === 'L2')
+    }
+
+    /**
      * Workspace data for the rail: the local DSH registry plus one workspace
      * list per configured host. Refreshes on mount, whenever host ids/statuses
      * change (SSE `/state` pushes), and on demand from the refresh button.
@@ -4576,6 +4629,7 @@ window.__ModuleLoader__.load({
             status: host.status === 'connected' ? 'loading' : 'disconnected',
             connected: host.status === 'connected',
             workspaces: [],
+            mirrors: [],
             error: null,
             hostName: host.name || host.id,
           }
@@ -4589,6 +4643,7 @@ window.__ModuleLoader__.load({
               setRemotes((current) => ({
                 ...current,
                 [host.id]: {
+                  ...(current[host.id] || {}),
                   status: 'ready',
                   connected: payload.connected,
                   workspaces: payload.workspaces,
@@ -4602,6 +4657,7 @@ window.__ModuleLoader__.load({
               setRemotes((current) => ({
                 ...current,
                 [host.id]: {
+                  ...(current[host.id] || {}),
                   status: 'error',
                   connected: true,
                   workspaces: [],
@@ -4611,6 +4667,41 @@ window.__ModuleLoader__.load({
               }))
             },
           )
+          // Read-only markers come from the mirror list the Host already exposes.
+          // Poll until the list settles (see `mirrorsSettled`) with a hard deadline:
+          // a fixed attempt budget missed the badge whenever replay was slower than
+          // it, and polling forever would leak requests on a host that never
+          // replays. A failed read clears the list, so no stale badge survives.
+          const loadMirrors = () => {
+            const startedAt = Date.now()
+            const step = () => {
+              api.getHostMirrors(host.id).then(
+                (payload) => {
+                  if (!alive.current || token !== generation.current) return
+                  setRemotes((current) => ({
+                    ...current,
+                    [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
+                  }))
+                  if (mirrorsSettled(payload.mirrors)) return
+                  if (Date.now() - startedAt >= MIRROR_POLL_DEADLINE_MS) return
+                  setTimeout(() => {
+                    if (!alive.current || token !== generation.current) return
+                    step()
+                  }, MIRROR_POLL_INTERVAL_MS)
+                },
+                () => {
+                  // Never keep a stale list: an unreadable mirror list shows no badge.
+                  if (!alive.current || token !== generation.current) return
+                  setRemotes((current) => ({
+                    ...current,
+                    [host.id]: { ...(current[host.id] || {}), mirrors: [] },
+                  }))
+                },
+              )
+            }
+            step()
+          }
+          loadMirrors()
         }
       }, [])
 
@@ -4652,6 +4743,39 @@ window.__ModuleLoader__.load({
             : String(workspace.id || '')
       const sessionsLabel = (workspace) =>
         t('workspaceRailSessions', { count: typeof workspace.sessionCount === 'number' ? workspace.sessionCount : 0 })
+      /** Read-only mirrors of one remote workspace (empty for local rows). */
+      const readOnlyMirrors = (workspace, kind, host) => {
+        if (kind !== 'remote' || !host) return []
+        const info = data.remotes[host.id]
+        const mirrors = Array.isArray(info && info.mirrors) ? info.mirrors : []
+        return mirrors.filter((mirror) => mirror && mirror.readOnly === true && mirror.workspaceId === workspace.id)
+      }
+      /**
+       * Visible read-only marker (design §10 P1): the rail row covering a
+       * replayed remote session says so, with the level and reason in its tooltip.
+       * Returns `null` when no mirror of the row is read-only, so a host whose
+       * history is unavailable never gets a misleading badge.
+       */
+      const readOnlyBadge = (workspace, kind, host) => {
+        const mirrors = readOnlyMirrors(workspace, kind, host)
+        if (mirrors.length === 0) return null
+        const first = mirrors[0]
+        const level = typeof first.level === 'string' ? first.level : ''
+        // `locale` is derived here rather than read from `props` directly: the rail's own
+        // `locale` binding was dropped as an unused local (it only served this badge), so
+        // resolving it at the point of use keeps the badge working without reintroducing a
+        // binding that only one call site needs.
+        const reason = resolveText(first.reason && first.reason.message, localeOf(props))
+        return h(
+          Badge,
+          {
+            tone: 'idle',
+            testId: 'mirror-readonly-badge',
+            title: t('mirrorReadOnlyTitle', { level, reason: reason || t('mirrorReadOnlyReasonDefault') }),
+          },
+          t('mirrorReadOnlyBadge'),
+        )
+      }
       const workspaceRow = (workspace, kind, host) =>
         h(
           'button',
@@ -4674,6 +4798,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'drg-rail-item-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 14 })),
           h('span', { className: 'drg-rail-item-title' }, workspaceTitle(workspace)),
           workspace.isDefault === true ? h(Badge, { tone: 'idle' }, t('workspaceDefault')) : null,
+          readOnlyBadge(workspace, kind, host),
           h('span', { className: 'drg-rail-item-meta' }, sessionsLabel(workspace)),
         )
 
@@ -5545,6 +5670,16 @@ window.__ModuleLoader__.load({
        * `inject`/`apply`/`components`.
        */
       api,
+      /**
+       * Mirror-list polling policy, exposed like `api` so unit tests can assert the
+       * settlement rules and the deadline/interval bounds directly. Inert at
+       * runtime: the loader consumes only `inject`/`apply`/`components`.
+       */
+      mirrorPolling: {
+        settled: mirrorsSettled,
+        intervalMs: MIRROR_POLL_INTERVAL_MS,
+        deadlineMs: MIRROR_POLL_DEADLINE_MS,
+      },
     }
 
     //#endregion

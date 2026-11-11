@@ -35,7 +35,7 @@
  */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -154,6 +154,146 @@ export const BLOCKED_TEXT = {
   ],
 }
 
+/**
+ * Read-only marker labels, both locales (`client.js` dictionaries). The tooltip
+ * is `"<level> 只读镜像：<reason>"` / `"Read-only <level> mirror: <reason>"`, so the
+ * level is asserted separately and the candidates only need the marker words.
+ */
+export const READ_ONLY_BADGE = Object.freeze({
+  text: ['只读镜像', 'Read-only mirror'],
+  tooltip: ['只读镜像', 'Read-only'],
+})
+
+/**
+ * Session logs for the simulator's default registry (`sess-sim-1`, `sess-sim-2`).
+ *
+ * The simulator already answers `sessions/**` history reads (that landed with the
+ * L2 replay change); when no fixture is named it generates a fallback log per
+ * session. This fixture pins the exact logs for the two default sessions, so the
+ * panel scenario exercises a known replay instead of depending on generated
+ * content — and the mirrors deterministically become `readOnly: true`, which is
+ * what the rail badge needs.
+ */
+export const SIMULATED_HISTORY = Object.freeze({
+  sessions: {
+    'sess-sim-1': {
+      events: [
+        { seq: 1, role: 'user', text: 'sim message 1', at: '2026-11-11T00:00:01Z' },
+        { seq: 2, role: 'assistant', text: 'sim message 2', at: '2026-11-11T00:00:02Z' },
+      ],
+    },
+    'sess-sim-2': {
+      events: [{ seq: 1, role: 'user', text: 'sim message 1', at: '2026-11-11T00:00:01Z' }],
+    },
+  },
+})
+
+/**
+ * Assert the workspace rail marks a replayed (read-only) remote mirror: visible
+ * text, a layout box, and a tooltip that names the level and why it is read-only.
+ * Every comparison normalises **both** sides (see `normalizeText`).
+ * @param {import('playwright-core').Page} page - shell page.
+ * @param {{ timeoutMs?: number }} [options] - timeout override.
+ * @returns {Promise<{ text: string, title: string, width: number }>} the badge.
+ */
+export async function assertReadOnlyBadge(page, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const selector = '[data-testid="mirror-readonly-badge"]'
+  try {
+    await page.waitForSelector(selector, { timeout: Math.min(timeoutMs, 20_000) })
+  } catch (_error) {
+    // The rail reads mirrors once on mount; on a slow host the connect-time replay
+    // may not have finished. One explicit refresh asks it to look again (the same
+    // button a user has), instead of asserting a race.
+    await page.click('[data-testid="workspace-rail-refresh"]')
+    try {
+      await page.waitForSelector(selector, { timeout: timeoutMs })
+    } catch (timeoutError) {
+      const diagnosis = await page.evaluate(
+        async ({ hostId_ }) => {
+          const rail = document.querySelector('[data-testid="workspace-rail"]')
+          const items = Array.from(document.querySelectorAll('[data-testid="workspace-remote-item"]'))
+          let mirrors = null
+          if (hostId_) {
+            try {
+              const headers = { accept: 'application/json', 'x-dsh-remote-go': '1' }
+              const response = await fetch(`/dsh-remote-go/api/hosts/${encodeURIComponent(hostId_)}/mirrors`, {
+                headers,
+                credentials: 'same-origin',
+              })
+              const payload = await response.json()
+              const list = Array.isArray(payload.mirrors) ? payload.mirrors : []
+              const synced = await fetch(`/dsh-remote-go/api/hosts/${encodeURIComponent(hostId_)}/mirrors/sync`, {
+                method: 'POST',
+                headers: { ...headers, 'content-type': 'application/json; charset=utf-8' },
+                body: JSON.stringify({}),
+                credentials: 'same-origin',
+              }).then((result) => result.json())
+              const after = Array.isArray(synced.mirrors) ? synced.mirrors : []
+              mirrors = {
+                status: response.status,
+                sessionsAvailable: payload.sessionsAvailable === true,
+                level: payload.level,
+                count: list.length,
+                readOnlyCount: list.filter((mirror) => mirror.readOnly === true).length,
+                sample: list.slice(0, 3).map((mirror) => ({
+                  readOnly: mirror.readOnly,
+                  level: mirror.level,
+                  workspaceId: mirror.workspaceId,
+                  reason: mirror.reason && mirror.reason.code,
+                })),
+                sync: {
+                  sessionsAvailable: synced.sessionsAvailable === true,
+                  level: synced.level,
+                  reason: synced.reason && synced.reason.code,
+                  sessions: (Array.isArray(synced.sessions) ? synced.sessions : []).slice(0, 3).map((entry) => ({
+                    ok: entry && entry.ok,
+                    reason: entry && entry.reason,
+                    error: entry && entry.error,
+                  })),
+                  readOnlyAfter: after.filter((mirror) => mirror.readOnly === true).length,
+                },
+              }
+            } catch (fetchError) {
+              mirrors = { error: String(fetchError) }
+            }
+          }
+          return {
+            collapsed: rail ? rail.getAttribute('data-collapsed') : null,
+            remoteItems: items.length,
+            itemTexts: items.slice(0, 3).map((node) => (node.textContent || '').slice(0, 80)),
+            badges: document.querySelectorAll('[data-testid="mirror-readonly-badge"]').length,
+            mirrors,
+          }
+        },
+        { hostId_: options.hostId || '' },
+      )
+      throw new Error(
+        `the read-only badge never appeared (${timeoutError.message}); state=${JSON.stringify(diagnosis)}`,
+      )
+    }
+  }
+  const badge = await page.evaluate((selector_) => {
+    const node = document.querySelector(selector_)
+    if (!node) return null
+    const rect = node.getBoundingClientRect()
+    return {
+      text: node.textContent ?? '',
+      title: node.getAttribute('title') ?? '',
+      width: Math.round(rect.width),
+    }
+  }, selector)
+  assert.ok(badge, `the workspace rail is missing the read-only badge (${selector})`)
+  assert.ok(textMatchesAny(badge.text, READ_ONLY_BADGE.text), `unexpected read-only badge text ${badge.text}`)
+  assert.ok(badge.width > 0, 'the read-only badge has no layout box')
+  assert.ok(
+    textIncludesAny(badge.title, READ_ONLY_BADGE.tooltip),
+    `the read-only badge tooltip does not explain why: ${badge.title}`,
+  )
+  assert.match(badge.title, /L2/, `the read-only tooltip is missing the mirror level: ${badge.title}`)
+  return badge
+}
+
 /** Fold whitespace the same way on both sides of a comparison. */
 export function normalizeText(value) {
   return String(value === undefined || value === null ? '' : value)
@@ -189,7 +329,7 @@ export function textIncludesAny(actual, candidates) {
  * The private state file matters: `test/integration/*.e2e.js` files run in one
  * `node --test` invocation, and a shared `e2e/sim/.state.json` would let two
  * simulators race on the same file.
- * @param {{ stateFile: string, workspaceFixture?: string | null }} options
+ * @param {{ stateFile: string, workspaceFixture?: string | null, historyFixture?: object | null }} options
  * @returns {Promise<{ child: import('node:child_process').ChildProcess, state: any, logs: string[], stop: () => Promise<void> }>}
  */
 export async function startSimulatedRemote(options) {
@@ -204,6 +344,14 @@ export async function startSimulatedRemote(options) {
   const args = [SIM_SCRIPT, '--serve', '--state-file', stateFile]
   if (typeof options.workspaceFixture === 'string' && options.workspaceFixture !== '') {
     args.push('--workspace-fixture', options.workspaceFixture)
+  }
+  if (options.historyFixture && typeof options.historyFixture === 'object') {
+    // Pins the session logs the simulator serves (it generates a fallback when no
+    // fixture is named), so replay content is deterministic; the file sits next to
+    // the private state file.
+    const historyFile = path.join(path.dirname(stateFile), 'history.json')
+    writeFileSync(historyFile, `${JSON.stringify(options.historyFixture, null, 2)}\n`, 'utf8')
+    args.push('--history-fixture', historyFile)
   }
   const child = spawn(process.execPath, args, {
     cwd: REPO_ROOT,
@@ -736,6 +884,98 @@ export async function stubNonLoopbackIframeUrl(page, options = {}) {
       })
     },
   }
+}
+
+/**
+ * Page-side installer for the late-replay stub. Runs in the page; `calls` is the
+ * number of `/mirrors` reads that must be answered with a pre-replay payload.
+ * @param {number} calls
+ */
+function installLateReplayStub(calls) {
+  const scope = window
+  if (!scope.__dshPanelE2EOriginalMirrorFetch) scope.__dshPanelE2EOriginalMirrorFetch = scope.fetch
+  const original = scope.__dshPanelE2EOriginalMirrorFetch
+  scope.__dshPanelE2EMirrorCalls = 0
+  scope.__dshPanelE2EPreReplayServed = 0
+  scope.__dshPanelE2ELateReplay = calls
+  scope.__dshPanelE2ESeenUrls = []
+  scope.fetch = async (input, init) => {
+    const raw = typeof input === 'string' ? input : (input && input.url) || ''
+    // Every call is recorded so a "0 mirror reads" failure can tell the difference
+    // between "the client never read" and "the read did not go through fetch".
+    if (scope.__dshPanelE2ESeenUrls.length < 40) scope.__dshPanelE2ESeenUrls.push(raw)
+    // Anchored so `/mirrors/sync` is not intercepted.
+    if (/\/dsh-remote-go\/api\/hosts\/[^/]+\/mirrors(?:[?#]|$)/.test(raw)) {
+      scope.__dshPanelE2EMirrorCalls += 1
+      if (scope.__dshPanelE2EMirrorCalls <= scope.__dshPanelE2ELateReplay) {
+        const real = await original.call(scope, input, init)
+        const payload = await real.clone().json()
+        const mirrors = Array.isArray(payload.mirrors) ? payload.mirrors : []
+        const preReplay = {
+          ...payload,
+          mirrors: mirrors.map((mirror) => ({ ...mirror, readOnly: false, reason: null })),
+        }
+        scope.__dshPanelE2EPreReplayServed += 1
+        return new Response(JSON.stringify(preReplay), {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        })
+      }
+    }
+    return original.call(scope, input, init)
+  }
+}
+
+/**
+ * Accessors for an installed late-replay stub, bound to the page it guards.
+ * @param {import('puppeteer-core').Page} page
+ * @param {number} preReplayCalls
+ */
+function lateReplayHarness(page, preReplayCalls) {
+  return {
+    preReplayCalls,
+    async calls() {
+      return await page.evaluate(() => window.__dshPanelE2EMirrorCalls ?? 0)
+    },
+    async served() {
+      return await page.evaluate(() => window.__dshPanelE2EPreReplayServed ?? 0)
+    },
+    /** Every `fetch` the page made since installation (bounded), for diagnosis. */
+    async urls() {
+      return await page.evaluate(() => window.__dshPanelE2ESeenUrls ?? [])
+    },
+    async disable() {
+      await page.evaluate(() => {
+        const scope = window
+        if (scope.__dshPanelE2EOriginalMirrorFetch) {
+          scope.fetch = scope.__dshPanelE2EOriginalMirrorFetch
+          delete scope.__dshPanelE2EOriginalMirrorFetch
+        }
+        delete scope.__dshPanelE2EMirrorCalls
+        delete scope.__dshPanelE2EPreReplayServed
+        delete scope.__dshPanelE2ESeenUrls
+        delete scope.__dshPanelE2ELateReplay
+      })
+    },
+  }
+}
+
+/**
+ * Install the late-replay stub **before any page script runs** (a fresh page, or a
+ * reload), which guarantees it owns mirror read #1 instead of racing the client.
+ *
+ * The first `preReplayCalls` `/hosts/:id/mirrors` reads return the real payload
+ * with `readOnly` forced to `false` (and `reason: null`), i.e. exactly the
+ * descriptors a host publishes before replay lands. Later reads pass through to
+ * the real API. `served()` proves the client actually received those payloads, so a
+ * test cannot pass vacuously on a stub that never intercepted anything.
+ * @param {import('puppeteer-core').Page} page
+ * @param {{ preReplayCalls?: number }} [options]
+ */
+export async function stubLateReplayMirrorsOnNewDocument(page, options = {}) {
+  const preReplayCalls = Number.isInteger(options.preReplayCalls) ? options.preReplayCalls : 2
+  await page.evaluateOnNewDocument(installLateReplayStub, preReplayCalls)
+  return lateReplayHarness(page, preReplayCalls)
 }
 
 /**

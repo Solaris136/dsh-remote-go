@@ -301,13 +301,20 @@ export function createSessionAdapter(options = {}) {
    * `meta.isSeeded` marks the session as a replay/projection, so a leftover mirror
    * is identifiable after a restart. DSH cannot carry `hostId`/`remoteSessionId`
    * in `meta` (fixed `SessionHeader`), so that lineage stays in `mirrors.json`.
-   * P0 has no seed because the directory level carries no history.
+   *
+   * The host requires an **explicit** seed *and* inherited event count whenever
+   * the header marks a session as seeded ("seeded session requires an explicit
+   * constructor seed" / "…an inherited event count"). The mirror inherits nothing
+   * at creation time — L2 appends the remote history afterwards — so both are
+   * passed explicitly as empty/zero. Omitting them made every mirror session
+   * creation fail in the real shell, so the mirrors were never replayable (and
+   * therefore never read-only).
    * @param {any} descriptor
-   * @returns {{ seed?: any[], meta?: Record<string, any> }}
+   * @returns {{ seed: any[], inheritedEventCount: number, meta: Record<string, any> }}
    */
   function buildCreateOptions(descriptor) {
-    /** @type {{ seed?: any[], meta?: Record<string, any> }} */
-    const createOptions = {}
+    /** @type {{ seed: any[], inheritedEventCount: number, meta: Record<string, any> }} */
+    const createOptions = { seed: [], inheritedEventCount: 0 }
     if (Array.isArray(descriptor?.seed) && descriptor.seed.length > 0) {
       createOptions.seed = descriptor.seed.map((event) => ({ ...event }))
     }
@@ -332,8 +339,10 @@ export function createSessionAdapter(options = {}) {
    * `snapshotEvents(fromSeq?, toSeqExclusive?)`, `ownEvents()`, `eventAt(seq)` and
    * `get seq`. `snapshotEvents()` is preferred because it returns the whole committed
    * log in order; `ownEvents()` is the fallback for a session that only exposes its
-   * own (non-inherited) records. The plain `events` array is kept last for fakes and
-   * for older hosts, but the real API is what must work.
+   * own (non-inherited) records. There is deliberately **no** `events`-array branch:
+   * the host `Session` has no such property, so that branch would be dead in
+   * production and alive only for a fake (which `test/helpers/fake-sessions.js` no
+   * longer provides).
    *
    * Degrades to an empty set when the host exposes nothing readable: the cursor then
    * remains the only guard, which is still correct for the common path.
@@ -354,7 +363,6 @@ export function createSessionAdapter(options = {}) {
     try {
       if (typeof session.snapshotEvents === 'function') events = session.snapshotEvents()
       else if (typeof session.ownEvents === 'function') events = session.ownEvents()
-      else if (Array.isArray(session.events)) events = session.events
     } catch (error) {
       logger.debug?.('[dsh-remote-go] cannot read the mirror session events:', error)
       return seqs

@@ -45,7 +45,10 @@ import {
   assertFrameRefresh,
   assertLoopbackUrl,
   assertPanelToolbar,
+  assertReadOnlyBadge,
+  SIMULATED_HISTORY,
   connectSimulatedHost,
+  stubLateReplayMirrorsOnNewDocument,
   describePanel,
   openRemotePanel,
   startSimulatedRemote,
@@ -58,6 +61,7 @@ import {
   makeTempRoot,
   packPlugin,
   pollUntil,
+  sleep,
   resolveBrowser,
   resolveDshCli,
   resolvePnpm,
@@ -583,7 +587,12 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         // A real connect against the repository's simulated remote host: no external
         // machine is needed, and the iframe therefore proves the *real* pipeline
         // (SSH → probe → remote start → loopback tunnel → iframe).
-        sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
+        sim = await startSimulatedRemote({
+          stateFile: path.join(tempRoot, 'sim', 'sim.state.json'),
+          // Session logs make L2 replay succeed, so the mirrors are read-only and
+          // the rail must mark them.
+          historyFixture: SIMULATED_HISTORY,
+        })
         // The panel subtests are the only ones that need a *live* SSH endpoint, so
         // assert it explicitly: a dead simulator must be reported here, not as a
         // mysterious "panel never mounted".
@@ -639,6 +648,84 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         const refreshed = await assertFrameRefresh(page)
         assertLoopbackUrl(refreshed.iframeSrc, 'the refreshed panel iframe')
       })
+    })
+
+    await t.test('the panel marks replayed remote sessions as read-only', async () => {
+      await withPanelDiagnostics(page, async () => {
+        // The simulator serves two sessions with history, so the connect above
+        // already produced read-only mirrors: this asserts the visible marker the
+        // L2 replay needs, without another simulator or another connect.
+        const badge = await assertReadOnlyBadge(page, { hostId: simulatedHostId })
+        console.log(`[web-e2e] read-only badge: ${JSON.stringify(badge)}`)
+      })
+    })
+
+    await t.test('the badge returns after a replay that finishes late (pre-replay cache)', async () => {
+      assert.ok(simulatedHostId, 'the simulated host was not connected')
+      // A fresh page whose stub is installed **before any app script runs**
+      // (`evaluateOnNewDocument`), so it owns mirror read #1 by construction. An
+      // in-page install raced the already-mounted rail: CI saw 0 reads and the test
+      // failed on a harness race instead of a product defect. The main page is left
+      // untouched, so later subtests keep their state.
+      const latePage = await browser.newPage()
+      try {
+        const stub = await stubLateReplayMirrorsOnNewDocument(latePage, { preReplayCalls: 2 })
+        await latePage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
+        await openRemoteHostsSection(latePage)
+        await openRemotePanel(latePage, { hostId: simulatedHostId })
+        // Prove the stub owned read #1 before asserting anything about the product:
+        // `served === 2` below means the client really received pre-replay rows.
+        await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
+          timeoutMs: 60_000,
+          label: 'the first mirror read on the fresh page',
+          diagnose: async () =>
+            `stubCalls=${await stub.calls()} served=${await stub.served()} ` +
+            `urls=${JSON.stringify((await stub.urls()).slice(-12))}`,
+        })
+        const badge = await assertReadOnlyBadge(latePage, { hostId: simulatedHostId })
+        const served = await stub.served()
+        assert.equal(served, 2, `the client did not receive the pre-replay payloads (served ${served})`)
+        const reads = await stub.calls()
+        assert.ok(reads >= 3, `the client stopped before replay settled (only ${reads} mirror reads)`)
+        // Once settled it stops: the request count must stop growing.
+        const settledReads = await stub.calls()
+        await sleep(2500)
+        assert.equal(await stub.calls(), settledReads, 'the client kept polling after the marker settled')
+        assert.equal(typeof badge.text, 'string')
+      } finally {
+        await latePage.close()
+      }
+    })
+
+    await t.test('a host that never replays shows no badge and stops polling', async () => {
+      assert.ok(simulatedHostId, 'the simulated host was not connected')
+      const selector = '[data-testid="mirror-readonly-badge"]'
+      // Same construction as the late-replay test: a fresh page whose stub is
+      // installed before any app script, so the counters describe *this* page's
+      // reads. Every read stays pre-replay, so no badge may ever appear and the
+      // poll must stay rate-limited (the 45 s deadline bounds the total in
+      // production; here the rate is what makes "bounded" observable).
+      const neverPage = await browser.newPage()
+      try {
+        const stub = await stubLateReplayMirrorsOnNewDocument(neverPage, { preReplayCalls: Number.MAX_SAFE_INTEGER })
+        await neverPage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
+        await openRemoteHostsSection(neverPage)
+        await openRemotePanel(neverPage, { hostId: simulatedHostId })
+        await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
+          timeoutMs: 60_000,
+          label: 'the first mirror read on the never-replay page',
+          diagnose: async () => `stubCalls=${await stub.calls()} served=${await stub.served()}`,
+        })
+        await sleep(1500)
+        const first = await stub.calls()
+        await sleep(6000)
+        const second = await stub.calls()
+        assert.equal(await neverPage.$(selector), null, 'a never-read-only host must not show the badge')
+        assert.ok(second > first, 'the client must retry while replay is still in flight')
+        assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
+      } finally {
+        await neverPage.close()
+      }
     })
 
     await t.test('a non-loopback iframe URL is refused instead of embedded', async () => {

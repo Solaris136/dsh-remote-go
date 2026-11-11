@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createSessionAdapter } from '../../src/session-adapter.js'
+import { createFakeSessions } from '../helpers/fake-sessions.js'
 import { RemoteGoService } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
 
@@ -168,37 +169,6 @@ function createService(options) {
   })
 }
 
-/**
- * A `sessions` service good enough for the adapter: real append bookkeeping so
- * per-seq idempotency can be observed.
- */
-function createSessionsService() {
-  /** @type {Map<string, any>} */
-  const live = new Map()
-  /** @type {{ id: string, type: string, data: any }[]} */
-  const appends = []
-  const sessions = {
-    create(id) {
-      const session = {
-        id,
-        events: [],
-        append(type, data) {
-          const event = { type, seq: session.events.length + 1, data }
-          session.events.push(event)
-          appends.push({ id, type, data })
-          return event
-        },
-      }
-      live.set(id, session)
-      return session
-    },
-    get(id) {
-      return live.get(id)
-    },
-  }
-  return { sessions, live, appends }
-}
-
 /** @param {import('../../src/service.js').RemoteGoService} service @param {string} hostId */
 async function mirrorsOf(service, hostId) {
   const listed = await service.listHostMirrors(hostId)
@@ -248,7 +218,8 @@ test('L2 history replay projects remote history into the local mirror session', 
   try {
     await t.test('history lands in the local session, once per remote seq', async () => {
       const logs = []
-      const { sessions, appends } = createSessionsService()
+      const sessions = createFakeSessions()
+      const { appends } = sessions
       const stateDir = path.join(temp, 'state-land')
       const mirrorRoot = path.join(stateDir, 'mirrors')
       const adapter = createSessionAdapter({ sessions, logger: createLogger(logs), mirrorRoot })
@@ -349,7 +320,8 @@ test('L2 history replay projects remote history into the local mirror session', 
 
     await t.test('a restart continues from the persisted cursor without refetching history', async () => {
       const logs = []
-      const { sessions, appends } = createSessionsService()
+      const sessions = createFakeSessions()
+      const { appends } = sessions
       const stateDir = path.join(temp, 'state-land')
       const mirrorRoot = path.join(stateDir, 'mirrors')
       const adapter = createSessionAdapter({ sessions, logger: createLogger(logs), mirrorRoot })
@@ -391,7 +363,8 @@ test('L2 history replay projects remote history into the local mirror session', 
       // §7: "版本不一致 → 不建立镜像，降级 L1，并在会话上标注". The reviewer's probe found it
       // doing the opposite: replaying and erasing the per-descriptor reason.
       const logs = []
-      const { sessions, appends } = createSessionsService()
+      const sessions = createFakeSessions()
+      const { appends } = sessions
       const stateDir = path.join(temp, 'state-mismatch')
       const adapter = createSessionAdapter({
         sessions,
@@ -478,7 +451,7 @@ test('a gap in the remote log stops the cursor and produces one bounded backfill
   try {
     await t.test('the cursor stops before the gap and the mirror reports a typed reason', async () => {
       const logs = []
-      const { sessions } = createSessionsService()
+      const sessions = createFakeSessions()
       const stateDir = path.join(temp, 'state-gap')
       const adapter = createSessionAdapter({
         sessions,
@@ -597,7 +570,7 @@ test('a remote without a sessions directory degrades to a typed reason', { timeo
   try {
     await t.test('mirrors stay at L1 with sessions-dir-missing instead of throwing', async () => {
       const logs = []
-      const { sessions } = createSessionsService()
+      const sessions = createFakeSessions()
       const stateDir = path.join(temp, 'state-noroot')
       const adapter = createSessionAdapter({
         sessions,
