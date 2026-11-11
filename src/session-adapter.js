@@ -319,7 +319,46 @@ export function createSessionAdapter(options = {}) {
     return createOptions
   }
 
-  return { available, ensureMirrorSession, ensureMirrorCwd, hasMirrorSession, appendEvent, removeMirrorSession }
+  /**
+   * Remote sequence numbers already projected into one mirror session.
+   *
+   * This is the second half of L2 idempotency. The descriptor cursor stops a normal
+   * re-sync from replaying, but a crash between "append to the session" and "persist
+   * the new cursor" would replay the batch on the next sync; asking the session what
+   * it already holds closes that window. Replayed events carry their remote `seq` in
+   * `data.mirrorSeq`, so the answer is exact rather than a heuristic.
+   *
+   * Degrades to an empty set when the host does not expose session events: the
+   * cursor then remains the only guard, which is still correct for the common path.
+   * @param {string} localSessionId
+   * @returns {Set<number>}
+   */
+  function mirrorEventSeqs(localSessionId) {
+    /** @type {Set<number>} */
+    const seqs = new Set()
+    const id = typeof localSessionId === 'string' ? localSessionId.trim() : ''
+    if (id === '' || !id.startsWith(MIRROR_ID_PREFIX)) return seqs
+    const sessions = resolveSessions()
+    if (!sessions || typeof sessions.get !== 'function') return seqs
+    const session = sessions.get(id)
+    const events = Array.isArray(session?.events) ? session.events : null
+    if (events === null) return seqs
+    for (const event of events) {
+      const seq = Number(event?.data?.mirrorSeq)
+      if (Number.isInteger(seq) && seq > 0) seqs.add(seq)
+    }
+    return seqs
+  }
+
+  return {
+    available,
+    ensureMirrorSession,
+    ensureMirrorCwd,
+    hasMirrorSession,
+    appendEvent,
+    mirrorEventSeqs,
+    removeMirrorSession,
+  }
 }
 
 /**
