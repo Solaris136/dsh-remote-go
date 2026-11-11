@@ -204,9 +204,12 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 2. **激活路径只能有一套定位器，且必须验证效果（one locator, DOM click, verified effect）。**
    就绪检查与点击必须用同一个定位器（`test/integration/activation.js` 的 `activateRowInPage` 用 `*` 遍历），
    否则「元素在」与「能点」会分叉，产生 `found the … entry but could not activate it`。
-   点击必须是 DOM `click()`（坐标点击会被任何浮层吞掉），并在点击前检查 `aria-disabled` / `pointer-events` /
-   有无布局盒 / `elementFromPoint` 是否被覆盖；点击后用有界轮询确认**效果**（目标区域真的挂载），失败时重试并
-   在错误信息里打印 url、对话框数量、命中节点的 tag/role 与被什么覆盖。不要再写第二套 `clickByText`。
+   点击必须是 DOM `click()`（坐标点击会被任何浮层吞掉），点击前检查 `aria-disabled` / `pointer-events` /
+   有无布局盒；点击**必须**用有界轮询确认效果（目标区域真的挂载 / 对话框真的关闭），失败时重新定位并重试，
+   错误信息里打印 url、对话框数量、命中节点的 tag/role 与被什么覆盖。
+   遮挡判定必须**同源区分**：`elementFromPoint` 命中同一对话框内的节点（例如对话框自己的关闭按钮被自身背板
+   覆盖）**不算**外部遮挡——否则会拒绝点击本对话框的关闭控件，浮层永远关不掉；只有命中**另一个**对话框或
+   无关浮层才算遮挡。命中同源时照常点击，由「效果已验证」兜底。不要再写第二套 `clickByText`。
 
 3. **测试替身要比宿主更严格，而不是更宽松（fakes enforce the host contract）。**
    替身接受的形状必须与真实宿主一致：`sessions.create` 在 `meta.isSeeded` 时必须要求显式 `seed` 与

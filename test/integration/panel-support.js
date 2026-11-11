@@ -378,9 +378,15 @@ export async function startSimulatedRemote(options) {
         if (!existsSync(stateFile)) return null
         try {
           const parsed = JSON.parse(readFileSync(stateFile, 'utf8'))
-          return Number(parsed.pid) === child.pid && Number(parsed.sshPort) > 0 && Number(parsed.remotePort) > 0
-            ? parsed
-            : null
+          // Every field the assertions use is part of "published" (audit A): pid and
+          // ports alone would let a partially written state file through.
+          const complete =
+            Number(parsed.pid) === child.pid &&
+            Number(parsed.sshPort) > 0 &&
+            Number(parsed.remotePort) > 0 &&
+            typeof parsed.fingerprint === 'string' &&
+            parsed.fingerprint.length > 0
+          return complete ? parsed : null
         } catch {
           // The child may be mid-write; retry until the deadline.
           return null
@@ -520,8 +526,14 @@ export async function connectSimulatedHost(page, options) {
         assert.equal(accepted.status, 200, `the fingerprint was not accepted: ${accepted.text.slice(0, 400)}`)
         return null
       }
-      if (view.status === 'connected' || view.status === 'error' || view.status === 'limited') return view
-      return null
+      // The wait must cover exactly what the assertions below require (audit A): a
+      // terminal `error`/`limited` can never become `connected`, so it is reported
+      // here instead of being returned for an assertion to fail on, and `uiReady` is
+      // asserted right after, so it is part of the settled state too.
+      if (view.status === 'error' || view.status === 'limited') {
+        throw new Error(`the connect pipeline ended in "${view.status}": ${JSON.stringify(view.error ?? null)}`)
+      }
+      return view.status === 'connected' && view.remote?.uiReady === true ? view : null
     },
     {
       timeoutMs,
@@ -530,7 +542,6 @@ export async function connectSimulatedHost(page, options) {
       diagnose: async () => `${JSON.stringify(await readHosts(page))}${simTail()}`,
     },
   )
-  assert.notEqual(host.status, 'error', `the connect pipeline failed: ${JSON.stringify(host.error)}`)
   assert.equal(host.status, 'connected', `unexpected host status ${host.status}`)
   assert.equal(host.remote?.uiReady, true, 'the remote UI was never verified by the Host')
   return { hostId, host }
@@ -722,37 +733,41 @@ export async function assertPanelToolbar(page, options = {}) {
     `the address toggle is not offering "hide": ${controls.addressToggle.label}`,
   )
 
-  // Hide → the rendered address text changes (and the control flips to "show").
+  // Hide → the rendered address text changes **and** the control flips to "show".
+  // Both are part of the settled state: polling for the text alone let the label
+  // assertion below race the re-render (audit A).
   await page.$eval(PANEL.addressToggle, (node) => node.click())
   const hidden = await pollUntil(
     async () => {
       const text = await page.$eval(PANEL.address, (node) => (node.textContent ?? '').trim())
+      const label = await page.$eval(PANEL.addressToggle, (node) =>
+        (node.textContent ?? '').replace(/\s+/g, ' ').trim(),
+      )
       // Both sides are folded: the address row is not localised today, but the
       // "strip one side only" shape is exactly what broke the label comparisons.
-      return normalizeText(text) === normalizeText(HIDDEN_ADDRESS) ? text : null
+      const textHidden = normalizeText(text) === normalizeText(HIDDEN_ADDRESS)
+      return textHidden && textMatchesAny(label, LABELS.addressShow) ? { text, label } : null
     },
-    { timeoutMs, intervalMs: 100, label: 'the address row to hide the address' },
+    { timeoutMs, intervalMs: 100, label: 'the address row to hide the address and flip the toggle' },
   )
-  const toggleAfterHide = await page.$eval(PANEL.addressToggle, (node) =>
-    (node.textContent ?? '').replace(/\s+/g, ' ').trim(),
-  )
-  assert.ok(
-    textMatchesAny(toggleAfterHide, LABELS.addressShow),
-    `the address toggle did not flip to "show": ${toggleAfterHide}`,
-  )
+  const toggleAfterHide = hidden.label
 
-  // Show → the loopback address comes back, so the toggle is not a one-way mask.
+  // Show → the loopback address comes back, so the toggle is not a one-way mask. The
+  // wait covers the exact text the caller asserts (`address`), not just "looks like an
+  // address" (audit A).
   await page.$eval(PANEL.addressToggle, (node) => node.click())
   const restored = await pollUntil(
     async () => {
       const text = await page.$eval(PANEL.address, (node) => (node.textContent ?? '').trim())
-      return MASKED_ADDRESS.test(text) ? text : null
+      return normalizeText(text) === normalizeText(address) ? text : null
     },
     { timeoutMs, intervalMs: 100, label: 'the address row to show the address again' },
   )
   return {
     address,
-    hidden,
+    // The public shape stays the hidden/restored *text*; the toggle label that proves
+    // the control flipped is internal to the wait above.
+    hidden: hidden.text,
     restored,
     labels: {
       reconnect: controls.reconnect.label,

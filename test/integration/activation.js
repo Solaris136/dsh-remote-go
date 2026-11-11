@@ -67,7 +67,18 @@ export function activateRowInPage(rawLabels) {
   }
   const rect = clickable.getBoundingClientRect()
   const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-  if (hit && !clickable.contains(hit) && !hit.contains(clickable)) {
+  // Is the element at the click point a **foreign** overlay, or the surface the
+  // target itself belongs to? A dialog's own backdrop/chrome resolves to a different
+  // node than a button, so a blanket veto refuses to click the dialog's own close
+  // affordance and the dialog never dismisses. A hit inside the same dialog is not
+  // foreign occlusion: the click is dispatched and then verified by its effect (which
+  // is what actually proves it landed). A hit in another dialog/root is foreign.
+  const inSameSurface = (target, hitNode) => {
+    if (!hitNode || target.contains(hitNode) || hitNode.contains(target)) return true
+    const targetDialog = target.closest('[role="dialog"]')
+    return targetDialog !== null && targetDialog === hitNode.closest('[role="dialog"]')
+  }
+  if (!inSameSurface(clickable, hit)) {
     return { clicked: false, reason: 'covered', row: info, coveredBy: describeNode(hit), dialogs }
   }
   clickable.click()
@@ -81,6 +92,11 @@ export function activateRowInPage(rawLabels) {
  */
 export function activateByAriaLabelInPage(rawLabels) {
   const dialogs = document.querySelectorAll('[role="dialog"]').length
+  const inSameSurface = (target, hitNode) => {
+    if (!hitNode || target.contains(hitNode) || hitNode.contains(target)) return true
+    const targetDialog = target.closest('[role="dialog"]')
+    return targetDialog !== null && targetDialog === hitNode.closest('[role="dialog"]')
+  }
   for (const label of rawLabels) {
     const node = document.querySelector(`[aria-label="${label}"]`)
     if (!node) continue
@@ -91,7 +107,7 @@ export function activateByAriaLabelInPage(rawLabels) {
     }
     if (rect.width === 0 || rect.height === 0) return { clicked: false, reason: 'not-laid-out', label, dialogs }
     const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-    if (hit && !node.contains(hit) && !hit.contains(node)) {
+    if (!inSameSurface(node, hit)) {
       return {
         clicked: false,
         reason: 'covered',
@@ -121,11 +137,44 @@ export function clickSelectorInPage(selector) {
   }
   if (rect.width === 0 || rect.height === 0) return { clicked: false, reason: 'not-laid-out', selector }
   const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
-  if (hit && !node.contains(hit) && !hit.contains(node)) {
+  const sameSurface =
+    !hit ||
+    node.contains(hit) ||
+    hit.contains(node) ||
+    (node.closest('[role="dialog"]') !== null && node.closest('[role="dialog"]') === hit.closest('[role="dialog"]'))
+  if (!sameSurface) {
     return { clicked: false, reason: 'covered', selector, coveredBy: { tag: hit.tagName.toLowerCase() } }
   }
   node.click()
   return { clicked: true, reason: null, selector }
+}
+
+/**
+ * Click a control **inside the open dialog** by selector or by its visible text, and
+ * let the caller verify the effect (the dialog disappearing). Dialog-local clicks are
+ * how a first-run overlay is dismissed without a coordinate click: the node is
+ * located, the click is dispatched on it, and the caller waits for the dialog to go.
+ * @param {{ selector?: string, labels?: string[] }} target
+ */
+export function clickInDialogInPage(target) {
+  const dialog = document.querySelector('[role="dialog"]')
+  if (!dialog) return { clicked: false, reason: 'no-dialog' }
+  const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+  /** @type {Element | null} */
+  let node = null
+  if (typeof target.selector === 'string' && target.selector !== '') {
+    node = dialog.querySelector(target.selector)
+  } else if (Array.isArray(target.labels) && target.labels.length > 0) {
+    const wanted = target.labels.map(strip)
+    node = [...dialog.querySelectorAll('button, [role="button"], a')].find((candidate) =>
+      wanted.includes(strip(candidate.textContent)),
+    )
+  }
+  if (!node) return { clicked: false, reason: 'no-matching-node' }
+  const rect = node.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return { clicked: false, reason: 'not-laid-out' }
+  node.click()
+  return { clicked: true, reason: null, text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) }
 }
 
 /**
@@ -204,6 +253,46 @@ export async function clickSelector(page, selector) {
 /** @param {import('puppeteer-core').Page} page @param {string[]} labels */
 export async function clickDialogButton(page, labels) {
   return await page.evaluate(clickDialogButtonInPage, labels)
+}
+
+/** @param {import('puppeteer-core').Page} page @param {{ selector?: string, labels?: string[] }} target */
+export async function clickInDialog(page, target) {
+  return await page.evaluate(clickInDialogInPage, target)
+}
+
+/**
+ * Dismiss the open dialog and **verify the effect**: the click only counts once the
+ * dialog is gone. Tries the dialog's own close affordance, then its labelled
+ * buttons, then Escape; returns whether the dialog actually closed.
+ *
+ * This is why a dialog-local click is not "trusting an unverified click": the effect
+ * check is right here, and a control that is inside the dialog is not treated as
+ * occluded by that same dialog (see the same-surface rule in the page functions).
+ * @param {import('puppeteer-core').Page} page
+ * @param {{ labels?: string[], timeoutMs?: number }} [options]
+ * @returns {Promise<boolean>} whether the dialog is gone.
+ */
+export async function dismissOpenDialog(page, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 10_000
+  const dialogGone = async () =>
+    await page
+      .waitForFunction(() => document.querySelector('[role="dialog"]') === null, { timeout: timeoutMs })
+      .then(() => true)
+      .catch(() => false)
+  if (!(await page.$('[role="dialog"]'))) return true
+  // 1. The dialog's own close affordance.
+  const closed = await clickInDialog(page, {
+    selector: '[aria-label="关闭"], [aria-label="Close"]',
+  })
+  if (closed.clicked && (await dialogGone())) return true
+  // 2. A labelled dismissal button (localised).
+  if (Array.isArray(options.labels) && options.labels.length > 0) {
+    const labelled = await clickInDialog(page, { labels: options.labels })
+    if (labelled.clicked && (await dialogGone())) return true
+  }
+  // 3. Escape, then re-check the effect.
+  await page.keyboard.press('Escape').catch(() => {})
+  return await dialogGone()
 }
 
 /**

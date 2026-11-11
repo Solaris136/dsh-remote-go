@@ -40,6 +40,14 @@ import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
 import {
+  activateByAriaLabel,
+  activateRow,
+  activateRowAndWaitFor,
+  dismissOpenDialog,
+  rowPresent,
+  waitForRow,
+} from './activation.js'
+import {
   assertBlockedIframe,
   assertNoNonLoopbackIframes,
   assertFrameRefresh,
@@ -51,6 +59,7 @@ import {
   stubLateReplayMirrorsOnNewDocument,
   describePanel,
   openRemotePanel,
+  pluginCall,
   startSimulatedRemote,
   stubNonLoopbackIframeUrl,
   switchPanelHost,
@@ -79,6 +88,18 @@ const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account
 const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
 const SETTINGS_LABELS = ['设置', 'Settings']
 const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
+/** First-run dialog buttons: any of these dismisses the overlay (both sides normalised). */
+const DIALOG_DISMISS_LABELS = [
+  '继续',
+  'Continue',
+  '知道了',
+  'Got it',
+  '稍后配置',
+  'Set up later',
+  'Configure later',
+  '稍后',
+  'Later',
+]
 
 /**
  * Boot `dsh web` and resolve once it prints its readiness line.
@@ -131,70 +152,14 @@ async function waitForSelector(page, selector, timeout = 60_000) {
  */
 
 /**
- * Tag the deepest element whose normalised text equals a normalised candidate, then
- * activate it. Deepest wins: the label span, not its wrapper.
- * @param {import('puppeteer-core').Page} page
- * @param {string[]} candidates
- * @returns {Promise<string | null>}
- */
-async function clickByText(page, candidates) {
-  const matched = await page.evaluate((list) => {
-    const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-    const wanted = list.map(strip)
-    const nodes = [
-      ...document.querySelectorAll('button, [role="menuitem"], [role="button"], [role="tab"], a, li, div, span'),
-    ]
-    for (const candidate of wanted) {
-      const matches = nodes.filter((node) => strip(node.textContent) === candidate)
-      if (matches.length === 0) continue
-      const target = matches.sort(
-        (left, right) => left.querySelectorAll('*').length - right.querySelectorAll('*').length,
-      )[0]
-      const clickable = target.closest('button, [role="menuitem"], [role="button"], [role="tab"], a, li') ?? target
-      clickable.setAttribute('data-web-e2e-click', '1')
-      return candidate
-    }
-    return null
-  }, candidates)
-  if (!matched) return null
-  // DOM-dispatched activation: a coordinate click is swallowed by any overlay that
-  // happens to cover the row, which is invisible in the failure output.
-  await page.evaluate(() => {
-    document.querySelector('[data-web-e2e-click="1"]')?.click()
-  })
-  await unmark(page)
-  return matched
-}
-
-/** @param {import('puppeteer-core').Page} page */
-async function unmark(page) {
-  await page.evaluate(() => {
-    document.querySelector('[data-web-e2e-click="1"]')?.removeAttribute('data-web-e2e-click')
-  })
-}
-
-/** @param {import('puppeteer-core').Page} page @param {string[]} labels */
-async function clickByAriaLabel(page, labels) {
-  const matched = await page.evaluate((list) => {
-    for (const label of list) {
-      const node = document.querySelector(`[aria-label="${label}"]`)
-      if (!node) continue
-      node.setAttribute('data-web-e2e-click', '1')
-      return label
-    }
-    return null
-  }, labels)
-  if (!matched) return null
-  await page.click('[data-web-e2e-click="1"]')
-  await unmark(page)
-  return matched
-}
-
-/**
- * Dismiss the first-run overlays (preview notice, sign-in prompt). They can arrive
- * in either order and a later one may appear after an earlier dismissal, so this
- * is re-run before each navigation attempt. Each round waits (bounded) for the
- * dialog to actually disappear — never a fixed sleep.
+ * Dismiss the first-run overlays (preview notice, sign-in prompt). They can arrive in
+ * either order and a later one may appear after an earlier dismissal, so this is
+ * re-run before each navigation attempt.
+ *
+ * Every dismissal is a DOM click **inside the dialog** and counts only once the dialog
+ * is actually gone (`dismissOpenDialog`): no coordinate click (an overlay swallows
+ * those silently) and no reliance on a blanket hit-test veto, which would refuse to
+ * click a dialog's own close affordance because the dialog's backdrop resolves on top.
  * @param {import('puppeteer-core').Page} page
  * @returns {Promise<number>} how many dismissal actions were taken
  */
@@ -203,83 +168,38 @@ async function dismissFirstRunDialogs(page) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     if (!(await page.$('[role="dialog"]'))) return dismissed
     dismissed += 1
-    const close = await page.$('[role="dialog"] [aria-label="关闭"], [role="dialog"] [aria-label="Close"]')
-    if (close) {
-      await close.click().catch(() => {})
-    } else {
-      const advanced = await page.evaluate(() => {
-        const dialog = document.querySelector('[role="dialog"]')
-        if (!dialog) return false
-        const button = [...dialog.querySelectorAll('button')].find((node) =>
-          [
-            '继续',
-            'Continue',
-            '知道了',
-            'Got it',
-            '稍后配置',
-            'Set up later',
-            'Configure later',
-            '稍后',
-            'Later',
-          ].includes((node.textContent ?? '').trim()),
-        )
-        if (!button) return false
-        button.setAttribute('data-web-e2e-click', '1')
-        return true
-      })
-      if (advanced) await page.click('[data-web-e2e-click="1"]').catch(() => {})
-      else await page.keyboard.press('Escape')
-      await unmark(page)
+    const closed = await dismissOpenDialog(page, { labels: DIALOG_DISMISS_LABELS })
+    if (!closed) {
+      throw new Error(
+        `the first-run dialog did not close after a verified click: ${JSON.stringify(await describePanel(page))}`,
+      )
     }
-    // Wait for the dismissal to take effect instead of sleeping a fixed amount.
-    await page
-      .waitForFunction(() => document.querySelector('[role="dialog"]') === null, { timeout: 10_000 })
-      .catch(() => {})
   }
   return dismissed
 }
 
-/** @param {import('puppeteer-core').Page} page */
-async function hasSettingsEntry(page) {
-  return await page.evaluate(() => {
-    const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-    return [...document.querySelectorAll('*')].some((node) => {
-      const text = strip(node.textContent)
-      return (text === '设置' || text === 'Settings') && node.children.length <= 2
-    })
-  })
-}
 /**
  * Open the account menu and wait, bounded, for its Settings entry.
  *
- * A fresh profile paints the shell before the app's handlers are attached, so the
- * first click can land on a dead button — a real interactivity race, not a label
- * mismatch (that bug is fixed: both sides of every comparison are normalised). It is
- * bounded to three clicks, each followed by a wait on the menu actually opening, so
- * a genuine failure still fails fast instead of looping.
+ * Readiness and activation share one locator (`activation.js`), the click is a DOM
+ * click, and each attempt waits for the entry to appear — a fresh profile paints the
+ * shell before the app's handlers are attached, so the first click can land on a dead
+ * button.
  * @param {import('puppeteer-core').Page} page
  */
 async function openAccountMenu(page) {
   await waitForSelector(page, ACCOUNT_MENU_SELECTOR)
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await dismissFirstRunDialogs(page)
-    if (await hasSettingsEntry(page)) return
-    const clicked = await clickByAriaLabel(page, ACCOUNT_MENU_LABELS)
-    if (!clicked) throw new Error('the account-menu button disappeared before it could be clicked')
-    const opened = await page
-      .waitForFunction(
-        () => {
-          const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-          return [...document.querySelectorAll('*')].some((node) => {
-            const text = strip(node.textContent)
-            return (text === '设置' || text === 'Settings') && node.children.length <= 2
-          })
-        },
-        { timeout: 15_000 },
-      )
-      .then(() => true)
-      .catch(() => false)
-    if (opened) return
+    // Only an *open* menu/dialog can already contain the entry; a stray "Settings"
+    // label elsewhere must not short-circuit the navigation.
+    if ((await page.$('[role="dialog"]')) && (await rowPresent(page, SETTINGS_LABELS))) return
+    const clicked = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
+    if (clicked.clicked) {
+      if (await waitForRow(page, SETTINGS_LABELS, { timeoutMs: 15_000 })) return
+    } else if (clicked.reason !== 'covered' && clicked.reason !== 'not-actionable') {
+      throw new Error(`the account-menu button could not be activated: ${JSON.stringify(clicked)}`)
+    }
     await page.keyboard.press('Escape').catch(() => {})
   }
   const aria = await page.$$eval('[aria-label]', (nodes) =>
@@ -293,59 +213,28 @@ async function openAccountMenu(page) {
 }
 
 /**
- * Wait (bounded) for a clickable label to appear, then activate it.
- * Both sides of the comparison are normalised — see the note above `clickByText`.
- * @param {import('puppeteer-core').Page} page
- * @param {string[]} labels
- * @param {{ timeout?: number, label: string }} options
- */
-async function waitAndClickByText(page, labels, options) {
-  await page.waitForFunction(
-    (list) => {
-      const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-      const wanted = list.map(strip)
-      return [...document.querySelectorAll('*')].some((node) => {
-        const text = strip(node.textContent)
-        return wanted.includes(text) && node.children.length <= 2
-      })
-    },
-    { timeout: options.timeout ?? 60_000, polling: 200 },
-    labels,
-  )
-  const clicked = await clickByText(page, labels)
-  if (!clicked) throw new Error(`${options.label}: found the entry but could not click it`)
-  return clicked
-}
-
-/**
- * Navigate account menu -> Settings -> Remote hosts, once.
+ * Navigate account menu -> Settings -> Remote hosts.
  *
- * Every step is a bounded wait on the state that must change; there is no retry
- * loop. A loop would only hide a deterministic failure — and this one was
- * deterministic: the label comparison stripped whitespace from the DOM text but not
- * from the candidate, so `Remote hosts` could never match in English. With both
- * sides normalised, one pass is enough.
+ * One locator for readiness and activation, DOM clicks only, and the step completes
+ * only when the section has mounted with a layout box; failures carry the attempt log
+ * (row, overlay, dialogs) instead of a bare timeout.
  * @param {import('puppeteer-core').Page} page
  */
 async function openRemoteHostsSection(page) {
   await dismissFirstRunDialogs(page)
   await openAccountMenu(page)
-  const settings = await clickByText(page, SETTINGS_LABELS)
-  if (!settings) throw new Error('the account menu did not expose a clickable Settings entry')
-  // The settings dialog replaces the menu; wait for it before touching its nav.
-  await page.waitForFunction(() => document.querySelector('[role="dialog"]') !== null, { timeout: 30_000 })
-  await waitAndClickByText(page, REMOTE_HOSTS_LABELS, {
-    label: 'the settings dialog did not offer a Remote hosts section',
+  // The menu is open with a Settings entry; activate it and verify the settings
+  // surface actually took over before looking for the Remote-hosts row inside it.
+  const settings = await activateRow(page, SETTINGS_LABELS)
+  if (!settings.clicked) {
+    throw new Error(`the Settings entry could not be activated: ${JSON.stringify(settings)}`)
+  }
+  await activateRowAndWaitFor(page, {
+    labels: REMOTE_HOSTS_LABELS,
+    selector: '[data-testid="settings-remote-section"]',
+    label: 'the Remote-hosts section',
+    describe: () => describePanel(page),
   })
-  // Existence is the contract; the contrast measurement below then requires real
-  // layout, so a zero-sized section cannot slip through.
-  await page.waitForFunction(
-    () => {
-      const node = document.querySelector('[data-testid="settings-remote-section"]')
-      return node !== null && node.getBoundingClientRect().width > 0
-    },
-    { timeout: 60_000, polling: 200 },
-  )
 }
 
 /**
@@ -711,9 +600,6 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         await neverPage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
         await openRemoteHostsSection(neverPage)
         await openRemotePanel(neverPage, { hostId: simulatedHostId })
-        // The rail mounted here: its bounded poll deadline (45 s) starts now, and
-        // "still retrying" is only assertable while that budget is running (see below).
-        const mountedAt = Date.now()
         await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
           timeoutMs: 60_000,
           label: 'the first mirror read on the never-replay page',
@@ -724,14 +610,22 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         await sleep(6000)
         const second = await stub.calls()
         assert.equal(await neverPage.$(selector), null, 'a never-read-only host must not show the badge')
-        // Rate limit always holds; **growth** is only meaningful while the bounded poll
-        // deadline is still running. Asserting growth across that boundary was the
-        // flake: on a slow suite the deadline had already elapsed, so stopping was the
-        // documented behaviour and the assertion was wrong, not the client.
+        // The product guarantees one of these, never "it must still be polling":
+        //   - it is still polling because replay looks in flight (the list has an L2
+        //     descriptor without a read-only one), or
+        //   - it has settled (nothing left at L2), which is why it stopped early.
+        // Asserting unconditional growth was the flake: on a host the plugin correctly
+        // settled, stopping is right. The rate limit always holds.
         assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
-        if (Date.now() - mountedAt < 40_000) {
-          assert.ok(second > first, 'the client must retry while replay is still in flight')
-        }
+        const listed = await pluginCall(neverPage, 'GET', `/hosts/${simulatedHostId}/mirrors`)
+        const mirrors = Array.isArray(listed.payload?.mirrors) ? listed.payload.mirrors : []
+        const stillInFlight = mirrors.some((mirror) => mirror && mirror.level === 'L2' && mirror.readOnly !== true)
+        const settled = mirrors.length > 0 && !stillInFlight
+        assert.ok(
+          second > first || settled,
+          `the client stopped polling while replay was still in flight (reads ${first} -> ${second}, ` +
+            `level ${listed.payload?.level}, mirrors ${JSON.stringify(mirrors.map((mirror) => mirror.level))})`,
+        )
       } finally {
         await neverPage.close()
       }
