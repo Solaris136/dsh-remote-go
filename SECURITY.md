@@ -81,6 +81,18 @@
 - 主机指纹首次显式确认，变化时阻断并强提示；`strict` 策略下未记录指纹直接拒绝。
 - 远端自举只执行固定白名单模板命令，不接受用户拼接的任意 shell；Node 下载校验 SHA-256。
 
+## 依赖与已知告警（Dependabot）
+
+- **发布包没有运行时依赖**：`package.json` 的 `dependencies` 为空，安装时 `--ignore-scripts` 也不执行任何生命周期脚本，
+  因此 Dependabot 报告的依赖告警不会进入用户安装的代码路径。
+- 依赖只存在于开发侧（`devDependencies`：测试、打包、E2E 浏览器驱动）与 E2E 夹具锁文件
+  （`e2e/control/pnpm-lock.yaml`、`e2e/remote/embed-check/pnpm-lock.yaml`）。这些目录**不会**被打进 npm tarball
+  （`scripts/pack-check.mjs` 校验）。
+- 仓库已启用 Dependabot 安全更新与告警（`.github/dependabot.yml` + 仓库安全设置），修复型 PR 由 Dependabot 自动提出，
+  走正常 PR 流程（CI + 评审）合入。
+- 如果你发现某个告警能通过**运行时**路径影响用户（例如 vendored `ssh2` bundle 的问题），请按上文私下报告——这属于
+  在范围内的安全问题，我们按安全流程处理，而不是等常规依赖升级。
+
 ## 安全港（Safe Harbour）
 
 我们支持出于善意的安全研究。只要满足以下条件，我们就不会就你的研究行为采取法律行动或向平台投诉：
