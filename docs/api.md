@@ -551,9 +551,16 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 - 恢复：竞争消失后本机 `acquire` 会拿到 `epoch+1`，从原 `cursor` 继续；`epoch` 高水位持久化在
   `mirrors.json` 里，重启不会回退（重启后的自己是「续约」而不是「新写入者」）。
 
+**围栏的适用边界（契约层必须如实告知）**：上述保证只覆盖**共享同一份 `mirrors.json` 的写入者**（同一本地
+profile 的重启、并发同步）以及远端 `lease.json` 显式声明的第三方。**两个互不相识的客户端不会被定序**：它们
+各有自己的描述符存储，都从 `epoch 0` 起步、都会拿到 `epoch 1`、都能通过各自的本地检查；插件也只**读**远端权威，
+从不发布自己的 `{ writer, epoch, expiresAt }`，因此远端没有可用来拒绝过期 epoch 的依据。这不是「已实现的分布式
+互斥」，L3 之前必须补齐双向权威通道、远端侧过期拒绝与真实性绑定（见 session-design.md §6.2 / §11 #9-#10）。
+
 **冲突上报**：同一 `seq` 出现内容不同的记录时，仍按「保留首个」处理（默认策略不变），但会记录到
-`MirrorView.conflicts`（最多 20 条，`kept`/`lost` 各带一段 ≤120 字符摘要 + 7 位短哈希，使截断后仍可区分），
-`conflictCount` 是不受上限约束的累计数；同步响应里对应 `history.conflicts` / `history.conflictSeqs`。
+`MirrorView.conflicts`（最多 20 条，`kept`/`lost` 各带一段 ≤120 字符摘要 + 7 位短哈希，使截断后仍可区分）。
+`conflictCount` 只统计**本次真正应用**的记录上的冲突，并按 `(seq, kept, lost)` 去重，所以 L2 每次重读整份日志
+（见 session-design.md §11 #7）**不会**让计数虚增；同步响应里对应 `history.conflicts` / `history.conflictSeqs`。
 
 **提示的生命周期**：连接成功后 Host 会在后台跑同一条同步，并创建本地镜像会话（此时 `created:true` /
 `resync.needed:true`）。客户端随后调用本端点时，会话已经存在（`created:false` / `resync:null`），所以

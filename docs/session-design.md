@@ -179,6 +179,32 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 - 上限：镜像事件数受 `mirrorMaxEvents` 限制（默认 200，`0` = 不限）。超限时保留**最新** N 条，并在会话里先写一条
   `mirror/history-folded` 通知（带 `folded` / `retained`），然后从新窗口起点继续。
 
+### 6.1 L2 已落地（历史回放）
+
+`cursor` / `applyEvents` / `nextCursor` 从「纯函数」变成**生产在跑**的路径（`src/history.js` +
+`src/service.js#syncMirrorHistory`）：
+
+| 环节 | 实现 |
+|---|---|
+| 远端发现 | SSH `exec`：`test -d <DSH_HOME>/sessions` → `find … -maxdepth 4 -type f -name '*<remoteSessionId>*' \| head -n 5` → `head -c <maxBytes> <file>`，全部单引号转义、带超时 |
+| 解析 | JSON 数组 / `{events\|records\|messages\|history\|turns:[...]}` / JSONL；显式 `version != 1` 直接判 `unknown-version`，不猜 |
+| 映射 | `{ seq, type, data, at }`，`seq` 单调；缺 `seq` 时用 1 起的位置 |
+| 应用 | `applyEvents({ cursor, events: [] }, window)`：只应用 `seq > cursor`，输入顺序无关，重复 `seq` 取首个 |
+| 缺口 | 游标停在缺口前最后一个连续事件；随后按 §6 的「重置游标 + 全量重拉」恢复一次，仍不连续才判 `gap-unfilled` |
+| 去重 | 写入本地会话的事件带 `data.mirrorSeq`，append 前再与「会话里已有的 seq」比对（真机走 `snapshotEvents()`），覆盖「append 成功但 cursor 未落盘」的窗口 |
+| 保留 | `mirrorMaxEvents`（默认 200）截断为最新窗口；首次同步折叠前缀并写 `mirror/history-folded`（带真实的 `from`/`to`），之后溢出按缺口处理 |
+| 只读标识 | 每个镜像会话首次回放时写一条 `mirror/read-only`（非 surface），descriptor 同时带 `readOnly: true`，客户端据此标注「只读」 |
+
+**什么被保留**：角色/类型、正文文本（`text` 或 `content` 的文本段）、工具调用的名称 + 参数摘要（≤200 字符）+
+`toolCallId`、`isError`、时间戳。
+
+**什么被丢弃**：二进制/内联附件（`data:` base64 直接替换为 `[binary omitted]`）、非文本 content 段、
+模型内部字段（`logprobs` / `usage` / `raw` / `embeddings` / `providerMetadata` 等）、以及任何未识别的匿名记录
+（无 `type`、无 `role`、无正文的对象）。
+
+**未知类型**：带 `type` 但本插件不认识的记录**保留**为 `{ seq, type, data: { record: <投影> } }`，投影有确定的
+深度/键数/字符串上限，因此同一输入永远得到同一事件；这样远端升级不会表现为「数据消失」。
+
 ### 6.2 L3 前置：租约 epoch 与围栏（已落地）
 
 L3（流式事件、输入转发、审批回传）之前必须先有「旧写入者不会再写」的机械保证，否则分区归来的写入者会与
@@ -217,7 +243,9 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 
 **围栏规则**：
 
-1. 每次写之前 `assertWritable(state, {owner, epoch, now})`；`epoch < 高水位` 直接拒绝（`stale-epoch`）。
+1. 每个 descriptor 的**写入批次之前**跑两次 `assertWritable(state, {owner, epoch, now})`：一次在两次带超时的 SSH
+   读之前（避免白读），一次**紧贴 append 之前**（纯函数、无 I/O，且重新读注入时钟）。后者是必需的：两次读各可
+   长达 20 s，而默认 TTL 是 30 s，慢同步可能活过自己的租约。`epoch < 高水位` 直接拒绝（`stale-epoch`）。
    这是唯一能挡住「租约看起来还有效、但自己已经被接管」的检查。
 2. 呈现**更高** `epoch` 的写入者被接受，并抬高本地高水位（号码即事实）；呈现更低者一律拒绝。
 3. 一次围栏事件只在**同一个 epoch 的第一次**被判定为 `changed`，因此每个会话每次围栏只写一条
@@ -225,34 +253,29 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 4. 被围栏时：不写、不推进 `cursor`、丢弃自己的租约、descriptor 标 `readOnly: true` + `reason.code = "fenced"`，
    已有历史**原样保留**（只读可看）。
 5. 恢复：竞争消失后重新 `acquire` 会拿到 `epoch + 1`，从原 `cursor` 继续——历史不会重拉、不会丢。
+6. `#ensureMirrorSessions`（创建本地镜像会话）**有意不经过围栏**：它只创建本地 DSH 会话、不写远端、也不追加
+   镜像历史，被围栏的客户端仍然可以「看到」会话列表。围栏管的是**写入远端历史投影**这件事，不是本地可见性。
 
 时钟是**注入**的（`RemoteGoService` 的 `clock`），所以过期与围栏由测试推进假时钟验证，不靠真实等待。
 
-### 6.1 L2 已落地（历史回放）
+**围栏的适用边界（重要，别把 L3 建在错的假设上）**
 
-`cursor` / `applyEvents` / `nextCursor` 从「纯函数」变成**生产在跑**的路径（`src/history.js` +
-`src/service.js#syncMirrorHistory`）：
+今天的保证只覆盖**共享同一描述符存储（`mirrors.json`）的写入者**：同一本地 profile 的重启、并发同步，以及
+远端 `lease.json` 所声明的第三方。
 
-| 环节 | 实现 |
-|---|---|
-| 远端发现 | SSH `exec`：`test -d <DSH_HOME>/sessions` → `find … -maxdepth 4 -type f -name '*<remoteSessionId>*' \| head -n 5` → `head -c <maxBytes> <file>`，全部单引号转义、带超时 |
-| 解析 | JSON 数组 / `{events\|records\|messages\|history\|turns:[...]}` / JSONL；显式 `version != 1` 直接判 `unknown-version`，不猜 |
-| 映射 | `{ seq, type, data, at }`，`seq` 单调；缺 `seq` 时用 1 起的位置 |
-| 应用 | `applyEvents({ cursor, events: [] }, window)`：只应用 `seq > cursor`，输入顺序无关，重复 `seq` 取首个 |
-| 缺口 | 游标停在缺口前最后一个连续事件；随后按 §6 的「重置游标 + 全量重拉」恢复一次，仍不连续才判 `gap-unfilled` |
-| 去重 | 写入本地会话的事件带 `data.mirrorSeq`，append 前再与「会话里已有的 seq」比对（真机走 `snapshotEvents()`），覆盖「append 成功但 cursor 未落盘」的窗口 |
-| 保留 | `mirrorMaxEvents`（默认 200）截断为最新窗口；首次同步折叠前缀并写 `mirror/history-folded`（带真实的 `from`/`to`），之后溢出按缺口处理 |
-| 只读标识 | 每个镜像会话首次回放时写一条 `mirror/read-only`（非 surface），descriptor 同时带 `readOnly: true`，客户端据此标注「只读」 |
+**两个互不相识的客户端不会被定序**：它们各自有一个 `mirrors.json`，都从 `epoch 0` 起步，都会拿到 `epoch 1`，
+也都能通过自己的 `assertWritable`——谁也不会看到对方的号码。而且插件目前**只读**远端权威，从不发布自己的
+`{ writer, epoch, expiresAt }`，所以远端也无从拒绝一个过期 epoch。换句话说，现在这套东西是**单机内的
+重复写入防护 + 一个可观测/可拒绝的远端声明**，不是分布式互斥。
 
-**什么被保留**：角色/类型、正文文本（`text` 或 `content` 的文本段）、工具调用的名称 + 参数摘要（≤200 字符）+
-`toolCallId`、`isError`、时间戳。
+L3 必须补齐的前提（缺一不可）：
 
-**什么被丢弃**：二进制/内联附件（`data:` base64 直接替换为 `[binary omitted]`）、非文本 content 段、
-模型内部字段（`logprobs` / `usage` / `raw` / `embeddings` / `providerMetadata` 等）、以及任何未识别的匿名记录
-（无 `type`、无 `role`、无正文的对象）。
-
-**未知类型**：带 `type` 但本插件不认识的记录**保留**为 `{ seq, type, data: { record: <投影> } }`，投影有确定的
-深度/键数/字符串上限，因此同一输入永远得到同一事件；这样远端升级不会表现为「数据消失」。
+1. **双向权威通道**：本地要主动**发布**自己的 `{ writer, epoch, expiresAt }`，而不是只读别人的。
+2. **远端侧拒绝过期 epoch**：写入请求带 epoch，远端按自己的高水位拒绝落后的一方（今天的检查只在本机）。
+3. **真实性绑定**：否则第三方只要发布一个巨大 epoch 就能把真正的所有者围栏掉（现在的棘轮会立刻接受更高号码，
+   等于一个廉价的 DoS）。
+4. **逐次写检查**：现在是「每批之前」检查；真正并发下应做到每次 append 前检查（或由远端原子地校验）。
+5. **两主机 + 分区测试**：需要两个客户端连同一远端会话、并让其中一个真的断网再回来，才能验证时序竞争。
 
 ## 7. 生命周期与失败模式
 
@@ -289,7 +312,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
 | P1 🟡 | 历史回放（L2）：**数据层已交付，可见标识待客户端** | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 已在 **Host/契约层** 提供（`test/unit/history.test.js` + `test/integration/history.e2e.js` 覆盖）。**未完成**：客户端尚未渲染只读标识（DSH 的 Conversation UI 不显示非 surface 事件），因此「只读标识清晰」这一用户可见目标仍未达成，见 §11 #8 |
-| P2 | 事件流 + 输入转发（L3） | **前置条件已完成**（见 §6.2）：租约 epoch/围栏、并发写入检测、`applyEvents` 冲突上报、可注入时钟，均有单测与模拟远端集成测试。L3 本身仍**未开始**：本地发消息 → 远端执行 → 事件流回本地还没有实现 |
+| P2 | 事件流 + 输入转发（L3） | **前置条件已完成**（见 §6.2）：租约 epoch/围栏、并发写入检测、`applyEvents` 冲突上报、可注入时钟，均有单测与模拟远端集成测试。**但「围栏」只对共享同一描述符存储的写入者成立**——两个独立客户端都从 epoch 0 起步、都会拿到 epoch 1，彼此不会被定序（§11 #10），所以**不要据此认为 L3 的单写者前提已经满足**。L3 本身仍**未开始**：本地发消息 → 远端执行 → 事件流回本地还没有实现 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 
 L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的会话日志，因此没有实时性承诺；`stream` / `input` /
@@ -314,9 +337,16 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
    surface 事件（契约层可断言），但 DSH 的 Conversation UI 不渲染非 surface 事件，客户端也还没有据此绘制任何
    可见标记——所以**用户实际看到的仍是「没有标识的远端历史」**。这是有意的待办而非已完成项：需要客户端在会话头
    或消息列表加一个只读徽标（并用 `redacted`/`level` 说明原因）后才能把 P1 的验收行标为全部达成。
-9. **围栏权威（`remote-go/lease.json`）是一个过渡实现**：真正的单写者仲裁在 L3 应该走控制通道（与事件流同一条
-   `ws-mux`），并用远端自己的会话锁而不是一个旁挂文件。现在这个文件只是为了在**不改远端**的前提下把 epoch /
-   fencing 这套机械先落地并可测；它没有防篡改能力，也不参与远端的真实性校验。
-10. **两个真实的远端主机才能验证的围栏场景**：`fenced` / 恢复路径目前只在模拟远端上验证过。真实的「A 分区后
-   归来、B 已接管」需要两个客户端同时连接同一远端会话，并让其中一个真的断网再回来——本仓库的测试环境里没有
-   第二台主机，所以只验证了协议状态机与 `lease.json` 这一条通道，没有验证真实并发下的时序竞争。
+9. **围栏权威（`remote-go/lease.json`）是一个过渡实现，而且只读**：真正的单写者仲裁在 L3 应该走控制通道
+   （与事件流同一条 `ws-mux`），并用远端自己的会话锁而不是一个旁挂文件。现在这个文件只是为了在**不改远端**的
+   前提下把 epoch / fencing 这套机械先落地并可测；它没有防篡改能力，也不参与远端的真实性校验。更关键的是插件
+   **只读不写**：从不发布自己的 `{ writer, epoch, expiresAt }`，所以远端根本没有可用来拒绝过期 epoch 的依据。
+10. **两个互不相识的客户端不会被定序（这是当前保证的真实边界）**：各自独立的 `mirrors.json` 都从 `epoch 0` 起步，
+    都会拿到 `epoch 1`，也都能通过自己的 `assertWritable`——谁都看不到对方的号码。所以 §6.2 的围栏只覆盖
+    **共享同一描述符存储**的写入者（同一 profile 的重启、并发同步）以及远端 `lease.json` 明确声明的第三方。
+    要越过这条线，L3 必须补齐：① 双向权威通道（本地要发布，而不是只读）；② 远端按自己的高水位拒绝过期 epoch；
+    ③ 真实性绑定（否则第三方发布一个巨大 epoch 就能把所有者围栏掉——当前的棘轮等于一个廉价 DoS）；
+    ④ 逐次写检查（现在只是「每批之前」）；⑤ 两主机 + 真分区的时序测试。
+11. **围栏场景目前只在模拟远端上验证过**：`fenced` / 恢复路径的测试用 `--lease-fixture` 让模拟远端声明一个更高的
+    epoch。真实的「A 分区后归来、B 已接管」需要两个客户端连同一远端会话，并让其中一个真的断网再回来——本仓库
+    的测试环境里没有第二台主机，因此没有验证真实并发下的时序竞争。

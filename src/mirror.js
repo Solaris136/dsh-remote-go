@@ -417,24 +417,45 @@ export function applyEvents(state, events) {
   if (Array.isArray(base.events)) {
     out.events = applied.length > 0 ? [...base.events, ...applied.map((event) => ({ ...event }))] : [...base.events]
   }
-  // Conflict reporting (design §6.2): a same-`seq` record whose payload differs from the
-  // one already applied used to be swallowed silently. Keep-first is still the default
-  // *policy*, but the loss is now reported so a caller/test can prove it happened, with
-  // bounded payload summaries and a capped history so a hostile remote cannot grow it.
-  if (normalized.conflicts.length > 0) {
-    const seen = Array.isArray(base.conflicts) ? base.conflicts : []
-    out.conflicts = capConflicts([...seen, ...normalized.conflicts])
-    // The counter counts **every** conflict seen, including the ones the capped list had to
-    // drop, so "how many were there" stays answerable after trimming.
-    out.conflictCount = (base.conflictCount ?? 0) + normalized.conflictTotal
+  // Conflict reporting (design §6.2): a same-`seq` record whose payload differs from the one
+  // applied used to be swallowed silently. Keep-first is still the default *policy*, but the
+  // loss is now reported so a caller/test can prove it happened.
+  //
+  // Only conflicts for records **this call actually applied** are reported. That is what
+  // makes the count idempotent: L2 re-reads the whole remote log every sync (§11 #7), so a
+  // conflict on a `seq` already behind the cursor was already reported when that record was
+  // applied — counting it again would inflate `conflictCount` on every sync.
+  const appliedSeqs = new Set(applied.map((event) => event.seq))
+  const freshConflicts = normalized.conflicts.filter((conflict) => appliedSeqs.has(conflict.seq))
+  if (freshConflicts.length > 0) {
+    // Merge by digest, not by position: a re-read after a failed append (cursor did not
+    // advance) legitimately re-applies the same seq, and the same conflict must not be
+    // counted twice just because it came back.
+    const seen = new Set((base.conflicts ?? []).map(conflictDigest))
+    const added = freshConflicts.filter((conflict) => !seen.has(conflictDigest(conflict)))
+    if (added.length > 0) {
+      out.conflicts = capConflicts([...(base.conflicts ?? []), ...added])
+      out.conflictCount = (base.conflictCount ?? 0) + added.length
+    }
   }
   return {
     state: out,
     backfill,
     applied: applied.length,
-    conflicts: normalized.conflicts,
+    // The caller-facing list is capped (it ends up in the summary), while the *count* above
+    // stays exact so "how many were there" never tracks the visible window instead of reality.
+    conflicts: capConflicts(freshConflicts),
     conflictCount: out.conflictCount ?? 0,
   }
+}
+
+/**
+ * A conflict's identity for de-duplication: the two sides plus the seq.
+ * @param {MirrorConflict} conflict
+ * @returns {string}
+ */
+function conflictDigest(conflict) {
+  return `${conflict.seq}\u0000${conflict.kept}\u0000${conflict.lost}`
 }
 
 /**
@@ -1107,10 +1128,10 @@ function isMirrorEvent(value) {
  * normal and must not look like data loss.
  *
  * @param {unknown} events
- * @returns {{ events: MirrorEvent[], conflicts: MirrorConflict[], conflictTotal: number }}
+ * @returns {{ events: MirrorEvent[], conflicts: MirrorConflict[] }}
  */
 function normalizeEventsDetailed(events) {
-  if (!Array.isArray(events)) return { events: [], conflicts: [], conflictTotal: 0 }
+  if (!Array.isArray(events)) return { events: [], conflicts: [] }
   /** @type {Map<number, MirrorEvent>} */
   const bySeq = new Map()
   /** @type {MirrorConflict[]} */
@@ -1129,7 +1150,11 @@ function normalizeEventsDetailed(events) {
     }
   }
   const sorted = [...bySeq.values()].sort((left, right) => left.seq - right.seq)
-  return { events: sorted, conflicts: capConflicts(conflicts), conflictTotal: conflicts.length }
+  // Not capped here: the *stored* history is capped (`capConflicts` when merging into the
+  // state), but the count of distinct conflicts in this batch must stay exact — capping
+  // first would make `conflictCount` under-report and let the counter track the visible
+  // window instead of reality. The list is bounded by the caller's batch anyway.
+  return { events: sorted, conflicts }
 }
 
 /**

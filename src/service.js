@@ -925,6 +925,30 @@ export class RemoteGoService extends EventEmitter {
           }
         }
 
+        // Re-check the lease **immediately before the write batch** (design §6.2).
+        //
+        // The earlier check (`:798`) runs before the two bounded SSH reads, and those can
+        // take up to 20 s each against a 30 s TTL: a slow sync could otherwise outlive its
+        // own lease and still append. This second call is pure (no I/O) and re-reads the
+        // injected clock, so the TTL is actually enforced at the moment of writing rather
+        // than at the moment of deciding to try.
+        const late = assertWritable(claimed.state, { owner: writer, epoch: writeEpoch, now: this.#now() })
+        if (!late.ok) {
+          summary.fenced += 1
+          firstReason = firstReason ?? 'fenced'
+          summary.failures.push({ localSessionId: descriptor.localSessionId, reason: late.reason })
+          updated.push({
+            ...descriptor,
+            epoch: Math.max(descriptor.epoch ?? 0, writeEpoch),
+            lease: null,
+            level: 'L1',
+            readOnly: true,
+            reason: historyReason('fenced'),
+            mirroredAt: nowIso(),
+          })
+          continue
+        }
+
         if (!applyPlan(plan)) {
           // Partial append: do not persist a cursor past what landed. The
           // `mirrorSeq` guard makes the next sync continue from the real position.

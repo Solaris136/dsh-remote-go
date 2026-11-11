@@ -474,3 +474,75 @@ test('the simulator contract for the lease fixture is still served', async () =>
     assert.ok(source.includes(needle), `the simulator no longer serves ${JSON.stringify(needle)}`)
   }
 })
+
+test('a lease that expires during a slow sync refuses the write batch', { timeout: 600_000 }, async () => {
+  // §6.2: the first check runs before the bounded SSH reads, and those can outlast a 30 s
+  // TTL. The gate is therefore re-run immediately before appending, against a fresh clock.
+  // The clock advances 60 s per call, so the pre-read check passes and the pre-append one
+  // cannot: nothing may be written.
+  const temp = mkdtempSync(path.join(tmpdir(), 'dsh-lease-late-'))
+  const stateFile = path.join(temp, 'sim-state.json')
+  writeFileSync(path.join(temp, 'workspace.json'), `${JSON.stringify(WORKSPACE_FIXTURE, null, 2)}\n`, 'utf8')
+  writeFileSync(path.join(temp, 'history.json'), `${JSON.stringify(historyFixture(), null, 2)}\n`, 'utf8')
+  const sim = await startSimulator({ stateFile, lease: null })
+  /** @type {RemoteGoService | null} */
+  let service = null
+  try {
+    const logs = []
+    const { sessions, appends } = createSessionsService()
+    const stateDir = path.join(temp, 'state-late')
+    const adapter = createSessionAdapter({
+      sessions,
+      logger: createLogger(logs),
+      mirrorRoot: path.join(stateDir, 'mirrors'),
+    })
+    // Each call jumps 60 s, i.e. well past the default 30 s TTL.
+    let ticks = 0
+    service = createService({
+      stateDir,
+      home: path.join(temp, 'home-late'),
+      localVersion: '0.2.2-rc.1',
+      logs,
+      adapter,
+      clock: () => {
+        ticks += 1
+        return 1_000_000 + ticks * 60_000
+      },
+    })
+    await service.init()
+    const host = await service.saveHost({
+      name: 'sim-lease-late',
+      address: '127.0.0.1',
+      port: sim.state.sshPort,
+      username: CREDENTIALS.username,
+      auth: { type: 'password' },
+      keepAlive: 'keep',
+      bootstrap: { mode: 'reuse' },
+    })
+    await connectHost(service, host.id, logs)
+    await service.syncHostMirrors(host.id).catch(() => null)
+
+    const mirrors = await waitForMirrors(service, host.id, (list) =>
+      list.every((mirror) => mirror.reason?.code === 'fenced'),
+    )
+    assert.equal(
+      mirrors.every((mirror) => mirror.reason?.code === 'fenced'),
+      true,
+      `a lease that expired mid-sync must refuse the batch, got ${JSON.stringify(mirrors.map((m) => m.reason?.code))}`,
+    )
+    assert.equal(
+      appends.filter((entry) => entry.type.endsWith('/message')).length,
+      0,
+      'nothing may be appended once the lease has expired',
+    )
+    assert.equal(
+      mirrors.every((mirror) => mirror.cursor === 0),
+      true,
+      'and the cursor must not advance',
+    )
+  } finally {
+    if (service) await service.shutdown?.().catch?.(() => null)
+    await stopSimulator(sim.child)
+    rmSync(temp, { recursive: true, force: true })
+  }
+})

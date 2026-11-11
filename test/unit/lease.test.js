@@ -296,3 +296,58 @@ test('the authority parser accepts the documented shapes only', () => {
     assert.equal(parseRemoteLease(bad).ok, false, `${bad} must be malformed`)
   }
 })
+
+test('re-reading the same batch does not double-count conflicts', () => {
+  // L2 re-reads the whole remote log every sync (§11 #7), so the same conflict comes back on
+  // every pass. Reviewer's probe: 30 conflicts counted 30, an identical second batch made it
+  // 60. Only conflicts for records this call actually applied may be counted.
+  const first = { seq: 1, type: 'user/message', data: { text: 'original' } }
+  const conflicting = { seq: 1, type: 'user/message', data: { text: 'rewritten' } }
+  const once = applyEvents({ cursor: 0, events: [] }, [first, conflicting])
+  assert.equal(once.conflictCount, 1)
+  assert.equal(once.state.conflictCount, 1)
+  assert.equal(once.state.conflicts.length, 1)
+
+  // The identical batch again: the record is already behind the cursor, so nothing is
+  // re-applied and nothing may be re-counted.
+  const twice = applyEvents(once.state, [first, conflicting])
+  assert.equal(twice.applied, 0)
+  assert.equal(twice.conflictCount, 1, 'a re-read must not inflate the counter')
+  assert.equal(twice.conflicts.length, 0, 'and must not re-report the same conflict')
+  assert.equal(twice.state.conflictCount, 1)
+  assert.equal(twice.state.conflicts.length, 1, 'the recorded conflict is kept')
+})
+
+test('a genuinely new conflict still counts while a repeat does not', () => {
+  const first = { seq: 1, type: 'user/message', data: { text: 'a' } }
+  const once = applyEvents({ cursor: 0, events: [] }, [first, { ...first, data: { text: 'b' } }])
+  assert.equal(once.state.conflictCount, 1)
+
+  // A new seq arrives with its own conflict: the counter advances by exactly one.
+  const second = { seq: 2, type: 'user/message', data: { text: 'c' } }
+  const twice = applyEvents(once.state, [
+    first,
+    { ...first, data: { text: 'b' } },
+    second,
+    { ...second, data: { text: 'd' } },
+  ])
+  assert.equal(twice.state.conflictCount, 2, 'only the new pair is counted')
+  assert.equal(twice.state.conflicts.length, 2)
+  assert.deepEqual(
+    twice.state.conflicts.map((conflict) => conflict.seq),
+    [1, 2],
+  )
+})
+
+test('a re-applied seq (cursor did not advance) is not counted twice', () => {
+  // The append-failure case: the cursor stays put, so the next sync applies the same seq
+  // again. The conflict is the same pair and must merge, not accumulate.
+  const kept = { seq: 1, type: 'user/message', data: { text: 'kept' } }
+  const lost = { seq: 1, type: 'user/message', data: { text: 'lost' } }
+  const first = applyEvents({ cursor: 0, events: [] }, [kept, lost])
+  assert.equal(first.state.conflictCount, 1)
+  // Same state (cursor still 0) and the same batch: applied again, same pair.
+  const again = applyEvents({ cursor: 0, events: [], conflicts: first.state.conflicts, conflictCount: 1 }, [kept, lost])
+  assert.equal(again.state.conflictCount, 1, 'the same (seq, kept, lost) pair merges')
+  assert.equal(again.state.conflicts.length, 1)
+})
