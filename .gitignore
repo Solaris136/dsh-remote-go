@@ -35,3 +35,6 @@ id_*
 .idea/
 .vscode/
 Thumbs.db
+
+e2e/sim/.state.json
+e2e/sim/home/
