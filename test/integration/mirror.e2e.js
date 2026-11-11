@@ -39,6 +39,7 @@ import { SshConnection } from '../../src/ssh.js'
 import { HostStore } from '../../src/store.js'
 import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
 import { readRemoteWorkspaces, remoteWorkspaceStoragePath } from '../../src/workspaces.js'
+import { createFakeSessions } from '../helpers/fake-sessions.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
@@ -376,8 +377,10 @@ function createFakeWorkspaceRegistry(live) {
         path: key,
         title: title ?? path.basename(String(dir)),
         get sessionIds() {
+          // Membership comes from the session header's cwd, like the live
+          // workspace registry (the Session class has no top-level `cwd`).
           return [...live.values()]
-            .filter((session) => canonical(session.cwd) === workspace.path)
+            .filter((session) => canonical(session.header?.cwd) === workspace.path)
             .map((session) => session.id)
         },
         async setTitle(next) {
@@ -662,21 +665,11 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       const stateDir = path.join(temp, 'state-adapter')
       // Production builds exactly this root (src/index.js): `$DSH_HOME/remote-go/mirrors`.
       const mirrorRoot = path.join(stateDir, 'mirrors')
-      /** @type {Map<string, any>} */
-      const live = new Map()
-      /** @type {{ id: string, options: any }[]} */
-      const createCalls = []
-      const sessions = {
-        create(id, options) {
-          createCalls.push({ id, options })
-          const session = { id, append() {} }
-          live.set(id, session)
-          return session
-        },
-        get(id) {
-          return live.get(id)
-        },
-      }
+      // The shared host-faithful double: it rejects a seeded header without an
+      // explicit seed/inheritedEventCount, exactly like the live service.
+      const sessions = createFakeSessions()
+      const { live } = sessions
+      const { createCalls } = sessions
       const adapter = createSessionAdapter({ sessions, logger: createLogger(serviceLogs), mirrorRoot })
       const withAdapter = createService({
         stateDir,
@@ -736,18 +729,8 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       // runner does), so compare the resolved physical directories, not the strings.
       assert.equal(await realpath(mirrorRoot), await realpath(realRoot), 'the mirror root is canonicalized')
 
-      /** @type {Map<string, any>} */
-      const live = new Map()
-      const sessions = {
-        create(id, options) {
-          const session = { id, cwd: options?.meta?.cwd ?? null, append() {} }
-          live.set(id, session)
-          return session
-        },
-        get(id) {
-          return live.get(id)
-        },
-      }
+      const sessions = createFakeSessions()
+      const live = sessions.live
       const registry = createFakeWorkspaceRegistry(live)
       const logger = createLogger(serviceLogs)
       const sessionAdapter = createSessionAdapter({ sessions, logger, mirrorRoot })
@@ -792,7 +775,8 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         assert.equal(workspace.sessionIds.length, listed.mirrors.length)
         assert.deepEqual([...workspace.sessionIds].sort(), listed.mirrors.map((mirror) => mirror.localSessionId).sort())
         // Every live mirror session really is keyed off that one directory.
-        for (const session of live.values()) assert.equal(path.resolve(session.cwd), workspace.path)
+        // The cwd lives on the session header, like the host's SessionHeader.
+        for (const session of live.values()) assert.equal(path.resolve(session.header.cwd), workspace.path)
 
         // The sync payload reports the registration the sidebar just gained, and
         // a re-sync reuses it instead of creating a duplicate.

@@ -339,8 +339,10 @@ export function createSessionAdapter(options = {}) {
    * `snapshotEvents(fromSeq?, toSeqExclusive?)`, `ownEvents()`, `eventAt(seq)` and
    * `get seq`. `snapshotEvents()` is preferred because it returns the whole committed
    * log in order; `ownEvents()` is the fallback for a session that only exposes its
-   * own (non-inherited) records. The plain `events` array is kept last for fakes and
-   * for older hosts, but the real API is what must work.
+   * own (non-inherited) records. There is deliberately **no** `events`-array branch:
+   * the host `Session` has no such property, so that branch would be dead in
+   * production and alive only for a fake (which `test/helpers/fake-sessions.js` no
+   * longer provides).
    *
    * Degrades to an empty set when the host exposes nothing readable: the cursor then
    * remains the only guard, which is still correct for the common path.
@@ -361,7 +363,6 @@ export function createSessionAdapter(options = {}) {
     try {
       if (typeof session.snapshotEvents === 'function') events = session.snapshotEvents()
       else if (typeof session.ownEvents === 'function') events = session.ownEvents()
-      else if (Array.isArray(session.events)) events = session.events
     } catch (error) {
       logger.debug?.('[dsh-remote-go] cannot read the mirror session events:', error)
       return seqs

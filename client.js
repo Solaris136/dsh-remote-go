@@ -4551,6 +4551,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Bounded mirror-list retries. The connect-time replay can finish after the
+     * panel mounts, and the read-only marker must not depend on that race: poll a
+     * few times, stopping as soon as the list is non-empty. Three attempts ~1 s
+     * apart keeps the common case fast and the slow case (replay > 1.5 s) correct.
+     */
+    const MIRROR_FETCH_ATTEMPTS = 3
+    const MIRROR_FETCH_RETRY_MS = 1000
+
+    /**
      * Workspace data for the rail: the local DSH registry plus one workspace
      * list per configured host. Refreshes on mount, whenever host ids/statuses
      * change (SSE `/state` pushes), and on demand from the refresh button.
@@ -4640,8 +4649,9 @@ window.__ModuleLoader__.load({
             },
           )
           // Read-only markers come from the mirror list the Host already exposes.
-          // A failure only hides the badge: never claim read-only without data.
-          const loadMirrors = (retry) => {
+          // A failed read clears the list (no stale badge); an empty list is retried
+          // a bounded number of times because replay may still be running.
+          const loadMirrors = (attempt = 0) => {
             api.getHostMirrors(host.id).then(
               (payload) => {
                 if (!alive.current || token !== generation.current) return
@@ -4649,21 +4659,24 @@ window.__ModuleLoader__.load({
                   ...current,
                   [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
                 }))
-                if (retry && payload.mirrors.length === 0) {
-                  // The connect-time sync may still be replaying history: retry once
-                  // (bounded, not a poll) so the marker appears without a manual refresh.
+                if (payload.mirrors.length === 0 && attempt + 1 < MIRROR_FETCH_ATTEMPTS) {
                   setTimeout(() => {
                     if (!alive.current || token !== generation.current) return
-                    loadMirrors(false)
-                  }, 1500)
+                    loadMirrors(attempt + 1)
+                  }, MIRROR_FETCH_RETRY_MS)
                 }
               },
               () => {
-                // No badge rather than a stale or invented one.
+                // Never keep a stale list: an unreadable mirror list shows no badge.
+                if (!alive.current || token !== generation.current) return
+                setRemotes((current) => ({
+                  ...current,
+                  [host.id]: { ...(current[host.id] || {}), mirrors: [] },
+                }))
               },
             )
           }
-          loadMirrors(true)
+          loadMirrors()
         }
       }, [])
 

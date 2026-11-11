@@ -165,10 +165,14 @@ export const READ_ONLY_BADGE = Object.freeze({
 })
 
 /**
- * Minimal session logs for the simulator's default registry (`sess-sim-1`,
- * `sess-sim-2`). Without a history fixture the simulator serves no
- * `sessions/**` logs, so L2 replay legitimately fails and the mirrors stay
- * `readOnly: false` — the state in which **no** badge must appear.
+ * Session logs for the simulator's default registry (`sess-sim-1`, `sess-sim-2`).
+ *
+ * The simulator already answers `sessions/**` history reads (that landed with the
+ * L2 replay change); when no fixture is named it generates a fallback log per
+ * session. This fixture pins the exact logs for the two default sessions, so the
+ * panel scenario exercises a known replay instead of depending on generated
+ * content — and the mirrors deterministically become `readOnly: true`, which is
+ * what the rail badge needs.
  */
 export const SIMULATED_HISTORY = Object.freeze({
   sessions: {
@@ -342,8 +346,9 @@ export async function startSimulatedRemote(options) {
     args.push('--workspace-fixture', options.workspaceFixture)
   }
   if (options.historyFixture && typeof options.historyFixture === 'object') {
-    // Serving session logs is what makes L2 replay succeed and the mirrors
-    // read-only; the file sits next to the private state file.
+    // Pins the session logs the simulator serves (it generates a fallback when no
+    // fixture is named), so replay content is deterministic; the file sits next to
+    // the private state file.
     const historyFile = path.join(path.dirname(stateFile), 'history.json')
     writeFileSync(historyFile, `${JSON.stringify(options.historyFixture, null, 2)}\n`, 'utf8')
     args.push('--history-fixture', historyFile)

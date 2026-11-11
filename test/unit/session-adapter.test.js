@@ -5,65 +5,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SURFACE_EVENT_TYPES, createSessionAdapter } from '../../src/session-adapter.js'
 import { decideResync, l1Capabilities, mirrorSessionId } from '../../src/mirror.js'
+import { createFakeSessions } from '../helpers/fake-sessions.js'
 
 const quiet = { warn() {} }
-
-/**
- * A fake of the real host `Session`, shaped after its actual surface:
- * `snapshotEvents()`, `ownEvents()`, `eventAt(seq)`, `get seq` — and **no `events`
- * property**, because the real object has none. Faking an `events` array would let
- * `mirrorEventSeqs()` pass here while being dead in production.
- */
-function createFakeSession(id, calls) {
-  /** @type {{ type: string, seq: number, data: any }[]} */
-  let committed = []
-  const session = {
-    id,
-    get seq() {
-      return committed.length
-    },
-    append(...args) {
-      calls.push({ op: 'append', id, args })
-      const [type, data] = args
-      const event = { type, seq: committed.length + 1, data }
-      committed = [...committed, event]
-      return event
-    },
-    snapshotEvents() {
-      return committed
-    },
-    ownEvents() {
-      return committed
-    },
-    eventAt(seq) {
-      return committed.find((event) => event.seq === seq)
-    },
-  }
-  return session
-}
-
-/** A fake of the Cordis `sessions` service: only the methods the adapter uses. */
-function createFakeSessions() {
-  /** @type {any[]} */
-  const calls = []
-  /** @type {Map<string, any>} */
-  const live = new Map()
-  const sessions = {
-    calls,
-    live,
-    create(id, options) {
-      calls.push({ op: 'create', id, options })
-      const session = createFakeSession(id, calls)
-      live.set(id, session)
-      return session
-    },
-    get(id) {
-      calls.push({ op: 'get', id })
-      return live.get(id)
-    },
-  }
-  return sessions
-}
 
 function descriptor(overrides = {}) {
   return {
@@ -404,8 +348,8 @@ test('mirrorEventSeqs reads the real Session surface, not a fake events array', 
 test('mirrorEventSeqs prefers snapshotEvents and falls back without throwing', () => {
   const id = 'mirror_fallbackprobe0000000000'
   const events = [
-    { type: 'user/message', seq: 1, data: { mirrorSeq: 3 } },
-    { type: 'user/message', seq: 2, data: { mirrorSeq: 4 } },
+    { type: 'user/message', seq: 0, data: { mirrorSeq: 3 } },
+    { type: 'user/message', seq: 1, data: { mirrorSeq: 4 } },
   ]
   /** @param {any} session */
   const adapterFor = (session) =>
@@ -414,8 +358,8 @@ test('mirrorEventSeqs prefers snapshotEvents and falls back without throwing', (
       logger: quiet,
     })
 
-  // snapshotEvents wins when both exist.
-  const both = adapterFor({ snapshotEvents: () => events, events: [{ data: { mirrorSeq: 9 } }] })
+  // snapshotEvents wins over ownEvents when both exist.
+  const both = adapterFor({ snapshotEvents: () => events, ownEvents: () => [{ data: { mirrorSeq: 9 } }] })
   assert.deepEqual(
     [...both.mirrorEventSeqs(id)].sort((a, b) => a - b),
     [3, 4],
@@ -434,6 +378,10 @@ test('mirrorEventSeqs prefers snapshotEvents and falls back without throwing', (
     [...wrapped.mirrorEventSeqs(id)].sort((a, b) => a - b),
     [3, 4],
   )
+
+  // A legacy `events` array is not read: the real Session has no such property, so
+  // supporting it would only keep a fake alive (see the shared double's docs).
+  assert.deepEqual([...adapterFor({ events }).mirrorEventSeqs(id)], [])
 
   // Nothing readable / a throwing host degrades to an empty set instead of raising.
   assert.deepEqual([...adapterFor({}).mirrorEventSeqs(id)], [])
