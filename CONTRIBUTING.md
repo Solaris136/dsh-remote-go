@@ -125,6 +125,16 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 
 真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁。
 
+### 仓库规则（已在仓库设置中启用）
+
+- **`main` 受保护**（ruleset「main protection」）：禁止删除与强推、要求线性历史、要求通过 PR 合并，并且必须通过
+  `Repository conventions`、`Unit tests (ubuntu-latest, Node 24)`、`Publish artifact (ubuntu-latest)` 三个检查。
+  维护者保留绕过权限，仅用于发布与紧急修复。
+- **只允许 squash merge**：合并后自动删除来源分支；PR 标题即最终提交标题。
+- **`v*` 标签受保护**（ruleset「release tags」）：禁止删除与移动，发布标签一旦推送即不可变。
+- **安全相关**：Dependabot 安全更新自动开 PR；CodeQL 在 PR 上扫描；secret scanning 与 push protection 已开启——
+  如果推送被拒绝并提示检测到密钥，请按 [SECURITY.md](SECURITY.md) 处理并立即轮换该凭据。
+
 ## 6. 评审要求
 
 评审看「可验证」，不看风格口味。合并前置条件：
