@@ -313,6 +313,31 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
   原样保留，不会被顺手删掉。
 - 两个既有持久化点都改走这里，是**单一入口**而不是在某一处加锁。
 
+#### 删除也必须走同一条队列（否则会「复活」）
+
+只有写入串行还不够：**删除**同样会改这批描述符。如果它绕过队列，一个在飞的同步就会把用户刚删掉的主机的镜像
+写回来。三个促成因素（修复前都在 `main` 上）：
+
+1. `removeHost` **直接**调用 `mirrorStore.removeHostMirrors`，绕过了队列；
+2. `#teardownRuntime` 不等待 `runtime.mirrorSync`，所以在删之前启动的同步会继续跑完；
+3. `mergeDescriptorDeltas` 会把「delta 里有、current 里没有」的描述符**插回去**。
+
+顺序：同步读到快照 → 用户删主机 → 描述符被清空 → 同步排队中的写入落地 → 描述符复活。
+
+**规则（本版定稿）**：
+
+- **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)` 让任意镜像操作排进同一条链；
+  `removeHost` 的删除通过它执行，因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
+- **墓碑优先于排序。** 删除一开始就置 `runtime.mirrorDeleted = true`；`#mutateMirrors` 把这个判断放在**排队的
+  delta 内部**，所以哪怕某次写入是在删除**之前**入队、在删除**之后**才执行，它也只会写回 `current`，不会复活。
+  队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
+- **合并是更新，不是 upsert。** `mergeDescriptorDeltas` 只改 `current` 里已存在的描述符；delta 指向一个已经
+  不存在的 `localSessionId` 时**丢弃**它——那正意味着「快照读完之后它被删了」。新建描述符是 reconcile 的职责
+  （它返回计划的全集），不是 merge 的。
+- **reconcile 只看当前存储。** 旧的 `current.length > 0 ? current : existing` 回退会在 `current` 为空时用删除前
+  的快照重建描述符，是复活 bug 的第二个入口，已移除。
+- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`），不再静默。
+
 ### 6.4 事件流尝试（已移除；失败归因见 §11 #14）
 
 事件流的传输、远端 epoch 拒绝脚本、有界帧缓冲与「流式/日志共用一条 ingest 流水线」的等价性都实现并通过了单测。

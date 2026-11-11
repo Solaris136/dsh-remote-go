@@ -26,14 +26,28 @@
  * @returns {Promise<any[]>}
  */
 export async function withMirrorWriter(runtime, read, write, delta) {
-  const run = async () => {
+  return withMirrorQueue(runtime, async () => {
     const current = read()
     const next = delta(current)
     if (!Array.isArray(next)) return current
     return write(next)
-  }
+  })
+}
+
+/**
+ * Run one operation on a host's mirror queue.
+ *
+ * Every mutation of a host's mirror state shares this queue — descriptor writes *and* host
+ * deletion. That is what stops a deletion from interleaving inside a sync's
+ * read → delta → persist, which is how an in-flight sync used to resurrect deleted mirrors.
+ *
+ * The chain survives a throwing operation, so a failure cannot wedge the queue for that host.
+ * @param {{ id: string, mirrorQueue?: Promise<unknown> }} runtime
+ * @param {() => Promise<any>} run
+ * @returns {Promise<any>}
+ */
+export async function withMirrorQueue(runtime, run) {
   const queued = (runtime.mirrorQueue ?? Promise.resolve()).then(run, run)
-  // Keep the chain alive even if one writer throws: a failure must not wedge the queue.
   runtime.mirrorQueue = queued.then(
     () => undefined,
     () => undefined,
@@ -42,35 +56,39 @@ export async function withMirrorWriter(runtime, read, write, delta) {
 }
 
 /**
- * Merge descriptor deltas onto the current set, keeping the monotonic fields monotonic.
+ * Merge descriptor deltas onto the current set.
  *
- * `cursor`, `epoch` and `conflictCount` only ever move forward: two writers that legitimately
- * race on them must not be able to lower either. Other fields follow the delta, because the last
- * serialised writer is the most recent opinion about them.
+ * Two rules, both load-bearing (design §6.3):
+ *
+ * 1. **Update-only — a merge never creates.** A delta whose `localSessionId` is no longer present
+ *    in `current` is dropped. That case means the descriptor was deleted after this writer read
+ *    its snapshot, so re-inserting it would resurrect a deleted host's mirrors. Creation is the
+ *    reconcile's job (it returns the full planned set), not a merge's.
+ * 2. **Monotonic fields only move forward.** `cursor`, `epoch` and `conflictCount` take the
+ *    maximum, so two writers that legitimately race on them cannot lower either. Other fields
+ *    follow the delta, because the last serialised writer is the most recent opinion about them.
+ *
+ * A descriptor the delta does not mention is preserved untouched.
  * @param {any[]} current @param {any[]} deltas
  * @returns {any[]}
  */
 export function mergeDescriptorDeltas(current, deltas) {
-  const byId = new Map(current.map((entry) => [entry.localSessionId, entry]))
-  const seen = new Set()
   /** @type {any[]} */
-  const out = []
+  const out = current.map((entry) => ({ ...entry }))
+  /** @type {Map<string, number>} */
+  const index = new Map(out.map((entry, at) => [entry.localSessionId, at]))
   for (const delta of deltas) {
-    seen.add(delta.localSessionId)
-    const base = byId.get(delta.localSessionId)
-    if (base === undefined) {
-      out.push(delta)
-      continue
-    }
-    out.push({
+    const at = index.get(delta.localSessionId)
+    // Update-only: absent means deleted since the snapshot was read, so it stays deleted.
+    if (at === undefined) continue
+    const base = out[at]
+    out[at] = {
       ...base,
       ...delta,
       cursor: Math.max(base.cursor ?? 0, delta.cursor ?? 0),
       epoch: Math.max(base.epoch ?? 0, delta.epoch ?? 0),
       conflictCount: Math.max(base.conflictCount ?? 0, delta.conflictCount ?? 0),
-    })
+    }
   }
-  // A descriptor the delta did not mention is preserved, never dropped.
-  for (const entry of current) if (!seen.has(entry.localSessionId)) out.push(entry)
   return out
 }

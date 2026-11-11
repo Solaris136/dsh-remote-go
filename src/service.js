@@ -59,7 +59,7 @@ import {
   leaseExpiryFor,
   publishRemoteLease,
 } from './lease.js'
-import { mergeDescriptorDeltas, withMirrorWriter } from './mirror-writer.js'
+import { mergeDescriptorDeltas, withMirrorQueue, withMirrorWriter } from './mirror-writer.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -373,7 +373,7 @@ export class RemoteGoService extends EventEmitter {
         this.logger.warn?.('[dsh-remote-go] cannot remove a mirror session:', error)
       }
     }
-    await this.mirrorStore?.removeHostMirrors?.(id)
+    await this.#removeMirrorsForHost(id, runtime)
     // Remove the host's sidebar workspace too: its directory stays (session logs
     // live elsewhere), but the group must not outlive the host it represents. A
     // failure here is repaired by the startup sweep, so it never blocks deletion.
@@ -596,7 +596,10 @@ export class RemoteGoService extends EventEmitter {
     /** @type {any} */
     let reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.#mutateMirrors(runtime, (current) => {
-      reconciled = reconcileMirrors({ existing: current.length > 0 ? current : existing, planned })
+      // Always reconcile against what is stored *now*. The old `current.length > 0 ? current :
+      // existing` fallback reconciled against a snapshot taken before any deletion, which is the
+      // second way a deleted host's mirrors came back.
+      reconciled = reconcileMirrors({ existing: current, planned })
       return reconciled.mirrors
     })
     const sessionRun = await this.#ensureMirrorSessions(runtime, mirrors)
@@ -1981,8 +1984,24 @@ export class RemoteGoService extends EventEmitter {
       runtime,
       () => this.mirrorStore.listMirrors({ hostId: runtime.id }),
       (next) => this.mirrorStore.replaceHostMirrors(runtime.id, next),
-      delta,
+      // The guard is *inside* the queued delta: a write enqueued before the deletion but executed
+      // after it must also be a no-op, otherwise the queue would only reorder the resurrection.
+      (current) => (runtime.mirrorDeleted === true ? current : delta(current)),
     )
+  }
+
+  /**
+   * Remove a host's descriptors on the same per-host queue a sync uses.
+   *
+   * Deleting while a sync is mid-flight used to leave the sync's queued write to re-insert the
+   * descriptors it had read before the deletion. Sharing the queue orders the two, and the
+   * tombstone set by `removeHost` makes any write ordered *before* the deletion harmless too.
+   * @param {string} hostId
+   * @param {any} [runtime] the runtime captured before it left the map (may be undefined)
+   */
+  async #removeMirrorsForHost(hostId, runtime) {
+    if (!runtime) return this.mirrorStore?.removeHostMirrors?.(hostId)
+    return withMirrorQueue(runtime, async () => this.mirrorStore?.removeHostMirrors?.(hostId))
   }
 
   /**
