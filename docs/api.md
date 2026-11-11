@@ -453,18 +453,22 @@ interface MirrorView {
 
 **侧边栏工作区（`sidebar`）**：DSH 侧边栏按工作区列会话，工作区成员由会话头的规范化 cwd 推导，所以 Host 会把每台
 主机的镜像目录 `$DSH_HOME/remote-go/mirrors/<hostId>` 注册成一个工作区（标题 `Remote: <主机名>`，与会话 `meta.cwd`
-用同一个路径函数产出）。`sidebar` 是该注册的落地结果：
+用同一个路径函数产出；镜像根在插件加载时先做一次 `fs.realpath`，两个适配器共用同一个规范化路径，见设计 §4.3）。
+`sidebar` 是该注册的落地结果：
 
 | 字段 | 含义 |
 |---|---|
-| `ok` / `reason` | `ok:false` 时 `reason` ∈ `adapter-absent` / `adapter-error` / `workspaces-unavailable` / `create-failed` / `no-mirror-root` / `invalid-host`；`ok:true` 且 `reason` 非空表示**有意跳过**：`disabled`（`mirrorToSidebar=false`）、`sessions-unavailable`（没有可分组的本地会话）、`no-mirrors`（远端没有镜像会话） |
+| `ok` / `reason` | `ok:false` 时 `reason` ∈ `adapter-absent` / `adapter-error` / `workspaces-unavailable` / `create-failed` / `no-mirror-root` / `invalid-host`；`ok:true` 且 `reason` 非空表示**有意跳过或移除**：`disabled`（`mirrorToSidebar=false`，若此前注册过则**已移除**）、`sessions-unavailable`（没有可分组的本地会话，含「本次同步所有 `sessions.create` 都失败」）、`no-mirrors`（远端没有镜像会话） |
 | `enabled` | 设置 `mirrorToSidebar` 是否为开 |
-| `path` / `title` / `workspaceId` | 注册的工作区；跳过或失败时可为 `null` |
+| `path` / `title` / `workspaceId` | 注册的工作区；跳过或失败时可为 `null`。`path` 是**注册表规范化后**的路径（`fs.realpath`），不是调用方传入的字面路径 |
 | `created` / `renamed` | 本次是否新建 / 是否因主机改名而改了标题；复用既有注册时两者皆 false |
+| `removed` | 仅 `reason="disabled"` 时有意义：是否真的移除了既有注册（没有注册时为 false，幂等） |
 
 注册是幂等且非致命的：`workspaceRegistry`（可选依赖）缺失或报错只影响侧边栏分组，连接与镜像本身照常完成。
-`DELETE /hosts/:id` 会同时删除该注册（保留目录与会话日志）。`GET /mirrors` 不返回 `sidebar`（只读端点不做实时
-注册表查询），需要时以本端点的返回为准。
+关闭 `mirrorToSidebar` 会在下一次同步（连接或 `POST …/mirrors/sync`）时**移除**已有注册——否则该分组会永远留在侧边栏
+（镜像会话只在内存中，重启后不会有会话填回）；重新开启后同一同步会重建注册。`DELETE /hosts/:id` 会删除该注册；
+若这次删除失败，下次启动的孤儿清理会对镜像根下没有对应主机的注册做一次幂等补删。
+`GET /mirrors` 不返回 `sidebar`（只读端点不做实时注册表查询），需要时以本端点的返回为准。
 
 请求（两者均可选，空请求体等价于 `{}`）：
 
@@ -507,6 +511,9 @@ v1.1 约束：
    被覆盖；不含任何凭据或 token。
 10. 侧边栏可见性：镜像会话只有在「镜像目录被注册为工作区」时才会出现在 DSH 侧边栏（成员关系由会话头的规范化
     cwd 决定，`meta` 没有 workspaceId）。Host 通过可选依赖 `ctx.workspaceRegistry` 注册 `Remote: <主机名>` 工作区，
-    路径与会话 `meta.cwd` 完全一致；`create` 前先 `resolveByPath`，因此重连不产生重复注册。设置
-    `mirrorToSidebar=false` 时不注册（`sidebar.reason="disabled"`），已存在的注册不删除；删除主机时删除注册。
-    `workspaceRegistry` 缺失时该能力整体降级为 `adapter-absent`，不影响 v1 的任何字段。
+    路径与会话 `meta.cwd` 完全一致——镜像根在插件加载时先 `fs.realpath` 一次（缺失时创建），两个适配器共用这个
+    规范化根，因此符号链接/junction 不会让「字面路径」与「注册表路径」分叉。`create` 前先 `resolveByPath`，所以
+    重连不产生重复注册。设置 `mirrorToSidebar=false` 时会**移除**已有注册（幂等；`sidebar.removed` 说明是否真的删了），
+    而不是仅停止新建；重新开启后在下一次同步重建。删除主机时删除注册；删除失败由启动时的孤儿清理补删
+    （只删镜像根下没有对应主机的注册，从不删除目录）。`workspaceRegistry` 缺失时该能力整体降级为
+    `adapter-absent`，不影响 v1 的任何字段。

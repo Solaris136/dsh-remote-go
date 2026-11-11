@@ -12,15 +12,19 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createSessionAdapter } from '../../src/session-adapter.js'
+import process from 'node:process'
+import { canonicalMirrorRoot, createSessionAdapter } from '../../src/session-adapter.js'
 import { createWorkspaceAdapter, hostWorkspaceTitle, WORKSPACE_TITLE_PREFIX } from '../../src/workspace-adapter.js'
 
 /**
  * A registry double with the durable-registry semantics the adapter needs.
- * @param {{ failCreate?: boolean, failDelete?: boolean, failResolve?: boolean }} [options]
+ * `canonicalPath` emulates `fs.realpath` inside the real registry: the stored
+ * entity (and every lookup) uses that path, so a test can prove the adapter
+ * reports the registry's canonical spelling rather than the literal input.
+ * @param {{ failCreate?: boolean, failDelete?: boolean, failResolve?: boolean, canonicalPath?: (dir: string) => string }} [options]
  */
 function createFakeRegistry(options = {}) {
   /** @type {{ create: { path: string, title: string | undefined }[], resolve: string[], delete: string[] }} */
@@ -30,6 +34,8 @@ function createFakeRegistry(options = {}) {
   /** @type {Map<string, any>} */
   const byId = new Map()
   let seq = 0
+  /** @param {string} dir */
+  const canonical = (dir) => (typeof options.canonicalPath === 'function' ? options.canonicalPath(dir) : dir)
   const registry = {
     /** @type {string[]} */
     get order() {
@@ -38,13 +44,14 @@ function createFakeRegistry(options = {}) {
     async create(dir, title) {
       calls.create.push({ path: dir, title })
       if (options.failCreate === true) throw new Error('registry refused the create')
-      const existing = byPath.get(dir)
+      const key = canonical(dir)
+      const existing = byPath.get(key)
       // Idempotent per contract: same canonical path returns the same entity and
       // does not retitle it.
       if (existing) return existing
       const workspace = {
         id: `ws_${(seq += 1)}`,
-        path: dir,
+        path: key,
         title: title ?? path.basename(dir),
         createdAt: '2026-11-11T00:00:00.000Z',
         updatedAt: '2026-11-11T00:00:00.000Z',
@@ -55,14 +62,14 @@ function createFakeRegistry(options = {}) {
           workspace.title = next
         },
       }
-      byPath.set(dir, workspace)
+      byPath.set(key, workspace)
       byId.set(workspace.id, workspace)
       return workspace
     },
     async resolveByPath(dir) {
       calls.resolve.push(dir)
       if (options.failResolve === true) throw new Error('realpath failed')
-      return byPath.get(dir)
+      return byPath.get(canonical(dir))
     },
     async delete(id) {
       calls.delete.push(id)
@@ -75,6 +82,10 @@ function createFakeRegistry(options = {}) {
     },
     list() {
       return [...byId.values()]
+    },
+    /** Test-only: register an entity the adapter never created. @param {string} dir @param {string} title */
+    async seed(dir, title = 'seeded') {
+      return await registry.create(canonical(dir), title)
     },
   }
   return { registry, calls }
@@ -145,7 +156,38 @@ test('ensureHostWorkspace is idempotent across reconnects', async () => {
   }
 })
 
-test('ensureHostWorkspace is a no-op when the setting is off', async () => {
+test('enabled:false unregisters an existing workspace instead of only skipping', async () => {
+  const root = await makeTempRoot()
+  try {
+    const { registry, calls } = createFakeRegistry()
+    const adapter = createWorkspaceAdapter({ registry, mirrorRoot: root })
+    const ensured = await adapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'Tencent VM' })
+    assert.equal(ensured.created, true)
+
+    // Turning the setting off must remove the group: a plain skip would leave
+    // "Remote: Tencent VM" visible forever (mirror sessions are memory-only).
+    const disabled = await adapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'Tencent VM', enabled: false })
+    assert.equal(disabled.ok, true)
+    assert.equal(disabled.enabled, false)
+    assert.equal(disabled.reason, 'disabled')
+    assert.equal(disabled.removed, true)
+    assert.equal(disabled.workspaceId, ensured.workspaceId)
+    assert.equal(disabled.path, ensured.path)
+    assert.deepEqual(calls.delete, [ensured.workspaceId])
+    assert.equal(registry.list().length, 0)
+
+    // Idempotent: a second disable has nothing left to remove and stays ok.
+    const again = await adapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'Tencent VM', enabled: false })
+    assert.equal(again.ok, true)
+    assert.equal(again.removed, false)
+    assert.equal(again.reason, 'disabled')
+    assert.equal(calls.delete.length, 1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('enabled:false never creates a workspace when nothing is registered', async () => {
   const root = await makeTempRoot()
   try {
     const { registry, calls } = createFakeRegistry()
@@ -155,10 +197,9 @@ test('ensureHostWorkspace is a no-op when the setting is off', async () => {
     assert.equal(result.ok, true)
     assert.equal(result.enabled, false)
     assert.equal(result.reason, 'disabled')
+    assert.equal(result.removed, false)
     assert.equal(result.workspaceId, null)
-    assert.equal(result.path, null)
     assert.deepEqual(calls.create, [])
-    assert.deepEqual(calls.resolve, [])
     assert.equal(registry.list().length, 0)
   } finally {
     await rm(root, { recursive: true, force: true })
@@ -317,4 +358,256 @@ test('host ids cannot escape the mirror root', async () => {
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------------------
+// ctx resolution: the production path is ctx.get('workspaceRegistry')
+// ---------------------------------------------------------------------------
+
+test('the registry resolves through ctx.get and a throwing ctx degrades', async () => {
+  const root = await makeTempRoot()
+  /** @type {string[]} */
+  const warnings = []
+  try {
+    const { registry, calls } = createFakeRegistry()
+
+    const viaCtx = createWorkspaceAdapter({
+      ctx: { get: (name) => (name === 'workspaceRegistry' ? registry : undefined) },
+      mirrorRoot: root,
+      logger: createLogger(warnings),
+    })
+    assert.equal(viaCtx.available(), true)
+    const ensured = await viaCtx.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'Tencent VM' })
+    assert.equal(ensured.ok, true)
+    assert.equal(ensured.created, true)
+    assert.equal(calls.create.length, 1)
+
+    // The plugin must keep working when the optional service is absent…
+    const missing = createWorkspaceAdapter({
+      ctx: { get: () => undefined },
+      mirrorRoot: root,
+      logger: createLogger(warnings),
+    })
+    assert.equal(missing.available(), false)
+    const unavailable = await missing.ensureHostWorkspace({ hostId: 'h_abc' })
+    assert.equal(unavailable.ok, false)
+    assert.equal(unavailable.reason, 'workspaces-unavailable')
+    // …and when resolving it throws.
+    const broken = createWorkspaceAdapter({
+      ctx: {
+        get() {
+          throw new Error('cordis exploded')
+        },
+      },
+      mirrorRoot: root,
+      logger: createLogger(warnings),
+    })
+    assert.equal(broken.available(), false)
+    assert.equal((await broken.ensureHostWorkspace({ hostId: 'h_abc' })).reason, 'workspaces-unavailable')
+    assert.equal(warnings.filter((line) => line.includes('cannot resolve the workspace registry')).length, 2)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('removeHostWorkspace without a registry answers workspaces-unavailable', async () => {
+  const root = await makeTempRoot()
+  try {
+    const adapter = createWorkspaceAdapter({ mirrorRoot: root })
+    const removed = await adapter.removeHostWorkspace({ hostId: 'h_abc' })
+    assert.equal(removed.ok, false)
+    assert.equal(removed.reason, 'workspaces-unavailable')
+    assert.equal(removed.removed, false)
+    assert.equal(removed.path, path.join(root, 'h_abc'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// canonical path reporting (the registry realpaths every registration)
+// ---------------------------------------------------------------------------
+
+test('the reported path is the registry-canonical one, not the literal directory', async () => {
+  const root = await makeTempRoot()
+  try {
+    // Emulate a junctioned root: the registry records the realpath, while the
+    // adapter asked with the literal spelling.
+    const canonicalRoot = path.join(root, 'real-mirrors')
+    const literalRoot = path.join(root, 'linked-mirrors')
+    const { registry } = createFakeRegistry({
+      canonicalPath: (dir) => path.join(canonicalRoot, path.basename(dir)),
+    })
+    const adapter = createWorkspaceAdapter({ registry, mirrorRoot: literalRoot })
+
+    const created = await adapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'VM' })
+    assert.equal(created.ok, true)
+    assert.equal(created.path, path.join(canonicalRoot, 'h_abc'), 'created: report the canonical path')
+
+    const reused = await adapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'VM' })
+    assert.equal(reused.created, false)
+    assert.equal(reused.path, path.join(canonicalRoot, 'h_abc'), 'reused: report the canonical path')
+
+    const removed = await adapter.removeHostWorkspace({ hostId: 'h_abc' })
+    assert.equal(removed.ok, true)
+    assert.equal(removed.path, path.join(canonicalRoot, 'h_abc'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// orphan sweep (ghost groups left by a failed unregister)
+// ---------------------------------------------------------------------------
+
+test('pruneOrphanWorkspaces deletes registrations whose host is gone, and nothing else', async () => {
+  const root = await makeTempRoot()
+  try {
+    const { registry, calls } = createFakeRegistry()
+    const adapter = createWorkspaceAdapter({ registry, mirrorRoot: root })
+    // Two live hosts, one ghost, plus registrations the plugin must not touch.
+    await adapter.ensureHostWorkspace({ hostId: 'h_live', hostName: 'live' })
+    await adapter.ensureHostWorkspace({ hostId: 'h_live2', hostName: 'live2' })
+    // The ghost's directory exists (the plugin created it while the host lived).
+    await mkdir(path.join(root, 'h_ghost'), { recursive: true })
+    await registry.seed(path.join(root, 'h_ghost'), 'Remote: ghost')
+    const outside = path.join(root, '..', 'somewhere-else')
+    await registry.seed(outside, 'Not ours')
+    await registry.seed(root, 'The root itself')
+
+    const result = await adapter.pruneOrphanWorkspaces({ hostIds: ['h_live', 'h_live2'] })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.removed, [path.join(root, 'h_ghost')])
+    assert.equal(result.kept, 4, 'both live hosts, the outside registration and the root stay')
+    assert.deepEqual(
+      registry
+        .list()
+        .map((workspace) => path.basename(workspace.path))
+        .sort(),
+      ['h_live', 'h_live2', path.basename(root), 'somewhere-else'].sort(),
+    )
+    assert.deepEqual(calls.delete.length, 1)
+    // Only the registration goes away: the directories stay on disk.
+    assert.equal((await stat(path.join(root, 'h_ghost'))).isDirectory(), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('pruneOrphanWorkspaces keeps everything on an unusable registry and never throws', async () => {
+  const root = await makeTempRoot()
+  /** @type {string[]} */
+  const warnings = []
+  try {
+    const withoutService = createWorkspaceAdapter({ mirrorRoot: root, logger: createLogger(warnings) })
+    const unavailable = await withoutService.pruneOrphanWorkspaces({ hostIds: [] })
+    assert.equal(unavailable.ok, false)
+    assert.equal(unavailable.reason, 'workspaces-unavailable')
+    assert.deepEqual(unavailable.removed, [])
+
+    const { registry } = createFakeRegistry()
+    const adapter = createWorkspaceAdapter({ registry, mirrorRoot: root, logger: createLogger(warnings) })
+    await registry.seed(path.join(root, 'h_ghost'))
+    const failing = {
+      list: () => registry.list(),
+      delete: async () => {
+        throw new Error('delete exploded')
+      },
+    }
+    const broken = createWorkspaceAdapter({ registry: failing, mirrorRoot: root, logger: createLogger(warnings) })
+    const result = await broken.pruneOrphanWorkspaces({ hostIds: [] })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'prune-failed')
+    assert.equal(warnings.filter((line) => line.includes('cannot prune orphan mirror workspaces')).length, 1)
+    assert.equal(adapter.available(), true)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// canonical mirror root (symlinked / junctioned $DSH_HOME)
+// ---------------------------------------------------------------------------
+
+test('canonicalMirrorRoot resolves a symlinked root so both adapters agree', async () => {
+  const root = await makeTempRoot()
+  try {
+    const real = path.join(root, 'real-mirrors')
+    const link = path.join(root, 'linked-mirrors')
+    await mkdir(real, { recursive: true })
+    await symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const canonical = canonicalMirrorRoot(link)
+    // A junction may store the 8.3 short spelling of its target (GitHub's Windows
+    // runner does), so compare the fully resolved physical directories rather than
+    // the literal strings the junction happened to be created with.
+    assert.equal(await realpath(canonical), await realpath(real))
+    // Deliberately *not* asserting that `canonical` is a realpath fixed point: on some Windows
+    // volumes (GitHub's runner among them) the sync and async realpath results disagree on 8.3
+    // short names, so that assumption does not hold universally. What matters for grouping is
+    // that both adapters receive this one string, which the assertions below cover.
+
+    // Both adapters are fed that one canonical root, so the session's cwd and the
+    // workspace path are the same string by construction — even though the user's
+    // DSH_HOME reaches the root through a junction.
+    const { registry } = createFakeRegistry()
+    const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot: canonical })
+    /** @type {any[]} */
+    const created = []
+    const sessionAdapter = createSessionAdapter({
+      sessions: {
+        create(id, options) {
+          created.push({ id, options })
+          return { id, append() {} }
+        },
+        get: () => undefined,
+      },
+      mirrorRoot: canonical,
+    })
+    sessionAdapter.ensureMirrorSession({ hostId: 'h_abc', remoteSessionId: 'sess-1' })
+    const ensured = await workspaceAdapter.ensureHostWorkspace({ hostId: 'h_abc', hostName: 'VM' })
+
+    assert.equal(created[0].options.meta.cwd, ensured.path)
+    assert.equal(ensured.path, path.join(canonical, 'h_abc'))
+    assert.ok(!ensured.path.startsWith(link), 'the literal (linked) spelling must not leak out')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('canonicalMirrorRoot creates a missing root and falls back on failure', async () => {
+  const root = await makeTempRoot()
+  /** @type {string[]} */
+  const warnings = []
+  try {
+    const missing = path.join(root, 'not-yet', 'mirrors')
+    const canonical = canonicalMirrorRoot(missing)
+    assert.equal(await realpath(canonical), await realpath(missing))
+    assert.equal((await stat(canonical)).isDirectory(), true)
+
+    // A path whose parent is a file cannot be created: fall back to the literal.
+    const blocker = path.join(root, 'blocker')
+    await writeFile(blocker, 'not a directory')
+    const impossible = path.join(blocker, 'mirrors')
+    assert.equal(canonicalMirrorRoot(impossible, { logger: createLogger(warnings) }), impossible)
+    assert.equal(warnings.filter((line) => line.includes('cannot canonicalize the mirror root')).length, 1)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('the production call site hands canonicalMirrorRoot an options object', async () => {
+  // Regression: `canonicalMirrorRoot(dir, logger)` silently used console instead of the plugin
+  // logger, because the second parameter is an options bag (`{ logger }`), not a logger.
+  const source = await readFile(new URL('../../src/index.js', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /canonicalMirrorRoot\(\s*path\.join\(stateDir,\s*'mirrors'\),\s*\{\s*logger\s*\}\s*\)/,
+    'src/index.js must call canonicalMirrorRoot with an options object',
+  )
+  assert.equal(
+    /canonicalMirrorRoot\([^)]*,\s*logger\s*\)/.test(source),
+    false,
+    'src/index.js must not pass the logger itself as the options bag',
+  )
 })

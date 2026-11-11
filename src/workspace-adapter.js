@@ -26,6 +26,8 @@
  * package is imported, so each branch is unit-testable with a fake registry.
  */
 import { promises as fsp } from 'node:fs'
+import path from 'node:path'
+import process from 'node:process'
 import { mirrorHostDir } from './session-adapter.js'
 
 /** Title prefix that marks a workspace as plugin-owned (see `hostWorkspaceTitle`). */
@@ -42,6 +44,7 @@ export const WORKSPACE_TITLE_PREFIX = 'Remote: '
  *   workspaceId: string | null,
  *   created: boolean,
  *   renamed: boolean,
+ *   removed?: boolean,
  *   error?: string,
  * }} EnsureWorkspaceResult
  * @typedef {{
@@ -53,6 +56,13 @@ export const WORKSPACE_TITLE_PREFIX = 'Remote: '
  *   removed: boolean,
  *   error?: string,
  * }} RemoveWorkspaceResult
+ * @typedef {{
+ *   ok: boolean,
+ *   reason: string | null,
+ *   removed: string[],
+ *   kept: number,
+ *   error?: string,
+ * }} PruneWorkspacesResult
  */
 
 /**
@@ -129,6 +139,11 @@ export function createWorkspaceAdapter(options = {}) {
    * the registration still carries the plugin-owned prefix, so a deliberate user
    * rename is never overwritten.
    *
+   * `enabled:false` means "this host must not appear in the sidebar", so it
+   * **unregisters** an existing registration instead of merely skipping creation
+   * — otherwise turning the setting off would leave the group visible forever.
+   * That path is idempotent too (no registration → `removed:false`).
+   *
    * @param {{ hostId?: unknown, hostName?: unknown, enabled?: boolean }} [request]
    * @returns {Promise<EnsureWorkspaceResult>}
    */
@@ -146,7 +161,19 @@ export function createWorkspaceAdapter(options = {}) {
       created: false,
       renamed: false,
     }
-    if (!base.enabled) return { ...base, ok: true, reason: 'disabled' }
+    if (!base.enabled) {
+      if (hostId === '') return { ...base, ok: true, reason: 'disabled' }
+      const removal = await removeHostWorkspace({ hostId })
+      return {
+        ...base,
+        ok: removal.ok,
+        reason: 'disabled',
+        path: removal.path,
+        workspaceId: removal.workspaceId,
+        removed: removal.removed,
+        ...(removal.error ? { error: removal.error } : {}),
+      }
+    }
     if (hostId === '') return { ...base, reason: 'invalid-host' }
     const dir = hostDir(hostId)
     if (dir === null) return { ...base, reason: 'no-mirror-root' }
@@ -182,7 +209,9 @@ export function createWorkspaceAdapter(options = {}) {
         return {
           ...base,
           ok: true,
-          path: dir,
+          // The registry canonicalizes through `fs.realpath`; report what it
+          // recorded so `sidebar.path` matches the registered workspace.
+          path: typeof existing.path === 'string' ? existing.path : dir,
           title,
           workspaceId: typeof existing.id === 'string' ? existing.id : null,
           created: false,
@@ -193,7 +222,7 @@ export function createWorkspaceAdapter(options = {}) {
       return {
         ...base,
         ok: true,
-        path: dir,
+        path: workspace && typeof workspace.path === 'string' ? workspace.path : dir,
         title,
         workspaceId: workspace && typeof workspace.id === 'string' ? workspace.id : null,
         created: true,
@@ -245,16 +274,92 @@ export function createWorkspaceAdapter(options = {}) {
         return { ...base, ok: true, path: dir, reason: 'not-found' }
       }
       const workspaceId = typeof existing.id === 'string' ? existing.id : null
-      if (workspaceId === null) return { ...base, ok: true, path: dir, reason: 'not-found' }
+      const existingPath = typeof existing.path === 'string' ? existing.path : dir
+      if (workspaceId === null) return { ...base, ok: true, path: existingPath, reason: 'not-found' }
       const removed = await registry.delete(workspaceId)
-      return { ...base, ok: true, path: dir, workspaceId, removed: removed !== false, reason: null }
+      return { ...base, ok: true, path: existingPath, workspaceId, removed: removed !== false, reason: null }
     } catch (error) {
       logger.warn?.('[dsh-remote-go] cannot remove the mirror workspace:', error)
       return { ...base, path: dir, reason: 'delete-failed', error: messageOf(error) }
     }
   }
 
-  return { available, hostDir, ensureHostWorkspace, removeHostWorkspace }
+  /**
+   * Delete registrations under the mirror root that no longer belong to a host.
+   *
+   * Why: a failed unregister (host deleted while the registry was unhappy, a
+   * crash between the two writes) would otherwise leave a permanently empty
+   * "Remote: …" group, because mirror sessions are memory-only and never come
+   * back to fill it. The plugin owns the whole `<mirrorRoot>/<segment>` subtree,
+   * so a registration directly under the root whose directory is not the mirror
+   * directory of a known host is an orphan. Only the **registration** is deleted:
+   * the directory and any session logs are never touched, and a registration
+   * outside this subtree is never considered.
+   *
+   * Never throws; called once at startup, where a failure must not block loading.
+   *
+   * @param {{ hostIds?: unknown[] }} [request] ids of the hosts that still exist.
+   * @returns {Promise<PruneWorkspacesResult>}
+   */
+  async function pruneOrphanWorkspaces(request = {}) {
+    const hostIds = Array.isArray(request.hostIds) ? request.hostIds.filter((id) => typeof id === 'string') : []
+    const root = typeof options.mirrorRoot === 'string' ? options.mirrorRoot.trim() : ''
+    /** @type {PruneWorkspacesResult} */
+    const base = { ok: false, reason: null, removed: [], kept: 0 }
+    if (!isAbsolutePath(root)) return { ...base, reason: 'no-mirror-root' }
+    const registry = resolveRegistry()
+    if (!registry || typeof registry.list !== 'function' || typeof registry.delete !== 'function') {
+      return { ...base, reason: 'workspaces-unavailable' }
+    }
+    try {
+      const expected = new Set(hostIds.map((hostId) => normalizeForCompare(mirrorHostDir(root, hostId))))
+      /** @type {string[]} */
+      const removed = []
+      let kept = 0
+      for (const workspace of registry.list()) {
+        const workspacePath = typeof workspace?.path === 'string' ? workspace.path : ''
+        if (!isDirectChildOf(workspacePath, root)) {
+          kept += 1
+          continue
+        }
+        if (expected.has(normalizeForCompare(workspacePath))) {
+          kept += 1
+          continue
+        }
+        const workspaceId = typeof workspace?.id === 'string' ? workspace.id : null
+        if (workspaceId === null) continue
+        await registry.delete(workspaceId)
+        removed.push(workspacePath)
+      }
+      return { ...base, ok: true, removed, kept }
+    } catch (error) {
+      logger.warn?.('[dsh-remote-go] cannot prune orphan mirror workspaces:', error)
+      return { ...base, reason: 'prune-failed', error: messageOf(error) }
+    }
+  }
+
+  return { available, hostDir, ensureHostWorkspace, removeHostWorkspace, pruneOrphanWorkspaces }
+}
+
+/** @param {unknown} value @returns {boolean} */
+function isAbsolutePath(value) {
+  return typeof value === 'string' && value.trim() !== '' && path.isAbsolute(value.trim())
+}
+
+/** Case-insensitive on Windows, where the registry may hand back other casing. */
+function normalizeForCompare(value) {
+  const resolved = path.resolve(String(value).trim())
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+/**
+ * Is `candidate` a direct child of `root`? Deliberately strict: only the
+ * `<mirrorRoot>/<segment>` level is plugin-owned, so a nested or unrelated
+ * registration is never a pruning candidate.
+ */
+function isDirectChildOf(candidate, root) {
+  if (typeof candidate !== 'string' || candidate.trim() === '') return false
+  return normalizeForCompare(path.dirname(path.resolve(candidate))) === normalizeForCompare(root)
 }
 
 /** @param {unknown} error @returns {string} */

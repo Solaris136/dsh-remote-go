@@ -384,7 +384,7 @@ window.__ModuleLoader__.load({
       'settings.mirror': '镜像会话',
       'settings.mirrorToSidebar': '把远端镜像会话显示在本地侧边栏',
       'settings.mirrorToSidebarHint':
-        '默认开启。每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭后不再注册或新建分组，已存在的分组保持不动。',
+        '默认开启。每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭后会移除已注册的分组，重新开启并在下次同步（连接或刷新镜像）时恢复。',
       'settings.reconnect': '自动重连',
       'settings.reconnectEnabled': '断线后自动重连',
       'settings.maxAttempts': '最大重试次数',
@@ -698,7 +698,7 @@ window.__ModuleLoader__.load({
       'settings.mirror': 'Mirrored sessions',
       'settings.mirrorToSidebar': 'Show mirrored remote sessions in the local sidebar',
       'settings.mirrorToSidebarHint':
-        'On by default. Each remote host registers one "Remote: <host>" workspace in the local sidebar; turning it off stops new registrations and leaves existing groups untouched.',
+        'On by default. Each remote host registers one "Remote: <host>" workspace in the local sidebar; turning it off removes the registered groups, and turning it back on restores them on the next sync (connect or mirror refresh).',
       'settings.reconnect': 'Auto reconnect',
       'settings.reconnectEnabled': 'Reconnect after a drop',
       'settings.maxAttempts': 'Max attempts',

@@ -12,7 +12,7 @@ import path from 'node:path'
 import { createApi } from './api.js'
 import { detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
-import { createSessionAdapter } from './session-adapter.js'
+import { canonicalMirrorRoot, createSessionAdapter } from './session-adapter.js'
 import { createWorkspaceAdapter } from './workspace-adapter.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 
@@ -35,7 +35,13 @@ export function apply(ctx, config = {}) {
   // adapter answers typed `sessions-unavailable` and the plugin keeps working.
   // Each host gets its own cwd under `$DSH_HOME/remote-go/mirrors/<hostId>`; the
   // remote workspace path is never used (it may not exist on this machine).
-  const mirrorRoot = path.join(stateDir, 'mirrors')
+  //
+  // The root is canonicalized once (realpath) and the same value feeds both
+  // adapters: the host's workspace registry canonicalizes registrations, while a
+  // session header keeps our literal `meta.cwd`, so with a symlinked or junctioned
+  // root the two spellings would otherwise disagree and grouping would depend on
+  // the registry canonicalizing the header too (docs/session-design.md §4.3).
+  const mirrorRoot = canonicalMirrorRoot(path.join(stateDir, 'mirrors'), { logger })
   const sessionAdapter = createSessionAdapter({
     ctx,
     logger,
