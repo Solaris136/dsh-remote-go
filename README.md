@@ -58,6 +58,7 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | 证据 | 结果 |
 |---|---|
 | 单元测试（Host + Client） | `pnpm run test:unit` → **169** 用例全部通过 |
+| 覆盖率门禁 | `pnpm run test:coverage` → 行 **90.97%** / 分支 **74.41%** / 函数 **86.51%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-workspace-rail.png`、`panel-remote-dsh.png`（含「工作区按远端分组」断言） |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`） |
 | 持续集成 | GitHub Actions：`Repository conventions` + 双平台单测 + 打包/市场条目校验；另有 CodeQL 与手动触发的真实主机 E2E |
@@ -199,6 +200,7 @@ pnpm run verify                                   # 一条命令跑完下面全�
 | `pnpm run market:check` | 用官方 `dsh-plugin-market-index` 校验市场条目 |
 | `pnpm run pack:check` | 校验 `files[]` 覆盖与打包内容 |
 | `pnpm run test:unit` | 单元测试（Host + Client，无需网络/SSH） |
+| `pnpm run test:coverage` | 同上 + 覆盖率门禁（CI 也会跑；不含 `vendor/`） |
 
 端到端（需要真实测试主机与本机 Chrome/Edge）：
 

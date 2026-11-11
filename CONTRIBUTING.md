@@ -54,6 +54,7 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run market:check` | 校验包元数据、运行时文件与 format-1 市场索引条目 |
 | `pnpm run pack:check` | 校验 `files[]` 覆盖与 `pnpm pack` 产物内容 |
 | `pnpm run test:unit` | `node --test "test/unit/*.test.js"`（Host + Client，无需网络 / SSH） |
+| `pnpm run test:coverage` | 单元测试 + 覆盖率门禁（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%，不含 `vendor/` 与自己） |
 | `pnpm run check:pr-title` | 按 Conventional Commits 校验 PR 标题（CI 对 PR 强制，见 §5） |
 | `pnpm run build:vendor` | 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
 | `pnpm run test:e2e` | 两个端到端套件（见下），需要 SSH 主机、Chrome 或可用的 pnpm；不在常规 PR CI 中运行 |

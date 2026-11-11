@@ -79,6 +79,7 @@
     "test": "node --test \"test/unit/*.test.js\"",
     "test:unit": "node --test \"test/unit/*.test.js\"",
     "test:e2e": "node --test \"test/e2e/*.e2e.js\"",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-exclude=vendor/** --test-coverage-exclude=test/** --test-coverage-lines=85 --test-coverage-branches=70 --test-coverage-functions=80 \"test/unit/*.test.js\"",
     "lint": "node scripts/check-repo.mjs",
     "check:repo": "node scripts/check-repo.mjs",
     "check:syntax": "node scripts/check-syntax.mjs",

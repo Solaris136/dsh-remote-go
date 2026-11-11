@@ -39,6 +39,9 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
+      - name: Unit test coverage thresholds
+        run: pnpm run test:coverage
+
       - name: Syntax check
         run: pnpm run check:syntax
 
