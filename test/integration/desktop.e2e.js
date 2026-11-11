@@ -214,8 +214,12 @@ async function dismissOnboarding(browser, consoleErrors) {
   const clicked = await pollUntil(
     async () => {
       const handle = await welcome
-        .evaluateHandle((labels) => {
+        .evaluateHandle((rawLabels) => {
           const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+          // Normalise the candidates too: DOM text is whitespace-stripped before the
+          // comparison, so a label such as "Set up later" would otherwise never equal
+          // the stripped "Setuplater" and every English run would time out.
+          const labels = rawLabels.map(strip)
           // The onboarding affordance is a <button> locally but need not be one: accept any
           // clickable-looking node so a markup change in the app does not strand the run.
           const candidates = [...document.querySelectorAll('button, a, [role="button"], [role="menuitem"], div, span')]

@@ -281,13 +281,68 @@ async function waitAndClickByText(page, labels, options) {
 
 /** Navigate account menu -> Settings -> Remote hosts. @param {import('puppeteer-core').Page} page */
 async function openRemoteHostsSection(page) {
-  await openAccountMenu(page)
-  const settings = await clickByText(page, SETTINGS_LABELS)
-  if (!settings) throw new Error('the account menu did not expose a clickable Settings entry')
-  await waitAndClickByText(page, REMOTE_HOSTS_LABELS, {
-    label: 'the settings dialog did not offer a Remote hosts section',
-  })
-  await waitForSelector(page, '[data-testid="settings-remote-section"]')
+  // The sign-in prompt can arrive *after* Settings is opened and then covers the dialog, so a
+  // click on "Remote hosts" lands on the overlay. Retry the whole navigation, clearing any
+  // foreign dialog first — the first CI run failed exactly this way.
+  let lastError = null
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await dismissForeignDialogs(page)
+      if (!(await page.$('[data-testid="settings-remote-section"]'))) {
+        const settingsOpen = await page.$('[role="dialog"]')
+        if (!settingsOpen) {
+          await openAccountMenu(page)
+          const settings = await clickByText(page, SETTINGS_LABELS)
+          if (!settings) throw new Error('the account menu did not expose a clickable Settings entry')
+        }
+      }
+      await dismissForeignDialogs(page)
+      await waitAndClickByText(page, REMOTE_HOSTS_LABELS, {
+        label: 'the settings dialog did not offer a Remote hosts section',
+      })
+      await waitForSelector(page, '[data-testid="settings-remote-section"]')
+      return
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError ?? new Error('the Remote hosts section could not be opened')
+}
+
+/**
+ * Close a dialog that is not the settings dialog (the sign-in prompt), leaving Settings alone.
+ * @param {import('puppeteer-core').Page} page
+ */
+async function dismissForeignDialogs(page) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const cleared = await page.evaluate(() => {
+      const isSettings = (dialog) => (dialog.textContent ?? '').includes('Remote hosts')
+      const foreign = [...document.querySelectorAll('[role="dialog"]')].filter((node) => !isSettings(node))
+      if (foreign.length === 0) return false
+      for (const dialog of foreign) {
+        const close = dialog.querySelector('[aria-label="Close"], [aria-label="关闭"]')
+        if (close) {
+          close.click()
+          continue
+        }
+        const later = [...dialog.querySelectorAll('button')].find((node) =>
+          ['Set up later', '稍后配置', 'Configure later', 'Cancel', '取消'].includes((node.textContent ?? '').trim()),
+        )
+        if (later) later.click()
+      }
+      return true
+    })
+    if (!cleared) return
+    await page
+      .waitForFunction(
+        () => {
+          const isSettings = (dialog) => (dialog.textContent ?? '').includes('Remote hosts')
+          return [...document.querySelectorAll('[role="dialog"]')].every(isSettings)
+        },
+        { timeout: 10_000 },
+      )
+      .catch(() => {})
+  }
 }
 
 /**
