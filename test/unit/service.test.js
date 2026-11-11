@@ -1,11 +1,69 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, stat } from 'node:fs/promises'
+import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 import { createSessionAdapter } from '../../src/session-adapter.js'
+import { RemoteGoService } from '../../src/service.js'
+import { HostStore } from '../../src/store.js'
+import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
+
+/**
+ * A `workspaceRegistry` double with the behaviour the plugin depends on:
+ * idempotent create per canonical path, non-creating lookup, registration-only
+ * delete. Service tests use it through the **real** adapter, so they exercise the
+ * production path rather than a hand-written stub.
+ */
+function createFakeWorkspaceRegistry() {
+  /** @type {Map<string, any>} */
+  const byPath = new Map()
+  /** @type {Map<string, any>} */
+  const byId = new Map()
+  /** @type {{ create: { path: string, title: string | undefined }[], delete: string[] }} */
+  const calls = { create: [], delete: [] }
+  let seq = 0
+  /** @param {string} value */
+  const key = (value) => path.resolve(value)
+  const registry = {
+    calls,
+    async create(dir, title) {
+      calls.create.push({ path: dir, title })
+      const existing = byPath.get(key(dir))
+      if (existing) return existing
+      const workspace = {
+        id: `ws_${(seq += 1)}`,
+        path: key(dir),
+        title: title ?? path.basename(dir),
+        /** @type {string[]} */
+        sessionIds: [],
+        /** @param {string} next */
+        async setTitle(next) {
+          workspace.title = next
+        },
+      }
+      byPath.set(workspace.path, workspace)
+      byId.set(workspace.id, workspace)
+      return workspace
+    },
+    async resolveByPath(dir) {
+      return byPath.get(key(dir))
+    },
+    async delete(id) {
+      calls.delete.push(id)
+      const workspace = byId.get(id)
+      if (!workspace) return false
+      byId.delete(id)
+      byPath.delete(workspace.path)
+      return true
+    },
+    list() {
+      return [...byId.values()]
+    },
+  }
+  return { registry, calls }
+}
 
 /** @param {string} target */
 async function pathExists(target) {
@@ -593,30 +651,55 @@ test('connect registers one sidebar workspace per host with the host name', asyn
   await service.shutdown()
 })
 
-test('mirrorToSidebar:false never registers a sidebar workspace', async () => {
+test('mirrorToSidebar:false unregisters the group a host already registered', async () => {
   const stdout = remoteRegistry({
     'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
   })
-  /** @type {any[]} */
-  const calls = []
-  const workspaceAdapter = {
-    async ensureHostWorkspace(request) {
-      calls.push(request)
-      return { ok: true, enabled: true, workspaceId: 'ws_mirror' }
+  // The real adapter over a fake registry: this proves the whole chain
+  // settings -> service -> registry delete, not just that a call was attempted.
+  const mirrorRoot = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-sidebar-off-'))
+  const { registry, calls } = createFakeWorkspaceRegistry()
+  const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot })
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    sessionAdapter: {
+      ensureMirrorSession: (descriptor) => ({ ok: true, created: true, localSessionId: descriptor.localSessionId }),
     },
-  }
-  const { service } = await makeTestService({ workspaceAdapter, sshFactory: registrySshFactory(stdout) })
-  await service.saveSettings({ mirrorToSidebar: false })
+    sshFactory: registrySshFactory(stdout),
+  })
   const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+  try {
+    await service.connect(host.id)
+    await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+    await waitFor(() => registry.list().length === 1, { label: 'the sidebar registration' })
 
-  const synced = await service.syncHostMirrors(host.id)
-  assert.equal(synced.synced, true)
-  assert.equal(synced.sidebar.enabled, false)
-  assert.equal(synced.sidebar.reason, 'disabled')
-  assert.deepEqual(calls, [], 'the adapter must not be asked when the setting is off')
-  await service.shutdown()
+    // Turning the toggle off must actually remove the "Remote: …" group.
+    await service.saveSettings({ mirrorToSidebar: false })
+    const synced = await service.syncHostMirrors(host.id)
+    assert.equal(synced.synced, true)
+    assert.equal(synced.sidebar.enabled, false)
+    assert.equal(synced.sidebar.reason, 'disabled')
+    assert.equal(synced.sidebar.removed, true)
+    assert.equal(registry.list().length, 0, 'the group is gone from the sidebar')
+    assert.equal(calls.delete.length, 1)
+    assert.equal((await stat(path.join(mirrorRoot, host.id))).isDirectory(), true, 'the directory is retained')
+
+    // Idempotent: nothing left to remove on the next sync.
+    const again = await service.syncHostMirrors(host.id)
+    assert.equal(again.sidebar.reason, 'disabled')
+    assert.equal(again.sidebar.removed, false)
+    assert.equal(calls.delete.length, 1)
+
+    // Re-enabling restores the group on the next sync.
+    await service.saveSettings({ mirrorToSidebar: true })
+    const restored = await service.syncHostMirrors(host.id)
+    assert.equal(restored.sidebar.ok, true)
+    assert.equal(restored.sidebar.created, true)
+    assert.equal(registry.list().length, 1)
+  } finally {
+    await service.shutdown()
+    await rm(mirrorRoot, { recursive: true, force: true })
+  }
 })
 
 test('removing a host removes its sidebar workspace registration', async () => {
@@ -671,7 +754,7 @@ test('a throwing workspace adapter cannot fail the sync or the host removal', as
   assert.equal(synced.sidebar.reason, 'adapter-error')
   const runtime = service.runtimes.get(host.id)
   assert.equal(
-    runtime.logs.some((entry) => entry.line.includes('mirror sidebar workspace failed')),
+    runtime.logs.some((entry) => entry.line.includes('mirror sidebar workspace ensureHostWorkspace failed')),
     true,
   )
 
@@ -703,6 +786,127 @@ test('without a sessions service no empty sidebar group is created', async () =>
   assert.equal(synced.sidebar.reason, 'sessions-unavailable')
   assert.deepEqual(calls, [])
   await service.shutdown()
+})
+
+test('a sync where every session create fails registers no empty group', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  const mirrorRoot = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-sidebar-nosessions-'))
+  const { registry } = createFakeWorkspaceRegistry()
+  const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot })
+  /** @type {any[]} */
+  const ensured = []
+  const sessionAdapter = {
+    ensureMirrorSession(descriptor) {
+      ensured.push(descriptor)
+      return { ok: false, reason: 'create-failed', localSessionId: descriptor.localSessionId }
+    },
+  }
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    sessionAdapter,
+    sshFactory: registrySshFactory(stdout),
+  })
+  const host = await createHost(service)
+  try {
+    await service.connect(host.id)
+    await waitFor(() => ensured.length === 2, { label: 'the failing session creates' })
+    const synced = await service.syncHostMirrors(host.id)
+    assert.equal(synced.synced, true)
+    // `sessions-unavailable` is the documented meaning "no local session to
+    // group", so no workspace may be registered here.
+    assert.equal(synced.sidebar.reason, 'sessions-unavailable')
+    assert.equal(synced.sidebar.ok, true)
+    assert.deepEqual(synced.sidebar.path, null)
+    assert.equal(registry.list().length, 0, 'an empty group must not be registered')
+  } finally {
+    await service.shutdown()
+    await rm(mirrorRoot, { recursive: true, force: true })
+  }
+})
+
+test('init sweeps sidebar registrations whose host no longer exists', async () => {
+  const mirrorRoot = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-sidebar-sweep-'))
+  const { registry, calls } = createFakeWorkspaceRegistry()
+  const workspaceAdapter = createWorkspaceAdapter({ registry, mirrorRoot })
+  // A ghost left behind by an earlier failed unregister.
+  await registry.create(path.join(mirrorRoot, 'h_deleted'), 'Remote: deleted host')
+  /** @type {any[]} */
+  const swept = []
+  const recording = {
+    ...workspaceAdapter,
+    async pruneOrphanWorkspaces(request) {
+      swept.push(request)
+      return await workspaceAdapter.pruneOrphanWorkspaces(request)
+    },
+  }
+  const { service, dir } = await makeTestService({ workspaceAdapter: recording })
+  const host = await createHost(service)
+  const quiet = { warn() {}, info() {}, debug() {}, error() {} }
+  try {
+    // `makeTestService` already awaited init; at that point no host was persisted,
+    // so every registration under the root was an orphan.
+    assert.equal(swept.length, 1, 'init must sweep exactly once')
+    assert.deepEqual(swept[0].hostIds, [])
+    assert.equal(registry.list().length, 0, 'the ghost registration is gone')
+    assert.equal(calls.delete.length, 1)
+
+    // A later init (same persisted store, now with a host) keeps that host's
+    // group and has nothing left to prune.
+    const ensured = await workspaceAdapter.ensureHostWorkspace({ hostId: host.id, hostName: host.name })
+    assert.equal(ensured.ok, true)
+    const store = new HostStore({ dir, logger: quiet })
+    await store.load()
+    const reloaded = new RemoteGoService({ store, home: dir, logger: quiet, workspaceAdapter: recording })
+    await reloaded.init()
+    assert.equal(swept.length, 2)
+    assert.deepEqual(swept[1].hostIds, [host.id], 'the persisted host is known to the sweep')
+    assert.deepEqual(
+      registry.list().map((workspace) => workspace.id),
+      [ensured.workspaceId],
+      'a live host keeps its group',
+    )
+  } finally {
+    await service.shutdown()
+    await rm(mirrorRoot, { recursive: true, force: true })
+  }
+})
+
+test('a failing orphan sweep is logged and never blocks init', async () => {
+  const warnings = []
+  const workspaceAdapter = {
+    async pruneOrphanWorkspaces() {
+      throw new Error('sweep exploded')
+    },
+  }
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    logger: { warn: (...args) => warnings.push(args.map(String).join(' ')), info() {}, debug() {}, error() {} },
+  })
+  assert.equal(service.initialized, true, 'init completed despite the sweep failure')
+  await service.shutdown()
+  assert.equal(
+    warnings.some((line) => line.includes('cannot prune orphan mirror workspaces')),
+    true,
+  )
+})
+
+test('a sweep that reports a typed failure is surfaced without throwing', async () => {
+  const warnings = []
+  const workspaceAdapter = {
+    pruneOrphanWorkspaces: async () => ({ ok: false, reason: 'workspaces-unavailable', removed: [], kept: 0 }),
+  }
+  const { service } = await makeTestService({
+    workspaceAdapter,
+    logger: { warn: (...args) => warnings.push(args.map(String).join(' ')), info() {}, debug() {}, error() {} },
+  })
+  assert.equal(service.initialized, true)
+  await service.shutdown()
+  assert.equal(
+    warnings.some((line) => line.includes('workspaces-unavailable')),
+    true,
+  )
 })
 
 test('syncHostMirrors keeps and marks a session the remote deleted', async () => {

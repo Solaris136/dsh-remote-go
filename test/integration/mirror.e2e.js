@@ -22,7 +22,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -34,7 +34,7 @@ import { l1Capabilities, mirrorSessionId, planMirror } from '../../src/mirror.js
 import { MirrorStore, MIRROR_STORE_VERSION } from '../../src/mirror-store.js'
 import { probeRemote } from '../../src/probe.js'
 import { RemoteGoService } from '../../src/service.js'
-import { createSessionAdapter } from '../../src/session-adapter.js'
+import { canonicalMirrorRoot, createSessionAdapter } from '../../src/session-adapter.js'
 import { SshConnection } from '../../src/ssh.js'
 import { HostStore } from '../../src/store.js'
 import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
@@ -720,8 +720,16 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
     await t.test('the sidebar workspace groups exactly the mirrored sessions', async () => {
       assert.ok(simulator && ctx.remoteVersion, 'the simulator subtest did not run')
       const stateDir = path.join(temp, 'state-sidebar')
-      // The real plugin builds this root (src/index.js): `$DSH_HOME/remote-go/mirrors`.
-      const mirrorRoot = path.join(stateDir, 'mirrors')
+      // A symlinked/junctioned root: the real plugin canonicalizes it once
+      // (src/index.js) and feeds that value to both adapters, so the workspace
+      // path and the session `meta.cwd` cannot disagree (session-design §4.3).
+      const realRoot = path.join(stateDir, 'mirrors-real')
+      const linkRoot = path.join(stateDir, 'mirrors')
+      await mkdir(realRoot, { recursive: true })
+      await symlink(realRoot, linkRoot, process.platform === 'win32' ? 'junction' : 'dir')
+      const mirrorRoot = canonicalMirrorRoot(linkRoot)
+      assert.equal(mirrorRoot, await realpath(realRoot), 'the mirror root is canonicalized')
+
       /** @type {Map<string, any>} */
       const live = new Map()
       const sessions = {
@@ -770,6 +778,7 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         const workspace = workspaces[0]
         const mirrorCwd = path.join(mirrorRoot, host.id)
         assert.equal(workspace.path, path.resolve(mirrorCwd), 'the workspace owns the mirror sessions cwd')
+        assert.equal(path.dirname(workspace.path), mirrorRoot, 'the registered directory is the canonical root')
         assert.equal(workspace.title, `Remote: ${host.name}`, 'the title names the remote host')
         // Membership is derived from the canonical cwd, so this is the number the
         // sidebar will actually render — and it must equal the mirrored sessions.
@@ -786,13 +795,28 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         assert.equal(synced.sidebar.workspaceId, workspace.id)
         assert.equal(synced.sidebar.created, false, 'a re-sync must reuse the registration')
         assert.equal(synced.sidebar.title, `Remote: ${host.name}`)
+        assert.equal(synced.sidebar.path, workspace.path, 'the payload reports the canonical path')
         assert.equal(registry.calls.create.length, 1, 'the registry was asked to create exactly once')
         assert.equal(registry.list().length, 1)
+
+        // Turning the toggle off must remove the group (not merely stop creating).
+        await withSidebar.saveSettings({ mirrorToSidebar: false })
+        const disabled = await withSidebar.syncHostMirrors(host.id)
+        assert.equal(disabled.sidebar.reason, 'disabled')
+        assert.equal(disabled.sidebar.removed, true)
+        assert.deepEqual(registry.list(), [], 'the "Remote: …" group is gone from the sidebar')
+
+        // Re-enabling restores it on the next sync, with the same sessions grouped.
+        await withSidebar.saveSettings({ mirrorToSidebar: true })
+        const restored = await withSidebar.syncHostMirrors(host.id)
+        assert.equal(restored.sidebar.ok, true)
+        assert.equal(restored.sidebar.created, true)
+        assert.equal(registry.list().length, 1)
+        assert.equal(registry.list()[0].sessionIds.length, FIXTURE_SESSIONS.length)
 
         // Deleting the host removes the registration; the directory is retained.
         await withSidebar.removeHost(host.id)
         assert.deepEqual(registry.list(), [])
-        assert.equal(registry.calls.delete.length, 1)
         assert.equal((await stat(mirrorCwd)).isDirectory(), true, 'the mirror directory is retained')
       } finally {
         await withSidebar.shutdown()

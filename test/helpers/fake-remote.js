@@ -144,7 +144,7 @@ export async function makeTestService(overrides = {}) {
   const service = new RemoteGoService({
     store,
     home: path.join(dir, 'home'),
-    logger: { warn() {}, info() {}, debug() {}, error() {} },
+    logger: overrides.logger ?? { warn() {}, info() {}, debug() {}, error() {} },
     localVersion: overrides.localVersion === undefined ? '0.2.2-rc.1' : overrides.localVersion,
     sshFactory,
     tunnelFactory,
