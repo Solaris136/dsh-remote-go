@@ -59,14 +59,14 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 |---|---|
 | 单元测试（Host + Client） | `pnpm run test:unit` → **268** 用例全部通过；集成/E2E `pnpm run test:integration` → **31** 用例全部通过 |
 | 覆盖率门禁 | `pnpm run test:coverage` → 行 **93.19%** / 分支 **78.39%** / 函数 **89.78%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
-| 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-remote-dsh.png`（远端会话以**原生工作区**形式出现在侧边栏，不再由插件自建侧栏） |
+| 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-workspace-rail.png`（面板内工作区栏按远端分组）、`panel-remote-dsh.png` |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现已由必需检查 `Web E2E` 每次 CI 复核 |
 | 持续集成 | GitHub Actions 共 **8 项必需检查**：`Repository conventions`（规范 + 格式 + 覆盖率 + PR 标题）、双平台单测、双平台打包、`Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`；另有 CodeQL 与手动触发的真实主机 E2E |
 | V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：同站 loopback iframe 可嵌入，无需同源反代 |
 
 > 端到端测试依赖一台可通过 SSH 访问、由你自行准备的主机（见 `e2e/remote/README.md`）；仓库不包含任何真实主机地址或凭据。
 
-真实验收截图（面板整页承载远端 DSH；截图时已隐藏远端地址）：
+真实验收截图（面板整页承载远端 DSH + 面板内工作区栏；截图时已隐藏远端地址）：
 
 ![远端 DSH 在本地全局面板中整页打开](e2e/artifacts/panel-remote-dsh.png)
 
@@ -155,8 +155,9 @@ dsh plugin --profile web add dsh-remote-go
                                                       │
 远端服务器：原版 DSH（`dsh --profile web --no-open --port 0`）
 └─ 远端 DSH Web 界面 ──同站 loopback iframe──▶ 本地远程面板
+                     └─ 面板内「工作区」栏：本地工作区 + 按远端主机分组
 
-本地 DSH 侧边栏（原生能力，插件不新增侧栏）：
+本地 DSH 左侧边栏（原生能力，PR #8 起额外提供，与上面并存）：
 └─ 每台远端主机一个工作区（标题 `Remote: <主机名>`），远端会话以镜像会话出现在其中
 ```
 
@@ -230,8 +231,8 @@ pnpm run test:desktop   # 仅 Windows：真实 Electron 桌面端（隔离 profi
 等文件——这样 `files[]`/`exports` 漏文件会在 CI 暴露，而不是发版后才发现。
 
 `test:web` 需要三样东西：可用的 DSH CLI、Chrome/Edge，以及安装插件用的 `pnpm`。CLI 按以下顺序发现：
-`DSH_CLI_JS`（直接指向 `…/@deepseek-ai/dsh/lib/bin.js`，CI 用它装本地目录，免去全局 bin）→
 `DSH_BIN`（可配 `DSH_EXE` 指定 Electron/Node 解释器）→ Windows 默认安装目录（可用 `DSH_INSTALL_DIR` 覆盖）→
+该目录/包内的 `lib/bin.js`（其中第一个候选是 `DSH_CLI_JS`，CI 用它指向本地 npm 安装，免去全局 bin）→
 PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.asar` 是虚拟文件系统，只看文件是否存在不可靠），
 **探测失败即跳过**——注意：装在非默认目录又没有设置 `DSH_INSTALL_DIR` 时，同样只会跳过（不会报错）。
 浏览器用 `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` / `E2E_CHROME` 指定（否则探测 Chrome/Edge 的常见路径），
@@ -243,7 +244,7 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 |---|---|
 | `DSH_E2E_STRICT=1` | 缺少 harness/浏览器/桌面端时**失败**而不是跳过（CI 必需检查就是这个模式，避免静默空跑） |
 | `DSH_E2E_LANG` | 固定界面语言（默认 `en-US`）。用例对文本比较两侧都做归一化，并在 en-US / zh-CN 下都验证过 |
-| `DSH_E2E_ARTIFACTS` / `DSH_DESKTOP_E2E_ARTIFACTS` | 失败时截图与日志的输出目录，CI 用它上传 artifact |
+| `DSH_WEB_E2E_ARTIFACTS` / `DSH_DESKTOP_E2E_ARTIFACTS` | 失败时截图与日志的输出目录（两套件各用各的），CI 用它上传 artifact |
 
 `test:desktop` 只在 Windows 有意义（桌面端没有 Linux 构建，也不在 npm 上）。它用 `DSH_DESKTOP_EXE` 指定可执行文件，
 或用 `DSH_DESKTOP_INSTALL_DIR` 指定安装目录，否则在 `%LOCALAPPDATA%\Programs` 与 `%PROGRAMFILES%` 下搜索
@@ -256,6 +257,22 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 - 启动时必须**去掉** `ELECTRON_RUN_AS_NODE`（否则 Electron 以 Node 模式运行，`--user-data-dir` /
   `--remote-debugging-port` 会被当成非法参数）。
 - 全新 profile 会先弹 `…/renderer/welcome.html`（登录引导），用例点 **`稍后配置`** 跳过，不使用任何凭据。
+- 桌面端欢迎页是独立 `file://` 页面，其语言跟随**系统语言**而非 `--lang`；用例会打印该页的
+  `documentElement.lang` / `navigator.language` 与实际点击到的标签，语言不符时看日志即可定位，而不是表现为导航超时。
+
+### 模拟远端主机（`e2e/sim`）
+
+镜像会话与历史回放等能力**不需要真实主机**即可验证：`e2e/sim/simulated-remote.mjs` 用 ssh2 在本机起一个真实 SSH
+端点（回环地址、固定凭据、只允许转发到自己的端口），并用一个 HTTP stub 扮演远端 DSH 的 web。
+
+```bash
+pnpm run sim:remote                                     # 自检：探针 → 隧道 → HTTP 200
+node e2e/sim/simulated-remote.mjs --serve --workspace-fixture <file> --state-file <file>
+```
+
+`--serve` 常驻；`--workspace-fixture` 指定远端 `storages/workspace.json` 的内容（用于构造多工作区/多会话场景），
+`--state-file` 指定状态文件（`node --test` 并行跑多个用例时需要各用各的）。隔离护栏：只绑回环、拒绝非回环配置退出、
+凭据必须匹配、转发目标限定自身端口。
   另外 `[data-dsh-remote-go="styles"]` 在桌面端**不存在**（样式却已生效），所以“客户端已加载”一律按行为断言
   （插件 class + CSS 变量可解析），不用这个标记。
 
