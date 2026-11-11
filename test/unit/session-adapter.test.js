@@ -123,6 +123,30 @@ test('ensureMirrorCwd creates the per-host directory the host keys storage off',
   assert.equal(await plain.ensureMirrorCwd(descriptor()), null)
 })
 
+test('a relative mirror root is ignored so the host default cwd is used', async () => {
+  // A relative root would produce a relative meta.cwd, which the DSH host
+  // rejects; the adapter must fall back to the host default instead of failing
+  // every mirror session with create-failed.
+  const relative = createSessionAdapter({
+    sessions: createFakeSessions(),
+    logger: quiet,
+    mirrorRoot: 'relative/not/absolute',
+  })
+  assert.equal(await relative.ensureMirrorCwd(descriptor()), null)
+
+  const sessions = createFakeSessions()
+  const adapter = createSessionAdapter({
+    sessions,
+    logger: quiet,
+    mirrorRoot: 'relative/not/absolute',
+    cwd: path.join(path.sep, 'home', 'u', 'dsh'),
+  })
+  adapter.ensureMirrorSession(descriptor())
+  assert.deepEqual(sessions.calls.find((call) => call.op === 'create').options, {
+    meta: { isSeeded: true },
+  })
+})
+
 test('meta.cwd falls back to an absolute cwd and is omitted when relative', () => {
   const absolute = createFakeSessions()
   const absoluteAdapter = createSessionAdapter({

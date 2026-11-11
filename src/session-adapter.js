@@ -245,11 +245,16 @@ export function createSessionAdapter(options = {}) {
    * @returns {string | null}
    */
   function mirrorCwd(descriptor) {
-    if (typeof options.mirrorRoot === 'string' && options.mirrorRoot.trim() !== '') {
+    const mirrorRoot = typeof options.mirrorRoot === 'string' ? options.mirrorRoot.trim() : ''
+    if (mirrorRoot !== '') {
+      // A relative root would produce a relative `meta.cwd`, which the host
+      // rejects ("cwd must be an absolute path"); ignore it so the host default
+      // applies instead of failing every mirror session.
+      if (!isAbsolutePath(mirrorRoot)) return null
       const hostSegment = String(descriptor?.hostId ?? '')
         .replace(/[^A-Za-z0-9._-]/g, '_')
         .replace(/^\.+$/, '')
-      return path.join(options.mirrorRoot.trim(), hostSegment || 'unknown')
+      return path.join(mirrorRoot, hostSegment || 'unknown')
     }
     const cwd = typeof descriptor?.cwd === 'string' ? descriptor.cwd : options.cwd
     return isAbsolutePath(cwd) ? cwd : null
