@@ -1,0 +1,25 @@
+{
+  "version": 2,
+  "global": {
+    "initialized": true,
+    "defaultWorkspaceId": "ws-sim-alpha",
+    "workspaceIds": ["ws-sim-alpha", "ws-sim-beta"]
+  },
+  "tables": {
+    "workspaces": {
+      "ws-sim-alpha": {
+        "path": "/home/sim/work/alpha",
+        "title": "Alpha project",
+        "sessionIds": ["sess-alpha-one", "sess-omega-two"],
+        "createdAt": "2026-11-11T00:00:00Z",
+        "updatedAt": "2026-11-11T00:00:00Z"
+      },
+      "ws-sim-beta": {
+        "path": "/home/sim/work/beta",
+        "sessionIds": ["sess-beta-three"],
+        "createdAt": "2026-11-11T00:00:00Z",
+        "updatedAt": "2026-11-11T00:00:00Z"
+      }
+    }
+  }
+}

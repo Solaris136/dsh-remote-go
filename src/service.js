@@ -35,6 +35,8 @@ import {
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
+import { decideLevel, l1Capabilities, planMirror, reconcileMirrors } from './mirror.js'
+import { MirrorStore } from './mirror-store.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -62,6 +64,11 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  *   tailLog?: typeof tailRemoteLog,
  *   loadSshMaterial?: typeof loadLocalSshMaterial,
  *   resolveTarget?: typeof resolveTargetVersion,
+ *   mirrorStore?: import('./mirror-store.js').MirrorStore,
+ *   sessionAdapter?: {
+ *     ensureMirrorSession: (descriptor: any) => any,
+ *     removeMirrorSession?: (localSessionId: string) => any,
+ *   } | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   clock?: () => number,
  * }} ServiceOptions
@@ -107,6 +114,8 @@ export class RemoteGoService extends EventEmitter {
     this.tailLog = options.tailLog ?? tailRemoteLog
     this.loadSshMaterial = options.loadSshMaterial ?? loadLocalSshMaterial
     this.resolveTarget = options.resolveTarget ?? resolveTargetVersion
+    this.mirrorStore = options.mirrorStore ?? new MirrorStore({ dir: options.store.dir, logger: this.logger })
+    this.sessionAdapter = options.sessionAdapter ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.clock = options.clock ?? (() => Date.now())
     /** @type {Map<string, any>} */
@@ -119,6 +128,7 @@ export class RemoteGoService extends EventEmitter {
   async init() {
     if (this.initialized) return this
     await this.store.load()
+    if (this.mirrorStore && typeof this.mirrorStore.load === 'function') await this.mirrorStore.load()
     for (const host of this.store.listHosts()) this.#ensureRuntime(host)
     this.initialized = true
     return this
@@ -166,6 +176,8 @@ export class RemoteGoService extends EventEmitter {
       reconnectTimer: null,
       idleTimer: null,
       connectPromise: null,
+      mirrorSync: null,
+      mirrorResync: null,
       closing: false,
       logs: [],
     }
@@ -302,6 +314,16 @@ export class RemoteGoService extends EventEmitter {
     if (runtime) await this.#teardownRuntime(runtime, { stopRemote: runtime.entry.keepAlive === 'stop' ? true : false })
     this.runtimes.delete(id)
     await this.store.removeHost(id)
+    // Drop the local mirror sessions and their descriptors with the host, so no
+    // orphan session points at a host the user just deleted.
+    for (const descriptor of this.mirrorStore.listMirrors({ hostId: id })) {
+      try {
+        this.sessionAdapter?.removeMirrorSession?.(descriptor.localSessionId)
+      } catch (error) {
+        this.logger.warn?.('[dsh-remote-go] cannot remove a mirror session:', error)
+      }
+    }
+    await this.mirrorStore?.removeHostMirrors?.(id)
     if (this.activeHostId === id) this.activeHostId = null
     this.#emitState()
     return { ok: true }
@@ -373,6 +395,221 @@ export class RemoteGoService extends EventEmitter {
         hostName: runtime.entry.name,
       })),
     }
+  }
+
+  // ---------------------------------------------------------------- mirrors
+
+  /**
+   * Persisted mirror descriptors of one host (P0: L1 directory mirrors).
+   * Read-only: descriptors are reconciled when a host connects or when
+   * `syncHostMirrors()` is called explicitly, never on a GET. A resync notice
+   * produced by the connect-time background sync stays visible here until a
+   * client acknowledges it, so the documented "restart → re-pull" obligation is
+   * reachable without waiting for the next sync.
+   * @param {string} id
+   */
+  async listHostMirrors(id) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    const decision = this.#mirrorDecision(runtime)
+    return {
+      hostId: id,
+      hostName: runtime.entry.name,
+      connected: Boolean(runtime.ssh?.connected),
+      level: decision.level,
+      reason: decision.reason,
+      capabilities: decision.capabilities,
+      sessionsAvailable: Boolean(this.sessionAdapter),
+      ...this.#pendingResync(runtime),
+      mirrors: this.mirrorStore.listMirrors({ hostId: id }),
+    }
+  }
+
+  /**
+   * Re-read the remote workspace registry and reconcile the mirror descriptors
+   * (design §4 L1). Never creates or deletes anything on the remote; a session
+   * that disappeared from the registry is kept and marked `remote-deleted`
+   * (design §7). The result also carries the per-session adapter outcomes so the
+   * "restart → re-pull from the remote" notice is reachable from the API.
+   * @param {string} id
+   * @param {{ acknowledgeResync?: boolean }} [options]
+   */
+  async syncHostMirrors(id, options = {}) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    if (runtime.mirrorSync) {
+      // Never run two directory syncs at once for one host; coalesce on the
+      // in-flight one started by the connect pipeline.
+      await runtime.mirrorSync.catch(() => null)
+    }
+    if (options.acknowledgeResync === true) runtime.mirrorResync = null
+    if (!runtime.ssh?.connected) {
+      return {
+        hostId: id,
+        connected: false,
+        synced: false,
+        reason: 'not-connected',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        ...this.#pendingResync(runtime),
+        mirrors: this.mirrorStore.listMirrors({ hostId: id }),
+      }
+    }
+    return this.#syncMirrors(runtime)
+  }
+
+  /**
+   * The resync notice a client has not acknowledged yet (set by the background
+   * connect sync, kept until `acknowledgeResync`).
+   * @param {any} runtime
+   */
+  #pendingResync(runtime) {
+    const pending = runtime.mirrorResync ?? null
+    return { resyncRequired: pending?.resyncRequired ?? 0, notice: pending?.notice ?? null }
+  }
+
+  /** @param {any} runtime */
+  #mirrorDecision(runtime) {
+    return decideLevel({
+      hostVersion: runtime.remote.version ?? runtime.facts?.dshVersion ?? null,
+      localVersion: this.localVersion,
+      // P0 verifies the directory channel only. L2/L3 must probe the remote RPC
+      // and ws-mux before they may claim more (design §4, §11 question 3).
+      probe: l1Capabilities(),
+    })
+  }
+
+  /** @param {any} runtime */
+  async #syncMirrors(runtime) {
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
+    const existing = this.mirrorStore.listMirrors({ hostId: runtime.id })
+    const decision = this.#mirrorDecision(runtime)
+    if (!result.ok) {
+      // Offline or unreadable: keep the last known descriptors instead of
+      // marking every remote session deleted (design §7 "host not connected").
+      return {
+        hostId: runtime.id,
+        synced: false,
+        reason: result.reason ?? 'unreadable',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        ...this.#pendingResync(runtime),
+        mirrors: existing,
+      }
+    }
+    if (existing.length > 0 && result.workspaces.length === 0) {
+      // A parseable but empty registry is far more likely to be a transient
+      // (fresh/partially-written) remote file than "the user deleted every
+      // session". Keep every record instead of marking all of them deleted.
+      return {
+        hostId: runtime.id,
+        synced: false,
+        reason: 'empty-registry',
+        sessionsAvailable: Boolean(this.sessionAdapter),
+        ...this.#pendingResync(runtime),
+        mirrors: existing,
+      }
+    }
+    const now = nowIso()
+    const planned = planMirror({
+      host: runtime.entry,
+      remoteWorkspaces: result,
+      capabilities: decision.capabilities,
+      existing,
+      now,
+    })
+    const reconciled = reconcileMirrors({ existing, planned })
+    const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
+    const sessions = await this.#ensureMirrorSessions(runtime, mirrors)
+    const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
+    if (freshRequired > 0) {
+      // Keep the notice until a client acknowledges it: the client's own sync
+      // finds the sessions already live and would otherwise never see it.
+      runtime.mirrorResync = {
+        resyncRequired: freshRequired,
+        notice: sessions.find((entry) => entry?.resync?.notice)?.resync.notice ?? null,
+        at: nowIso(),
+      }
+    }
+    return {
+      hostId: runtime.id,
+      synced: true,
+      level: decision.level,
+      reason: decision.reason,
+      sessionsAvailable: Boolean(this.sessionAdapter),
+      ...this.#pendingResync(runtime),
+      mirrors,
+      markedDeleted: reconciled.markedDeleted,
+      revived: reconciled.revived,
+      sessions,
+    }
+  }
+
+  /**
+   * Create the local DSH sessions that back the mirrors, when the host publishes
+   * the optional `sessions` service. Absent adapter ⇒ no sessions, no error.
+   * Typed adapter failures are counted and logged instead of being swallowed:
+   * the connect log says how many descriptors got a local session and which
+   * distinct reasons failed (design §4: no silent pretend success).
+   * @param {any} runtime
+   * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
+   */
+  async #ensureMirrorSessions(runtime, mirrors) {
+    if (!this.sessionAdapter) return []
+    const active = mirrors.filter((descriptor) => descriptor.status === 'active')
+    /** @type {any[]} */
+    const results = []
+    for (const descriptor of active) {
+      try {
+        // The per-host cwd must exist before the host keys storage off it.
+        await this.sessionAdapter.ensureMirrorCwd?.(descriptor)
+        results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
+      } catch (error) {
+        results.push({
+          ok: false,
+          reason: 'adapter-error',
+          localSessionId: descriptor.localSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    const created = results.filter((entry) => entry?.ok === true).length
+    const reasons = [
+      ...new Set(results.filter((entry) => entry?.ok !== true).map((entry) => entry?.reason ?? 'unknown')),
+    ]
+    this.#log(
+      runtime,
+      'info',
+      `mirror sessions: ${active.length} descriptor(s) / ${created} local session(s)` +
+        (reasons.length > 0 ? ` (failed: ${reasons.join(', ')})` : ''),
+    )
+    if (reasons.length > 0) this.#log(runtime, 'debug', `mirror session failure reasons: ${reasons.join(', ')}`)
+    return results
+  }
+
+  /** Start one directory sync without blocking the caller. @param {any} runtime */
+  #startMirrorSync(runtime) {
+    if (runtime.mirrorSync) return runtime.mirrorSync
+    runtime.mirrorSync = this.#syncMirrors(runtime)
+      .then((synced) => {
+        if (synced.mirrors.length > 0) {
+          this.#log(runtime, 'info', `mirror directory: ${synced.mirrors.length} session(s), level ${synced.level}`)
+        }
+        return synced
+      })
+      .catch((error) => {
+        // A mirror failure must never take the connection down (design §4).
+        this.#log(
+          runtime,
+          'warn',
+          'mirror directory sync failed:',
+          error instanceof Error ? error.message : String(error),
+        )
+        return null
+      })
+      .finally(() => {
+        runtime.mirrorSync = null
+      })
+    return runtime.mirrorSync
   }
 
   /** Read-only SSH discovery for the wizard (design §15.1). */
@@ -674,6 +911,10 @@ export class RemoteGoService extends EventEmitter {
       this.#attachDisconnectHandler(runtime)
       this.#emitState()
       this.#log(runtime, 'info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${runtime.tunnel.localPort}`)
+      // P0: mirror the remote directory AFTER `connected` is published, and never
+      // await it: a slow remote read must not delay the connect response or the
+      // ready state. Failures are logged, never fatal.
+      this.#startMirrorSync(runtime)
     } catch (error) {
       const view = toErrorView(error)
       runtime.error = view

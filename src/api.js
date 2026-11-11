@@ -302,6 +302,18 @@ export function createApi(options) {
           sendJson(res, 200, { ok: true, ...(await service.listHostWorkspaces(id)) })
           return
         }
+        if (method === 'GET' && action === 'mirrors') {
+          sendJson(res, 200, { ok: true, ...(await service.listHostMirrors(id)) })
+          return
+        }
+        if (method === 'POST' && action === 'mirrors' && segments[3] === 'sync') {
+          const body = await readJson(req)
+          sendJson(res, 200, {
+            ok: true,
+            ...(await service.syncHostMirrors(id, { acknowledgeResync: body.acknowledgeResync === true })),
+          })
+          return
+        }
         if (method === 'GET' && action === 'open') {
           sendJson(res, 200, { ok: true, ...service.openInfo(id) })
           return

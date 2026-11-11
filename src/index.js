@@ -8,9 +8,11 @@
  */
 import { API_PREFIX, PLUGIN_ID } from './constants.js'
 import { statSync } from 'node:fs'
+import path from 'node:path'
 import { createApi } from './api.js'
 import { detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
+import { createSessionAdapter } from './session-adapter.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 
 export const name = PLUGIN_ID
@@ -28,12 +30,22 @@ export function apply(ctx, config = {}) {
   const home = config.home ? String(config.home) : resolveDshHome(process.env)
   const stateDir = resolveStateDir(home)
   const store = new HostStore({ dir: stateDir, logger })
+  // Mirror sessions are an optional host capability: without `ctx.sessions` the
+  // adapter answers typed `sessions-unavailable` and the plugin keeps working.
+  // Each host gets its own cwd under `$DSH_HOME/remote-go/mirrors/<hostId>`; the
+  // remote workspace path is never used (it may not exist on this machine).
+  const sessionAdapter = createSessionAdapter({
+    ctx,
+    logger,
+    mirrorRoot: path.join(stateDir, 'mirrors'),
+  })
   const service = new RemoteGoService({
     store,
     home,
     logger,
     localVersion: config.localVersion ? String(config.localVersion) : null,
     hostKeyConfirmTimeoutMs: config.hostKeyConfirmTimeoutMs,
+    sessionAdapter,
   })
   const getOrigin = () => {
     try {

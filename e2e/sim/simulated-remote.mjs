@@ -11,8 +11,17 @@
 //   node e2e/sim/simulated-remote.mjs --self-test   # start, verify, exit
 //   node e2e/sim/simulated-remote.mjs --serve       # stay up for manual use
 //
-// While serving it writes e2e/sim/.state.json (ports, host key fingerprint) so
-// other tooling can point at it: E2E_SSH_ADDRESS=127.0.0.1:<sshPort>.
+// Options (environment fallbacks in parentheses):
+//   --ssh-user/--ssh-password (SIM_SSH_USER/SIM_SSH_PASSWORD)  the one credential pair accepted
+//   --workspace-fixture <file> (SIM_WORKSPACE_FIXTURE)          body served for
+//                                                             `storages/workspace.json`, so a test can
+//                                                             choose the remote sessions it wants
+//   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published; the
+//                                                             default is e2e/sim/.state.json
+//
+// While serving it writes its state file (ports, host key fingerprint) so other
+// tooling can point at it: E2E_SSH_ADDRESS=127.0.0.1:<sshPort>. Parallel test
+// files pass their own --state-file so they never race on the default path.
 //
 // The command answers below are NOT a permissive fake: `respond()` recognises
 // the plugin's real command shapes by their leading tokens and returns the
@@ -32,7 +41,7 @@ import { assertSupportedRemote } from '../../src/bootstrap.js'
 const { Server: SshServer, Client: SshClient, utils } = ssh2
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-const STATE_FILE = path.join(HERE, '.state.json')
+const DEFAULT_STATE_FILE = path.join(HERE, '.state.json')
 
 /** @param {string[]} argv */
 function parseArgs(argv) {
@@ -56,6 +65,24 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2))
 const selfTest = args['self-test'] === true
 const serve = args['serve'] === true || !selfTest
+
+/**
+ * State file: the repository default, or the path the caller chose. A custom
+ * path keeps two simulators (e.g. test files running in parallel) from racing on
+ * one file, and still lets each one clean up only what it published.
+ * @returns {string}
+ */
+function resolveStateFile() {
+  const requested = args['state-file'] ?? process.env.SIM_STATE_FILE ?? null
+  if (requested === null) return DEFAULT_STATE_FILE
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    console.error('[sim] --state-file needs a file path')
+    process.exit(2)
+  }
+  return path.resolve(requested)
+}
+
+const STATE_FILE = resolveStateFile()
 
 /**
  * The single credential pair the simulator accepts (override with
@@ -152,8 +179,17 @@ function probeOutput() {
   return lines.map(([key, value]) => `${key}\t${value}\n`).join('')
 }
 
-/** Workspace registry the panel's workspace rail can parse. */
-const WORKSPACE_REGISTRY = {
+/**
+ * @typedef {{
+ *   json: string,
+ *   fixturePath: string | null,
+ *   workspaceCount: number,
+ *   sessionCount: number,
+ * }} WorkspaceAnswer
+ */
+
+/** Registry served when the caller names no fixture. */
+const DEFAULT_WORKSPACE_REGISTRY = {
   version: 2,
   global: { initialized: true, defaultWorkspaceId: 'ws-sim', workspaceIds: ['ws-sim'] },
   tables: {
@@ -168,6 +204,65 @@ const WORKSPACE_REGISTRY = {
     },
   },
 }
+
+/**
+ * Summarize a registry for the startup log and the state file. The bytes served
+ * to the plugin are the registry itself, so `readRemoteWorkspaces()` parses
+ * exactly what the test wrote.
+ * @param {any} registry
+ * @param {string | null} fixturePath
+ * @returns {WorkspaceAnswer}
+ */
+function describeWorkspaceRegistry(registry, fixturePath) {
+  const table = registry?.tables?.workspaces
+  const entries = table && typeof table === 'object' && !Array.isArray(table) ? Object.values(table) : []
+  const workspaces = entries.filter((entry) => entry && typeof entry === 'object')
+  const sessionCount = workspaces.reduce(
+    (total, entry) => total + (Array.isArray(entry.sessionIds) ? entry.sessionIds.length : 0),
+    0,
+  )
+  return { json: `${JSON.stringify(registry)}\n`, fixturePath, workspaceCount: workspaces.length, sessionCount }
+}
+
+/**
+ * Resolve the `storages/workspace.json` answer: the built-in registry, or the
+ * fixture file the caller named. A broken fixture exits loudly instead of
+ * falling back, so a drifted test cannot silently "pass" against other sessions.
+ * @returns {WorkspaceAnswer}
+ */
+function loadWorkspaceAnswer() {
+  const requested = args['workspace-fixture'] ?? process.env.SIM_WORKSPACE_FIXTURE ?? null
+  if (requested === null) return describeWorkspaceRegistry(DEFAULT_WORKSPACE_REGISTRY, null)
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    console.error('[sim] --workspace-fixture needs a file path')
+    process.exit(2)
+  }
+  const resolved = path.resolve(requested)
+  /** @type {any} */
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(resolved, 'utf8'))
+  } catch (error) {
+    fatal(`workspace fixture ${resolved}`, error)
+  }
+  const table = parsed?.tables?.workspaces
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    !table ||
+    typeof table !== 'object' ||
+    Array.isArray(table)
+  ) {
+    console.error(
+      `[sim] workspace fixture ${resolved} is not a DSH Workspace registry (expected {"tables":{"workspaces":{...}}})`,
+    )
+    process.exit(2)
+  }
+  return describeWorkspaceRegistry(parsed, resolved)
+}
+
+const WORKSPACE = loadWorkspaceAnswer()
 
 /** @param {SimState} sim @returns {string} */
 function webLine(sim) {
@@ -230,7 +325,7 @@ function respond(command, sim) {
 
   // 4. Workspace registry read (src/workspaces.js readRemoteWorkspaces).
   if (/^cat '[^']*\/storages\/workspace\.json'/.test(cmd)) {
-    return ok(`${JSON.stringify(WORKSPACE_REGISTRY)}\n`)
+    return ok(WORKSPACE.json)
   }
 
   // 5. Run registry read (src/webapp.js readRunRegistry).
@@ -616,14 +711,18 @@ async function runSelfTest(host) {
 
 if (serve || selfTest) {
   const host = await startSimulatedRemote()
-  mkdirSync(HERE, { recursive: true })
+  mkdirSync(path.dirname(STATE_FILE), { recursive: true })
   writeFileSync(
     STATE_FILE,
-    `${JSON.stringify({ simulated: true, sshHost: '127.0.0.1', sshPort: host.sshPort, remotePort: host.remotePort, fingerprint: host.fingerprint, pid: process.pid }, null, 2)}\n`,
+    `${JSON.stringify({ simulated: true, sshHost: '127.0.0.1', sshPort: host.sshPort, remotePort: host.remotePort, fingerprint: host.fingerprint, pid: process.pid, workspaceFixture: WORKSPACE.fixturePath }, null, 2)}\n`,
     'utf8',
   )
-  console.log(`[sim] SIMULATED remote host — not a real machine, writes nothing outside e2e/sim/`)
+  console.log('[sim] SIMULATED remote host — not a real machine; touches only its state file and the workspace fixture')
   console.log(`[sim] ssh 127.0.0.1:${host.sshPort}  remote-web 127.0.0.1:${host.remotePort}  ${host.fingerprint}`)
+  console.log(
+    `[sim] workspace registry: ${WORKSPACE.fixturePath ?? 'built-in'} — ${WORKSPACE.workspaceCount} workspace(s), ${WORKSPACE.sessionCount} session(s)`,
+  )
+  console.log(`[sim] state file: ${STATE_FILE}`)
   console.log(`[sim] E2E_SSH_ADDRESS=127.0.0.1:${host.sshPort}   (use it in a dedicated shell only)`)
 
   // Every exit path must leave no stale state file behind.

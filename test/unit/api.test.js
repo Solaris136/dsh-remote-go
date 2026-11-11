@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createApi } from '../../src/api.js'
-import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createSessionAdapter } from '../../src/session-adapter.js'
+import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 
@@ -328,6 +329,165 @@ test('workspace inventory endpoints serve local and per-remote groups', async ()
     assert.equal(remote.json.ok, true)
     assert.equal(remote.json.connected, false)
     assert.deepEqual(remote.json.workspaces, [])
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('GET /hosts/:id/mirrors serves the persisted directory mirrors', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const before = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(before.status, 200)
+    assert.equal(before.json.ok, true)
+    assert.equal(before.json.hostId, host.id)
+    assert.equal(before.json.connected, false)
+    assert.deepEqual(before.json.mirrors, [])
+    // P0 verifies the directory channel only, so the honest level is L1.
+    assert.equal(before.json.level, 'L1')
+    assert.equal(before.json.capabilities.list, true)
+    assert.equal(before.json.capabilities.stream, false)
+    assert.equal(before.json.sessionsAvailable, false)
+
+    await service.mirrorStore.upsertMirrors([
+      { hostId: host.id, remoteSessionId: 'remote-1', title: 'Project A · remote-1', cursor: 7 },
+      { hostId: 'h_other', remoteSessionId: 'remote-9', title: 'Other host mirror' },
+    ])
+    const after = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(after.status, 200)
+    assert.equal(after.json.mirrors.length, 1)
+    const [mirror] = after.json.mirrors
+    assert.equal(mirror.hostId, host.id)
+    assert.equal(mirror.remoteSessionId, 'remote-1')
+    assert.equal(mirror.title, 'Project A · remote-1')
+    assert.equal(mirror.cursor, 7)
+    assert.equal(mirror.status, 'active')
+    assert.equal(mirror.capabilities.list, true)
+    assert.equal(mirror.capabilities.stream, false)
+    assert.match(mirror.localSessionId, /^mirror_[a-z0-9]{25}$/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /hosts/:id/mirrors/sync exposes the restart re-pull notice', async () => {
+  const stdout = JSON.stringify({
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'] },
+    tables: { workspaces: { 'ws-1': { path: '/home/u/proj', title: 'proj', sessionIds: ['remote-1'] } } },
+  })
+  // A real adapter over an empty in-memory sessions store: the mirror session
+  // does not exist (as after a restart), so the sync must report `resyncRequired`.
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+  }
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
+  const { service } = await makeTestService({
+    sessionAdapter,
+    sshFactory: (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) }),
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+    // Wait for the connect-time sync to finish before simulating the restart.
+    await waitFor(() => !service.runtimes.get(host.id).mirrorSync)
+    // Simulate a restart: the descriptor survives, the in-memory session does not.
+    live.clear()
+    const result = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(result.status, 200)
+    assert.equal(result.json.ok, true)
+    assert.equal(result.json.synced, true)
+    assert.equal(result.json.mirrors.length, 1)
+    assert.equal(result.json.sessionsAvailable, true)
+    // The local session persists nothing, so the API surfaces the re-pull path.
+    assert.equal(result.json.resyncRequired, 1)
+    assert.equal(result.json.sessions[0].resync.reason, 'local-session-missing')
+    assert.match(result.json.notice.en, /re-pull/i)
+    assert.equal(live.size, 1)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('the background resync notice survives later syncs until a client acknowledges it', async () => {
+  const stdout = JSON.stringify({
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'] },
+    tables: {
+      workspaces: { 'ws-1': { path: '/home/u/proj', title: 'proj', sessionIds: ['remote-1', 'remote-2'] } },
+    },
+  })
+  // An adapter over a fake in-memory sessions store: connect's background sync
+  // creates the sessions, so the client's own sync finds them already live.
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+  }
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
+  const { service } = await makeTestService({
+    sessionAdapter,
+    sshFactory: (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) }),
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    await waitFor(() => live.size === 2)
+    await waitFor(() => !service.runtimes.get(host.id).mirrorSync)
+
+    const first = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(first.status, 200)
+    assert.equal(first.json.resyncRequired, 2)
+    assert.match(first.json.notice.en, /re-pull/i)
+    // The sessions already exist, so this sync itself created nothing.
+    assert.equal(
+      first.json.sessions.every((entry) => entry.created === false),
+      true,
+    )
+
+    // Second client sync: the notice must still be there (not a transient value).
+    const second = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(second.json.resyncRequired, 2)
+    assert.match(second.json.notice.en, /re-pull/i)
+
+    // The read-only endpoint exposes the same pending notice.
+    const listed = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(listed.json.resyncRequired, 2)
+    assert.match(listed.json.notice.en, /re-pull/i)
+
+    // Only an explicit acknowledgement clears it.
+    const acknowledged = await call(api.base, `/hosts/${host.id}/mirrors/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ acknowledgeResync: true }),
+    })
+    assert.equal(acknowledged.json.resyncRequired, 0)
+    assert.equal(acknowledged.json.notice, null)
+    const afterAck = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(afterAck.json.resyncRequired, 0)
+    assert.equal(afterAck.json.notice, null)
   } finally {
     await api.close()
     await service.shutdown()

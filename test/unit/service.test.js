@@ -1,8 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
+import { createSessionAdapter } from '../../src/session-adapter.js'
+
+/** @param {string} target */
+async function pathExists(target) {
+  try {
+    await stat(target)
+    return true
+  } catch {
+    return false
+  }
+}
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {
   const { service, store } = await makeTestService()
@@ -335,5 +348,274 @@ test('listHostWorkspaces reads the remote registry over the live SSH session', a
   assert.equal(result.workspaces[0].hostId, host.id)
   assert.equal(result.workspaces[0].sessionCount, 2)
   assert.match(calls[0], /storages\/workspace\.json/)
+  await service.shutdown()
+})
+
+// ---------------------------------------------------------------- mirrors
+
+/** Serialize a remote `storages/workspace.json` body. */
+function remoteRegistry(workspaces) {
+  return JSON.stringify({
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: Object.keys(workspaces) },
+    tables: { workspaces },
+  })
+}
+
+/** A fake SSH whose only command answers the workspace registry read. */
+function registrySshFactory(stdout) {
+  return (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) })
+}
+
+test('connect mirrors the remote workspace directory into L1 descriptors', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  const { service } = await makeTestService({ sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  // The directory sync runs after `connected`, so wait for the persisted rows.
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2, { label: 'mirror sync' })
+
+  const mirrors = service.mirrorStore.listMirrors({ hostId: host.id })
+  assert.deepEqual(
+    mirrors.map((mirror) => mirror.remoteSessionId),
+    ['s-a', 's-b'],
+  )
+  assert.equal(
+    mirrors.every((mirror) => mirror.status === 'active' && mirror.cursor === 0),
+    true,
+  )
+  assert.equal(
+    mirrors.every((mirror) => mirror.capabilities.list === true),
+    true,
+  )
+  assert.equal(
+    mirrors.every((mirror) => mirror.capabilities.stream === false),
+    true,
+  )
+  assert.equal(mirrors[0].hostId, host.id)
+  assert.match(mirrors[0].localSessionId, /^mirror_[a-z0-9]{25}$/)
+  // mirroredAt records the successful directory read.
+  assert.equal(typeof mirrors[0].mirroredAt, 'string')
+
+  const listed = await service.listHostMirrors(host.id)
+  assert.equal(listed.connected, true)
+  assert.equal(listed.level, 'L1')
+  assert.equal(listed.reason.code, 'history-unavailable')
+  assert.equal(listed.sessionsAvailable, false)
+  assert.equal(listed.mirrors.length, 2)
+  await service.shutdown()
+})
+
+test('a parseable empty registry is treated as transient, never as mass deletion', async () => {
+  let payload = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  const sshFactory = (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout: payload, stderr: '' }) })
+  const { service } = await makeTestService({ sshFactory })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+
+  // A fresh/partially-written remote registry parses but lists nothing.
+  payload = remoteRegistry({})
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.synced, false)
+  assert.equal(synced.reason, 'empty-registry')
+  const kept = service.mirrorStore.listMirrors({ hostId: host.id })
+  assert.equal(kept.length, 2)
+  assert.equal(
+    kept.every((mirror) => mirror.status === 'active'),
+    true,
+  )
+  await service.shutdown()
+})
+
+test('the connect pipeline does not wait for the directory sync', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  // A slow remote read must not delay the ready state or the connect response.
+  const sshFactory = (options) =>
+    new FakeSsh({
+      options,
+      exec: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 250))
+        return { code: 0, stdout, stderr: '' }
+      },
+    })
+  const { service } = await makeTestService({ sshFactory })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  // The sync is in flight and is not part of the connect promise.
+  assert.ok(runtime.mirrorSync, 'the mirror sync should still be running')
+  assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 0)
+  await runtime.mirrorSync
+  assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 1)
+  await service.shutdown()
+})
+
+test('typed mirror-session failures are counted and logged, not swallowed', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  const sessionAdapter = {
+    ensureMirrorSession(descriptor) {
+      if (descriptor.remoteSessionId === 's-a') {
+        return { ok: true, created: true, localSessionId: descriptor.localSessionId }
+      }
+      return { ok: false, reason: 'sessions-unavailable', localSessionId: descriptor.localSessionId }
+    },
+  }
+  const { service } = await makeTestService({ sessionAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+  const runtime = service.runtimes.get(host.id)
+  await waitFor(() => runtime.logs.some((entry) => entry.line.includes('mirror sessions:')))
+  const info = runtime.logs.find((entry) => entry.line.includes('mirror sessions:'))
+  assert.match(info.line, /2 descriptor\(s\) \/ 1 local session\(s\)/)
+  assert.match(info.line, /sessions-unavailable/)
+  assert.equal(
+    runtime.logs.some((entry) => entry.line.includes('mirror session failure reasons:')),
+    true,
+  )
+  await service.shutdown()
+})
+
+test('removing a host asks the adapter to remove its local mirror sessions', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  /** @type {string[]} */
+  const removed = []
+  const sessionAdapter = {
+    ensureMirrorSession: (descriptor) => ({ ok: true, created: true, localSessionId: descriptor.localSessionId }),
+    removeMirrorSession: (localSessionId) => {
+      removed.push(localSessionId)
+      return { ok: true, removed: false, reason: 'fiber-owned' }
+    },
+  }
+  const { service } = await makeTestService({ sessionAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+  const mirrorIds = service.mirrorStore.listMirrors({ hostId: host.id }).map((mirror) => mirror.localSessionId)
+
+  await service.removeHost(host.id)
+  assert.deepEqual(removed.sort(), mirrorIds.sort())
+  assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 0)
+  await service.shutdown()
+})
+
+test('removing a host actually drops local sessions when the host can delete them', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  // A real adapter over a fake `sessions` service that supports removal.
+  /** @type {Map<string, any>} */
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+    remove(id) {
+      live.delete(id)
+    },
+  }
+  const mirrorRoot = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-cwd-'))
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} }, mirrorRoot })
+  const { service } = await makeTestService({ sessionAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => live.size === 2, { label: 'two live mirror sessions' })
+  // The per-host cwd exists (the host keys storage off it).
+  assert.equal(await pathExists(path.join(mirrorRoot, host.id)), true)
+
+  await service.removeHost(host.id)
+  assert.equal(live.size, 0, 'the local mirror sessions must be gone, not just reported')
+  await service.shutdown()
+})
+
+test('syncHostMirrors keeps and marks a session the remote deleted', async () => {
+  let sessionIds = ['s-a', 's-b']
+  const commands = []
+  const sshFactory = (options) =>
+    new FakeSsh({
+      options,
+      exec: async (command) => {
+        commands.push(command)
+        const stdout = remoteRegistry({
+          'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds },
+        })
+        return { code: 0, stdout, stderr: '' }
+      },
+    })
+  const { service } = await makeTestService({ sshFactory })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
+
+  sessionIds = ['s-a']
+  const synced = await service.syncHostMirrors(host.id)
+  assert.equal(synced.synced, true)
+  assert.deepEqual(synced.markedDeleted, ['s-b'])
+  const kept = service.mirrorStore.listMirrors({ hostId: host.id })
+  assert.equal(kept.length, 2)
+  assert.equal(kept.find((mirror) => mirror.remoteSessionId === 's-b').status, 'remote-deleted')
+  // The plugin only ever read the registry; it never asked the remote to delete.
+  assert.equal(
+    commands.every((command) => command.startsWith('cat ')),
+    true,
+  )
+  await service.shutdown()
+})
+
+test('mirror sessions are created only when the optional sessions adapter is injected', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  /** @type {any[]} */
+  const ensured = []
+  const sessionAdapter = {
+    ensureMirrorSession(descriptor) {
+      ensured.push(descriptor)
+      return { ok: true, created: true, localSessionId: descriptor.localSessionId }
+    },
+  }
+  const { service } = await makeTestService({ sessionAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => ensured.length === 2, { label: 'adapter calls' })
+  assert.deepEqual(
+    ensured.map((descriptor) => descriptor.remoteSessionId),
+    ['s-a', 's-b'],
+  )
+  assert.equal(
+    ensured.every((descriptor) => descriptor.status === 'active'),
+    true,
+  )
+  await service.shutdown()
+})
+
+test('without the optional sessions adapter the mirror stays directory-only', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  const { service } = await makeTestService({ sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
+  assert.equal(service.sessionAdapter, null)
+  assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 1)
   await service.shutdown()
 })

@@ -115,6 +115,7 @@ export class FakeTunnel {
  *   adopt?: any,
  *   localVersion?: string | null,
  *   hostKeyConfirmTimeoutMs?: number,
+ *   sessionAdapter?: any,
  * }} [overrides]
  */
 export async function makeTestService(overrides = {}) {
@@ -186,6 +187,7 @@ export async function makeTestService(overrides = {}) {
       knownHostsPath: '/home/test/.ssh/known_hosts',
     }),
     hostKeyConfirmTimeoutMs: overrides.hostKeyConfirmTimeoutMs ?? 2000,
+    sessionAdapter: overrides.sessionAdapter ?? null,
   })
   await service.init()
   return { service, store, dir, events, facts }

@@ -110,7 +110,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Simulated-host integration tests
-        run: node --test "test/integration/*.test.js"
+        run: node --test "test/integration/*.test.js" "test/integration/*.e2e.js"
 
   package:
     name: Publish artifact (${{ matrix.os }})

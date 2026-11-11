@@ -49,6 +49,10 @@ test('parseWorkspaceStorage follows the global order and appends orphans', () =>
   assert.equal(a.title, 'proj-a')
   assert.equal(def.isDefault, true)
   assert.equal(def.sessionCount, 2)
+  // v1.1 additive field: the L1 mirror plans one descriptor per session id.
+  assert.deepEqual(def.sessionIds, ['s1', 's2'])
+  assert.deepEqual(b.sessionIds, ['s3'])
+  assert.deepEqual(a.sessionIds, [])
 })
 
 test('parseWorkspaceStorage is defensive about missing/malformed data', () => {
@@ -115,4 +119,29 @@ test('remoteWorkspaceStoragePath and readRemoteWorkspaces use the SSH exec chann
   const brokenResult = await readRemoteWorkspaces(broken, '/home/u/home')
   assert.equal(brokenResult.ok, false)
   assert.equal(brokenResult.reason, 'malformed')
+})
+
+test('sessionIds are deduplicated so sessionCount keeps the v1 count of sessions', () => {
+  // Duplicates, padded duplicates and non-string junk are not separate sessions;
+  // the v1 count must equal the deduplicated list the L1 mirror plans one
+  // descriptor per.
+  const parsed = parseWorkspaceStorage({
+    global: { initialized: true, workspaceIds: ['ws'] },
+    tables: {
+      workspaces: { ws: { path: '/p/ws', sessionIds: ['a', 'a', '', ' b ', 'b', 42, 'c'] } },
+    },
+  })
+  const [workspace] = parsed.workspaces
+  assert.deepEqual(workspace.sessionIds, ['a', 'b', 'c'])
+  assert.equal(workspace.sessionCount, 3)
+  assert.equal(workspace.sessionCount, new Set(workspace.sessionIds).size)
+})
+
+test('padded session ids count once, matching the L1 mirror cardinality', () => {
+  const parsed = parseWorkspaceStorage({
+    global: { initialized: true, workspaceIds: ['ws'] },
+    tables: { workspaces: { ws: { path: '/p/ws', sessionIds: [' s1 ', 's1'] } } },
+  })
+  assert.deepEqual(parsed.workspaces[0].sessionIds, ['s1'])
+  assert.equal(parsed.workspaces[0].sessionCount, 1)
 })
