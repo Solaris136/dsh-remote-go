@@ -250,7 +250,8 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 
 缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
 `.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
-（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**：失败时会上传截图与日志（`web-e2e-failure` /
+（缺件即失败，避免静默空跑）。这两个工作流是**候选必需检查**——待各自在 CI 上绿跑一次之后，才会被加入分支保护的
+必需检查清单；在此之前它们不阻塞合并。失败时都会上传截图与日志（`web-e2e-failure` /
 `desktop-e2e-failure` artifact）。
 
 目录：
@@ -278,8 +279,8 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 | [`codeql.yml`](.github/workflows/codeql.yml) | push/PR `main` / 每周 | CodeQL 静态分析（`security-and-quality`） |
 | [`release.yml`](.github/workflows/release.yml) | `v*` 标签 / 手动 | 校验标签与版本一致 → 跑门禁 → 打包 → 发布 npm（有 token 时，含 provenance）→ 创建 GitHub Release |
 | [`e2e.yml`](.github/workflows/e2e.yml) | 仅手动 | 真实主机端到端：隔离 control DSH → SSH → 远端自举 → 面板 iframe 验收 → 上传证据 |
-| [`web-e2e.yml`](.github/workflows/web-e2e.yml) | push `main` / PR / 手动 | Web 兼容性（**必需检查** `Web E2E (ubuntu-latest)`）：安装 `@deepseek-ai/dsh` + Chrome → 打包产物真装进隔离 `dsh web` → 设置页浅色/深色按钮对比度断言；失败上传截图与日志 |
-| [`desktop-e2e.yml`](.github/workflows/desktop-e2e.yml) | push `main` / PR / 手动 | 桌面端兼容性（**必需检查** `Desktop E2E (windows-latest)`）：静默安装官方 Electron 桌面端（带超时与诊断）→ 手工构建 desktop profile 装打包产物 → CDP 驱动真实窗口 → 同样的对比度断言；失败上传截图与日志 |
+| [`web-e2e.yml`](.github/workflows/web-e2e.yml) | push `main` / PR / 手动 | Web 兼容性（候选必需检查 `Web E2E (ubuntu-latest)`）：安装 `@deepseek-ai/dsh` + Chrome → 打包产物真装进隔离 `dsh web` → 设置页浅色/深色按钮对比度断言；失败上传截图与日志 |
+| [`desktop-e2e.yml`](.github/workflows/desktop-e2e.yml) | push `main` / PR / 手动 | 桌面端兼容性（候选必需检查 `Desktop E2E (windows-latest)`）：静默安装官方 Electron 桌面端（带超时与诊断）→ 手工构建 desktop profile 装打包产物 → CDP 驱动真实窗口 → 同样的对比度断言；失败上传截图与日志 |
 
 发布前请本地跑一遍 `pnpm run verify`；`prepack` 还会自动执行 `market-entry --check`，防止带病发布。完整发布步骤见
 [docs/publish.md](docs/publish.md)。

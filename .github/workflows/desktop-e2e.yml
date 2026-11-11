@@ -128,7 +128,9 @@ jobs:
 
           function Invoke-Installer([string[]]$arguments, [string]$label) {
             Write-Host "installing ($label): $installer $($arguments -join ' ')"
-            $proc = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru
+            # -WindowStyle Hidden matters here: the installer is a GUI binary, so without it every
+            # attempt flashes a console window in the runner and on a developer machine.
+            $proc = Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -WindowStyle Hidden
             $deadline = (Get-Date).AddMinutes(10)
             while (-not $proc.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
             $stalled = -not $proc.HasExited

@@ -72,11 +72,15 @@ jobs:
         run: |
           echo "node $(node --version), pnpm $(pnpm --version)"
           echo "dsh $(dsh --version)"
-          echo "chrome ${CHROME_PATH:-<not set>}"
 
       - name: Setup Chrome
         id: chrome
         uses: browser-actions/setup-chrome@v2
+
+      - name: Report the browser version
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: echo "chrome ${CHROME_PATH:-<not set>}"
 
       - name: Run the web E2E
         env:

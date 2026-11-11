@@ -35,7 +35,7 @@ const SKIP_DIRS = new Set([
 ])
 
 /** Unambiguous spawn APIs, bare or qualified (`cp.spawn(...)`, `child_process.spawnSync(...)`). */
-const SPAWN_RE = /(?<![\w$])(?:[A-Za-z_$][\w$]*\.)?(spawn|spawnSync|execFile|execFileSync|execSync)\s*\(/g
+const SPAWN_RE = /(?<![\w$])(?:[A-Za-z_$][\w$]*\.)?(spawn|spawnSync|execFile|execFileSync|execSync|fork)\s*\(/g
 /** `exec` is ambiguous: `ssh.exec(...)` is ssh2, `regex.exec(...)` is a match. Bare calls only. */
 const EXEC_RE = /(?<![\w.$])exec\s*\(/g
 const OPT_OUT = 'windowsHide-ignore'
@@ -171,7 +171,7 @@ async function findCallSites() {
         // `exec(a, b) {` / `async exec(a) {` is a method body, not a child process.
         if (args.closeIndex !== -1 && looksLikeDefinition(source, args.closeIndex)) continue
         const line = source.slice(0, index).split('\n').length
-        const context = `${rawLines[line - 1] ?? ''}\n${rawLines[line] ?? ''}`
+        const context = `${rawLines[line - 2] ?? ''}\n${rawLines[line - 1] ?? ''}`
         sites.push({
           file: path.relative(ROOT, file),
           name: match[1] ?? 'exec',
