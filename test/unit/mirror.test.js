@@ -119,6 +119,8 @@ test('applyEvents sorts out-of-order input and stops at a gap without advancing 
     state: { cursor: 0 },
     backfill: null,
     applied: 0,
+    conflictCount: 0,
+    conflicts: [],
   })
 })
 

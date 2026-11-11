@@ -179,6 +179,55 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 - 上限：镜像事件数受 `mirrorMaxEvents` 限制（默认 200，`0` = 不限）。超限时保留**最新** N 条，并在会话里先写一条
   `mirror/history-folded` 通知（带 `folded` / `retained`），然后从新窗口起点继续。
 
+### 6.2 L3 前置：租约 epoch 与围栏（已落地）
+
+L3（流式事件、输入转发、审批回传）之前必须先有「旧写入者不会再写」的机械保证，否则分区归来的写入者会与
+新写入者交错写同一份镜像（split brain）。这一层现在已实现（`src/mirror.js` 的租约函数 + `src/lease.js` +
+`src/service.js#syncMirrorHistory`），L3 只需在此之上加通道，不需要重新发明仲裁。
+
+**状态机**（每个 mirror 独立）：
+
+```
+                 acquire(发放新 epoch)
+   (none) ───────────────────────────────▶ acquired ──renew(epoch 不变)──▶ renewed
+      ▲                                        │                             │
+      │                                        │ expiresAt <= now            │ 看到更高 epoch
+      │                                        ▼                             ▼
+      └────────────── expire ◀────────────  expired ◀─────────────────── fenced
+                                                 │
+                                                 └── acquire(epoch+1) ──▶ acquired（恢复）
+```
+
+| 状态 | 含义 | 还能写吗 |
+|---|---|---|
+| `acquired` | 刚拿到租约，`epoch` 已发放 | 能 |
+| `renewed` | 心跳续约，**epoch 不变**（同一份授权，自己的在途写不能被自己作废） | 能 |
+| `expired` | `expiresAt <= now`，租约已失效 | 不能（`lease-expired`） |
+| `fenced` | 看到比自己更新的 `epoch`，或同 epoch 但写入者不同 | 不能（`stale-epoch`），且租约被清空 |
+
+**谁持有什么**：
+
+- 远端（或 L3 落地后的控制通道）发布 `<DSH_HOME>/remote-go/lease.json`：`{ writer, epoch, expiresAt }`。
+  这是**可选**的：文件不存在表示「没有竞争写入者」，本地照常持有自己的租约；文件损坏（`lease-malformed`）
+  则表示「权威不可信」，同样不当作「没人写」。
+- 本地在 descriptor 里持久化 `epoch`（高水位）、`lease`（`owner/acquiredAt/renewedAt/expiresAt/epoch`）、
+  `fencedEpoch` / `fencedWriter`（去重用）。
+- **高水位属于 descriptor，不属于租约**：租约过期或被释放后 `epoch` 不会回退，所以旧写入者即使重新连上、
+  甚至重启，也拿不到一个已经用过的号码。
+
+**围栏规则**：
+
+1. 每次写之前 `assertWritable(state, {owner, epoch, now})`；`epoch < 高水位` 直接拒绝（`stale-epoch`）。
+   这是唯一能挡住「租约看起来还有效、但自己已经被接管」的检查。
+2. 呈现**更高** `epoch` 的写入者被接受，并抬高本地高水位（号码即事实）；呈现更低者一律拒绝。
+3. 一次围栏事件只在**同一个 epoch 的第一次**被判定为 `changed`，因此每个会话每次围栏只写一条
+   `mirror/fenced` 非 surface 通知，不会每次同步刷屏。
+4. 被围栏时：不写、不推进 `cursor`、丢弃自己的租约、descriptor 标 `readOnly: true` + `reason.code = "fenced"`，
+   已有历史**原样保留**（只读可看）。
+5. 恢复：竞争消失后重新 `acquire` 会拿到 `epoch + 1`，从原 `cursor` 继续——历史不会重拉、不会丢。
+
+时钟是**注入**的（`RemoteGoService` 的 `clock`），所以过期与围栏由测试推进假时钟验证，不靠真实等待。
+
 ### 6.1 L2 已落地（历史回放）
 
 `cursor` / `applyEvents` / `nextCursor` 从「纯函数」变成**生产在跑**的路径（`src/history.js` +
@@ -240,7 +289,7 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
 | P1 🟡 | 历史回放（L2）：**数据层已交付，可见标识待客户端** | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 已在 **Host/契约层** 提供（`test/unit/history.test.js` + `test/integration/history.e2e.js` 覆盖）。**未完成**：客户端尚未渲染只读标识（DSH 的 Conversation UI 不显示非 surface 事件），因此「只读标识清晰」这一用户可见目标仍未达成，见 §11 #8 |
-| P2 | 事件流 + 输入转发（L3） | 本地发消息 → 远端执行 → 事件流回本地；`seq` 幂等与续传有用例覆盖 |
+| P2 | 事件流 + 输入转发（L3） | **前置条件已完成**（见 §6.2）：租约 epoch/围栏、并发写入检测、`applyEvents` 冲突上报、可注入时钟，均有单测与模拟远端集成测试。L3 本身仍**未开始**：本地发消息 → 远端执行 → 事件流回本地还没有实现 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 
 L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的会话日志，因此没有实时性承诺；`stream` / `input` /
@@ -265,3 +314,9 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
    surface 事件（契约层可断言），但 DSH 的 Conversation UI 不渲染非 surface 事件，客户端也还没有据此绘制任何
    可见标记——所以**用户实际看到的仍是「没有标识的远端历史」**。这是有意的待办而非已完成项：需要客户端在会话头
    或消息列表加一个只读徽标（并用 `redacted`/`level` 说明原因）后才能把 P1 的验收行标为全部达成。
+9. **围栏权威（`remote-go/lease.json`）是一个过渡实现**：真正的单写者仲裁在 L3 应该走控制通道（与事件流同一条
+   `ws-mux`），并用远端自己的会话锁而不是一个旁挂文件。现在这个文件只是为了在**不改远端**的前提下把 epoch /
+   fencing 这套机械先落地并可测；它没有防篡改能力，也不参与远端的真实性校验。
+10. **两个真实的远端主机才能验证的围栏场景**：`fenced` / 恢复路径目前只在模拟远端上验证过。真实的「A 分区后
+   归来、B 已接管」需要两个客户端同时连接同一远端会话，并让其中一个真的断网再回来——本仓库的测试环境里没有
+   第二台主机，所以只验证了协议状态机与 `lease.json` 这一条通道，没有验证真实并发下的时序竞争。
