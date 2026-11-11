@@ -497,22 +497,6 @@ export class RemoteGoService extends EventEmitter {
    */
   async syncHostMirrors(id, options = {}) {
     await this.init()
-    const syncRuntime = this.runtimes.get(id)
-    if (syncRuntime) syncRuntime.syncing = true
-    try {
-      return await this.#syncHostMirrorsInner(id, options)
-    } finally {
-      if (syncRuntime) syncRuntime.syncing = false
-    }
-  }
-
-  /**
-   * The body of `syncHostMirrors`, split out so a background poller (§6.3, when activated) can be
-   * held off for its duration — both paths persist descriptors.
-   * @param {string} id @param {{ acknowledgeResync?: boolean }} [options]
-   */
-  async #syncHostMirrorsInner(id, options = {}) {
-    await this.init()
     const runtime = this.#runtime(id)
     if (runtime.mirrorSync) {
       // Never run two directory syncs at once for one host; coalesce on the
