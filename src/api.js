@@ -307,7 +307,11 @@ export function createApi(options) {
           return
         }
         if (method === 'POST' && action === 'mirrors' && segments[3] === 'sync') {
-          sendJson(res, 200, { ok: true, ...(await service.syncHostMirrors(id)) })
+          const body = await readJson(req)
+          sendJson(res, 200, {
+            ok: true,
+            ...(await service.syncHostMirrors(id, { acknowledgeResync: body.acknowledgeResync === true })),
+          })
           return
         }
         if (method === 'GET' && action === 'open') {

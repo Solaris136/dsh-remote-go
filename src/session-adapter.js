@@ -24,6 +24,7 @@
  * No DSH package is imported: the service object (or a `ctx` that can resolve
  * it) is injected, so every branch is unit-testable with a fake.
  */
+import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { MIRROR_ID_PREFIX, decideResync, mirrorSessionId } from './mirror.js'
 
@@ -73,6 +74,7 @@ export const SURFACE_EVENT_TYPES = Object.freeze([
  * @returns {{
  *   available: () => boolean,
  *   ensureMirrorSession: (descriptor: any) => AdapterResult,
+ *   ensureMirrorCwd: (descriptor: any) => Promise<string | null>,
  *   appendEvent: (localSessionId: string, event: any) => AdapterResult,
  *   removeMirrorSession: (localSessionId: string) => AdapterResult,
  * }}
@@ -254,6 +256,25 @@ export function createSessionAdapter(options = {}) {
   }
 
   /**
+   * Create the per-host mirror working directory, if one is configured. The host
+   * keys storage off `meta.cwd`, so the directory must exist before the session
+   * is created. Never throws: a failure only means the host default cwd is used.
+   * @param {any} descriptor
+   * @returns {Promise<string | null>}
+   */
+  async function ensureMirrorCwd(descriptor) {
+    const cwd = mirrorCwd(descriptor)
+    if (cwd === null) return null
+    try {
+      await fsp.mkdir(cwd, { recursive: true, mode: 0o700 })
+      return cwd
+    } catch (error) {
+      logger.warn?.('[dsh-remote-go] cannot create the mirror session directory:', error)
+      return null
+    }
+  }
+
+  /**
    * Translate a descriptor into `create` options.
    *
    * `meta.cwd` is only passed when absolute (the host rejects anything else) and
@@ -278,7 +299,7 @@ export function createSessionAdapter(options = {}) {
     return createOptions
   }
 
-  return { available, ensureMirrorSession, appendEvent, removeMirrorSession }
+  return { available, ensureMirrorSession, ensureMirrorCwd, appendEvent, removeMirrorSession }
 }
 
 /** @param {unknown} value @returns {boolean} */

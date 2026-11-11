@@ -1,5 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SURFACE_EVENT_TYPES, createSessionAdapter } from '../../src/session-adapter.js'
 import { decideResync, l1Capabilities, mirrorSessionId } from '../../src/mirror.js'
@@ -107,6 +109,18 @@ test('each host gets its own mirror cwd under the mirror root', () => {
   const hostileCall = hostile.calls.find((call) => call.op === 'create')
   assert.equal(hostileCall.options.meta.cwd, path.join(mirrorRoot, '.._evil_host'))
   assert.equal(hostileCall.options.meta.cwd.includes('..' + path.sep), false)
+})
+
+test('ensureMirrorCwd creates the per-host directory the host keys storage off', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-cwd-'))
+  const adapter = createSessionAdapter({ sessions: createFakeSessions(), logger: quiet, mirrorRoot: root })
+  const created = await adapter.ensureMirrorCwd(descriptor())
+  assert.equal(created, path.join(root, 'h_1'))
+  assert.equal((await stat(created)).isDirectory(), true)
+  assert.equal(await adapter.ensureMirrorCwd(descriptor({ hostId: 'unknown host' })), path.join(root, 'unknown_host'))
+  // Without a mirror root there is no directory to create.
+  const plain = createSessionAdapter({ sessions: createFakeSessions(), logger: quiet })
+  assert.equal(await plain.ensureMirrorCwd(descriptor()), null)
 })
 
 test('meta.cwd falls back to an absolute cwd and is omitted when relative', () => {

@@ -15,10 +15,13 @@
  *   `mirrors.json.future-<ts>` and never reinterpreted (this build cannot know
  *   the newer schema), so an older plugin can never overwrite it in place.
  *
- * Writes are safe for several `MirrorStore` instances in one process: they share
- * a per-file lock, re-read the file inside the lock before mutating (so two
- * instances cannot lose each other's rows), and use a `crypto.randomUUID()` temp
- * name opened with `wx`, fsynced, then renamed. Directories are fsynced where the
+ * Writes are safe across **processes**: writers serialize on a `wx` lock file
+ * (stale locks from a crashed writer are broken after `LOCK_STALE_MS`), re-read
+ * the file inside the lock before mutating (so two writers cannot lose each
+ * other's rows), and use a `crypto.randomUUID()` temp name opened with `wx`,
+ * fsynced, then renamed. On Windows another process can hold the target file
+ * briefly, so the rename is retried on `EPERM`/`EBUSY`; any failure removes the
+ * temp file instead of leaving a `.tmp` behind. Directories are fsynced where the
  * platform allows it.
  */
 import { promises as fs } from 'node:fs'
@@ -29,6 +32,28 @@ import { compareMirrors, normalizeMirrorDescriptor } from './mirror.js'
 
 /** On-disk envelope version; bump only when an older file cannot be sanitized. */
 export const MIRROR_STORE_VERSION = 1
+
+/** Rename attempts when another process holds/replaces the target (Windows). */
+const RENAME_RETRY_ATTEMPTS = 5
+
+/** Base backoff for a busy rename; multiplied by the attempt number. */
+const RENAME_RETRY_BASE_MS = 20
+
+/** A lock file older than this is stale (the writer crashed). */
+const LOCK_STALE_MS = 10_000
+
+/** How long to wait for another process to release the lock before failing. */
+const LOCK_WAIT_MS = 20_000
+
+/** Poll interval while waiting for the cross-process lock. */
+const LOCK_RETRY_MS = 10
+
+/** @param {number} ms @returns {Promise<void>} */
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
 
 /** @typedef {{ version: number, mirrors: import('./mirror.js').MirrorDescriptor[] }} MirrorStoreData */
 
@@ -69,6 +94,7 @@ export class MirrorStore {
     this.logger = options.logger ?? console
     this.fs = options.fsImpl ?? fs
     this.file = path.join(this.dir, 'mirrors.json')
+    this.lockFile = `${this.file}.lock`
     /** @type {MirrorStoreData} */
     this.data = emptyMirrorData()
     /** Path the last load moved a corrupt/future file to, if any. */
@@ -234,40 +260,133 @@ export class MirrorStore {
   }
 
   /**
-   * Run one mutation under the shared per-file lock. Inside the lock the file is
-   * re-read so concurrent instances merge instead of overwriting each other.
+   * Run one mutation under the in-process chain and the cross-process lock.
+   * Inside the lock the file is re-read so concurrent writers merge instead of
+   * overwriting each other.
    * @template T
    * @param {(data: MirrorStoreData) => T} apply
    * @returns {Promise<T>}
    */
   async #mutate(apply) {
     return withFileLock(this.file, async () => {
-      this.data = await this.#readFresh()
-      const result = apply(this.data)
-      await this.#writeAtomic(this.data)
-      return result
+      const release = await this.#acquireLock()
+      try {
+        this.data = await this.#readFresh()
+        const result = apply(this.data)
+        await this.#writeAtomic(this.data)
+        return result
+      } finally {
+        await release()
+      }
     })
   }
 
   /**
-   * Atomic write: unique temp file opened exclusively, fsynced, renamed, then the
-   * directory is fsynced where supported. A unique suffix plus `wx` means two
-   * writers can never share (or silently reuse) a temp path.
+   * Create the exclusive lock file. Another process holding it means this writer
+   * waits (a stale lock from a crashed process is broken after `LOCK_STALE_MS`).
+   * @returns {Promise<() => Promise<void>>} release function
+   */
+  async #acquireLock() {
+    const started = Date.now()
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        const handle = await this.fs.open(this.lockFile, 'wx', 0o600)
+        return async () => {
+          try {
+            await handle.close()
+          } catch {
+            /* already closed */
+          }
+          await this.#removeQuietly(this.lockFile)
+        }
+      } catch (error) {
+        if (/** @type {any} */ (error)?.code !== 'EEXIST') throw error
+        await this.#breakStaleLock()
+        if (Date.now() - started > LOCK_WAIT_MS) {
+          const timeout = (new Error('timed out waiting for another process to release the mirror store lock')(
+            /** @type {any} */ timeout,
+          ).code = 'ELOCKTIMEOUT')
+          throw timeout
+        }
+        await sleep(LOCK_RETRY_MS)
+      }
+    }
+  }
+
+  /** Remove a lock file left behind by a writer that died. */
+  async #breakStaleLock() {
+    try {
+      const info = await this.fs.stat(this.lockFile)
+      if (Date.now() - info.mtimeMs > LOCK_STALE_MS) await this.#removeQuietly(this.lockFile)
+    } catch {
+      /* the lock disappeared or cannot be inspected: just retry the create */
+    }
+  }
+
+  /**
+   * Atomic write: unique temp file opened exclusively, fsynced, renamed with a
+   * retry when the target is briefly held (Windows), then the directory is
+   * fsynced where supported. No temp file survives a failure.
    * @param {MirrorStoreData} data
    */
   async #writeAtomic(data) {
     await this.#ensureDir()
     const tmp = `${this.file}.${randomUUID()}.tmp`
     const text = `${JSON.stringify(data, null, 2)}\n`
-    const handle = await this.fs.open(tmp, 'wx', 0o600)
+    let handle = null
     try {
+      handle = await this.fs.open(tmp, 'wx', 0o600)
       await handle.writeFile(text, 'utf8')
       await handle.sync()
-    } finally {
       await handle.close()
+      handle = null
+    } catch (error) {
+      if (handle) {
+        try {
+          await handle.close()
+        } catch {
+          /* ignore */
+        }
+      }
+      await this.#removeQuietly(tmp)
+      throw error
     }
-    await this.fs.rename(tmp, this.file)
+    await this.#renameWithRetry(tmp)
     await this.#syncDir()
+  }
+
+  /**
+   * Windows can throw `EPERM`/`EBUSY` when another process briefly holds or
+   * replaces the target; retry with backoff. Any other failure (or the last
+   * attempt) removes the temp file before rethrowing so no `.tmp` is left.
+   * @param {string} tmp
+   */
+  async #renameWithRetry(tmp) {
+    for (let attempt = 1; attempt <= RENAME_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        await this.fs.rename(tmp, this.file)
+        return
+      } catch (error) {
+        const code = /** @type {any} */ (error)?.code
+        const retryable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES'
+        if (retryable && attempt < RENAME_RETRY_ATTEMPTS) {
+          await sleep(RENAME_RETRY_BASE_MS * attempt)
+          continue
+        }
+        await this.#removeQuietly(tmp)
+        throw error
+      }
+    }
+  }
+
+  /** @param {string} target */
+  async #removeQuietly(target) {
+    try {
+      await this.fs.unlink(target)
+    } catch {
+      /* already gone */
+    }
   }
 
   /** Best effort: some platforms (Windows) cannot fsync a directory. */

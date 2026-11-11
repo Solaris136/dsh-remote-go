@@ -424,6 +424,76 @@ test('POST /hosts/:id/mirrors/sync exposes the restart re-pull notice', async ()
   }
 })
 
+test('the background resync notice survives later syncs until a client acknowledges it', async () => {
+  const stdout = JSON.stringify({
+    global: { initialized: true, defaultWorkspaceId: 'ws-1', workspaceIds: ['ws-1'] },
+    tables: {
+      workspaces: { 'ws-1': { path: '/home/u/proj', title: 'proj', sessionIds: ['remote-1', 'remote-2'] } },
+    },
+  })
+  // An adapter over a fake in-memory sessions store: connect's background sync
+  // creates the sessions, so the client's own sync finds them already live.
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+  }
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} } })
+  const { service } = await makeTestService({
+    sessionAdapter,
+    sshFactory: (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) }),
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    await waitFor(() => live.size === 2)
+    await waitFor(() => !service.runtimes.get(host.id).mirrorSync)
+
+    const first = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(first.status, 200)
+    assert.equal(first.json.resyncRequired, 2)
+    assert.match(first.json.notice.en, /re-pull/i)
+    // The sessions already exist, so this sync itself created nothing.
+    assert.equal(
+      first.json.sessions.every((entry) => entry.created === false),
+      true,
+    )
+
+    // Second client sync: the notice must still be there (not a transient value).
+    const second = await call(api.base, `/hosts/${host.id}/mirrors/sync`, { method: 'POST' })
+    assert.equal(second.json.resyncRequired, 2)
+    assert.match(second.json.notice.en, /re-pull/i)
+
+    // The read-only endpoint exposes the same pending notice.
+    const listed = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(listed.json.resyncRequired, 2)
+    assert.match(listed.json.notice.en, /re-pull/i)
+
+    // Only an explicit acknowledgement clears it.
+    const acknowledged = await call(api.base, `/hosts/${host.id}/mirrors/sync`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ acknowledgeResync: true }),
+    })
+    assert.equal(acknowledged.json.resyncRequired, 0)
+    assert.equal(acknowledged.json.notice, null)
+    const afterAck = await call(api.base, `/hosts/${host.id}/mirrors`)
+    assert.equal(afterAck.json.resyncRequired, 0)
+    assert.equal(afterAck.json.notice, null)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('GET /version reports plugin and host versions', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)

@@ -177,6 +177,7 @@ export class RemoteGoService extends EventEmitter {
       idleTimer: null,
       connectPromise: null,
       mirrorSync: null,
+      mirrorResync: null,
       closing: false,
       logs: [],
     }
@@ -401,7 +402,10 @@ export class RemoteGoService extends EventEmitter {
   /**
    * Persisted mirror descriptors of one host (P0: L1 directory mirrors).
    * Read-only: descriptors are reconciled when a host connects or when
-   * `syncHostMirrors()` is called explicitly, never on a GET.
+   * `syncHostMirrors()` is called explicitly, never on a GET. A resync notice
+   * produced by the connect-time background sync stays visible here until a
+   * client acknowledges it, so the documented "restart → re-pull" obligation is
+   * reachable without waiting for the next sync.
    * @param {string} id
    */
   async listHostMirrors(id) {
@@ -416,6 +420,7 @@ export class RemoteGoService extends EventEmitter {
       reason: decision.reason,
       capabilities: decision.capabilities,
       sessionsAvailable: Boolean(this.sessionAdapter),
+      ...this.#pendingResync(runtime),
       mirrors: this.mirrorStore.listMirrors({ hostId: id }),
     }
   }
@@ -427,8 +432,9 @@ export class RemoteGoService extends EventEmitter {
    * (design §7). The result also carries the per-session adapter outcomes so the
    * "restart → re-pull from the remote" notice is reachable from the API.
    * @param {string} id
+   * @param {{ acknowledgeResync?: boolean }} [options]
    */
-  async syncHostMirrors(id) {
+  async syncHostMirrors(id, options = {}) {
     await this.init()
     const runtime = this.#runtime(id)
     if (runtime.mirrorSync) {
@@ -436,6 +442,7 @@ export class RemoteGoService extends EventEmitter {
       // in-flight one started by the connect pipeline.
       await runtime.mirrorSync.catch(() => null)
     }
+    if (options.acknowledgeResync === true) runtime.mirrorResync = null
     if (!runtime.ssh?.connected) {
       return {
         hostId: id,
@@ -443,12 +450,21 @@ export class RemoteGoService extends EventEmitter {
         synced: false,
         reason: 'not-connected',
         sessionsAvailable: Boolean(this.sessionAdapter),
-        resyncRequired: 0,
-        notice: null,
+        ...this.#pendingResync(runtime),
         mirrors: this.mirrorStore.listMirrors({ hostId: id }),
       }
     }
     return this.#syncMirrors(runtime)
+  }
+
+  /**
+   * The resync notice a client has not acknowledged yet (set by the background
+   * connect sync, kept until `acknowledgeResync`).
+   * @param {any} runtime
+   */
+  #pendingResync(runtime) {
+    const pending = runtime.mirrorResync ?? null
+    return { resyncRequired: pending?.resyncRequired ?? 0, notice: pending?.notice ?? null }
   }
 
   /** @param {any} runtime */
@@ -476,8 +492,7 @@ export class RemoteGoService extends EventEmitter {
         synced: false,
         reason: result.reason ?? 'unreadable',
         sessionsAvailable: Boolean(this.sessionAdapter),
-        resyncRequired: 0,
-        notice: null,
+        ...this.#pendingResync(runtime),
         mirrors: existing,
       }
     }
@@ -490,8 +505,7 @@ export class RemoteGoService extends EventEmitter {
         synced: false,
         reason: 'empty-registry',
         sessionsAvailable: Boolean(this.sessionAdapter),
-        resyncRequired: 0,
-        notice: null,
+        ...this.#pendingResync(runtime),
         mirrors: existing,
       }
     }
@@ -505,21 +519,28 @@ export class RemoteGoService extends EventEmitter {
     })
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
-    const sessions = this.#ensureMirrorSessions(runtime, mirrors)
-    const resyncRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
-    const notice = sessions.find((entry) => entry?.resync?.notice)?.resync.notice ?? null
+    const sessions = await this.#ensureMirrorSessions(runtime, mirrors)
+    const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
+    if (freshRequired > 0) {
+      // Keep the notice until a client acknowledges it: the client's own sync
+      // finds the sessions already live and would otherwise never see it.
+      runtime.mirrorResync = {
+        resyncRequired: freshRequired,
+        notice: sessions.find((entry) => entry?.resync?.notice)?.resync.notice ?? null,
+        at: nowIso(),
+      }
+    }
     return {
       hostId: runtime.id,
       synced: true,
       level: decision.level,
       reason: decision.reason,
       sessionsAvailable: Boolean(this.sessionAdapter),
+      ...this.#pendingResync(runtime),
       mirrors,
       markedDeleted: reconciled.markedDeleted,
       revived: reconciled.revived,
       sessions,
-      resyncRequired,
-      notice,
     }
   }
 
@@ -532,13 +553,15 @@ export class RemoteGoService extends EventEmitter {
    * @param {any} runtime
    * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
    */
-  #ensureMirrorSessions(runtime, mirrors) {
+  async #ensureMirrorSessions(runtime, mirrors) {
     if (!this.sessionAdapter) return []
     const active = mirrors.filter((descriptor) => descriptor.status === 'active')
     /** @type {any[]} */
     const results = []
     for (const descriptor of active) {
       try {
+        // The per-host cwd must exist before the host keys storage off it.
+        await this.sessionAdapter.ensureMirrorCwd?.(descriptor)
         results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
       } catch (error) {
         results.push({

@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1，冻结）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1 冻结 + v1.1 增补）
 
 > 本文件是 Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议。两侧都不得依赖对方的内部实现。
 > 基地址：`/dsh-remote-go/api`（挂在本地 DSH Web 服务同源路由下）。
@@ -348,6 +348,8 @@ data: {}
   },
   "capabilities": { "list": true, "history": false, "stream": false, "input": false, "approve": false },
   "sessionsAvailable": true,
+  "resyncRequired": 1,
+  "notice": { "zh": "本地镜像会话在重启后不保留…", "en": "Mirror sessions do not survive a restart yet…" },
   "mirrors": [
     {
       "localSessionId": "mirror_1a2b3c4d5e6f7g8h9i0j1k2l3",
@@ -363,6 +365,9 @@ data: {}
   ]
 }
 ```
+
+`resyncRequired` / `notice` 来自连接时后台同步产生的「重启后从远端重拉」提示（见下节）：它**不是**瞬时值，
+在客户端确认之前一直返回；没有待确认提示时为 `0` / `null`。
 
 ```ts
 type MirrorLevel = 'L1' | 'L2' | 'L3'
@@ -426,15 +431,25 @@ interface MirrorView {
 
 `synced:false` 的两种情况都**不改动**已持久化的镜像状态：`reason:"unreadable"`（注册表读不到/不可解析）与
 `reason:"empty-registry"`（注册表可解析但 0 个工作区，通常是一次写入中途的瞬时状态）。`sessions[]` 是适配器的
-原始结果（`ok:false` 时带 `reason`，如 `sessions-unavailable` / `create-failed`）；`resyncRequired` 是
-`resync.needed === true` 的数量。
+原始结果（`ok:false` 时带 `reason`，如 `sessions-unavailable` / `create-failed`）。
+
+**提示的生命周期**：连接成功后 Host 会在后台跑同一条同步，并创建本地镜像会话（此时 `created:true` /
+`resync.needed:true`）。客户端随后调用本端点时，会话已经存在（`created:false` / `resync:null`），所以
+`resyncRequired` / `notice` 返回的是**后台同步留下、尚未确认**的那条提示，而不是本次调用的结果；`GET
+/hosts/:id/mirrors` 也返回同一对字段。客户端展示后应带 `{ "acknowledgeResync": true }` 再调用一次本端点来清除。
+
+请求（两者均可选，空请求体等价于 `{}`）：
+
+```json
+{ "acknowledgeResync": true }
+```
 
 ### `GET /local/workspaces`、`GET /hosts/:id/workspaces` 的追加字段
 
 v1.1 在这两个端点的 `workspaces[]` 每个工作区对象上**追加** `sessionIds: string[]`（注册表里的会话 id，
-保持原文件顺序、**按 id 去重**）。`sessionCount` 保持 v1 语义（该工作区的会话数）并且恒等于
-`new Set(sessionIds).size`，也就是 L1 为每个远端会话建立的镜像条数。v1 已有字段语义不变；不关心镜像的客户端
-可以忽略 `sessionIds`。
+保持原文件顺序、**去空白后按 id 去重**）。`sessionCount` 保持 v1 语义（该工作区的会话数）并且恒等于
+`new Set(sessionIds).size`，也就是 L1 为每个远端会话建立的镜像条数（`[" s1 ", "s1"]` 只算 1 条）。v1 已有字段
+语义不变；不关心镜像的客户端可以忽略 `sessionIds`。
 
 v1.1 约束：
 

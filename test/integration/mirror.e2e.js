@@ -20,7 +20,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -32,6 +32,7 @@ import { l1Capabilities, mirrorSessionId, planMirror } from '../../src/mirror.js
 import { MirrorStore, MIRROR_STORE_VERSION } from '../../src/mirror-store.js'
 import { probeRemote } from '../../src/probe.js'
 import { RemoteGoService } from '../../src/service.js'
+import { createSessionAdapter } from '../../src/session-adapter.js'
 import { SshConnection } from '../../src/ssh.js'
 import { HostStore } from '../../src/store.js'
 import { readRemoteWorkspaces, remoteWorkspaceStoragePath } from '../../src/workspaces.js'
@@ -245,9 +246,12 @@ async function startApi(service, logs) {
 }
 
 /**
- * Build one service over the test's temporary state home. Only the local
- * `~/.ssh` discovery input is stubbed (so the developer's real config cannot
- * change the destination); the SSH transport, probe, start and tunnel stay real.
+ * Build one service over the test's temporary state home. Two inputs are stubbed:
+ * the local `~/.ssh` discovery (so the developer's real config cannot change the
+ * destination) and the target-version resolver (so no network/target lookup is
+ * needed). Everything else — SSH transport, probe, remote start and tunnel — is
+ * real. Because `resolveTarget` returns the probed remote version, version parity
+ * is true by construction and is therefore NOT asserted anywhere below.
  * @param {{ stateDir: string, home: string, localVersion: string, logs: string[], adapter?: any }} options
  */
 function createService(options) {
@@ -428,7 +432,8 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       assert.equal(view.remote.port, simulator.state.remotePort)
       assert.equal(view.remote.uiReady, true)
       assert.ok(Number(view.remote.localPort) > 0, 'the loopback tunnel exposed no local port')
-      assert.equal(view.versionParity.same, true)
+      // `resolveTarget` is stubbed (see createService), so version parity would be
+      // true by construction: the real check is the probed remote version above.
       assert.equal(view.fingerprint.sha256, simulator.state.fingerprint)
     })
 
@@ -582,6 +587,68 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       assert.deepEqual(stablePart(refreshed.json.mirrors), stablePart(onDisk.mirrors))
       for (const [index, mirror] of refreshed.json.mirrors.entries()) {
         assert.ok(Date.parse(mirror.mirroredAt) >= Date.parse(onDisk.mirrors[index].mirroredAt))
+      }
+    })
+
+    await t.test('an injected sessions service gets one created local session per descriptor', async () => {
+      assert.ok(simulator && ctx.remoteVersion, 'the simulator subtest did not run')
+      const stateDir = path.join(temp, 'state-adapter')
+      // Production builds exactly this root (src/index.js): `$DSH_HOME/remote-go/mirrors`.
+      const mirrorRoot = path.join(stateDir, 'mirrors')
+      /** @type {Map<string, any>} */
+      const live = new Map()
+      /** @type {{ id: string, options: any }[]} */
+      const createCalls = []
+      const sessions = {
+        create(id, options) {
+          createCalls.push({ id, options })
+          const session = { id, append() {} }
+          live.set(id, session)
+          return session
+        },
+        get(id) {
+          return live.get(id)
+        },
+      }
+      const adapter = createSessionAdapter({ sessions, logger: createLogger(serviceLogs), mirrorRoot })
+      const withAdapter = createService({
+        stateDir,
+        home: path.join(temp, 'dsh-home-adapter'),
+        localVersion: ctx.remoteVersion,
+        logs: serviceLogs,
+        adapter,
+      })
+      await withAdapter.init()
+      const host = await withAdapter.saveHost({
+        name: 'simulated-remote-adapter',
+        address: '127.0.0.1',
+        port: simulator.state.sshPort,
+        username: CREDENTIALS.username,
+        auth: { type: 'password' },
+        keepAlive: 'keep',
+        bootstrap: { mode: 'reuse' },
+      })
+      try {
+        await connectHost(withAdapter, host.id, CREDENTIALS.password, serviceLogs)
+        const listed = await waitForMirrors(withAdapter, host.id, serviceLogs, FIXTURE_SESSIONS.length)
+        assert.equal(listed.sessionsAvailable, true)
+        // Wait for the background sync's session creation, which follows the
+        // descriptor write.
+        const deadline = Date.now() + 30_000
+        while (createCalls.length < FIXTURE_SESSIONS.length && Date.now() < deadline) await sleep(25)
+        assert.equal(createCalls.length, FIXTURE_SESSIONS.length, 'one create per mirror descriptor')
+        assert.equal(live.size, FIXTURE_SESSIONS.length, 'one live session per mirror descriptor')
+
+        const cwd = path.join(mirrorRoot, host.id)
+        assert.equal((await stat(cwd)).isDirectory(), true, 'the per-host mirror cwd must exist')
+        for (const call of createCalls) {
+          assert.deepEqual(call.options, { meta: { isSeeded: true, cwd } })
+        }
+        // Descriptor ids are the ids handed to the sessions service.
+        const descriptorIds = listed.mirrors.map((mirror) => mirror.localSessionId).sort()
+        assert.deepEqual(createCalls.map((call) => call.id).sort(), descriptorIds)
+      } finally {
+        await withAdapter.shutdown()
       }
     })
 

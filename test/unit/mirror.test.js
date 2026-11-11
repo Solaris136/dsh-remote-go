@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -520,6 +521,8 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and fsyncs atomica
   /** @type {any[]} */
   const renames = []
   /** @type {any[]} */
+  const unlinks = []
+  /** @type {any[]} */
   const mkdirs = []
   const fakeFs = {
     async mkdir(target, options) {
@@ -539,6 +542,13 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and fsyncs atomica
     },
     async rename(from, to) {
       renames.push({ from, to })
+    },
+    async unlink(target) {
+      unlinks.push(target)
+    },
+    async stat() {
+      const error = (new Error('no lock file')(/** @type {any} */ error).code = 'ENOENT')
+      throw error
     },
     async readFile() {
       throw new Error('the fake store never reads an existing file')
@@ -567,6 +577,11 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and fsyncs atomica
   assert.equal(renames.length, 1)
   assert.equal(renames[0].to, file)
   assert.equal(renames[0].from, tmpOpen.target)
+  // Cross-process serialization: an exclusive lock file is taken and released.
+  const lockOpen = opens.find((entry) => entry.target === `${file}.lock`)
+  assert.ok(lockOpen, 'the store must take the cross-process lock file')
+  assert.equal(lockOpen.flags, 'wx')
+  assert.equal(unlinks.includes(`${file}.lock`), true)
 })
 
 test('MirrorStore quarantines a corrupt file instead of destroying it', async () => {
@@ -699,3 +714,62 @@ test('MirrorStore replaces one host, removes records and survives a reload', asy
     ['r1'],
   )
 })
+
+test(
+  'two processes writing 150 rows each keep every row and leave no temp or lock files',
+  { timeout: 180_000 },
+  async () => {
+    const stateDir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-xproc-'))
+    const scriptDir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-xproc-script-'))
+    const storeUrl = new URL('../../src/mirror-store.js', import.meta.url).href
+    const workerSource = [
+      `import { MirrorStore } from ${JSON.stringify(storeUrl)}`,
+      'const [dir, host, count] = process.argv.slice(2)',
+      'const store = new MirrorStore({ dir, logger: { warn() {} } })',
+      'for (let index = 0; index < Number(count); index += 1) {',
+      "  await store.upsertMirrors([{ hostId: host, remoteSessionId: 'r' + index, title: host + '-' + index }])",
+      '}',
+      '',
+    ].join('\n')
+    const workerFile = path.join(scriptDir, 'worker.mjs')
+    await writeFile(workerFile, workerSource, 'utf8')
+
+    /** @param {string} host */
+    const runWorker = (host) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [workerFile, stateDir, host, '150'], {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let output = ''
+        child.stdout?.on('data', (chunk) => {
+          output += chunk.toString('utf8')
+        })
+        child.stderr?.on('data', (chunk) => {
+          output += chunk.toString('utf8')
+        })
+        child.on('error', reject)
+        child.on('exit', (code) => {
+          if (code === 0) resolve(undefined)
+          else reject(new Error(`mirror worker exited ${code}\n${output}`))
+        })
+      })
+
+    // Two OS processes, same store, racing 150 single-row upserts each.
+    await Promise.all([runWorker('h_worker_a'), runWorker('h_worker_b')])
+
+    const store = new MirrorStore({ dir: stateDir, logger: quiet })
+    await store.load()
+    const mirrors = store.listMirrors()
+    assert.equal(mirrors.length, 300, 'a cross-process write lost rows')
+    /** @type {Map<string, number>} */
+    const perHost = new Map()
+    for (const mirror of mirrors) perHost.set(mirror.hostId, (perHost.get(mirror.hostId) ?? 0) + 1)
+    assert.deepEqual([...perHost.entries()].sort(), [
+      ['h_worker_a', 150],
+      ['h_worker_b', 150],
+    ])
+    const leftovers = (await readdir(stateDir)).filter((name) => name.endsWith('.tmp') || name.endsWith('.lock'))
+    assert.deepEqual(leftovers, [], 'a failed write left temp or lock files behind')
+  },
+)

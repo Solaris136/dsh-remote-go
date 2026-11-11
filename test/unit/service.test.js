@@ -1,8 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
+import { createSessionAdapter } from '../../src/session-adapter.js'
+
+/** @param {string} target */
+async function pathExists(target) {
+  try {
+    await stat(target)
+    return true
+  } catch {
+    return false
+  }
+}
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {
   const { service, store } = await makeTestService()
@@ -473,7 +486,7 @@ test('typed mirror-session failures are counted and logged, not swallowed', asyn
   await service.shutdown()
 })
 
-test('removing a host also removes its local mirror sessions', async () => {
+test('removing a host asks the adapter to remove its local mirror sessions', async () => {
   const stdout = remoteRegistry({
     'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
   })
@@ -495,6 +508,40 @@ test('removing a host also removes its local mirror sessions', async () => {
   await service.removeHost(host.id)
   assert.deepEqual(removed.sort(), mirrorIds.sort())
   assert.equal(service.mirrorStore.listMirrors({ hostId: host.id }).length, 0)
+  await service.shutdown()
+})
+
+test('removing a host actually drops local sessions when the host can delete them', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
+  })
+  // A real adapter over a fake `sessions` service that supports removal.
+  /** @type {Map<string, any>} */
+  const live = new Map()
+  const sessions = {
+    create(id) {
+      const session = { id, append() {} }
+      live.set(id, session)
+      return session
+    },
+    get(id) {
+      return live.get(id)
+    },
+    remove(id) {
+      live.delete(id)
+    },
+  }
+  const mirrorRoot = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-cwd-'))
+  const sessionAdapter = createSessionAdapter({ sessions, logger: { warn() {} }, mirrorRoot })
+  const { service } = await makeTestService({ sessionAdapter, sshFactory: registrySshFactory(stdout) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => live.size === 2, { label: 'two live mirror sessions' })
+  // The per-host cwd exists (the host keys storage off it).
+  assert.equal(await pathExists(path.join(mirrorRoot, host.id)), true)
+
+  await service.removeHost(host.id)
+  assert.equal(live.size, 0, 'the local mirror sessions must be gone, not just reported')
   await service.shutdown()
 })
 
