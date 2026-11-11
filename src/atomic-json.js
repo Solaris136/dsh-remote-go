@@ -123,7 +123,12 @@ async function acquireLock(lockFile, options) {
         await removeQuietly(fsImpl, lockFile)
       }
     } catch (error) {
-      if (/** @type {any} */ (error)?.code !== 'EEXIST') throw error
+      // Windows reports contention on an exclusive create as EPERM/EACCES (and sometimes
+      // EBUSY) rather than EEXIST when the other process is mid-create or mid-delete, so
+      // treat those as "someone else holds it" and retry instead of failing the write.
+      const code = /** @type {any} */ (error)?.code
+      const contended = code === 'EEXIST' || code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
+      if (!contended) throw error
       await breakStaleLock(fsImpl, lockFile, staleMs)
       if (Date.now() - started > waitMs) {
         const timeout = new Error('timed out waiting for another process to release the store lock')

@@ -956,6 +956,54 @@ test('a lock that never goes stale times out with a coded error', async () => {
   )
 })
 
+test('a contended lock open reported as EPERM is retried, not failed', async () => {
+  // Windows reports contention on an exclusive create as EPERM/EACCES rather than EEXIST when
+  // the other process is mid-create or mid-delete. Treating it as a hard failure broke the
+  // cross-process write on the Windows runner.
+  let attempts = 0
+  let opened = false
+  const fakeFs = {
+    async mkdir() {},
+    async open(file, flags) {
+      if (flags === 'wx' && String(file).endsWith('.lock')) {
+        attempts += 1
+        if (attempts <= 2) {
+          const error = new Error('operation not permitted')
+          error.code = 'EPERM'
+          throw error
+        }
+      }
+      opened = true
+      return {
+        async close() {},
+        async sync() {},
+        async writeFile() {},
+      }
+    },
+    async stat() {
+      return { mtimeMs: Date.now() }
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-eperm-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 2_000,
+    lockRetryMs: 5,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }])
+  assert.equal(opened, true, 'the write must eventually take the lock')
+  assert.equal(attempts, 3, 'each EPERM contention must be retried')
+})
+
 test('listMirrors returns deep copies so callers cannot corrupt the store', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-clone-'))
   const store = new MirrorStore({ dir, logger: quiet })
