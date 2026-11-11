@@ -381,6 +381,10 @@ window.__ModuleLoader__.load({
       'settings.saveTokensHint':
         '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
       'settings.saveTokensRisk': '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
+      'settings.mirror': '镜像会话',
+      'settings.mirrorToSidebar': '把远端镜像会话显示在本地侧边栏',
+      'settings.mirrorToSidebarHint':
+        '默认开启。每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭后不再注册或新建分组，已存在的分组保持不动。',
       'settings.reconnect': '自动重连',
       'settings.reconnectEnabled': '断线后自动重连',
       'settings.maxAttempts': '最大重试次数',
@@ -691,6 +695,10 @@ window.__ModuleLoader__.load({
       'settings.saveTokensHint':
         'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
       'settings.saveTokensRisk': 'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
+      'settings.mirror': 'Mirrored sessions',
+      'settings.mirrorToSidebar': 'Show mirrored remote sessions in the local sidebar',
+      'settings.mirrorToSidebarHint':
+        'On by default. Each remote host registers one "Remote: <host>" workspace in the local sidebar; turning it off stops new registrations and leaves existing groups untouched.',
       'settings.reconnect': 'Auto reconnect',
       'settings.reconnectEnabled': 'Reconnect after a drop',
       'settings.maxAttempts': 'Max attempts',
@@ -3503,6 +3511,7 @@ window.__ModuleLoader__.load({
         },
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
         saveTokens: draft.saveTokens === true,
+        mirrorToSidebar: draft.mirrorToSidebar === true,
         windowMode: draft.windowMode === 'external' ? 'external' : 'panel',
         language: draft.language === 'zh' || draft.language === 'en' ? draft.language : 'auto',
         logLevel: ['error', 'warn', 'info', 'debug'].indexOf(draft.logLevel) >= 0 ? draft.logLevel : 'info',
@@ -3530,6 +3539,8 @@ window.__ModuleLoader__.load({
         baseDelayMs: auto.baseDelayMs === undefined ? 1000 : auto.baseDelayMs,
         hostKeyPolicy: view.hostKeyPolicy || 'first-use',
         saveTokens: view.saveTokens === true,
+        // Default on: only an explicit `false` opts a user out.
+        mirrorToSidebar: view.mirrorToSidebar !== false,
         language: view.language || 'auto',
         logLevel: view.logLevel || 'info',
         targetVersion: bootstrap.targetVersion || 'local',
@@ -3715,6 +3726,17 @@ window.__ModuleLoader__.load({
                 }),
               ),
             ),
+          ),
+          h(
+            'section',
+            { className: 'drg-settings-section' },
+            h('h3', { className: 'drg-section-title' }, t('settings.mirror')),
+            h(CheckRow, {
+              checked: draft.mirrorToSidebar === true,
+              label: t('settings.mirrorToSidebar'),
+              onChange: set('mirrorToSidebar'),
+            }),
+            h('p', { className: 'drg-field-hint' }, t('settings.mirrorToSidebarHint')),
           ),
           h(
             'section',

@@ -247,14 +247,11 @@ export function createSessionAdapter(options = {}) {
   function mirrorCwd(descriptor) {
     const mirrorRoot = typeof options.mirrorRoot === 'string' ? options.mirrorRoot.trim() : ''
     if (mirrorRoot !== '') {
-      // A relative root would produce a relative `meta.cwd`, which the host
-      // rejects ("cwd must be an absolute path"); ignore it so the host default
-      // applies instead of failing every mirror session.
-      if (!isAbsolutePath(mirrorRoot)) return null
-      const hostSegment = String(descriptor?.hostId ?? '')
-        .replace(/[^A-Za-z0-9._-]/g, '_')
-        .replace(/^\.+$/, '')
-      return path.join(mirrorRoot, hostSegment || 'unknown')
+      // A configured root owns the cwd. A relative root would produce a relative
+      // `meta.cwd`, which the host rejects ("cwd must be an absolute path"), so it
+      // is ignored entirely — deliberately without falling back to another cwd —
+      // so the host default applies instead of failing every mirror session.
+      return mirrorHostDir(mirrorRoot, descriptor?.hostId)
     }
     const cwd = typeof descriptor?.cwd === 'string' ? descriptor.cwd : options.cwd
     return isAbsolutePath(cwd) ? cwd : null
@@ -305,6 +302,27 @@ export function createSessionAdapter(options = {}) {
   }
 
   return { available, ensureMirrorSession, ensureMirrorCwd, appendEvent, removeMirrorSession }
+}
+
+/**
+ * The per-host mirror directory, shared with the sidebar workspace registration
+ * so a workspace and the sessions it groups can never disagree about the path.
+ *
+ * One sanitization rule for both callers: the host id keeps only
+ * `[A-Za-z0-9._-]` (a remote-supplied id must never traverse directories), and an
+ * empty/`.`/`..` segment falls back to `unknown`.
+ *
+ * @param {unknown} mirrorRoot absolute mirror root, or a non-absolute value.
+ * @param {unknown} hostId
+ * @returns {string | null} the absolute per-host directory, or `null` when no
+ * absolute mirror root is configured (the caller then has no sidebar grouping).
+ */
+export function mirrorHostDir(mirrorRoot, hostId) {
+  if (!isAbsolutePath(mirrorRoot)) return null
+  const hostSegment = String(hostId ?? '')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .replace(/^\.+$/, '')
+  return path.join(String(mirrorRoot).trim(), hostSegment || 'unknown')
 }
 
 /** @param {unknown} value @returns {boolean} */

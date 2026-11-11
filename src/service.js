@@ -69,6 +69,10 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  *     ensureMirrorSession: (descriptor: any) => any,
  *     removeMirrorSession?: (localSessionId: string) => any,
  *   } | null,
+ *   workspaceAdapter?: {
+ *     ensureHostWorkspace: (request: any) => Promise<any>,
+ *     removeHostWorkspace?: (request: any) => Promise<any>,
+ *   } | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   clock?: () => number,
  * }} ServiceOptions
@@ -116,6 +120,9 @@ export class RemoteGoService extends EventEmitter {
     this.resolveTarget = options.resolveTarget ?? resolveTargetVersion
     this.mirrorStore = options.mirrorStore ?? new MirrorStore({ dir: options.store.dir, logger: this.logger })
     this.sessionAdapter = options.sessionAdapter ?? null
+    // Optional: registers one sidebar workspace per host so the mirrored local
+    // sessions are grouped where DSH's sidebar actually lists them.
+    this.workspaceAdapter = options.workspaceAdapter ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.clock = options.clock ?? (() => Date.now())
     /** @type {Map<string, any>} */
@@ -324,6 +331,20 @@ export class RemoteGoService extends EventEmitter {
       }
     }
     await this.mirrorStore?.removeHostMirrors?.(id)
+    // Remove the host's sidebar workspace too: its directory stays (session logs
+    // live elsewhere), but the group must not outlive the host it represents.
+    if (this.workspaceAdapter) {
+      try {
+        const removed = await this.workspaceAdapter.removeHostWorkspace({ hostId: id })
+        if (removed?.ok !== true) {
+          this.logger.warn?.(
+            `[dsh-remote-go] could not remove the mirror workspace for ${id}: ${removed?.reason ?? 'unknown'}`,
+          )
+        }
+      } catch (error) {
+        this.logger.warn?.('[dsh-remote-go] cannot remove the mirror workspace:', error)
+      }
+    }
     if (this.activeHostId === id) this.activeHostId = null
     this.#emitState()
     return { ok: true }
@@ -520,6 +541,7 @@ export class RemoteGoService extends EventEmitter {
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
     const sessions = await this.#ensureMirrorSessions(runtime, mirrors)
+    const sidebar = await this.#ensureHostWorkspace(runtime, mirrors)
     const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
     if (freshRequired > 0) {
       // Keep the notice until a client acknowledges it: the client's own sync
@@ -541,6 +563,7 @@ export class RemoteGoService extends EventEmitter {
       markedDeleted: reconciled.markedDeleted,
       revived: reconciled.revived,
       sessions,
+      sidebar,
     }
   }
 
@@ -584,6 +607,75 @@ export class RemoteGoService extends EventEmitter {
     )
     if (reasons.length > 0) this.#log(runtime, 'debug', `mirror session failure reasons: ${reasons.join(', ')}`)
     return results
+  }
+
+  /**
+   * Register the host's mirror directory as a sidebar workspace.
+   *
+   * DSH's sidebar lists sessions per workspace and membership is derived from the
+   * session header's canonical cwd, so the per-host directory the mirror sessions
+   * already use must also exist as a workspace registration — otherwise every
+   * mirrored session is invisible in the UI. `workspaceRegistry.create(path,
+   * title)` is idempotent, and the adapter always resolves before creating, so a
+   * reconnect never produces a duplicate.
+   *
+   * Degradations are explicit rather than silent: `mirrorToSidebar:false` skips
+   * registration on purpose, a missing sessions service makes the grouping
+   * pointless, and any adapter failure is logged and reported as `ok:false`
+   * without touching the connect result.
+   *
+   * @param {any} runtime
+   * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
+   */
+  async #ensureHostWorkspace(runtime, mirrors) {
+    const settings = this.store.getSettings()
+    const enabled = settings?.mirrorToSidebar !== false
+    const active = mirrors.filter((descriptor) => descriptor.status === 'active')
+    if (!this.workspaceAdapter) return { ok: false, enabled, reason: 'adapter-absent', path: null, workspaceId: null }
+    if (!enabled) {
+      this.#log(runtime, 'debug', 'mirror sidebar workspace: disabled by settings (mirrorToSidebar)')
+      return { ok: true, enabled: false, reason: 'disabled', path: null, workspaceId: null }
+    }
+    if (!this.sessionAdapter) {
+      // No local sessions to group, so a workspace would only be an empty group.
+      return { ok: true, enabled, reason: 'sessions-unavailable', path: null, workspaceId: null }
+    }
+    if (active.length === 0) {
+      return { ok: true, enabled, reason: 'no-mirrors', path: null, workspaceId: null }
+    }
+    /** @type {any} */
+    let result = null
+    try {
+      result = await this.workspaceAdapter.ensureHostWorkspace({
+        hostId: runtime.id,
+        hostName: runtime.entry?.name ?? null,
+        enabled,
+      })
+    } catch (error) {
+      // The adapter promises never to throw; this is the belt-and-braces guard so
+      // a broken service can never fail a connect.
+      this.#log(runtime, 'warn', `mirror sidebar workspace failed: ${messageOf(error)}`)
+      return { ok: false, enabled, reason: 'adapter-error', path: null, workspaceId: null }
+    }
+    if (result?.ok === true) {
+      // Reuse is the steady state (every re-sync hits it), so it stays at debug
+      // level; only an actual create/retitle is worth an info line.
+      const changed = result.created === true || result.renamed === true
+      this.#log(
+        runtime,
+        changed ? 'info' : 'debug',
+        `mirror sidebar workspace: ${result.created ? 'created' : result.renamed ? 'retitled' : 'reused'} ` +
+          `${JSON.stringify(result.title ?? '')} (${active.length} session(s))`,
+      )
+    } else {
+      this.#log(
+        runtime,
+        'warn',
+        `mirror sidebar workspace unavailable: ${result?.reason ?? 'unknown'}` +
+          (result?.error ? ` (${result.error})` : ''),
+      )
+    }
+    return result ?? { ok: false, enabled, reason: 'no-result', path: null, workspaceId: null }
   }
 
   /** Start one directory sync without blocking the caller. @param {any} runtime */
@@ -1442,4 +1534,9 @@ export function maskAddress(entry) {
   const user = entry.username ? `${entry.username}@` : ''
   const host = entry.address || '?'
   return `${user}${host}${port}`
+}
+
+/** @param {unknown} error */
+function messageOf(error) {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error ?? '')
 }
