@@ -4551,13 +4551,32 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Bounded mirror-list retries. The connect-time replay can finish after the
-     * panel mounts, and the read-only marker must not depend on that race: poll a
-     * few times, stopping as soon as the list is non-empty. Three attempts ~1 s
-     * apart keeps the common case fast and the slow case (replay > 1.5 s) correct.
+     * Mirror-list polling policy.
+     *
+     * Replay settles asynchronously *after* the panel mounts, and the slot props
+     * carry no mirror/sync progress signal (`HostView` has host status only), so
+     * the list is polled **until it settles** rather than a fixed number of times:
+     * a fixed attempt budget silently missed the badge whenever replay outran it.
+     *
+     * - `settled()` says when to stop: a read-only mirror exists, or descriptors
+     *   exist and none is planned at L2 (nothing left to replay). An empty list is
+     *   not settled — the descriptors may not have been written yet.
+     * - The deadline bounds the whole loop, so a host that never replays stops
+     *   polling (and simply shows no badge) instead of spinning forever.
      */
-    const MIRROR_FETCH_ATTEMPTS = 3
-    const MIRROR_FETCH_RETRY_MS = 1000
+    const MIRROR_POLL_INTERVAL_MS = 1000
+    const MIRROR_POLL_DEADLINE_MS = 45_000
+
+    /**
+     * @param {readonly any[] | null | undefined} mirrors - `/hosts/:id/mirrors` rows.
+     * @returns {boolean} whether polling can stop.
+     */
+    function mirrorsSettled(mirrors) {
+      if (!Array.isArray(mirrors) || mirrors.length === 0) return false
+      if (mirrors.some((mirror) => mirror && mirror.readOnly === true)) return true
+      // Nothing planned at L2: replay is not in flight for this host.
+      return !mirrors.some((mirror) => mirror && mirror.level === 'L2')
+    }
 
     /**
      * Workspace data for the rail: the local DSH registry plus one workspace
@@ -4649,32 +4668,38 @@ window.__ModuleLoader__.load({
             },
           )
           // Read-only markers come from the mirror list the Host already exposes.
-          // A failed read clears the list (no stale badge); an empty list is retried
-          // a bounded number of times because replay may still be running.
-          const loadMirrors = (attempt = 0) => {
-            api.getHostMirrors(host.id).then(
-              (payload) => {
-                if (!alive.current || token !== generation.current) return
-                setRemotes((current) => ({
-                  ...current,
-                  [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
-                }))
-                if (payload.mirrors.length === 0 && attempt + 1 < MIRROR_FETCH_ATTEMPTS) {
+          // Poll until the list settles (see `mirrorsSettled`) with a hard deadline:
+          // a fixed attempt budget missed the badge whenever replay was slower than
+          // it, and polling forever would leak requests on a host that never
+          // replays. A failed read clears the list, so no stale badge survives.
+          const loadMirrors = () => {
+            const startedAt = Date.now()
+            const step = () => {
+              api.getHostMirrors(host.id).then(
+                (payload) => {
+                  if (!alive.current || token !== generation.current) return
+                  setRemotes((current) => ({
+                    ...current,
+                    [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
+                  }))
+                  if (mirrorsSettled(payload.mirrors)) return
+                  if (Date.now() - startedAt >= MIRROR_POLL_DEADLINE_MS) return
                   setTimeout(() => {
                     if (!alive.current || token !== generation.current) return
-                    loadMirrors(attempt + 1)
-                  }, MIRROR_FETCH_RETRY_MS)
-                }
-              },
-              () => {
-                // Never keep a stale list: an unreadable mirror list shows no badge.
-                if (!alive.current || token !== generation.current) return
-                setRemotes((current) => ({
-                  ...current,
-                  [host.id]: { ...(current[host.id] || {}), mirrors: [] },
-                }))
-              },
-            )
+                    step()
+                  }, MIRROR_POLL_INTERVAL_MS)
+                },
+                () => {
+                  // Never keep a stale list: an unreadable mirror list shows no badge.
+                  if (!alive.current || token !== generation.current) return
+                  setRemotes((current) => ({
+                    ...current,
+                    [host.id]: { ...(current[host.id] || {}), mirrors: [] },
+                  }))
+                },
+              )
+            }
+            step()
           }
           loadMirrors()
         }
@@ -5645,6 +5670,16 @@ window.__ModuleLoader__.load({
        * `inject`/`apply`/`components`.
        */
       api,
+      /**
+       * Mirror-list polling policy, exposed like `api` so unit tests can assert the
+       * settlement rules and the deadline/interval bounds directly. Inert at
+       * runtime: the loader consumes only `inject`/`apply`/`components`.
+       */
+      mirrorPolling: {
+        settled: mirrorsSettled,
+        intervalMs: MIRROR_POLL_INTERVAL_MS,
+        deadlineMs: MIRROR_POLL_DEADLINE_MS,
+      },
     }
 
     //#endregion

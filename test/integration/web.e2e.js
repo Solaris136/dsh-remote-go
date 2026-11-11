@@ -48,6 +48,7 @@ import {
   assertReadOnlyBadge,
   SIMULATED_HISTORY,
   connectSimulatedHost,
+  stubLateReplayMirrors,
   describePanel,
   openRemotePanel,
   startSimulatedRemote,
@@ -60,6 +61,7 @@ import {
   makeTempRoot,
   packPlugin,
   pollUntil,
+  sleep,
   resolveBrowser,
   resolveDshCli,
   resolvePnpm,
@@ -655,6 +657,75 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
         // L2 replay needs, without another simulator or another connect.
         const badge = await assertReadOnlyBadge(page, { hostId: simulatedHostId })
         console.log(`[web-e2e] read-only badge: ${JSON.stringify(badge)}`)
+      })
+    })
+
+    await t.test('the badge returns after a replay that finishes late (pre-replay cache)', async () => {
+      await withPanelDiagnostics(page, async () => {
+        assert.ok(simulatedHostId, 'the simulated host was not connected')
+        const selector = '[data-testid="mirror-readonly-badge"]'
+        // The CI failure mode: the first reads see descriptors that are not yet
+        // read-only, and the badge only appears once a later read sees the replay.
+        const stub = await stubLateReplayMirrors(page, { preReplayCalls: 2 })
+        try {
+          const before = await stub.calls()
+          await page.click('[data-testid="workspace-rail-refresh"]')
+          // The refresh resets the rail's mirror list, so the stale state is visible.
+          await page.waitForSelector(selector, { state: 'detached', timeout: 20_000 })
+          // A fixed retry budget stopped here; polling until settled must not.
+          await page.waitForSelector(selector, { timeout: 45_000 })
+          const reads = (await stub.calls()) - before
+          assert.ok(reads >= 3, `the client stopped before replay settled (only ${reads} mirror reads)`)
+          // Once settled it stops: the request count must stop growing.
+          const settledReads = await stub.calls()
+          await sleep(2500)
+          assert.equal(await stub.calls(), settledReads, 'the client kept polling after the marker settled')
+        } finally {
+          await stub.disable()
+        }
+      })
+    })
+
+    await t.test('a host that never replays shows no badge and stops polling', async () => {
+      await withPanelDiagnostics(page, async () => {
+        const selector = '[data-testid="mirror-readonly-badge"]'
+        // Every read stays pre-replay: no badge, and the poll must stay rate-limited
+        // instead of spinning (the 45 s deadline bounds the total in production).
+        const stub = await stubLateReplayMirrors(page, { preReplayCalls: Number.MAX_SAFE_INTEGER })
+        try {
+          const before = await stub.calls()
+          await page.click('[data-testid="workspace-rail-refresh"]')
+          // Wait until at least one *stubbed* read landed and the marker is gone:
+          // the refresh clears the list first, so both conditions are asserted.
+          await pollUntil(
+            async () => {
+              const calls = await stub.calls()
+              const present = (await page.$(selector)) !== null
+              return calls > before && !present ? calls : null
+            },
+            {
+              timeoutMs: 20_000,
+              label: 'the pre-replay list hides the read-only badge',
+              diagnose: async () =>
+                `badgePresent=${(await page.$(selector)) !== null} stubCalls=${await stub.calls()} (start ${before})`,
+            },
+          )
+          const first = await stub.calls()
+          await sleep(6000)
+          const second = await stub.calls()
+          assert.equal(await page.$(selector), null, 'a never-read-only host must not show the badge')
+          assert.ok(second > first, 'the client must retry while replay is still in flight')
+          assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
+        } finally {
+          await stub.disable()
+          // Restore the real list so later subtests see the badge again.
+          await page.click('[data-testid="workspace-rail-refresh"]')
+          try {
+            await page.waitForSelector(selector, { timeout: 30_000 })
+          } catch (error) {
+            throw new Error(`the badge did not return after disabling the stub: ${error.message}`)
+          }
+        }
       })
     })
 
