@@ -510,3 +510,37 @@ test('the publish writes a sibling temp file and renames it', () => {
   )
   assert.equal(/ > '\/h\/remote-go\/lease-s\.json'$/.test(command), false, 'never truncate the live file')
 })
+
+test('integration waits assert the same end state they wait for', async () => {
+  // A wait predicate weaker than the assertions after it resolves on a *pre-condition* and turns
+  // a deterministic failure into a platform-timing flake. That cost three CI rounds:
+  // `reason !== null` matched the ordinary L2 `stream-unavailable` reason before the fence, and
+  // `cursor === 5` matched a half-settled mirror. Encode the rule so it cannot come back.
+  const { readdir, readFile } = await import('node:fs/promises')
+  const dir = new URL('../integration/', import.meta.url)
+  /** @type {string[]} */
+  const files = (await readdir(dir)).filter((name) => name.endsWith('.e2e.js'))
+  assert.ok(files.length > 0, 'the integration suites must exist')
+
+  /** Predicates that describe "something happened" rather than the asserted state. */
+  const WEAK = [/\.reason\s*!==\s*null/, /\.reason\s*!=\s*null/]
+  for (const file of files) {
+    const source = await readFile(new URL(file, dir), 'utf8')
+    const lines = source.split('\n')
+    lines.forEach((line, index) => {
+      // Only *wait* predicates matter: a plain assertion may legitimately test "not null".
+      if (!/waitForMirrors\(|const settled =|const ready =|for \(let attempt/.test(line)) return
+      // The predicate may span lines; look at the enclosing statement's neighbourhood.
+      const window = lines.slice(index, index + 8).join('\n')
+      for (const pattern of WEAK) {
+        if (pattern.test(window)) {
+          assert.fail(
+            `${file}:${index + 1} waits on a weak predicate (${pattern}). ` +
+              `Wait for the asserted end state instead: a predicate weaker than the assertions ` +
+              `after it resolves on a pre-condition and fails only on slow runners.`,
+          )
+        }
+      }
+    })
+  }
+})

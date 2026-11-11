@@ -348,7 +348,18 @@ test('a mirror that is not fenced keeps writing and holds its own epoch', { time
     })
     await connectHost(service, host.id, logs)
 
-    const mirrors = await waitForMirrors(service, host.id, (list) => list.every((mirror) => mirror.cursor === 5))
+    // Predicate = the asserted end state, not a proxy: "cursor === 5" is also true mid-sync
+    // (before the lease is persisted), so waiting on it alone can read a half-settled mirror.
+    const mirrors = await waitForMirrors(service, host.id, (list) =>
+      list.every(
+        (mirror) =>
+          mirror.cursor === 5 &&
+          mirror.level === 'L2' &&
+          mirror.reason === null &&
+          mirror.writable === true &&
+          mirror.lease !== null,
+      ),
+    )
     for (const mirror of mirrors) {
       assert.equal(mirror.cursor, 5, 'an unfenced mirror replays as usual')
       assert.equal(mirror.level, 'L2')
@@ -444,7 +455,11 @@ test('a fenced mirror resumes once it can re-acquire a newer epoch', { timeout: 
     repointed.entry.port = sim.state.sshPort
     await connectHost(service, existing.id, resumedLogs)
     await service.syncHostMirrors(existing.id).catch(() => null)
-    const resumed = await waitForMirrors(service, existing.id, (list) => list.every((mirror) => mirror.reason === null))
+    // The assertions below also require a writable lease and the resumed cursor, so the wait
+    // must require them too — "reason === null" is satisfied before the lease is re-acquired.
+    const resumed = await waitForMirrors(service, existing.id, (list) =>
+      list.every((mirror) => mirror.reason === null && mirror.writable === true && mirror.cursor === 5),
+    )
     assert.equal(
       resumed.every((mirror) => mirror.reason === null),
       true,
@@ -613,7 +628,11 @@ test(
       // Client B starts from its own epoch 0 and is *refused by the remote*: it may not take a
       // lease A still holds, so it stays L1/read-only and appends nothing.
       const b = await makeClient('b')
-      const bMirrors = await waitForMirrors(b.service, b.host.id, (list) => list.every((m) => m.reason !== null))
+      // "reason !== null" was the proxy that cost a CI round: `stream-unavailable` is a normal
+      // non-null L2 reason, so the wait resolved on B's pre-fence state. Wait for the fence itself.
+      const bMirrors = await waitForMirrors(b.service, b.host.id, (list) =>
+        list.every((mirror) => mirror.reason?.code === 'fenced' && mirror.readOnly === true),
+      )
       assert.equal(
         bMirrors.every((mirror) => mirror.reason?.code === 'fenced'),
         true,
@@ -689,7 +708,11 @@ test('a writer that cannot see the authority is still refused by the remote', { 
     await connectHost(service, host.id, logs)
     await service.syncHostMirrors(host.id).catch(() => null)
 
-    const mirrors = await waitForMirrors(service, host.id, (list) => list.every((m) => m.reason !== null))
+    // Same defect class: wait for the refusal, not for "any reason" (L2 has its own non-null
+    // reasons, which this test must not mistake for the remote's refusal).
+    const mirrors = await waitForMirrors(service, host.id, (list) =>
+      list.every((mirror) => mirror.reason?.code === 'fenced'),
+    )
     assert.equal(
       mirrors.every((mirror) => mirror.reason?.code === 'fenced'),
       true,

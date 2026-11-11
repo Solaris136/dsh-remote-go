@@ -410,8 +410,11 @@ test('L2 history replay projects remote history into the local mirror session', 
         // means the healthy sync really finished and the snapshot below is stable.
         const ready = async () => {
           const mirrors = await mirrorsOf(service, host.id)
+          // Includes `level === 'L2'` because the assertion below requires it: waiting on
+          // cursor+readOnly alone can resolve while the descriptor is still pre-fence L1.
           return (
-            mirrors.length === HISTORY_SESSIONS.length && mirrors.every((m) => m.cursor === 5 && m.readOnly === true)
+            mirrors.length === HISTORY_SESSIONS.length &&
+            mirrors.every((m) => m.cursor === 5 && m.level === 'L2' && m.readOnly === true && m.reason === null)
           )
         }
         for (let attempt = 0; attempt < 300; attempt += 1) {
@@ -620,7 +623,15 @@ test('a remote without a sessions directory degrades to a typed reason', { timeo
       })
       await connectHost(service, host.id, logs)
       for (let attempt = 0; attempt < 200; attempt += 1) {
-        if ((await mirrorsOf(service, host.id)).length === HISTORY_SESSIONS.length) break
+        // Predicate = the asserted end state (L1 + untouched cursor), not just "descriptors
+        // exist": the assertions below require the history-disabled shape specifically.
+        const listed = await mirrorsOf(service, host.id)
+        if (
+          listed.length === HISTORY_SESSIONS.length &&
+          listed.every((mirror) => mirror.level === 'L1' && mirror.cursor === 0)
+        ) {
+          break
+        }
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
       const mirrors = await mirrorsOf(service, host.id)
