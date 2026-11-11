@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-go",
-  "version": "0.1.0",
-  "description": "DSH 远程入口：通过 SSH 在本地 DSH 全局面板里整页使用远端 DSH 的 Web 界面 | Remote entry: open a remote DSH inside a full-page panel over SSH",
+  "version": "1.0.0",
+  "description": "DSH 插件：通过 SSH 在本地 DSH 全局面板里整页使用远端 DSH（薄客户端）| DSH plugin: open a remote DSH in a full-page panel over SSH",
   "keywords": [
     "deepseek",
     "harness",
@@ -14,15 +14,27 @@
   "license": "MIT",
   "author": "Solaris136",
   "homepage": "https://github.com/Solaris136/dsh-remote-go#readme",
+  "bugs": {
+    "url": "https://github.com/Solaris136/dsh-remote-go/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Solaris136/dsh-remote-go.git"
   },
   "type": "module",
+  "packageManager": "pnpm@11.28.9",
+  "engines": {
+    "dsh": ">=0.2.2-rc.1",
+    "node": ">=24"
+  },
+  "sideEffects": [
+    "./client.js"
+  ],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
-    "./locale/*.json": "./locale/*.json"
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
@@ -48,9 +60,6 @@
       ]
     }
   },
-  "engines": {
-    "dsh": ">=0.2.2-rc.1"
-  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -66,11 +75,15 @@
     "ssh2": "1.17.0"
   },
   "scripts": {
-    "test": "node --test",
+    "test": "node --test \"test/unit/*.test.js\"",
     "test:unit": "node --test \"test/unit/*.test.js\"",
     "test:e2e": "node --test \"test/e2e/*.e2e.js\"",
+    "lint": "node scripts/check-repo.mjs",
+    "check:repo": "node scripts/check-repo.mjs",
     "check:syntax": "node scripts/check-syntax.mjs",
     "check:workflows": "node scripts/check-workflows.mjs",
+    "check:pr-title": "node scripts/check-pr-title.mjs",
+    "verify": "node scripts/check-repo.mjs && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/market-entry.mjs --check && node scripts/pack-check.mjs && node --test \"test/unit/*.test.js\"",
     "build:vendor": "node scripts/build-vendor.mjs",
     "market:entry": "node scripts/market-entry.mjs",
     "market:check": "node scripts/market-entry.mjs --check",

@@ -36,4 +36,3 @@ await writeFile(
   'utf8',
 )
 console.log(`[build-vendor] wrote ${path.relative(root, outfile)} (${(stats.length / 1024).toFixed(0)} KiB) and THIRD_PARTY_NOTICES.md`)
-

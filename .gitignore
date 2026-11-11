@@ -7,9 +7,31 @@ e2e/control/home-published/
 e2e/control/logs/
 e2e/control/.state.json
 e2e/control/bin/*.log
+e2e/control/bin/node
 e2e/remote/.state.json
 e2e/remote/.token
 e2e/remote/embed-check/node_modules/
 e2e/artifacts/*.tgz
 *.log
 .DS_Store
+
+# Build, packaging and coverage output
+artifacts/
+*.tgz
+coverage/
+.pnpm-store/
+*.tmp
+
+# Local environment and secrets (never commit credentials)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_*
+!id_*.example
+
+# Editor and OS noise
+.idea/
+.vscode/
+Thumbs.db

@@ -1,6 +1,12 @@
 // Validate the committed CI workflow YAML files with a real YAML parser.
-// Uses the js-yaml copy shipped with the local DSH desktop profile; falls back
-// to python3 + PyYAML when available. Exits non-zero on the first parse error.
+//
+// Resolution order:
+//   1. the js-yaml devDependency (what CI installs),
+//   2. DSH_JS_YAML, an explicit path to a js-yaml entry point,
+//   3. python3 + PyYAML.
+//
+// Exits 1 when a workflow fails to parse or is missing, and 2 when no YAML
+// parser is available at all.
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -9,14 +15,14 @@ import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const files = ['.github/workflows/ci.yml', '.github/workflows/e2e.yml']
+const files = [
+  '.github/workflows/ci.yml',
+  '.github/workflows/e2e.yml',
+  '.github/workflows/codeql.yml',
+  '.github/workflows/release.yml',
+]
 
-const candidates = [
-  process.env.DSH_JS_YAML,
-  'C:/Users/zhang/.dsh/profiles/desktop/node_modules/js-yaml/index.js',
-  '/usr/local/lib/node_modules/js-yaml/index.js',
-].filter(Boolean)
-
+/** @type {((text: string) => unknown) | null} */
 let parse = null
 // Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).
 try {
@@ -25,18 +31,22 @@ try {
   parse = (text) => yaml.load(text)
   console.log('[check-workflows] using js-yaml devDependency')
 } catch {
-  /* fall through to local desktop copy / python */
+  /* fall through to the explicit override / python */
 }
-for (const candidate of candidates) {
-  if (parse || !candidate || !existsSync(candidate)) continue
+// Explicit override for environments that keep js-yaml outside the project.
+const override = process.env.DSH_JS_YAML
+if (!parse && override) {
+  if (!existsSync(override)) {
+    console.error(`[check-workflows] DSH_JS_YAML points at a missing file: ${override}`)
+    process.exit(2)
+  }
   try {
     const require = createRequire(import.meta.url)
-    const yaml = require(candidate)
+    const yaml = require(override)
     parse = (text) => yaml.load(text)
-    console.log(`[check-workflows] using js-yaml: ${candidate}`)
-    break
-  } catch {
-    /* try next */
+    console.log(`[check-workflows] using js-yaml: ${override}`)
+  } catch (error) {
+    console.error(`[check-workflows] cannot load DSH_JS_YAML (${override}): ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 if (!parse) {
@@ -55,15 +65,20 @@ if (!parse) {
   }
 }
 if (!parse) {
-  console.error('[check-workflows] no YAML parser available (set DSH_JS_YAML to a js-yaml entry path)')
+  console.error('[check-workflows] no YAML parser available: install the devDependencies, or set DSH_JS_YAML to a js-yaml entry path')
   process.exit(2)
 }
 
 let bad = 0
 for (const file of files) {
   const full = path.join(root, file)
+  if (!existsSync(full)) {
+    bad += 1
+    console.error(`[check-workflows] FAIL ${file}: workflow file is missing`)
+    continue
+  }
   try {
-    const doc = parse(await readFile(full, 'utf8'))
+    const doc = /** @type {any} */ (parse(await readFile(full, 'utf8')))
     // Minimal structural assertions: workflows need `on` and `jobs`.
     const problem = !doc || typeof doc !== 'object' ? 'not a mapping' : !doc.jobs ? 'missing jobs' : !doc.on ? 'missing on' : null
     if (problem) throw new Error(problem)

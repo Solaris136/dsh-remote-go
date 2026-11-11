@@ -130,5 +130,3 @@ async function main() {
 }
 
 main().catch((error) => fail(error.stack ?? String(error)))
-
-

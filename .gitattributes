@@ -1,0 +1,20 @@
+# Store every text file as LF. Windows entry points keep CRLF in the working
+# tree so .cmd/.ps1 still run after a plain clone on Windows.
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never diff, merge or normalize binary payloads.
+*.png binary
+*.tgz binary
+*.jar binary
+
+# Generated, vendored and recorded evidence files: keep them out of language
+# stats and out of review diffs.
+pnpm-lock.yaml linguist-generated=true
+vendor/** linguist-vendored
+e2e/remote/evidence/** linguist-documentation
+
+# client.js is the hand-maintained browser half; keep it reviewable.
+client.js linguist-generated=false
