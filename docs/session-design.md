@@ -100,11 +100,44 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 - [docs/api.md](api.md) 目前是**冻结的 v1**：上述扩展必须以 v1.1（或 v2）显式版本化新增，先改契约文档、再改两侧
   实现；不得就地改写 v1 已有字段的语义。
 
+### 4.3 侧边栏可见性前提（已在本机核实）
+
+P0 建好镜像会话后侧边栏仍然看不到它们：DSH 的侧边栏**按工作区**列会话，而工作区归属由**会话头的规范化 cwd**
+推导，不是 `meta` 里的显式字段。用 Cordis Inspect 对 Host `sessions` / `workspaceRegistry` 核实的结果：
+
+`sessions.create(id?, options?)` 的 `options.meta` 只有
+`{ cwd, parentSession, createdAt, isSeeded, origin, delegationDepth, agentPreset }` —— **没有 workspaceId 字段**。
+
+Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
+
+| 方法 | 签名 | 关键语义 |
+|---|---|---|
+| 创建/复用 | `async create(path: string, title?: string): Promise<Workspace>` | 目录必须存在（`fs.realpath` 规范化）；同一规范化路径重复调用返回既有实体，且**不改标题** |
+| 按路径查 | `async resolveByPath(path: string): Promise<Workspace \| undefined>` | 只查不建；已存在但未注册返回 `undefined`，路径不存在时 reject |
+| 列表 | `list(): Workspace[]` | 每个实体的 `sessionIds` getter 已按「启动/在线 规范化 cwd 头索引」过滤 |
+| 删除 | `async delete(id: WorkspaceId): Promise<boolean>` | 只删注册，保留目录与会话日志；未知 id 幂等 |
+| 重命名 | `Workspace.setTitle(title): Promise<void>` | 修改显示标题 |
+
+`Workspace` 另有 `attachSession/detachSession/insertSessionBefore/status`，但**成员关系由 cwd 索引决定**：把每台
+主机的镜像目录注册成工作区，P0 的镜像会话就自动归组，不需要逐会话 attach。
+
+实现要点（P0 增补，`src/workspace-adapter.js`）：
+
+- 每台远端主机一个工作区：路径 `$DSH_HOME/remote-go/mirrors/<hostId>`，标题 `Remote: <主机名>`；路径与会话的
+  `meta.cwd` 由**同一个** `mirrorHostDir()` 产出，避免两侧漂移。
+- 幂等：先 `resolveByPath()` 再 `create()`，重连复用同一注册；主机改名时只在现有标题仍带 `Remote: ` 前缀（即插件
+  自己写的）时才 `setTitle()`，用户手工改名不覆盖。
+- 清理：删除主机时 `delete()` 该注册（保留目录，重连可重建）；`mirrorToSidebar=false` 时不再注册、也不再新建分组，
+  已有分组保持不动（非破坏性）。
+- 降级：`workspaceRegistry` 缺失、`sessions` 缺失（没有可分组的会话）、路径不存在或注册失败 → 记录日志并降级，
+  **绝不把异常抛进连接流程**。
+
 ## 5. 数据通路
 
 ```text
 本地 DSH（Host 插件）
 ├─ 镜像会话存储（本地 Session 记录 + cursor + capabilities）
+├─ 侧边栏工作区注册（每台主机一个 workspace，路径 = 镜像 cwd）   ← P0 增补
 ├─ SSH（ssh2）：认证 / exec / forwardOut          ← 已有
 ├─ 隧道：127.0.0.1:<localPort> ──▶ 远端 127.0.0.1:<remotePort>   ← 已有
 └─ 远端会话适配器（新增）
@@ -115,6 +148,9 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 
 远端服务器：原版 DSH（不装任何专属组件）
 ```
+
+镜像会话能不能出现在侧边栏，取决于「工作区注册」这一行：DSH 的侧边栏按工作区列会话，而工作区成员由会话头的
+规范化 cwd 决定（§4.3）。镜像目录与会话 `meta.cwd` 必须完全一致，因此两者共用一个路径函数。
 
 设计取舍：**不引入远端 agent**。远端就是原版 DSH，镜像所需的目录、历史、事件、输入全部走它已有的 HTTP/RPC
 接口；这是本项目相对 `Golden-Pigeon/dsh-remote`（需装 `dsh-remote-agent`）的主要差异，也是「零远端专属组件」
@@ -150,8 +186,11 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 
 - **保留** iframe 面板：作为「完整远端界面」入口（文件树、终端、插件管理、远端设置都在里面），也是 L3 出问题时的
   逃生通道。
-- **设置 → 远程主机** 不变，新增「镜像到本地侧边栏」开关（默认开），可按主机关闭。
-- 侧边栏不新增列：镜像会话就是本地 Session，天然进列表；这正是「不新开一列」的实现方式。
+- **设置 → 远程主机** 不变。设置新增「镜像会话」分组里的 `mirrorToSidebar`（默认开，**全局**开关；当前实现不按
+  主机单独配置）：关闭后不再注册新的侧边栏工作区、也不再新建分组，已有分组保持不动。
+- 侧边栏不新增列：镜像会话就是本地 Session，天然进列表；每台主机一个 `Remote: <主机名>` 工作区负责分组。这正是
+  「不新开一列」的实现方式。
+- 删除主机时同时删除该工作区注册（目录与会话日志保留），避免留下指向已删主机的空分组。
 
 ## 10. 分阶段交付与验收
 

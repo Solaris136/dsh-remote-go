@@ -13,13 +13,14 @@ import { createApi } from './api.js'
 import { detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
 import { createSessionAdapter } from './session-adapter.js'
+import { createWorkspaceAdapter } from './workspace-adapter.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 
 export const name = PLUGIN_ID
 export const inject = ['webServer']
 
 /** Services the plugin can use when the composition provides them. */
-export const optional = ['connection']
+export const optional = ['connection', 'workspaceRegistry']
 
 /**
  * @param {any} ctx Cordis context.
@@ -34,10 +35,19 @@ export function apply(ctx, config = {}) {
   // adapter answers typed `sessions-unavailable` and the plugin keeps working.
   // Each host gets its own cwd under `$DSH_HOME/remote-go/mirrors/<hostId>`; the
   // remote workspace path is never used (it may not exist on this machine).
+  const mirrorRoot = path.join(stateDir, 'mirrors')
   const sessionAdapter = createSessionAdapter({
     ctx,
     logger,
-    mirrorRoot: path.join(stateDir, 'mirrors'),
+    mirrorRoot,
+  })
+  // Sidebar visibility needs the same directory registered as a workspace: DSH
+  // lists sessions per workspace and derives membership from the session's
+  // canonical cwd. Optional like `sessions`; absent ⇒ mirrors stay panel-only.
+  const workspaceAdapter = createWorkspaceAdapter({
+    ctx,
+    logger,
+    mirrorRoot,
   })
   const service = new RemoteGoService({
     store,
@@ -46,6 +56,7 @@ export function apply(ctx, config = {}) {
     localVersion: config.localVersion ? String(config.localVersion) : null,
     hostKeyConfirmTimeoutMs: config.hostKeyConfirmTimeoutMs,
     sessionAdapter,
+    workspaceAdapter,
   })
   const getOrigin = () => {
     try {

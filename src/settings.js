@@ -14,6 +14,7 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   autoReconnect: { enabled: boolean, maxAttempts: number, baseDelayMs: number },
  *   hostKeyPolicy: 'first-use' | 'strict',
  *   saveTokens: boolean,
+ *   mirrorToSidebar: boolean,
  *   windowMode: 'panel' | 'external',
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
@@ -30,6 +31,9 @@ export function defaultSettings() {
     autoReconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 800 },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
+    // Mirrored remote sessions are grouped into a sidebar workspace per host by
+    // default; turning this off keeps them out of the sidebar entirely.
+    mirrorToSidebar: true,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -85,6 +89,7 @@ export function sanitizeSettings(raw) {
     },
     hostKeyPolicy: oneOf(input.hostKeyPolicy, ['first-use', 'strict'], defaults.hostKeyPolicy),
     saveTokens: boolean(input.saveTokens, defaults.saveTokens),
+    mirrorToSidebar: boolean(input.mirrorToSidebar, defaults.mirrorToSidebar),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
