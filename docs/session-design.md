@@ -9,8 +9,8 @@
 
 ## 1. 为什么需要这一层
 
-现状（[docs/design.md](design.md) §v0.6）：远端 DSH 在自己的 iframe 面板里整页运行，等价于「把另一台机器的界面
-显示出来」。它的问题不是能不能用，而是**不是本地一等公民**：
+现状（[docs/design.md](design.md) §v0.7 附录，行 529-538）：远端 DSH 在自己的 iframe 面板里整页运行，等价于
+「把另一台机器的界面显示出来」。它的问题不是能不能用，而是**不是本地一等公民**：
 
 - 远端会话不出现在本地侧边栏，切会话必须先切主机再在面板里找；
 - 远端会话不能进本地 Conversation UI，本地的工作区栏、搜索、快捷键都用不上；
@@ -21,8 +21,8 @@
 sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。两者都**没有**去遮蔽宿主的 `sidebar.workspaces`。
 
 > 关键约束：`sidebar.workspaces` 是单占槽位（由 `dsh-client-ui-workspace` 独占），第三方插件无法追加分组
-> （[docs/design.md](design.md) §v0.6 限制说明）。**所以「完全会话」不能靠改宿主侧边栏实现，只能靠让远端会话
-> 本身成为本地会话。**
+> （[docs/design.md](design.md) §v0.7 附录第 3 条的限制说明，行 ~536）。**所以「完全会话」不能靠改宿主侧边栏
+> 实现，只能靠让远端会话本身成为本地会话。**
 
 ## 2. 目标与非目标
 
@@ -59,8 +59,8 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 
 | 级别 | 能力 | 数据来源 | 用户可见效果 |
 |---|---|---|---|
-| L1 目录镜像 | 列出远端工作区/会话（标题、时间、状态点） | 远端 `storages/workspace.json`（现有 `src/workspaces.js` 已实现读取） | 侧边栏能看到远端会话，点开进入 iframe 面板定位到该会话 |
-| L2 只读镜像 | L1 + 历史正文回放 | 远端 DSH 的 RPC/HTTP（经隧道） | 本地 Conversation UI 里能读远端历史，只读 |
+| L1 目录镜像 | 列出远端工作区（标题、路径、会话数）与会话 id/计数 | 远端 `storages/workspace.json`（现有 `src/workspaces.js` 只产出工作区级数据 + sessionIds，不含每会话标题/时间/状态） | 侧边栏能看到远端工作区及其会话数，点开进入 iframe 面板定位到该工作区 |
+| L2 只读镜像 | L1 + 每会话标题/时间/状态 + 历史正文回放 | 远端 DSH 的 RPC/HTTP（经隧道） | 本地 Conversation UI 里能读远端历史，只读 |
 | L3 完全会话 | L2 + 流式订阅 + 输入转发 + 审批回本地 | 远端 `ws-mux` 事件流（本仓库 E2E 证据已证明隧道内可握手） | 与本地会话几乎无差别：流式、可发消息、审批在本地弹 |
 
 选型：**分阶段做到 L3，但每一级都独立可用**。任何一级失败必须显式降级（例如事件流握手失败 → 停在 L2 并提示
@@ -73,13 +73,32 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 | 能力 | 签名要点 | 对本设计的用途 |
 |---|---|---|
 | 创建会话 | `create(id?, { seed, meta })` | 建立镜像会话；`seed` 可直接回放远端历史事件 |
-| 追加事件 | `Session.append(type, data)` | 把远端新增事件写入本地镜像会话 |
+| 追加事件 | `Session.append(type, data, intent?)` | 把远端新增事件写入本地镜像会话（surface 事件必须传 intent） |
 | 分叉 | `fork(source, boundary?, childId?)` | 从远端某条消息处分叉出本地会话 |
 | 元数据 | `meta.cwd` 必须是绝对路径，`meta.parentSession` 记录血缘 | 标记该会话属于哪个远端主机/远端会话 |
 
 **关键约束（必须写进实现）**：`ctx.sessions` 只做内存存储，持久化由 agent 生命周期挂载的 session-log writer 负责——
 「a session published outside that lifecycle persists nothing」。镜像会话不走 agent 循环，因此：
 要么给它接一个 writer（P2 必须解决），要么接受**重启后重新同步**（P0/P1 可以接受，但要在 UI 上说明「重启后从远端重拉」）。
+
+**`append` 的第三个参数**：surface 事件（`system/message`、`developer/message`、`user/message`、
+`assistant/message`、`tool/result`）必须带 `SurfaceIntent`，否则事件只作为普通记录落库、不会被宿主当作会话可见内容
+呈现。回放映射固定为 `surfaceOp: 'append'`：
+
+| 远端事件 | 本地写入 |
+|---|---|
+| `system/message` / `developer/message` / `user/message` / `assistant/message` / `tool/result` | `Session.append(type, data, { surfaceOp: 'append' })` |
+| 非 surface 事件（游标、状态等） | `Session.append(type, data)` |
+
+### 4.2 契约变更（docs/api.md）
+
+镜像会话不是纯 UI 变化，需要扩展 Host↔Client 契约（[docs/api.md](api.md)）：
+
+- L1 可复用现有 `GET /hosts/:id/workspaces`（v1 已有），只取工作区级数据与 `sessionIds`。
+- L2/L3 需要**新增**接口与字段：镜像会话目录、历史区间拉取、事件流订阅、输入与审批转发；字段如
+  `remoteSessionId`、`cursor`、`capabilities`、`mirroredAt`。
+- [docs/api.md](api.md) 目前是**冻结的 v1**：上述扩展必须以 v1.1（或 v2）显式版本化新增，先改契约文档、再改两侧
+  实现；不得就地改写 v1 已有字段的语义。
 
 ## 5. 数据通路
 
