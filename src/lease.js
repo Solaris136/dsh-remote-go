@@ -23,6 +23,12 @@
  * @module
  */
 
+/**
+ * Longest session segment kept verbatim; longer ids keep a digest suffix so they stay distinct.
+ * Comfortably below the usual 255-byte filename limit even after the `lease-`/`.json` wrapper.
+ */
+const SAFE_SEGMENT_LIMIT = 120
+
 /** Bounds for one authority read: it is a tiny file, so the limits are small. */
 export const LEASE_LIMITS = Object.freeze({
   maxBytes: 8 * 1024,
@@ -49,11 +55,20 @@ export function remoteLeaseFile(remoteDshHome, remoteSessionId = null) {
 }
 
 /**
- * A filesystem-safe, collision-resistant segment for a remote session id.
+ * A filesystem-safe, **injective** segment for a remote session id.
  *
- * Deliberately not just "strip unsafe characters": two different ids must not collapse onto the
- * same file, or one session's lease would fence another. Anything outside [A-Za-z0-9._-] is
- * percent-encoded, which is reversible and injective.
+ * This must be a bijection on ids, not a "cleanup": two distinct ids that collapse onto one
+ * file would share a lease and fence each other — the exact defect that made the authority
+ * per-session in the first place.
+ *
+ * Two rules make it injective where a naive version is not:
+ * - escapes are **zero-padded to 4 hex digits**, so `"\u0002" + "5"` (`%0002` + `5`) cannot
+ *   collide with `"%25"` — without padding, `%2` + `5` equals `%25`;
+ * - over-long ids keep a **hash suffix** rather than being truncated, so `"x"*130` and
+ *   `"x"*131` stay distinct files.
+ *
+ * Traversal is impossible: `/`, `.` sequences outside the safe set are all escaped, so the
+ * result never contains a path separator and never starts a `..` segment on its own.
  * @param {string} value
  * @returns {string}
  */
@@ -61,9 +76,26 @@ function safeSegment(value) {
   const text = String(value ?? '')
   let out = ''
   for (const char of text) {
-    out += /[A-Za-z0-9._-]/.test(char) ? char : `%${char.codePointAt(0).toString(16)}`
+    out += /[A-Za-z0-9_-]/.test(char) ? char : `%${char.codePointAt(0).toString(16).padStart(4, '0')}`
   }
-  return out.slice(0, 120)
+  // Keep the name bounded without losing identity: the tail becomes a digest of the full id.
+  if (out.length <= SAFE_SEGMENT_LIMIT) return out
+  const suffix = `~${shortDigest(text)}`
+  return `${out.slice(0, SAFE_SEGMENT_LIMIT - suffix.length)}${suffix}`
+}
+
+/**
+ * A short, stable digest of an id (only used to keep truncated names distinct).
+ * @param {string} text
+ * @returns {string}
+ */
+function shortDigest(text) {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
 }
 
 /**
@@ -226,7 +258,16 @@ export function buildLeaseRecord(input) {
 export function buildLeasePublishCommand(file, record) {
   const payload = Buffer.from(JSON.stringify(record), 'utf8').toString('base64')
   // `base64 -d` is the GNU spelling; the fallback covers BSD/busybox mktemp'ed hosts.
-  return `mkdir -p ${quotePath(dirOf(file))} 2>/dev/null; printf '%s' ${quotePath(payload)} | (base64 -d 2>/dev/null || base64 -D 2>/dev/null) > ${quotePath(file)}`
+  //
+  // Written to a sibling temp file and renamed: `> file` truncates first, so a crash or a
+  // concurrent read would see partial JSON. That is classified as `lease-malformed` and treated
+  // as untrustworthy, which would turn a crash into a lockout instead of a recoverable lease.
+  const temp = `${file}.tmp`
+  return (
+    `mkdir -p ${quotePath(dirOf(file))} 2>/dev/null; ` +
+    `printf '%s' ${quotePath(payload)} | (base64 -d 2>/dev/null || base64 -D 2>/dev/null) > ${quotePath(temp)} && ` +
+    `mv ${quotePath(temp)} ${quotePath(file)}`
+  )
 }
 
 /**

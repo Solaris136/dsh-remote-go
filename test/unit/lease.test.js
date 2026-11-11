@@ -474,3 +474,39 @@ test('an implausible epoch jump is refused instead of adopted', () => {
   assert.equal(plausible.suspicious, undefined)
   assert.equal(plausible.state.epoch, 1 + 500)
 })
+
+test('the per-session authority path is injective for hostile ids', () => {
+  // Regression: unpadded hex escapes collided (`"\u0002"+"5"` vs `"%"` both became `%25`), and
+  // truncation made `"x"*130` and `"x"*131` the same file. Colliding ids would share one lease
+  // and fence each other — the exact defect that made the authority per-session.
+  const ids = ['\u00025', '%', 'x'.repeat(130), 'x'.repeat(131), 'a/b', 'a%2Fb', '../../etc/passwd']
+  const paths = ids.map((id) => remoteLeaseFile('/h', id))
+  assert.equal(new Set(paths).size, ids.length, `distinct ids must not share a file: ${JSON.stringify(paths)}`)
+  // Traversal stays impossible: the segment never contains a separator.
+  for (const path of paths) {
+    const segment = path.slice('/h/remote-go/lease-'.length)
+    assert.equal(segment.includes('/'), false, `a session id must not inject a separator: ${segment}`)
+  }
+  // Exact filenames for the two collisions the reviewer found.
+  assert.equal(remoteLeaseFile('/h', '%'), '/h/remote-go/lease-%0025.json')
+  assert.equal(remoteLeaseFile('/h', '\u00025'), '/h/remote-go/lease-%00025.json')
+})
+
+test('the publish writes a sibling temp file and renames it', () => {
+  // A truncate-then-write leaves a window where a reader (or a crash) sees partial JSON, which
+  // is classified `lease-malformed` and treated as untrustworthy — a crash would become a lockout.
+  const command = buildLeasePublishCommand(
+    '/h/remote-go/lease-s.json',
+    buildLeaseRecord({
+      writer: 'w',
+      epoch: 1,
+      expiresAt: 2,
+      sessionKey: 'k',
+    }),
+  )
+  assert.match(
+    command,
+    /> '\/h\/remote-go\/lease-s\.json\.tmp' && mv '\/h\/remote-go\/lease-s\.json\.tmp' '\/h\/remote-go\/lease-s\.json'$/,
+  )
+  assert.equal(/ > '\/h\/remote-go\/lease-s\.json'$/.test(command), false, 'never truncate the live file')
+})
