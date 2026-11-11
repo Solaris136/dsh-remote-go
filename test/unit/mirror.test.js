@@ -1004,6 +1004,49 @@ test('a contended lock open reported as EPERM is retried, not failed', async () 
   assert.equal(attempts, 3, 'each EPERM contention must be retried')
 })
 
+test('a lock that can never be created fails fast with its own error', async () => {
+  // ACL denial / read-only mount also surface as EACCES on create. Those must not be
+  // mistranslated into a 20 s ELOCKTIMEOUT that blames another process.
+  const fakeFs = {
+    async mkdir() {},
+    async open() {
+      const error = new Error('operation not permitted')
+      error.code = 'EACCES'
+      throw error
+    },
+    // The lock file never exists: nothing else can be holding it.
+    async stat() {
+      const error = new Error('not found')
+      error.code = 'ENOENT'
+      throw error
+    },
+    async unlink() {},
+    async rename() {},
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-lock-eacces-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({
+    dir,
+    fsImpl: fakeFs,
+    logger: quiet,
+    lockWaitMs: 20_000,
+    lockRetryMs: 5,
+    lockStaleMs: 60_000,
+  })
+  await store.load()
+  const started = Date.now()
+  await assert.rejects(
+    () => store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }]),
+    (error) => {
+      assert.equal(error.code, 'EACCES', 'the original permission error must survive')
+      return true
+    },
+  )
+  assert.ok(Date.now() - started < 5_000, 'a permanent lock failure must not wait out the full lock window')
+})
+
 test('listMirrors returns deep copies so callers cannot corrupt the store', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-mirror-clone-'))
   const store = new MirrorStore({ dir, logger: quiet })

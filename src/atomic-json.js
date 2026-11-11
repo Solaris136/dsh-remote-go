@@ -39,6 +39,17 @@ export const LOCK_WAIT_MS = 20_000
 /** Poll interval while waiting for the cross-process lock. */
 export const LOCK_RETRY_MS = 10
 
+/**
+ * How long a non-`EEXIST` lock error is trusted as contention without the lock being
+ * present. Windows reports a mid-create/mid-delete race as EPERM/EACCES, but the same
+ * codes also describe a lock that can never be created (ACL denial, read-only mount);
+ * past this window the original error is surfaced instead of a misleading timeout.
+ */
+export const LOCK_TRANSIENT_MS = 250
+
+/** Attempts to unlink a lock on release before giving up (a leaked lock costs a stale wait). */
+export const LOCK_UNLINK_ATTEMPTS = 3
+
 /** @param {number} ms @returns {Promise<void>} */
 export function sleep(ms) {
   return new Promise((resolve) => {
@@ -120,7 +131,19 @@ async function acquireLock(lockFile, options) {
         } catch {
           /* already closed */
         }
-        await removeQuietly(fsImpl, lockFile)
+        // A close-then-unlink can be held briefly on Windows (Defender, indexing), and a
+        // leaked lock costs the next writer a full stale wait, so retry before giving up.
+        for (let attempt = 0; attempt < LOCK_UNLINK_ATTEMPTS; attempt += 1) {
+          try {
+            await fsImpl.unlink(lockFile)
+            return
+          } catch (unlinkError) {
+            const unlinkCode = /** @type {any} */ (unlinkError)?.code
+            if (unlinkCode === 'ENOENT') return
+            if (attempt === LOCK_UNLINK_ATTEMPTS - 1) return
+            await sleep(retryMs)
+          }
+        }
       }
     } catch (error) {
       // Windows reports contention on an exclusive create as EPERM/EACCES (and sometimes
@@ -129,6 +152,14 @@ async function acquireLock(lockFile, options) {
       const code = /** @type {any} */ (error)?.code
       const contended = code === 'EEXIST' || code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
       if (!contended) throw error
+      // Only EEXIST is unambiguous. Anything else is contention just while the lock is
+      // actually there, or for a moment after it vanished (the mid-delete window) — a lock
+      // that can never be created (ACL denial, read-only mount) must fail fast with its own
+      // error instead of becoming a misleading ELOCKTIMEOUT after a full wait.
+      if (code !== 'EEXIST' && Date.now() - started > LOCK_TRANSIENT_MS) {
+        const present = await lockExists(fsImpl, lockFile)
+        if (!present) throw error
+      }
       await breakStaleLock(fsImpl, lockFile, staleMs)
       if (Date.now() - started > waitMs) {
         const timeout = new Error('timed out waiting for another process to release the store lock')
@@ -297,5 +328,21 @@ async function removeQuietly(fsImpl, target) {
     await fsImpl.unlink(target)
   } catch {
     /* already gone */
+  }
+}
+
+/**
+ * Whether the lock file is present right now. Any stat failure counts as "absent", so a
+ * lock that cannot be read never turns a permanent error into an endless retry.
+ * @param {typeof fs} fsImpl
+ * @param {string} lockFile
+ * @returns {Promise<boolean>}
+ */
+async function lockExists(fsImpl, lockFile) {
+  try {
+    await fsImpl.stat(lockFile)
+    return true
+  } catch {
+    return false
   }
 }
