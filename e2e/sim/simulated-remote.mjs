@@ -23,9 +23,12 @@
 //                                                             detect a seq hole and stop its cursor there
 //   --history-no-root                                           model a remote with no `sessions/` dir
 //                                                             (typed `sessions-dir-missing` path)
-//   --lease-fixture <file> (SIM_LEASE_FIXTURE)                  publish a writer authority at
-//                                                             `remote-go/lease.json` (`{ writer, epoch }`),
-//                                                             so a competing writer can be observed over SSH
+//   --lease-fixture <file> (SIM_LEASE_FIXTURE)                  seed the writer authority at
+//                                                             `remote-go/lease.json` (`{ writer, epoch, expiresAt,
+//                                                             sessionKey }`). The sim then VALIDATES publishes:
+//                                                             stale epoch / session-key mismatch / implausible
+//                                                             jump are refused, which is what makes the channel
+//                                                             enforced rather than advisory
 //   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published; the
 //                                                             default is e2e/sim/.state.json
 //
@@ -130,7 +133,7 @@ const SIM = {
 }
 
 /** @typedef {{ code: number, stdout: string, stderr: string }} CommandResult */
-/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number }} SimState */
+/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number, leaseWrites?: number, leaseRefusals?: number, suspiciousJumps?: number, authority?: any, authorityHistory?: any[] }} SimState */
 
 // ---------------------------------------------------------------------------
 // Isolation guards: this is a simulator that must never be mistaken for, or
@@ -378,6 +381,100 @@ const LEASE = loadLeaseAnswer()
 /**
  * @returns {{ writer: string | null, epoch: number | null } | null}
  */
+/**
+ * The authority record this remote currently recognises, or null when nobody holds it.
+ *
+ * A record whose `expiresAt` has passed is *not* returned: an expired lease is free, which is
+ * what makes a crashed writer recoverable instead of blocking the mirror forever.
+ * @param {any} sim
+ * @returns {{ writer: string, epoch: number, expiresAt: number, sessionKey: string } | null}
+ */
+function currentAuthority(sim, file = '') {
+  const keyed = sessionKeyOf(file)
+  const map = sim?.authorities ?? null
+  const current = map === null || map === undefined ? (sim?.authority ?? null) : (map[keyed] ?? null)
+  if (current !== null) {
+    if (Number(current.expiresAt) > Date.now()) return current
+    return {
+      writer: current.writer,
+      epoch: current.epoch,
+      expiresAt: current.expiresAt,
+      sessionKey: current.sessionKey,
+    }
+  }
+  return LEASE === null ? null : { ...LEASE }
+}
+
+/**
+ * The remote-side acceptance rule for a published record (design §6.2).
+ *
+ * This is the half the plugin cannot do for itself: a partitioned writer that ignored its own
+ * local check still cannot take the lease, because the authority refuses it here.
+ *
+ * Rules, in order:
+ * - a record with no writer / epoch / sessionKey is malformed;
+ * - a **jump** beyond the window is refused as `implausible-epoch` and never adopted — otherwise
+ *   publishing a huge number would be a one-line denial of service;
+ * - an epoch **below** the current one is refused as `stale-epoch` (this is the stale writer);
+ * - the same epoch from a different session key is refused as `writer-changed`;
+ * - an expired current record is free to take over;
+ * - otherwise accepted (new grant, renewal, or tombstone).
+ *
+ * @param {any} record
+ * @param {any} sim
+ * @returns {{ ok: true, record: any } | { ok: false, reason: string, remoteEpoch: number | null }}
+ */
+function sessionKeyOf(file) {
+  return /lease(?:-([^'/]*))?\.json$/.exec(String(file ?? ''))?.[1] ?? ''
+}
+
+function acceptAuthority(record, sim, fileOrKey = '') {
+  const writer = typeof record?.writer === 'string' ? record.writer.trim() : ''
+  const epoch = Number(record?.epoch)
+  const sessionKey = typeof record?.sessionKey === 'string' ? record.sessionKey.trim() : ''
+  if (writer === '' || !Number.isInteger(epoch) || epoch < 1 || sessionKey === '') {
+    return { ok: false, reason: 'malformed', remoteEpoch: null }
+  }
+  const keyed = String(fileOrKey ?? '')
+  const map = sim.authorities ?? null
+  const current =
+    map === null || map === undefined
+      ? (sim.authority ?? (LEASE === null ? null : { ...LEASE, sessionKey: LEASE.sessionKey ?? '' }))
+      : (map[keyed] ?? null)
+  const normalized = {
+    writer,
+    epoch,
+    expiresAt: Number(record?.expiresAt) || 0,
+    sessionKey,
+  }
+  if (current === null || Number(current.expiresAt) <= Date.now()) return { ok: true, record: normalized }
+  const window = Number(sim.epochJumpLimit) > 0 ? Number(sim.epochJumpLimit) : 1000
+  if (epoch > Number(current.epoch) + window) {
+    sim.suspiciousJumps = (sim.suspiciousJumps ?? 0) + 1
+    return { ok: false, reason: 'implausible-epoch', remoteEpoch: Number(current.epoch) }
+  }
+  if (epoch < Number(current.epoch)) {
+    return { ok: false, reason: 'stale-epoch', remoteEpoch: Number(current.epoch) }
+  }
+  // Same epoch from the SAME writer is a restart/renewal of its own lease, so it is accepted
+  // and the record takes the new connection key. Only a *different* writer at the same epoch is
+  // a real `writer-changed` — otherwise restarting the plugin would fence itself.
+  if (epoch === Number(current.epoch) && writer !== current.writer && sessionKey !== (current.sessionKey ?? '')) {
+    return { ok: false, reason: 'writer-changed', remoteEpoch: Number(current.epoch) }
+  }
+  return { ok: true, record: normalized }
+}
+
+/**
+ * Answer a publish with the machine-readable refusal line the plugin classifies.
+ * @param {any} sim @param {string} reason @param {number | null} remoteEpoch
+ */
+function refused(sim, reason, remoteEpoch) {
+  sim.leaseRefusals = (sim.leaseRefusals ?? 0) + 1
+  const suffix = remoteEpoch === null ? '' : ` ${remoteEpoch}`
+  return { code: 3, stdout: `dsh-lease: ${reason}${suffix}\n`, stderr: '' }
+}
+
 function loadLeaseAnswer() {
   const requested = args['lease-fixture'] ?? process.env.SIM_LEASE_FIXTURE ?? null
   if (requested === null) return null
@@ -400,6 +497,8 @@ function loadLeaseAnswer() {
   return {
     writer: typeof parsed.writer === 'string' ? parsed.writer : null,
     epoch: Number.isInteger(parsed.epoch) ? parsed.epoch : null,
+    expiresAt: Number.isFinite(Number(parsed.expiresAt)) ? Number(parsed.expiresAt) : Date.now() + 60_000,
+    sessionKey: typeof parsed.sessionKey === 'string' ? parsed.sessionKey : '',
   }
 }
 /**
@@ -518,15 +617,42 @@ function respond(command, sim) {
     return ok(`${JSON.stringify({ version: 1, session: { id: sessionId }, events })}\n`)
   }
 
-  // 4b. Writer authority (src/lease.js fetchRemoteLease, design §6.2).
-  const leaseRead = /^head -c (\d+) '([^']*\/remote-go\/lease\.json)' 2>&1 \|\| true$/.exec(cmd)
+  // 4b. Writer authority: read + publish (src/lease.js, design §6.2).
+  //
+  // The simulated remote plays the authority the plugin does not have: it validates a
+  // published record and REFUSES a stale epoch, a mismatched session key, or an implausible
+  // jump. That refusal is what makes the channel enforced rather than advisory.
+  const leaseRead = /^head -c (\d+) '([^']*\/remote-go\/lease(?:-[^'\/]*)?\.json)' 2>&1 \|\| true$/.exec(cmd)
   if (leaseRead) {
     sim.leaseReads = (sim.leaseReads ?? 0) + 1
-    // No fixture means the remote publishes no authority — the normal state, answered the
-    // way an absent file is (empty output, not an error).
-    if (LEASE === null) return ok('')
-    const report = { writer: LEASE.writer, epoch: LEASE.epoch }
-    return ok(`${JSON.stringify(report)}\n`)
+    // `--lease-read-fail` models a writer that cannot see the authority (partition, permission
+    // change). It must still be refused on publish — that is the point of the channel.
+    if (args['lease-read-fail'] === true) return { code: 1, stdout: 'head: Permission denied\n', stderr: '' }
+    const current = currentAuthority(sim, leaseRead[2])
+    // No record means the remote has never been claimed: answered the way an absent file is
+    // (empty output, not an error).
+    if (current === null) return ok('')
+    return ok(`${JSON.stringify(current)}\n`)
+  }
+
+  const leaseWrite = /^mkdir -p .+; printf '%s' '([A-Za-z0-9+/=]+)' \| \(base64 -d/.exec(cmd)
+  if (leaseWrite) {
+    sim.leaseWrites = (sim.leaseWrites ?? 0) + 1
+    let record
+    try {
+      record = JSON.parse(Buffer.from(leaseWrite[1], 'base64').toString('utf8'))
+    } catch {
+      return refused(sim, 'malformed', null)
+    }
+    const verdict = acceptAuthority(record, sim, /lease(?:-([^'\/]*))?\.json$/.exec(cmd)?.[1] ?? '')
+    if (verdict.ok !== true) return refused(sim, verdict.reason, verdict.remoteEpoch)
+    const slot = /lease(?:-([^'/]*))?\.json$/.exec(cmd)?.[1] ?? ''
+    sim.authorities = sim.authorities ?? {}
+    sim.authorities[slot] = verdict.record
+    sim.authority = verdict.record
+    sim.authorityHistory = sim.authorityHistory ?? []
+    sim.authorityHistory.push({ writer: verdict.record.writer, epoch: verdict.record.epoch })
+    return ok('')
   }
 
   // 5. Run registry read (src/webapp.js readRunRegistry).

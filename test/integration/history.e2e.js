@@ -362,6 +362,21 @@ test('L2 history replay projects remote history into the local mirror session', 
     await t.test('a version-mismatched host stops replaying and keeps its §7 reason', async () => {
       // §7: "版本不一致 → 不建立镜像，降级 L1，并在会话上标注". The reviewer's probe found it
       // doing the opposite: replaying and erasing the per-descriptor reason.
+      //
+      // Its own simulator: the sibling subtests already published a writer lease in `sim`, and
+      // lease contention would fence this client for an unrelated reason. Contention has its own
+      // test in lease.e2e.js.
+      const ownState = path.join(temp, 'sim-state-mismatch.json')
+      writeFileSync(
+        path.join(temp, 'workspace-mismatch.json'),
+        `${JSON.stringify(WORKSPACE_FIXTURE, null, 2)}\n`,
+        'utf8',
+      )
+      writeFileSync(path.join(temp, 'history-mismatch.json'), `${JSON.stringify(historyFixture(), null, 2)}\n`, 'utf8')
+      const ownSim = await startSimulator({
+        stateFile: ownState,
+        historyFile: path.join(temp, 'history-mismatch.json'),
+      })
       const logs = []
       const sessions = createFakeSessions()
       const { appends } = sessions
@@ -382,54 +397,60 @@ test('L2 history replay projects remote history into the local mirror session', 
       const host = await service.saveHost({
         name: 'sim-history-mismatch',
         address: '127.0.0.1',
-        port: sim.state.sshPort,
+        port: ownSim.state.sshPort,
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
         bootstrap: { mode: 'reuse' },
       })
-      await connectHost(service, host.id, logs)
-      // Wait for the *completed* projection, not just a level: the read-only marker is
-      // appended before the descriptor is persisted, so `cursor === 5 && readOnly`
-      // means the healthy sync really finished and the snapshot below is stable.
-      const ready = async () => {
-        const mirrors = await mirrorsOf(service, host.id)
-        return mirrors.length === HISTORY_SESSIONS.length && mirrors.every((m) => m.cursor === 5 && m.readOnly === true)
-      }
-      for (let attempt = 0; attempt < 300; attempt += 1) {
-        if (await ready()) break
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      }
-      assert.equal(await ready(), true, 'the healthy sync must complete before the mismatch probe')
-      const healthy = await mirrorsOf(service, host.id)
-      assert.equal(
-        healthy.every((m) => m.level === 'L2'),
-        true,
-        'the healthy sync must reach L2 first, otherwise the regression below proves nothing',
-      )
-      const cursorsBefore = healthy.map((mirror) => mirror.cursor)
-      const appendsBefore = appends.length
+      try {
+        await connectHost(service, host.id, logs)
+        // Wait for the *completed* projection, not just a level: the read-only marker is
+        // appended before the descriptor is persisted, so `cursor === 5 && readOnly`
+        // means the healthy sync really finished and the snapshot below is stable.
+        const ready = async () => {
+          const mirrors = await mirrorsOf(service, host.id)
+          return (
+            mirrors.length === HISTORY_SESSIONS.length && mirrors.every((m) => m.cursor === 5 && m.readOnly === true)
+          )
+        }
+        for (let attempt = 0; attempt < 300; attempt += 1) {
+          if (await ready()) break
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+        assert.equal(await ready(), true, 'the healthy sync must complete before the mismatch probe')
+        const healthy = await mirrorsOf(service, host.id)
+        assert.equal(
+          healthy.every((m) => m.level === 'L2'),
+          true,
+          'the healthy sync must reach L2 first, otherwise the regression below proves nothing',
+        )
+        const cursorsBefore = healthy.map((mirror) => mirror.cursor)
+        const appendsBefore = appends.length
 
-      // Lie about the remote version, the way the reviewer did, then re-sync.
-      const runtime = service.runtimes.get(host.id)
-      assert.ok(runtime, 'the host runtime must exist after connect')
-      runtime.remote = { ...runtime.remote, version: '0.0.1-mismatch' }
-      runtime.facts = { ...(runtime.facts ?? {}), dshVersion: '0.0.1-mismatch' }
-      const refreshed = await service.syncHostMirrors(host.id)
+        // Lie about the remote version, the way the reviewer did, then re-sync.
+        const runtime = service.runtimes.get(host.id)
+        assert.ok(runtime, 'the host runtime must exist after connect')
+        runtime.remote = { ...runtime.remote, version: '0.0.1-mismatch' }
+        runtime.facts = { ...(runtime.facts ?? {}), dshVersion: '0.0.1-mismatch' }
+        const refreshed = await service.syncHostMirrors(host.id)
 
-      assert.equal(appends.length, appendsBefore, 'a version-mismatched host must not replay history')
-      assert.deepEqual(
-        (await mirrorsOf(service, host.id)).map((mirror) => mirror.cursor),
-        cursorsBefore,
-        'a version-mismatched host must not advance the cursor',
-      )
-      assert.equal(refreshed.level, 'L1')
-      const after = await mirrorsOf(service, host.id)
-      assert.equal(
-        after.every((mirror) => mirror.level === 'L1' && mirror.reason?.code === 'version-mismatch'),
-        true,
-        `a mismatch must be annotated per descriptor, got ${JSON.stringify(after.map((m) => ({ level: m.level, reason: m.reason?.code })))}`,
-      )
+        assert.equal(appends.length, appendsBefore, 'a version-mismatched host must not replay history')
+        assert.deepEqual(
+          (await mirrorsOf(service, host.id)).map((mirror) => mirror.cursor),
+          cursorsBefore,
+          'a version-mismatched host must not advance the cursor',
+        )
+        assert.equal(refreshed.level, 'L1')
+        const after = await mirrorsOf(service, host.id)
+        assert.equal(
+          after.every((mirror) => mirror.level === 'L1' && mirror.reason?.code === 'version-mismatch'),
+          true,
+          `a mismatch must be annotated per descriptor, got ${JSON.stringify(after.map((m) => ({ level: m.level, reason: m.reason?.code })))}`,
+        )
+      } finally {
+        await stopSimulator(ownSim.child)
+      }
     })
   } finally {
     await stopSimulator(sim.child)

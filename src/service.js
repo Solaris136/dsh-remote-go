@@ -31,10 +31,12 @@ import {
   stopRemoteWeb,
   waitForRemoteUi,
 } from './webapp.js'
+import { randomBytes } from 'node:crypto'
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
 import {
+  DEFAULT_EPOCH_JUMP_LIMIT,
   MIRROR_LEASE_TTL_MS,
   acquireLease,
   assertWritable,
@@ -48,7 +50,15 @@ import {
 } from './mirror.js'
 import { MirrorStore } from './mirror-store.js'
 import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow, recoveredCursor } from './history.js'
-import { fetchRemoteLease } from './lease.js'
+import {
+  LEASE_LIMITS,
+  buildLeaseRecord,
+  buildLeaseReleaseCommand,
+  fetchRemoteLease,
+  remoteLeaseFile,
+  leaseExpiryFor,
+  publishRemoteLease,
+} from './lease.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -141,6 +151,7 @@ export class RemoteGoService extends EventEmitter {
     // writer id identifies *which* local side holds it. Stable per host so a restart
     // resumes its own lease instead of looking like a competing writer.
     this.leaseTtlMs = options.leaseTtlMs ?? MIRROR_LEASE_TTL_MS
+    this.epochJumpLimit = options.epochJumpLimit ?? LEASE_LIMITS.epochJumpLimit ?? DEFAULT_EPOCH_JUMP_LIMIT
     /** @type {Map<string, any>} */
     this.runtimes = new Map()
     this.activeHostId = null
@@ -674,6 +685,8 @@ export class RemoteGoService extends EventEmitter {
       skipped: 0,
       /** Fencing events seen this sync (a stale writer refused to write). */
       fenced: 0,
+      /** Epoch jumps too large to believe (refused, never adopted). */
+      suspicious: 0,
       /** Same-`seq` payload conflicts reported by `applyEvents` (design §6.2). */
       conflicts: 0,
       /** The conflicting seqs, bounded by the caller's use of the plan's capped list. */
@@ -726,13 +739,30 @@ export class RemoteGoService extends EventEmitter {
         }
         // Ask the remote whether someone else holds a newer grant. An absent authority is
         // normal (no L3 channel yet); a malformed one is reported, never read as "free".
-        const authority = await fetchRemoteLease(runtime.ssh, { remoteDshHome: layout.home })
+        const authority = await fetchRemoteLease(runtime.ssh, {
+          remoteDshHome: layout.home,
+          remoteSessionId: descriptor.remoteSessionId,
+        })
         if (authority.ok && authority.report) {
           const observed = observeRemoteLease(fenceState, {
             writer: authority.report.writer,
             epoch: authority.report.epoch,
             now,
+            epochJumpLimit: this.epochJumpLimit,
+            // Identifies "our own leftover record" (same writer id) versus a takeover.
+            previousWriter: writer,
           })
+          if (observed.suspicious === true) {
+            // A jump too large to believe: refuse it, do not adopt it, and say so in the log.
+            // Adopting would hand the lease to whoever published the biggest number.
+            this.#log(
+              runtime,
+              'warn',
+              `mirror lease: suspicious epoch jump for ${descriptor.remoteSessionId} ` +
+                `(ours ${descriptor.epoch ?? 0}, reported ${authority.report.epoch}, limit ${this.epochJumpLimit}); refusing it`,
+            )
+            summary.suspicious += 1
+          }
           if (observed.fenced) {
             summary.fenced += 1
             firstReason = firstReason ?? 'fenced'
@@ -804,6 +834,49 @@ export class RemoteGoService extends EventEmitter {
             mirroredAt: nowIso(),
           })
           continue
+        }
+        // ---- publish our authority (design §6.2) -----------------------------------
+        // The channel is only real if the remote can *refuse* us. Publish on every sync that
+        // claims the lease (acquire or renew), and treat a refusal as "not authorized": we do
+        // not fall back to writing anyway, because that would make the channel decorative.
+        const sessionKey = runtime.leaseSessionKey ?? null
+        if (sessionKey !== null) {
+          const published = await publishRemoteLease(runtime.ssh, {
+            remoteDshHome: layout.home,
+            remoteSessionId: descriptor.remoteSessionId,
+            record: buildLeaseRecord({
+              writer,
+              epoch: writeEpoch,
+              expiresAt: leaseExpiryFor({ startedAt: now, ttlMs: this.leaseTtlMs }),
+              sessionKey,
+            }),
+          })
+          if (published.ok) {
+            runtime.leasePublished = { writer, epoch: writeEpoch, sessionId: descriptor.remoteSessionId }
+          }
+          if (!published.ok) {
+            // The remote said no. That is the enforcement half of the protocol: a partitioned
+            // writer that ignored its own local check still cannot take the lease.
+            summary.fenced += 1
+            if (published.reason === 'implausible-epoch') summary.suspicious += 1
+            firstReason = firstReason ?? 'fenced'
+            this.#log(
+              runtime,
+              'warn',
+              `mirror lease: publish refused for ${descriptor.remoteSessionId}: ${published.reason}`,
+            )
+            summary.failures.push({ localSessionId: descriptor.localSessionId, reason: published.reason })
+            updated.push({
+              ...descriptor,
+              epoch: Math.max(descriptor.epoch ?? 0, writeEpoch),
+              lease: null,
+              level: 'L1',
+              readOnly: true,
+              reason: historyReason('fenced'),
+              mirroredAt: nowIso(),
+            })
+            continue
+          }
         }
         /** Descriptor fields the successful write must carry. */
         const leaseFields = {
@@ -1691,6 +1764,7 @@ export class RemoteGoService extends EventEmitter {
       runtime.ssh = this.sshFactory(buildOptions(target))
       this.#phase(runtime, 'ssh', 'ssh-connecting', { host: target.host })
       this.#captureFingerprint(runtime, await runtime.ssh.connect())
+      this.#startLeaseSession(runtime)
       return
     }
     this.#phase(runtime, 'ssh', 'ssh-connecting', { host: target.jumpHost.host, jump: true })
@@ -1883,6 +1957,50 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
+  /**
+   * Start a fresh writer-authority session for this connection (design §6.2).
+   *
+   * The key is a **per-connection random token**, not a secret shared with anyone: it exists so
+   * a lease cannot be silently continued by a different writer (the remote refuses a publish
+   * whose key does not own the record). Anything stronger would need a real secret, which this
+   * transport does not provide — see §11 #9 for exactly what that leaves open.
+   * @param {any} runtime
+   */
+  #startLeaseSession(runtime) {
+    runtime.leaseSessionKey = `sk_${randomBytes(18).toString('base64url')}`
+    runtime.leasePublished = null
+  }
+
+  /**
+   * Publish the tombstone for this host's lease, if we ever published one.
+   *
+   * Never throws and never blocks teardown: failing to release only costs other clients a TTL
+   * wait, which is why the record carries `expiresAt` in the first place.
+   * @param {any} runtime
+   */
+  async #releaseLease(runtime) {
+    const key = runtime.leaseSessionKey ?? null
+    const published = runtime.leasePublished ?? null
+    runtime.leaseSessionKey = null
+    runtime.leasePublished = null
+    if (key === null || published === null || !runtime.ssh?.connected) return
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.home) return
+    try {
+      await runtime.ssh.exec(
+        buildLeaseReleaseCommand(remoteLeaseFile(layout.home, published.sessionId ?? null), {
+          writer: published.writer,
+          epoch: published.epoch,
+          sessionKey: key,
+          now: this.#now(),
+        }),
+        { timeoutMs: LEASE_LIMITS.timeoutMs },
+      )
+    } catch {
+      /* a failed release is only a delay, never an error */
+    }
+  }
+
   /** @param {any} runtime */
   async #disposeSsh(runtime) {
     const ssh = runtime.ssh
@@ -1910,6 +2028,10 @@ export class RemoteGoService extends EventEmitter {
    * @param {{ stopRemote?: boolean, keepRemote?: boolean, keepSshForIdle?: boolean }} [options]
    */
   async #teardownRuntime(runtime, options = {}) {
+    // Publish the tombstone while the transport still exists: a released lease lets another
+    // client take over immediately instead of waiting out the TTL, and it is the honest
+    // "I am gone" signal a single-writer protocol needs.
+    await this.#releaseLease(runtime)
     runtime.closing = true
     this.#cancelIdleStop(runtime)
     if (options.stopRemote && runtime.ssh?.connected) {

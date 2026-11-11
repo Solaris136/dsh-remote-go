@@ -557,11 +557,25 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 - 恢复：竞争消失后本机 `acquire` 会拿到 `epoch+1`，从原 `cursor` 继续；`epoch` 高水位持久化在
   `mirrors.json` 里，重启不会回退（重启后的自己是「续约」而不是「新写入者」）。
 
-**围栏的适用边界（契约层必须如实告知）**：上述保证只覆盖**共享同一份 `mirrors.json` 的写入者**（同一本地
-profile 的重启、并发同步）以及远端 `lease.json` 显式声明的第三方。**两个互不相识的客户端不会被定序**：它们
-各有自己的描述符存储，都从 `epoch 0` 起步、都会拿到 `epoch 1`、都能通过各自的本地检查；插件也只**读**远端权威，
-从不发布自己的 `{ writer, epoch, expiresAt }`，因此远端没有可用来拒绝过期 epoch 的依据。这不是「已实现的分布式
-互斥」，L3 之前必须补齐双向权威通道、远端侧过期拒绝与真实性绑定（见 session-design.md §6.2 / §11 #9-#10）。
+**权威通道是双向的（v1.1，L3 前置）**：本机不只读 `lease.json`，还会在每次拿到租约（acquire 或 renew）后**发布**
+`{ version: 1, writer, epoch, expiresAt, sessionKey }`，断开时写入墓碑（`expiresAt = now`，让别的客户端立刻可接管）。
+远端**校验并拒绝**不合格的发布，拒绝以一行机器可读文本返回，本机把它映射为类型化原因：
+
+| 远端答复 | 本机映射 | 含义 |
+|---|---|---|
+| `dsh-lease: stale-epoch <n>` | `fenced` | 远端持有更新的 epoch：本机被定序掉，停止写入、`cursor` 不推进 |
+| `dsh-lease: writer-changed <n>` | `fenced` | 同 epoch 但 `sessionKey` 不属于本机 |
+| `dsh-lease: implausible-epoch <n>` | `fenced` + `suspicious` | 跳变超出窗口（默认 1000），拒绝且不抬高本机高水位 |
+| `dsh-lease: malformed` | `fenced` | 记录缺字段 |
+| 退出码非 0（非上述） | `fenced` | `publish-failed` / `permission-denied` 等 |
+
+发布被拒绝时**不会**退化成「照旧写入」——否则通道就只是装饰。同步响应里对应 `history.fenced` 与
+`history.suspicious`。
+
+**仍然开放（不要在 L3 里当成已解决）**：`sessionKey` 是**每条连接**随机生成的令牌，保证「不是这条连接就不能续约
+这份租约」，但**不是秘密**——能同时读写该文件的一方可以照抄；真实的绑定需要远端侧持密钥。远端的校验逻辑目前由
+模拟远端实现（未改造的真实 DSH 没有）。逐次写检查仍是「每批之前」而非每次 append。两主机真分区时序测试缺失。
+详见 session-design.md §6.2 与 §11 #9-#11。
 
 **冲突上报**：同一 `seq` 出现内容不同的记录时，仍按「保留首个」处理（默认策略不变），但会记录到
 `MirrorView.conflicts`（最多 20 条，`kept`/`lost` 各带一段 ≤120 字符摘要 + 7 位短哈希，使截断后仍可区分）。
