@@ -61,6 +61,30 @@ test('deepMerge replaces scalars and merges objects', () => {
   assert.deepEqual(base, { a: 1, nested: { b: 2, c: 3 }, list: [1] })
 })
 
+test('deepMerge cannot be used to pollute Object.prototype', () => {
+  // Shaped like a JSON request body: `__proto__`/`constructor` arrive as plain
+  // own properties (JSON.parse does not invoke the setter).
+  const patch = JSON.parse(
+    '{"__proto__":{"polluted":"yes"},"constructor":{"prototype":{"polluted":"yes"}},"saveTokens":true}',
+  )
+  const merged = deepMerge({ saveTokens: false, autoReconnect: { enabled: true } }, patch)
+
+  assert.equal(merged.saveTokens, true, 'declared keys still merge')
+  assert.equal(Object.hasOwn(merged, '__proto__'), false)
+  assert.equal(Object.hasOwn(merged, 'constructor'), false)
+  assert.equal(merged.polluted, undefined)
+  assert.equal({}.polluted, undefined, 'Object.prototype must stay clean')
+  assert.equal(Object.prototype.polluted, undefined)
+  assert.equal(Object.getPrototypeOf(merged), Object.prototype)
+})
+
+test('deepMerge only writes properties the schema declares', () => {
+  const merged = deepMerge({ known: 1, nested: { a: 1 } }, { known: 2, invented: { deep: 'value' }, nested: { b: 2 } })
+  assert.deepEqual(merged, { known: 2, nested: { a: 1 } })
+  assert.equal(Object.hasOwn(merged, 'invented'), false)
+  assert.equal(Object.hasOwn(merged.nested, 'b'), false)
+})
+
 test('expandHome expands only a leading tilde', () => {
   assert.equal(expandHome('~/.ssh/id_rsa', '/home/u'), '/home/u/.ssh/id_rsa')
   assert.equal(expandHome('~', '/home/u'), '/home/u')

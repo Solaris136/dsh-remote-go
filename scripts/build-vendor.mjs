@@ -4,7 +4,6 @@
 import { build } from 'esbuild'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import process from 'node:process'
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const outfile = path.join(root, 'vendor', 'ssh2.bundle.cjs')

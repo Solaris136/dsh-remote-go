@@ -3,7 +3,7 @@
  * The shapes mirror what ssh.js / probe.js / webapp.js return.
  */
 import { EventEmitter } from 'node:events'
-import { Readable, Duplex } from 'node:stream'
+import { Duplex } from 'node:stream'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -179,7 +179,6 @@ export async function makeTestService(overrides = {}) {
         bodyLength: 1024,
       })),
     adopt: overrides.adopt ?? (async () => null),
-    tailLog: async () => '',
     loadSshMaterial: async () => ({
       sshDir: '/home/test/.ssh',
       configText: 'Host test-host\n  HostName 2001:db8::1\n  User ubuntu\n',

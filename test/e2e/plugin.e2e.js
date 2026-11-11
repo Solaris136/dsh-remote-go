@@ -17,7 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import puppeteer from 'puppeteer-core'
@@ -27,13 +27,59 @@ const CONTROL_DIR = path.join(ROOT, 'e2e', 'control')
 const CONTROL_HOME = path.join(CONTROL_DIR, 'home')
 const DSH_BIN = path.join(CONTROL_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const ARTIFACTS = path.join(ROOT, 'e2e', 'artifacts')
+const REPORT_FILE = path.join(ARTIFACTS, 'plugin-e2e-report.json')
 const SSH_ADDRESS = process.env.E2E_SSH_ADDRESS || ''
 const KEEP_CONTROL = process.env.E2E_KEEP_CONTROL === '1'
 const API_HEADER = 'x-dsh-remote-go'
 
-/** @param {string} file */
-async function readJson(file) {
-  return JSON.parse(await readFile(file, 'utf8'))
+/**
+ * Report strings come from the remote page (titles, console lines, HTML
+ * excerpts) and are untrusted by definition. They are evidence, not input:
+ * keep them bounded and free of control characters so the artefact stays
+ * greppable and cannot inject terminal escapes into a CI log.
+ * @param {unknown} value - any report value.
+ * @param {number} limit - maximum retained length.
+ * @returns {string} printable, truncated text.
+ */
+function evidenceText(value, limit = 2000) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .slice(0, limit)
+}
+
+/**
+ * Deep-copy the report, passing every string through {@link evidenceText}.
+ * @param {unknown} value - report node.
+ * @param {number} depth - recursion guard.
+ * @returns {unknown} sanitized copy.
+ */
+function sanitizeEvidence(value, depth = 0) {
+  if (depth > 8) return '[depth-limit]'
+  if (typeof value === 'string') return evidenceText(value)
+  if (Array.isArray(value)) return value.map((entry) => sanitizeEvidence(entry, depth + 1))
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const [key, entry] of Object.entries(value)) out[evidenceText(key, 120)] = sanitizeEvidence(entry, depth + 1)
+    return out
+  }
+  return value
+}
+
+/**
+ * Write the evidence report to its fixed destination.
+ *
+ * The path is a constant under `e2e/artifacts/`: it is never derived from page,
+ * network or SSH data, and the resolved target is re-checked against the
+ * artifacts directory. The untrusted part is only the *content*, which is
+ * sanitized above — so remote data cannot steer where, or whether, we write.
+ * @param {unknown} report - evidence payload.
+ * @returns {Promise<void>} resolves once the file is written.
+ */
+async function writeReport(report) {
+  const target = path.resolve(REPORT_FILE)
+  const artifacts = path.resolve(ARTIFACTS) + path.sep
+  if (!target.startsWith(artifacts)) throw new Error(`refusing to write outside the artifacts directory: ${target}`)
+  await writeFile(target, `${JSON.stringify(sanitizeEvidence(report), null, 2)}\n`, 'utf8')
 }
 
 function resolveChrome() {
@@ -654,11 +700,7 @@ test(
           /* control may already be gone */
         }
       }
-      await writeFile(
-        path.join(ARTIFACTS, 'plugin-e2e-report.json'),
-        `${JSON.stringify(report, null, 2)}\n`,
-        'utf8',
-      ).catch(() => {})
+      await writeReport(report).catch(() => {})
       if (browser) await browser.close().catch(() => {})
       if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
     }

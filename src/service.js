@@ -18,7 +18,7 @@ import { remoteLayout } from './layout.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { findKnownHostEntries, parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import { probeRemote, describeProbeCapabilities } from './probe.js'
-import { executeBootstrap, planBootstrap, summarizePlan, verifyInstalledVersion } from './bootstrap.js'
+import { executeBootstrap, planBootstrap, verifyInstalledVersion } from './bootstrap.js'
 import { discoverSshAliases as discoverAliasesFromConfig, resolveDestination } from './ssh-config.js'
 import { parseSshConfig } from './ssh-config.js'
 import { SshConnection } from './ssh.js'
@@ -29,7 +29,6 @@ import {
   remoteHttpStatus,
   startRemoteWeb,
   stopRemoteWeb,
-  tailRemoteLog,
   waitForRemoteUi,
 } from './webapp.js'
 import { nowIso, randomDelay } from './util.js'
@@ -74,7 +73,6 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  *   waitUi?: typeof waitForRemoteUi,
  *   exchange?: typeof exchangeTokenOverTunnel,
  *   adopt?: typeof adoptRemoteWeb,
- *   tailLog?: typeof tailRemoteLog,
  *   loadSshMaterial?: typeof loadLocalSshMaterial,
  *   resolveTarget?: typeof resolveTargetVersion,
  *   mirrorStore?: import('./mirror-store.js').MirrorStore,
@@ -130,7 +128,6 @@ export class RemoteGoService extends EventEmitter {
     this.waitUi = options.waitUi ?? waitForRemoteUi
     this.exchange = options.exchange ?? exchangeTokenOverTunnel
     this.adopt = options.adopt ?? adoptRemoteWeb
-    this.tailLog = options.tailLog ?? tailRemoteLog
     this.loadSshMaterial = options.loadSshMaterial ?? loadLocalSshMaterial
     this.resolveTarget = options.resolveTarget ?? resolveTargetVersion
     this.mirrorStore = options.mirrorStore ?? new MirrorStore({ dir: options.store.dir, logger: this.logger })
@@ -1430,7 +1427,6 @@ export class RemoteGoService extends EventEmitter {
     let remoteStarted = false
     try {
       const target = await this.#resolveTargetForRuntime(runtime)
-      const settings = this.store.getSettings()
       this.#phase(runtime, 'ssh', 'ssh-connecting', { host: runtime.entry.name })
       await this.#openTransport(runtime, target)
       this.#log(
@@ -1537,7 +1533,6 @@ export class RemoteGoService extends EventEmitter {
       this.#phase(runtime, 'verifying', 'verifying')
       const ui = await this.waitUi(runtime.ssh, webInfo.port, { attempts: 20, intervalMs: 500 })
       if (!ui.ok) {
-        const log = await this.tailLog(runtime.ssh, layout, 60)
         throw errors.remoteUiUnreachable({
           zh: `远端 DSH 的本地 127.0.0.1:${webInfo.port} 没有响应（HTTP ${ui.status ?? '无'}）。`,
           en: `The remote DSH on 127.0.0.1:${webInfo.port} did not respond (HTTP ${ui.status ?? 'none'}).`,
