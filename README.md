@@ -4,7 +4,6 @@
 
 [![CI](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml)
-[![GitHub release](https://img.shields.io/github/v/release/Solaris136/dsh-remote-go?sort=semver)](https://github.com/Solaris136/dsh-remote-go/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](#版本与兼容)
 [![DSH](https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1-blueviolet.svg)](#版本与兼容)
@@ -13,7 +12,7 @@
 inside a full-page panel of your local DSH over SSH. The remote DSH web UI is embedded from the loopback tunnel
 (same-site iframe); hosts are managed in **Settings → Remote hosts**. The local half only does four things:
 host inventory, SSH connection plus tunnel, panel hosting, and connection status/diagnostics. Current version:
-**1.0.0** (a **thin client**; no remote-side components are installed beyond vanilla DSH).
+**0.1.0** (a **thin client**, not yet published to npm; no remote-side components are installed beyond vanilla DSH).
 
 ## 目录
 
@@ -53,7 +52,7 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 
 ## 当前状态与验收证据
 
-**1.0.0**：设计文档 v0.6 中定义的 V1.0 范围已全部实现，含单元测试与真实测试主机上的端到端验收。
+**0.1.0**（尚未发布到 npm）：设计文档 v0.6 中定义的 V1.0 范围已全部实现，含单元测试与真实测试主机上的端到端验收。
 
 | 证据 | 结果 |
 |---|---|
@@ -74,24 +73,24 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 
 | 能力 | 状态 |
 |---|---|
-| **设置页「远程主机」**：主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ 1.0.0 |
-| **面板左侧「工作区」栏**：本地工作区 + 按远端分组 / 远端工作区，点击本地工作区回本地会话 | ✅ 1.0.0 |
-| 不占用侧边栏入口（入口在设置页与面板内） | ✅ 1.0.0 |
-| 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ 1.0.0 |
-| SSH 别名自动发现（`~/.ssh/config`）、known_hosts 只读解析 | ✅ 1.0.0 |
-| 主机指纹：首次确认 / 记录 / 变化强提示 / strict 策略 | ✅ 1.0.0 |
-| 认证：SSH Agent / 密钥文件 / 一次性密码（不落盘） | ✅ 1.0.0 |
-| 跳板机（跳板 SSH → forwardOut → 目标 SSH） | ✅ 1.0.0 |
-| 全局面板整页呈现远端 DSH（同站 loopback iframe） | ✅ 1.0.0 |
-| 视窗工具条：状态点、重连、刷新、切主机、新窗口打开、返回 | ✅ 1.0.0 |
-| 连接状态 / 分阶段进度 / 断线自动重连 | ✅ 1.0.0 |
-| 诊断检查表（9 项）+ 复制脱敏诊断信息 | ✅ 1.0.0 |
-| 远端环境自举 T0/T0-local/T1/T2/T3（T4 离线包为 V1.1 预留） | ✅ 1.0.0 |
-| 版本一致性：目标版本 = 本机 DSH 版本，不一致不静默混用 | ✅ 1.0.0 |
-| 远端存活策略：保持运行 / 退出即停 / 空闲停止（按主机） | ✅ 1.0.0 |
-| 隧道收养（本地重启后复用仍在运行的远端实例） | ✅ 1.0.0 |
-| 设置（窗口/SSH 默认值/自动重连/指纹策略/保存令牌开关/自举参数） | ✅ 1.0.0 |
-| 双语界面（中文 / English） | ✅ 1.0.0 |
+| **设置页「远程主机」**：主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ 0.1.0 |
+| **面板左侧「工作区」栏**：本地工作区 + 按远端分组 / 远端工作区，点击本地工作区回本地会话 | ✅ 0.1.0 |
+| 不占用侧边栏入口（入口在设置页与面板内） | ✅ 0.1.0 |
+| 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ 0.1.0 |
+| SSH 别名自动发现（`~/.ssh/config`）、known_hosts 只读解析 | ✅ 0.1.0 |
+| 主机指纹：首次确认 / 记录 / 变化强提示 / strict 策略 | ✅ 0.1.0 |
+| 认证：SSH Agent / 密钥文件 / 一次性密码（不落盘） | ✅ 0.1.0 |
+| 跳板机（跳板 SSH → forwardOut → 目标 SSH） | ✅ 0.1.0 |
+| 全局面板整页呈现远端 DSH（同站 loopback iframe） | ✅ 0.1.0 |
+| 视窗工具条：状态点、重连、刷新、切主机、新窗口打开、返回 | ✅ 0.1.0 |
+| 连接状态 / 分阶段进度 / 断线自动重连 | ✅ 0.1.0 |
+| 诊断检查表（9 项）+ 复制脱敏诊断信息 | ✅ 0.1.0 |
+| 远端环境自举 T0/T0-local/T1/T2/T3（T4 离线包为 V1.1 预留） | ✅ 0.1.0 |
+| 版本一致性：目标版本 = 本机 DSH 版本，不一致不静默混用 | ✅ 0.1.0 |
+| 远端存活策略：保持运行 / 退出即停 / 空闲停止（按主机） | ✅ 0.1.0 |
+| 隧道收养（本地重启后复用仍在运行的远端实例） | ✅ 0.1.0 |
+| 设置（窗口/SSH 默认值/自动重连/指纹策略/保存令牌开关/自举参数） | ✅ 0.1.0 |
+| 双语界面（中文 / English） | ✅ 0.1.0 |
 | 沉浸模式 / 本机通知 / 远端设置管理 / 离线包自举（T4） | ⏳ V1.1+ |
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。
@@ -106,15 +105,18 @@ dsh plugin --profile web add /absolute/path/to/dsh-remote-go
 
 或在 DSH 的 **Settings → Plugins** 里以插件包目录安装。安装后刷新页面，打开 **设置 → 远程主机** 即可管理服务器。
 
-### 方式 2：npm / 插件市场
+### 方式 2：npm / 插件市场（尚未发布）
 
 ```bash
 dsh plugin --profile web add dsh-remote-go
 ```
 
-> npm 包由 `.github/workflows/release.yml` 在 `v*` 标签上发布（需要仓库 secret `NPM_PUBLISH_TOKEN`）。在此之前可直接用
-> [Releases](https://github.com/Solaris136/dsh-remote-go/releases) 里附带的 `.tgz` 安装：
-> `dsh plugin --profile web add ./dsh-remote-go-<version>.tgz`。
+> 该命令在包发布到 npm 之后才可用；当前**尚未发布**。现在想按发布物验证，可以本地打包后安装：
+>
+> ```bash
+> pnpm pack                                              # 产出 dsh-remote-go-0.1.0.tgz
+> dsh plugin --profile web add ./dsh-remote-go-0.1.0.tgz
+> ```
 
 发布流程见 [docs/publish.md](docs/publish.md)；索引条目由 `pnpm run market:entry` 生成，并用官方
 `dsh-plugin-market-index` 校验（`pnpm run market:check`）。
@@ -177,12 +179,13 @@ dsh plugin --profile web add dsh-remote-go
 
 | 版本 | 状态 | 说明 |
 |---|---|---|
-| 1.x | 支持 | 当前主线，SemVer |
-| < 1.0.0 | 不支持 | 1.0.0 之前的开发版本不再维护 |
+| `0.1.x` | 开发中（未发布） | 当前版本；`0.x` 阶段不承诺兼容性 |
+| 已发布版本 | 暂无 | 尚未发布到 npm，也无对应 tag/release |
 
 - 兼容性由 `package.json` 的 `engines.dsh`（`>=0.2.2-rc.1`）与 `engines.node`（`>=24`）声明，安装和运行都会校验。
 - 插件与远端 DSH 的版本必须一致（见「架构与关键决策」第 4 条）；不一致时会显式提示，不静默混用。
-- 每次发布都会更新 [CHANGELOG.md](CHANGELOG.md)，发布动作由 `.github/workflows/release.yml` 在 `v*` 标签上执行。
+- 变更记录见 [CHANGELOG.md](CHANGELOG.md)。发布流程（npm + 插件市场）已就绪，但当前**尚未执行**；
+  发布动作由 `.github/workflows/release.yml` 在 `v*` 标签上执行。
 
 ## 开发与测试
 

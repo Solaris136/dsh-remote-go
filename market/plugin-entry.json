@@ -11,8 +11,8 @@
   "metadata": { "keywords": ["deepseek", "harness", "dsh", "dsh-plugin", "remote", "ssh", "remote-development"] },
   "versions": [
     {
-      "version": "1.0.0",
-      "publishTimestamp": 1794370353,
+      "version": "0.1.0",
+      "publishTimestamp": 1794371352,
       "source": { "type": "npm" },
       "engines": { "dsh": ">=0.2.2-rc.1" }
     }

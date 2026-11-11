@@ -45,7 +45,7 @@ pnpm run test:e2e
 5. 提交并推送：`chore(release): v<x.y.z>`。
 6. 打标签并推送标签：`git tag -a v<x.y.z> -m "v<x.y.z>"` → `git push origin v<x.y.z>`。
 
-`release.yml` 会校验标签与 `package.json` 版本严格相等（`v1.0.0` ↔ `1.0.0`），不一致直接失败，避免发错版本。
+`release.yml` 会校验标签与 `package.json` 版本严格相等（例如 `v0.1.0` ↔ `0.1.0`），不一致直接失败，避免发错版本。
 
 ## 2. 通过 GitHub Actions 发布（推荐）
 
@@ -155,7 +155,7 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 - [ ] 市场索引条目可解析、可一键安装（路径 A 或 B）
 - [ ] 升级后回滚路径：`dsh plugin --profile web add dsh-remote-go@<旧版本>` 可用
 
-## 8. 历史验证记录（1.0.0 之前）
+## 8. 历史验证记录（0.1.0 之前）
 
 以下结果在维护者机器上验证过，作为发布路径的既有证据保留；新版本以 CI 与 `pnpm run verify` 为准。
 
