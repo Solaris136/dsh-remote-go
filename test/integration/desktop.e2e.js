@@ -37,6 +37,19 @@ import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
 import {
+  LOOPBACK_IFRAME,
+  assertBlockedIframe,
+  assertFrameRefresh,
+  assertPanelToolbar,
+  connectSimulatedHost,
+  describePanel,
+  openRemotePanel,
+  startSimulatedRemote,
+  stubNonLoopbackIframeUrl,
+  switchPanelHost,
+  waitForRemoteFrame,
+} from './panel-support.js'
+import {
   isWindows,
   makeTempRoot,
   packPlugin,
@@ -446,6 +459,22 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
   }
 }
 
+/**
+ * Run one panel assertion and, on failure, append the panel's observable state to
+ * the message: a timeout with no iframe src or toolbar dump is undiagnosable from
+ * a CI log alone.
+ * @param {import('puppeteer-core').Page} page
+ * @param {() => Promise<any>} task
+ */
+async function withPanelDiagnostics(page, task) {
+  try {
+    return await task()
+  } catch (error) {
+    const state = await describePanel(page).catch(() => null)
+    throw new Error(`${error?.message ?? error} — panel: ${JSON.stringify(state)}`)
+  }
+}
+
 test('the desktop shell renders the plugin settings with legible buttons', { timeout: 1_200_000 }, async (t) => {
   if (!isWindows) {
     skipOrFail(t, 'the desktop installer exists for Windows and macOS only; there is no Linux build')
@@ -481,6 +510,10 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
   let page = null
   /** @type {any} */
   let lightMeasurement = null
+  /** @type {string | null} */
+  let simulatedHostId = null
+  /** @type {Awaited<ReturnType<typeof startSimulatedRemote>> | null} */
+  let sim = null
   /** @type {string[]} */
   const consoleErrors = []
   const onSignal = (signal) => {
@@ -574,6 +607,60 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       assert.notEqual(dark.sectionBackground, lightMeasurement.sectionBackground, 'the section did not switch theme')
     })
 
+    await t.test('the remote panel embeds the remote UI in a loopback iframe', async () => {
+      await withPanelDiagnostics(page, async () => {
+        // Same simulated remote host as the web suite: a real connect through the
+        // plugin's own API, then the panel is opened the way a user opens it.
+        sim = await startSimulatedRemote({ stateFile: path.join(tempRoot, 'sim', 'sim.state.json') })
+        const host = await connectSimulatedHost(page, { hostName: 'simulated-remote', sshPort: sim.state.sshPort })
+        simulatedHostId = host.hostId
+        assert.equal(host.host.status, 'connected')
+        await openRemotePanel(page, { hostId: host.hostId })
+        const frame = await waitForRemoteFrame(page)
+        assert.equal(frame.ready, 'complete', 'the iframe document never reached a ready state')
+        assert.equal(frame.frameTitle, 'simulated remote DSH')
+        const iframeSrcs = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
+        assert.ok(iframeSrcs.length >= 1, 'the panel mounted no iframe')
+        for (const src of iframeSrcs) assert.match(src, LOOPBACK_IFRAME, `non-loopback iframe src: ${src}`)
+      })
+    })
+
+    await t.test('the panel toolbar affords reconnect, refresh, open-in-new-window and address hiding', async () => {
+      await withPanelDiagnostics(page, async () => {
+        const toolbar = await assertPanelToolbar(page)
+        // Print the labels that actually matched: the log then proves which locale
+        // branch this run exercised instead of leaving it to inference.
+        console.log(`[desktop-e2e] panel toolbar labels: ${JSON.stringify(toolbar.labels)}`)
+        assert.match(toolbar.address, /127\.0\.0\.1:\d+/)
+        assert.equal(toolbar.hidden, '••••••')
+        const refreshed = await assertFrameRefresh(page)
+        assert.match(refreshed.iframeSrc, LOOPBACK_IFRAME)
+      })
+    })
+
+    await t.test('a non-loopback iframe URL is refused instead of embedded', async () => {
+      await withPanelDiagnostics(page, async () => {
+        assert.ok(simulatedHostId, 'the simulated host was not connected')
+        // A second connected host gives the toolbar's host switcher something to
+        // switch to; the switch is what makes the client fetch `/open` again (the
+        // client caches that URL per viewport mount by design).
+        const second = await connectSimulatedHost(page, {
+          hostName: 'simulated-remote-b',
+          sshPort: sim.state.sshPort,
+        })
+        const guard = await stubNonLoopbackIframeUrl(page)
+        try {
+          const blocked = await assertBlockedIframe(page, {
+            intercepted: () => guard.calls(),
+            forceRefetch: () => switchPanelHost(page, { hostId: second.hostId, hostName: 'simulated-remote-b' }),
+          })
+          assert.equal(blocked.panelIframe, null, 'a blocked URL produced an iframe')
+        } finally {
+          await guard.disable()
+        }
+      })
+    })
+
     await t.test('the shell logged no console errors while rendering the section', async () => {
       assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
     })
@@ -588,6 +675,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
     })
     throw error
   } finally {
+    if (sim) await sim.stop()
     if (browser) await browser.disconnect().catch(() => {})
     if (app) await app.stop()
     process.removeListener('SIGINT', onSignal)
