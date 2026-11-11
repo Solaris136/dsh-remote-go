@@ -40,9 +40,19 @@ import { normalizeVersion, versionsEqual } from './version.js'
  *   mirroredAt: string | null,
  *   status: MirrorStatus,
  * }} MirrorDescriptor
- * @typedef {{ owner: string, acquiredAt: number, renewedAt: number, expiresAt: number }} MirrorLease
+ * @typedef {{ owner: string, acquiredAt: number, renewedAt: number, expiresAt: number, epoch: number }} MirrorLease
+ * @typedef {{ seq: number, kept: string, lost: string }} MirrorConflict
  * @typedef {{ seq: number } & Record<string, any>} MirrorEvent
- * @typedef {{ cursor: number, events?: MirrorEvent[], lease?: MirrorLease | null, status?: MirrorStatus }} MirrorState
+ * @typedef {{
+ *   cursor: number,
+ *   events?: MirrorEvent[],
+ *   lease?: MirrorLease | null,
+ *   status?: MirrorStatus,
+ *   epoch?: number,
+ *   fencedWriter?: string,
+ *   conflicts?: MirrorConflict[],
+ *   conflictCount?: number,
+ * }} MirrorState
  * @typedef {{ code: string, detail: { zh: string, en: string } }} MirrorReason
  */
 
@@ -63,6 +73,20 @@ export const MIRROR_ID_PREFIX = 'mirror_'
 
 /** Remote event sequence numbers are 1-based (see `applyEvents`). */
 const FIRST_EVENT_SEQ = 1
+
+/**
+ * How many conflict reports one mirror keeps.
+ *
+ * Deliberately small: conflicts are an anomaly, not a log. The *count* is unbounded (a
+ * single number) so "how many were seen" is still answerable after the list is trimmed.
+ */
+export const MIRROR_CONFLICT_LIMIT = 20
+
+/** Characters of each side kept in a conflict summary. */
+const CONFLICT_TEXT_LIMIT = 120
+
+/** Default lease lifetime; the heartbeat renews well inside it. */
+export const MIRROR_LEASE_TTL_MS = 30_000
 
 // ---------------------------------------------------------------- descriptor
 
@@ -209,6 +233,16 @@ export function planMirror(input = {}) {
         // Carried forward: `planMirror` only knows the directory, so the read-only
         // flag set by the L2 replay must not be cleared on the next sync.
         readOnly: previous ? previous.readOnly === true : false,
+        // L3 prerequisite (§6.2): the fencing state belongs to the previous sync, not to the
+        // directory read. Carrying it forward is what makes the epoch survive a re-plan and
+        // keeps a fenced mirror fenced until it legitimately re-acquires.
+        epoch: previous?.epoch ?? 0,
+        lease: previous?.lease ?? null,
+        writable: previous?.writable === true,
+        fencedEpoch: previous?.fencedEpoch ?? null,
+        fencedWriter: previous?.fencedWriter ?? null,
+        conflicts: previous?.conflicts ?? [],
+        conflictCount: previous?.conflictCount ?? 0,
       })
     }
   }
@@ -256,6 +290,19 @@ export function normalizeMirrorDescriptor(raw) {
     // L2: a replayed mirror is a read-only projection until L3 forwards input
     // (design §10 P1 asks for the marker; the client renders it from this flag).
     readOnly: record.readOnly === true,
+    // L3 prerequisite (design §6.2): the fencing state must survive a restart, otherwise a
+    // restarted writer would come back with a stale epoch and believe it may write.
+    epoch: nonNegativeInteger(record.epoch) ?? 0,
+    lease: normalizeLease(record.lease),
+    writable: record.writable === true,
+    fencedEpoch: nonNegativeInteger(record.fencedEpoch) ?? null,
+    fencedWriter: textOrNull(record.fencedWriter),
+    conflicts: Array.isArray(record.conflicts)
+      ? capConflicts(
+          record.conflicts.filter(isMirrorConflict).map((/** @type {MirrorConflict} */ conflict) => ({ ...conflict })),
+        )
+      : [],
+    conflictCount: nonNegativeInteger(record.conflictCount) ?? 0,
   }
 }
 
@@ -352,7 +399,8 @@ export function nextCursor(state) {
  */
 export function applyEvents(state, events) {
   const base = normalizeMirrorState(state)
-  const fresh = normalizeEvents(events).filter((event) => event.seq > base.cursor)
+  const normalized = normalizeEventsDetailed(events)
+  const fresh = normalized.events.filter((event) => event.seq > base.cursor)
   /** @type {MirrorEvent[]} */
   const applied = []
   let cursor = base.cursor
@@ -369,7 +417,45 @@ export function applyEvents(state, events) {
   if (Array.isArray(base.events)) {
     out.events = applied.length > 0 ? [...base.events, ...applied.map((event) => ({ ...event }))] : [...base.events]
   }
-  return { state: out, backfill, applied: applied.length }
+  // Conflict reporting (design §6.2): a same-`seq` record whose payload differs from the one
+  // applied used to be swallowed silently. Keep-first is still the default *policy*, but the
+  // loss is now reported so a caller/test can prove it happened.
+  //
+  // Only conflicts for records **this call actually applied** are reported. That is what
+  // makes the count idempotent: L2 re-reads the whole remote log every sync (§11 #7), so a
+  // conflict on a `seq` already behind the cursor was already reported when that record was
+  // applied — counting it again would inflate `conflictCount` on every sync.
+  const appliedSeqs = new Set(applied.map((event) => event.seq))
+  const freshConflicts = normalized.conflicts.filter((conflict) => appliedSeqs.has(conflict.seq))
+  if (freshConflicts.length > 0) {
+    // Merge by digest, not by position: a re-read after a failed append (cursor did not
+    // advance) legitimately re-applies the same seq, and the same conflict must not be
+    // counted twice just because it came back.
+    const seen = new Set((base.conflicts ?? []).map(conflictDigest))
+    const added = freshConflicts.filter((conflict) => !seen.has(conflictDigest(conflict)))
+    if (added.length > 0) {
+      out.conflicts = capConflicts([...(base.conflicts ?? []), ...added])
+      out.conflictCount = (base.conflictCount ?? 0) + added.length
+    }
+  }
+  return {
+    state: out,
+    backfill,
+    applied: applied.length,
+    // The caller-facing list is capped (it ends up in the summary), while the *count* above
+    // stays exact so "how many were there" never tracks the visible window instead of reality.
+    conflicts: capConflicts(freshConflicts),
+    conflictCount: out.conflictCount ?? 0,
+  }
+}
+
+/**
+ * A conflict's identity for de-duplication: the two sides plus the seq.
+ * @param {MirrorConflict} conflict
+ * @returns {string}
+ */
+function conflictDigest(conflict) {
+  return `${conflict.seq}\u0000${conflict.kept}\u0000${conflict.lost}`
 }
 
 /**
@@ -442,6 +528,7 @@ export function acquireLease(state, options = {}) {
       reason: 'lease-held-by-other',
       holder: current.owner,
       expiresAt: current.expiresAt,
+      epoch: current.epoch,
       state: base,
       lease: current,
       readOnly: true,
@@ -449,13 +536,27 @@ export function acquireLease(state, options = {}) {
   }
   const renewed = current !== null && current.owner === owner && current.expiresAt > now
   const tookOver = current !== null && current.owner !== owner && !renewed
+  // Fencing token (design §6.2): every *grant* advances the epoch, but a renewal of the
+  // same live lease keeps it — the writer's authority did not change, so its outstanding
+  // writes must stay valid. The high-water mark lives on the state, not on the lease, so
+  // an expired/released lease can never let the epoch regress (see `nextEpoch`).
+  const epoch = renewed ? current.epoch : nextEpoch(base, current)
   const lease = {
     owner,
     acquiredAt: renewed ? current.acquiredAt : now,
     renewedAt: now,
     expiresAt: now + ttlMs,
+    epoch,
   }
-  return { ok: true, renewed, tookOver, lease, state: { ...base, lease }, readOnly: false }
+  return {
+    ok: true,
+    renewed,
+    tookOver,
+    epoch,
+    lease,
+    state: { ...base, lease, epoch: Math.max(base.epoch ?? 0, epoch) },
+    readOnly: false,
+  }
 }
 
 /**
@@ -509,7 +610,14 @@ export function renewLease(state, options = {}) {
     }
   }
   const lease = { ...current, renewedAt: now, expiresAt: now + ttlMs }
-  return { ok: true, lease, state: { ...base, lease }, readOnly: false }
+  return {
+    ok: true,
+    // A renewal is the same lease, so the fencing token does not move.
+    epoch: lease.epoch,
+    lease,
+    state: { ...base, lease, epoch: Math.max(base.epoch ?? 0, lease.epoch) },
+    readOnly: false,
+  }
 }
 
 /**
@@ -553,6 +661,190 @@ export function expireLease(state, options = {}) {
     return { state: base, expired: false, lease: current, readOnly: false }
   }
   return { state: { ...base, lease: null }, expired: true, lease: current, readOnly: true }
+}
+
+// -------------------------------------------------------------------- fencing
+
+/**
+ * The next fencing token: strictly greater than anything this mirror has ever seen.
+ *
+ * The high-water mark is `state.epoch`, which outlives the lease itself. That is what
+ * makes a *stale* writer unable to come back: releasing, expiring or taking over a lease
+ * never reuses a number, so a writer holding epoch N stays fenced even after the lease
+ * that issued N is gone (and after a restart, because `state.epoch` is persisted).
+ *
+ * @param {MirrorState} state
+ * @param {MirrorLease | null} [lease]
+ * @returns {number}
+ */
+export function nextEpoch(state, lease = null) {
+  const base = normalizeMirrorState(state)
+  const high = Math.max(base.epoch ?? 0, lease?.epoch ?? 0)
+  return high + 1
+}
+
+/**
+ * The epoch a writer must present for its writes to be accepted right now.
+ * @param {unknown} state
+ * @returns {number}
+ */
+export function currentEpoch(state) {
+  const base = normalizeMirrorState(state)
+  return Math.max(base.epoch ?? 0, base.lease?.epoch ?? 0)
+}
+
+/**
+ * Whether `owner` may append at `epoch` (design §6.2), i.e. the fencing check every write
+ * goes through.
+ *
+ * Refusal reasons are typed so the caller can annotate the mirror:
+ * - `stale-epoch` — the write carries an epoch below the high-water mark. This is the
+ *   split-brain case: the writer was fenced while it was partitioned and must stop, even
+ *   if its lease still looks unexpired locally.
+ * - `lease-held-by-other` / `lease-expired` / `no-lease` — no authority at all.
+ *
+ * An epoch *above* the high-water mark is accepted and raises the mark: the only way to
+ * learn about a newer grant is to be told about it, and the number is the truth.
+ *
+ * @param {unknown} state
+ * @param {{ owner?: unknown, epoch?: unknown, now?: unknown }} [options]
+ * @returns {{
+ *   ok: boolean,
+ *   reason?: 'invalid-write' | 'stale-epoch' | 'lease-held-by-other' | 'lease-expired' | 'no-lease',
+ *   epoch: number,
+ *   currentEpoch: number,
+ *   holder?: string,
+ *   state: MirrorState,
+ *   readOnly: boolean,
+ * }}
+ */
+export function assertWritable(state, options = {}) {
+  const base = normalizeMirrorState(state)
+  const owner = textOrNull(options.owner)
+  const epoch = finiteNumber(options.epoch)
+  const now = finiteNumber(options.now)
+  const high = currentEpoch(base)
+  if (owner === null || epoch === null || now === null || epoch < 0) {
+    return { ok: false, reason: 'invalid-write', epoch: high, currentEpoch: high, state: base, readOnly: true }
+  }
+  if (epoch < high) {
+    // Fenced: someone else owns a strictly newer epoch. Never write, never lower the mark.
+    return {
+      ok: false,
+      reason: 'stale-epoch',
+      epoch,
+      currentEpoch: high,
+      holder: base.lease?.owner,
+      state: base,
+      readOnly: true,
+    }
+  }
+  const lease = base.lease ?? null
+  if (lease === null) {
+    return { ok: false, reason: 'no-lease', epoch, currentEpoch: high, state: base, readOnly: true }
+  }
+  if (lease.owner !== owner) {
+    return {
+      ok: false,
+      reason: 'lease-held-by-other',
+      epoch,
+      currentEpoch: high,
+      holder: lease.owner,
+      state: base,
+      readOnly: true,
+    }
+  }
+  if (lease.expiresAt <= now) {
+    return {
+      ok: false,
+      reason: 'lease-expired',
+      epoch,
+      currentEpoch: high,
+      holder: lease.owner,
+      state: base,
+      readOnly: true,
+    }
+  }
+  // Accepted. A writer presenting a newer epoch than we know raises the mark, so the
+  // next stale write is recognised without waiting for a lease refresh.
+  const raised = epoch > (base.epoch ?? 0) ? { ...base, epoch } : base
+  return { ok: true, epoch, currentEpoch: Math.max(high, epoch), state: raised, readOnly: false }
+}
+
+/**
+ * Compare the lease authority the remote reports with ours (design §6.2/§7).
+ *
+ * A different writer id or an epoch above ours is a **fencing event**: we have been
+ * overtaken, so the local side stops writing and keeps the mirror readable. Reporting is
+ * typed and idempotent per epoch — the caller emits one notice per occurrence instead of
+ * one per sync (`fenced: false` means "already known, stay quiet").
+ *
+ * @param {unknown} state
+ * @param {{ writer?: unknown, epoch?: unknown, now?: unknown }} [report]
+ * @returns {{
+ *   fenced: boolean,
+ *   changed: boolean,
+ *   reason?: 'fenced-by-newer-epoch' | 'writer-changed',
+ *   holder?: string,
+ *   epoch: number,
+ *   state: MirrorState,
+ *   readOnly: boolean,
+ * }}
+ */
+export function observeRemoteLease(state, report = {}) {
+  const base = normalizeMirrorState(state)
+  const writer = textOrNull(report.writer)
+  const epoch = finiteNumber(report.epoch)
+  const high = currentEpoch(base)
+  // No usable report: nothing is known, so nothing changes and nothing is announced.
+  if (writer === null && epoch === null) {
+    return { fenced: false, changed: false, epoch: high, state: base, readOnly: false }
+  }
+  const theirs = epoch === null ? 0 : epoch
+  const ours = base.lease ?? null
+  if (theirs > high) {
+    // They hold a newer grant. Adopt the number (so we are fenced from now on), **drop our
+    // own lease** — a fenced writer must not be able to renew the epoch it just lost — and
+    // report the takeover; only a *new* number is an occurrence.
+    return {
+      fenced: true,
+      changed: true,
+      reason: 'fenced-by-newer-epoch',
+      holder: writer ?? ours?.owner,
+      epoch: theirs,
+      state: { ...base, epoch: theirs, lease: null, fencedWriter: writer ?? ours?.owner ?? null },
+      readOnly: true,
+    }
+  }
+  if (theirs === high && writer !== null && ours !== null && ours.owner !== writer) {
+    // Same epoch, different writer. Still fenced, and again our lease is no longer ours to
+    // hold. `changed` is only true the first time this writer is seen at this epoch —
+    // otherwise every sync would announce it again.
+    const alreadySeen = base.fencedWriter === writer
+    return {
+      fenced: true,
+      changed: !alreadySeen,
+      reason: 'writer-changed',
+      holder: writer,
+      epoch: theirs,
+      state: alreadySeen ? base : { ...base, lease: null, fencedWriter: writer },
+      readOnly: true,
+    }
+  }
+  if (theirs === high && ours === null && base.fencedWriter === writer) {
+    // We already dropped our lease for this writer: still fenced (we hold nothing), but the
+    // occurrence was reported the first time.
+    return {
+      fenced: true,
+      changed: false,
+      reason: 'writer-changed',
+      holder: writer,
+      epoch: theirs,
+      state: base,
+      readOnly: true,
+    }
+  }
+  return { fenced: false, changed: false, epoch: high, state: base, readOnly: false }
 }
 
 // ------------------------------------------------------------------- levels
@@ -787,7 +1079,35 @@ function normalizeMirrorState(state) {
   }
   if (source.lease !== undefined) out.lease = normalizeLease(source.lease)
   if (source.status === 'remote-deleted') out.status = 'remote-deleted'
+  // The fencing high-water mark outlives the lease: it is what stops an epoch from being
+  // reused after expiry/release, so it must survive normalisation (and therefore a
+  // restart, since it is persisted with the descriptor).
+  const epoch = nonNegativeInteger(source.epoch)
+  if (epoch !== null) out.epoch = epoch
+  if (Array.isArray(source.conflicts)) {
+    out.conflicts = capConflicts(
+      source.conflicts.filter(isMirrorConflict).map((/** @type {MirrorConflict} */ conflict) => ({ ...conflict })),
+    )
+  }
+  const conflictCount = nonNegativeInteger(source.conflictCount)
+  if (conflictCount !== null) out.conflictCount = conflictCount
+  const fencedWriter = textOrNull(source.fencedWriter)
+  if (fencedWriter !== null) out.fencedWriter = fencedWriter
   return out
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is MirrorConflict}
+ */
+function isMirrorConflict(value) {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    nonNegativeInteger(/** @type {any} */ (value).seq) !== null &&
+    typeof (/** @type {any} */ (value).kept === 'string' && typeof (/** @type {any} */ (value).lost) === 'string')
+  )
 }
 
 /**
@@ -799,21 +1119,95 @@ function isMirrorEvent(value) {
 }
 
 /**
- * Sort, dedupe and validate a batch of remote events.
+ * Sort, dedupe and validate a batch of remote events, **reporting** duplicate-`seq`
+ * payload conflicts instead of dropping them silently.
+ *
+ * Keep-first stays the policy (the first record for a seq is the one that gets applied),
+ * but every later record that disagrees is described in `conflicts` with a bounded
+ * summary of both sides. Identical duplicates are not conflicts — a replayed batch is
+ * normal and must not look like data loss.
+ *
  * @param {unknown} events
- * @returns {MirrorEvent[]}
+ * @returns {{ events: MirrorEvent[], conflicts: MirrorConflict[] }}
  */
-function normalizeEvents(events) {
-  if (!Array.isArray(events)) return []
+function normalizeEventsDetailed(events) {
+  if (!Array.isArray(events)) return { events: [], conflicts: [] }
   /** @type {Map<number, MirrorEvent>} */
   const bySeq = new Map()
+  /** @type {MirrorConflict[]} */
+  const conflicts = []
   for (const entry of events) {
     if (!isMirrorEvent(entry)) continue
     const seq = nonNegativeInteger(entry.seq)
-    if (seq === null || seq < FIRST_EVENT_SEQ || bySeq.has(seq)) continue
-    bySeq.set(seq, entry)
+    if (seq === null || seq < FIRST_EVENT_SEQ) continue
+    const kept = bySeq.get(seq)
+    if (kept === undefined) {
+      bySeq.set(seq, entry)
+      continue
+    }
+    if (eventDigest(kept) !== eventDigest(entry)) {
+      conflicts.push({ seq, kept: eventDigest(kept), lost: eventDigest(entry) })
+    }
   }
-  return [...bySeq.values()].sort((left, right) => left.seq - right.seq)
+  const sorted = [...bySeq.values()].sort((left, right) => left.seq - right.seq)
+  // Not capped here: the *stored* history is capped (`capConflicts` when merging into the
+  // state), but the count of distinct conflicts in this batch must stay exact — capping
+  // first would make `conflictCount` under-report and let the counter track the visible
+  // window instead of reality. The list is bounded by the caller's batch anyway.
+  return { events: sorted, conflicts }
+}
+
+/**
+ * A bounded, stable fingerprint of an event for conflict reporting.
+ *
+ * Deliberately shallow: the report is for humans and tests, and must never copy an
+ * attachment or a large tool payload into the descriptor.
+ *
+ * The clipped preview alone is **not** a fingerprint — two payloads that differ only after
+ * the limit would look identical, which would hide the very conflict being reported. A
+ * short hash of the full text rides along so distinct payloads stay distinguishable while
+ * the preview stays readable.
+ * @param {MirrorEvent} event
+ * @returns {string}
+ */
+function eventDigest(event) {
+  const type = typeof event.type === 'string' ? event.type : 'unknown'
+  const data = event.data && typeof event.data === 'object' ? /** @type {any} */ (event.data) : null
+  const text =
+    data === null
+      ? ''
+      : typeof data.text === 'string'
+        ? data.text
+        : typeof data.content === 'string'
+          ? data.content
+          : typeof data.role === 'string'
+            ? data.role
+            : ''
+  const clipped = text.length > CONFLICT_TEXT_LIMIT ? `${text.slice(0, CONFLICT_TEXT_LIMIT)}…` : text
+  if (clipped === '') return type
+  return `${type}: ${clipped} #${shortHash(text)}`
+}
+
+/**
+ * A short stable digest, only used to keep clipped conflict previews distinguishable.
+ * @param {string} text
+ * @returns {string}
+ */
+function shortHash(text) {
+  let hash = 0
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0
+  }
+  return (hash >>> 0).toString(36).padStart(7, '0').slice(-7)
+}
+
+/**
+ * Trim a conflict list to the newest `MIRROR_CONFLICT_LIMIT` entries.
+ * @param {MirrorConflict[]} conflicts
+ * @returns {MirrorConflict[]}
+ */
+function capConflicts(conflicts) {
+  return conflicts.length <= MIRROR_CONFLICT_LIMIT ? conflicts : conflicts.slice(-MIRROR_CONFLICT_LIMIT)
 }
 
 /**
@@ -832,6 +1226,9 @@ function normalizeLease(raw) {
     acquiredAt,
     renewedAt: finiteNumber(record.renewedAt) ?? acquiredAt,
     expiresAt,
+    // A lease persisted before fencing existed has no epoch; it is treated as epoch 1 so
+    // an upgrade cannot leave a writer permanently fenced against its own old lease.
+    epoch: nonNegativeInteger(record.epoch) ?? 1,
   }
 }
 

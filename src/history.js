@@ -56,11 +56,6 @@ export const HISTORY_LIMITS = Object.freeze({
 /** Reasoning limits for the `sanitizeValue` projection of unknown record types. */
 const SANITIZE = Object.freeze({ depth: 3, maxKeys: 24, maxString: 500 })
 
-/**
- * Quote a value for a POSIX shell (same rule as `src/workspaces.js`).
- * @param {string} value
- * @returns {string}
- */
 function quote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`
 }
@@ -680,5 +675,8 @@ export function planHistoryWindow(input) {
     folded,
     gap: applied.backfill !== null,
     total: fresh.length,
+    // Same-`seq` payload conflicts (design §6.2), already bounded by `applyEvents`.
+    conflicts: applied.conflicts ?? [],
+    conflictCount: applied.conflictCount ?? 0,
   }
 }

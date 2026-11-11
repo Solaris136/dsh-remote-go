@@ -35,9 +35,21 @@ import {
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
 import { resolveTargetVersion } from './local-version.js'
-import { decideLevel, l1Capabilities, planMirror, reconcileMirrors } from './mirror.js'
+import {
+  MIRROR_LEASE_TTL_MS,
+  acquireLease,
+  assertWritable,
+  currentEpoch,
+  decideLevel,
+  l1Capabilities,
+  observeRemoteLease,
+  planMirror,
+  reconcileMirrors,
+  renewLease,
+} from './mirror.js'
 import { MirrorStore } from './mirror-store.js'
 import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow, recoveredCursor } from './history.js'
+import { fetchRemoteLease } from './lease.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
@@ -128,6 +140,10 @@ export class RemoteGoService extends EventEmitter {
     this.workspaceAdapter = options.workspaceAdapter ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.clock = options.clock ?? (() => Date.now())
+    // L3 prerequisite (design §6.2): every mirror write carries a fencing epoch, and the
+    // writer id identifies *which* local side holds it. Stable per host so a restart
+    // resumes its own lease instead of looking like a competing writer.
+    this.leaseTtlMs = options.leaseTtlMs ?? MIRROR_LEASE_TTL_MS
     /** @type {Map<string, any>} */
     this.runtimes = new Map()
     this.activeHostId = null
@@ -203,6 +219,18 @@ export class RemoteGoService extends EventEmitter {
     const runtime = this.runtimes.get(id)
     if (!runtime) throw errors.invalidInput('id', { zh: `未知主机 ${id}`, en: `Unknown host ${id}` })
     return runtime
+  }
+
+  /**
+   * The clock every lease decision reads.
+   *
+   * Injected (constructor `clock`) so expiry and fencing are testable without sleeping for
+   * real time — the tests advance a fake clock instead of waiting out a TTL.
+   * @returns {number} epoch milliseconds
+   */
+  #now() {
+    const value = typeof this.clock === 'function' ? this.clock() : Number.NaN
+    return Number.isFinite(value) ? value : Date.now()
   }
 
   #log(runtime, level, ...args) {
@@ -623,7 +651,21 @@ export class RemoteGoService extends EventEmitter {
     const settings = this.store.getSettings()
     const enabled = settings?.mirrorHistory !== false
     const maxEvents = Number(settings?.mirrorMaxEvents ?? 0)
-    const summary = { enabled, attempted: 0, applied: 0, appended: 0, folded: 0, skipped: 0, failures: [] }
+    const summary = {
+      enabled,
+      attempted: 0,
+      applied: 0,
+      appended: 0,
+      folded: 0,
+      skipped: 0,
+      /** Fencing events seen this sync (a stale writer refused to write). */
+      fenced: 0,
+      /** Same-`seq` payload conflicts reported by `applyEvents` (design §6.2). */
+      conflicts: 0,
+      /** The conflicting seqs, bounded by the caller's use of the plan's capped list. */
+      conflictSeqs: [],
+      failures: [],
+    }
     // §7: a host whose mirror was refused must not gain history. Returning the
     // descriptors untouched keeps whatever `planMirror` stamped (the mismatch reason)
     // instead of overwriting it with `level: 'L2', reason: null`.
@@ -655,6 +697,107 @@ export class RemoteGoService extends EventEmitter {
       }
       summary.attempted += 1
       try {
+        // ---- L3 prerequisite: fencing (design §6.2) --------------------------------
+        // Every write below is gated on a lease whose `epoch` is current. The gate runs
+        // before the remote read so a fenced writer does not even re-pull.
+        const writer = leaseWriterId(runtime.id)
+        const now = this.#now()
+        const fenceState = {
+          cursor: descriptor.cursor ?? 0,
+          epoch: descriptor.epoch ?? 0,
+          lease: descriptor.lease ?? null,
+          // Needed so a repeat observation of the same fencing is recognised as the same
+          // occurrence instead of being announced (or acted on) again.
+          fencedWriter: descriptor.fencedWriter ?? null,
+        }
+        // Ask the remote whether someone else holds a newer grant. An absent authority is
+        // normal (no L3 channel yet); a malformed one is reported, never read as "free".
+        const authority = await fetchRemoteLease(runtime.ssh, { remoteDshHome: layout.home })
+        if (authority.ok && authority.report) {
+          const observed = observeRemoteLease(fenceState, {
+            writer: authority.report.writer,
+            epoch: authority.report.epoch,
+            now,
+          })
+          if (observed.fenced) {
+            summary.fenced += 1
+            firstReason = firstReason ?? 'fenced'
+            // Announce once per epoch: `fencedEpoch` on the descriptor makes a repeated
+            // sync (or a crash-recovered one) silent until the number actually changes.
+            const alreadyAnnounced = descriptor.fencedEpoch === observed.epoch
+            if (!alreadyAnnounced) {
+              this.sessionAdapter.appendEvent(descriptor.localSessionId, {
+                type: 'mirror/fenced',
+                data: {
+                  readOnly: true,
+                  epoch: observed.epoch,
+                  remoteEpoch: authority.report.epoch,
+                  remoteWriter: authority.report.writer,
+                  reason: observed.reason,
+                },
+              })
+            }
+            summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'fenced' })
+            updated.push({
+              ...descriptor,
+              // Adopt the newer epoch so our own next write is refused locally too, and
+              // keep the cursor untouched: being fenced says nothing about the data.
+              epoch: Math.max(descriptor.epoch ?? 0, observed.epoch),
+              lease: null,
+              level: 'L1',
+              readOnly: true,
+              fencedEpoch: observed.epoch,
+              // Remembering *who* fenced us is what makes the repeat silent: the next sync
+              // re-observes the same writer at the same epoch and must not announce it again.
+              fencedWriter: observed.holder ?? authority.report.writer ?? null,
+              reason: historyReason('fenced'),
+              mirroredAt: nowIso(),
+            })
+            continue
+          }
+        }
+
+        // (Re)acquire or renew our own lease; a live lease held by someone else refuses.
+        const acquired = acquireLease(fenceState, { owner: writer, now, ttlMs: this.leaseTtlMs })
+        if (!acquired.ok) {
+          summary.fenced += 1
+          firstReason = firstReason ?? 'lease-held-by-other'
+          summary.failures.push({ localSessionId: descriptor.localSessionId, reason: acquired.reason })
+          updated.push({
+            ...descriptor,
+            level: 'L1',
+            readOnly: true,
+            reason: historyReason('fenced'),
+            mirroredAt: nowIso(),
+          })
+          continue
+        }
+        const renewed = renewLease(acquired.state, { owner: writer, now, ttlMs: this.leaseTtlMs })
+        const claimed = renewed.ok ? renewed : acquired
+        const writeEpoch = currentEpoch(claimed.state)
+        const writable = assertWritable(claimed.state, { owner: writer, epoch: writeEpoch, now })
+        if (!writable.ok) {
+          summary.fenced += 1
+          firstReason = firstReason ?? 'fenced'
+          summary.failures.push({ localSessionId: descriptor.localSessionId, reason: writable.reason })
+          updated.push({
+            ...descriptor,
+            epoch: Math.max(descriptor.epoch ?? 0, writeEpoch),
+            lease: claimed.state.lease ?? null,
+            level: 'L1',
+            readOnly: true,
+            reason: historyReason('fenced'),
+            mirroredAt: nowIso(),
+          })
+          continue
+        }
+        /** Descriptor fields the successful write must carry. */
+        const leaseFields = {
+          epoch: writeEpoch,
+          lease: claimed.state.lease ?? null,
+          writable: true,
+        }
+
         const remote = await fetchRemoteHistory(runtime.ssh, {
           remoteDshHome: layout.home,
           remoteSessionId: descriptor.remoteSessionId,
@@ -782,6 +925,30 @@ export class RemoteGoService extends EventEmitter {
           }
         }
 
+        // Re-check the lease **immediately before the write batch** (design §6.2).
+        //
+        // The earlier check (`:798`) runs before the two bounded SSH reads, and those can
+        // take up to 20 s each against a 30 s TTL: a slow sync could otherwise outlive its
+        // own lease and still append. This second call is pure (no I/O) and re-reads the
+        // injected clock, so the TTL is actually enforced at the moment of writing rather
+        // than at the moment of deciding to try.
+        const late = assertWritable(claimed.state, { owner: writer, epoch: writeEpoch, now: this.#now() })
+        if (!late.ok) {
+          summary.fenced += 1
+          firstReason = firstReason ?? 'fenced'
+          summary.failures.push({ localSessionId: descriptor.localSessionId, reason: late.reason })
+          updated.push({
+            ...descriptor,
+            epoch: Math.max(descriptor.epoch ?? 0, writeEpoch),
+            lease: null,
+            level: 'L1',
+            readOnly: true,
+            reason: historyReason('fenced'),
+            mirroredAt: nowIso(),
+          })
+          continue
+        }
+
         if (!applyPlan(plan)) {
           // Partial append: do not persist a cursor past what landed. The
           // `mirrorSeq` guard makes the next sync continue from the real position.
@@ -813,14 +980,30 @@ export class RemoteGoService extends EventEmitter {
         summary.appended += appended.length
         summary.folded += plan.folded
         summary.skipped += Math.max(0, plan.append.length - appended.length)
+        // Conflict reporting (design §6.2): same-seq records whose payloads disagree are
+        // reported here instead of vanishing. The counter is cumulative per descriptor.
+        if (plan.conflicts && plan.conflicts.length > 0) {
+          summary.conflicts += plan.conflicts.length
+          summary.conflictSeqs.push(...plan.conflicts.map((conflict) => conflict.seq))
+        }
         updated.push({
           ...descriptor,
           cursor: plan.cursor,
           level: 'L2',
           reason: null,
-          // Mirrored history is a projection of a remote session: it is read-only until
-          // L3 delivers input/approval forwarding (design §4).
+          // Mirrored history is a projection of a remote session: the *session* is
+          // read-only until L3 delivers input/approval forwarding (design §4). That is a
+          // different fact from `writable` below, which says whether this mirror currently
+          // holds the write lease; being writable must not make the session look editable.
           readOnly: true,
+          writable: leaseFields.writable,
+          // The lease that authorized this write, so the next sync renews instead of
+          // re-acquiring and the epoch survives a restart (design §6.2).
+          epoch: leaseFields.epoch,
+          lease: leaseFields.lease,
+          fencedEpoch: null,
+          conflicts: plan.conflicts.length > 0 ? plan.conflicts : descriptor.conflicts,
+          conflictCount: (descriptor.conflictCount ?? 0) + plan.conflicts.length,
           mirroredAt: nowIso(),
         })
       } catch (error) {
@@ -1927,6 +2110,19 @@ function messageOf(error) {
 }
 
 /**
+ * The writer id a host's mirror lease is issued to (design §6.2).
+ *
+ * Stable for a given host so a restart **renews** its own lease instead of looking like a
+ * competing writer that has to be fenced. It is not a secret and carries no credentials —
+ * it only distinguishes local writers, which today means one plugin instance per host.
+ * @param {string} hostId
+ * @returns {string}
+ */
+function leaseWriterId(hostId) {
+  return `local:${hostId}`
+}
+
+/**
  * Typed history failure ⇒ the bilingual `reason` a descriptor (and its client row)
  * carries. Kept next to the sync code so a new `HistoryFailure` cannot be added
  * without a user-visible explanation.
@@ -1937,6 +2133,13 @@ function historyReason(code) {
   if (code === null || code === undefined) return null
   /** @type {Record<string, { zh: string, en: string }>} */
   const table = {
+    // L3 prerequisite (design §6.2): the local side has been fenced — another writer holds
+    // a newer epoch, or a live lease belongs to someone else. Writes stop, the mirror stays
+    // readable, and nothing about the existing history is discarded.
+    fenced: {
+      zh: '写入租约已被更新的写入者接管（epoch 更新），镜像转为只读；历史仍可查看，写入停止。',
+      en: 'A newer writer took over the lease (a higher epoch), so the mirror is read-only; its history stays readable and writes stop.',
+    },
     'sessions-dir-missing': {
       zh: '远端没有会话目录，无法回放历史（镜像保持只读快照）。',
       en: 'The remote has no session directory, so history cannot be replayed (the mirror keeps its last snapshot).',

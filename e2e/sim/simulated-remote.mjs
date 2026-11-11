@@ -23,6 +23,9 @@
 //                                                             detect a seq hole and stop its cursor there
 //   --history-no-root                                           model a remote with no `sessions/` dir
 //                                                             (typed `sessions-dir-missing` path)
+//   --lease-fixture <file> (SIM_LEASE_FIXTURE)                  publish a writer authority at
+//                                                             `remote-go/lease.json` (`{ writer, epoch }`),
+//                                                             so a competing writer can be observed over SSH
 //   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published; the
 //                                                             default is e2e/sim/.state.json
 //
@@ -127,7 +130,7 @@ const SIM = {
 }
 
 /** @typedef {{ code: number, stdout: string, stderr: string }} CommandResult */
-/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number> }} SimState */
+/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number }} SimState */
 
 // ---------------------------------------------------------------------------
 // Isolation guards: this is a simulator that must never be mistaken for, or
@@ -361,6 +364,44 @@ function loadWorkspaceAnswer() {
 
 const WORKSPACE = loadWorkspaceAnswer()
 const HISTORY = loadHistoryAnswer()
+
+/**
+ * The writer authority the simulated remote publishes (L3 prerequisite, design §6.2).
+ *
+ * `null` means "no authority file" — the normal state for an unmodified DSH. When set, the
+ * plugin can observe a competing writer/epoch over the same SSH `exec` transport it already
+ * uses for L1/L2, which is what makes a fencing scenario testable end to end.
+ * @type {{ writer: string | null, epoch: number | null } | null}
+ */
+const LEASE = loadLeaseAnswer()
+
+/**
+ * @returns {{ writer: string | null, epoch: number | null } | null}
+ */
+function loadLeaseAnswer() {
+  const requested = args['lease-fixture'] ?? process.env.SIM_LEASE_FIXTURE ?? null
+  if (requested === null) return null
+  if (typeof requested !== 'string' || requested.trim() === '') {
+    console.error('[sim] --lease-fixture needs a file path')
+    process.exit(2)
+  }
+  const resolved = path.resolve(requested)
+  /** @type {any} */
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(resolved, 'utf8'))
+  } catch (error) {
+    fatal(`lease fixture ${resolved}`, error)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`[sim] lease fixture ${resolved} must be an object`)
+    process.exit(2)
+  }
+  return {
+    writer: typeof parsed.writer === 'string' ? parsed.writer : null,
+    epoch: Number.isInteger(parsed.epoch) ? parsed.epoch : null,
+  }
+}
 /**
  * Sessions that have a log on this simulated host: every id the served registry
  * advertises, plus anything the history fixture names. An id outside this set
@@ -475,6 +516,17 @@ function respond(command, sim) {
       return ok(`${JSON.stringify({ version: 1, session: { id: sessionId }, events })}\n`)
     }
     return ok(`${JSON.stringify({ version: 1, session: { id: sessionId }, events })}\n`)
+  }
+
+  // 4b. Writer authority (src/lease.js fetchRemoteLease, design §6.2).
+  const leaseRead = /^head -c (\d+) '([^']*\/remote-go\/lease\.json)' 2>&1 \|\| true$/.exec(cmd)
+  if (leaseRead) {
+    sim.leaseReads = (sim.leaseReads ?? 0) + 1
+    // No fixture means the remote publishes no authority — the normal state, answered the
+    // way an absent file is (empty output, not an error).
+    if (LEASE === null) return ok('')
+    const report = { writer: LEASE.writer, epoch: LEASE.epoch }
+    return ok(`${JSON.stringify(report)}\n`)
   }
 
   // 5. Run registry read (src/webapp.js readRunRegistry).

@@ -415,6 +415,20 @@ interface MirrorView {
   status: 'active' | 'remote-deleted'
   /** L2：已回放历史的镜像会话为只读投影（L3 才有输入通道）。客户端据此标注「只读」 */
   readOnly: boolean
+  /** L3 前置（§6.2）：本机是否**当前持有可能写入的租约**。与 `readOnly` 是两件事：会话仍是只读投影，
+   *  但本机持有租约意味着它是被授权的写入者，下次同步会继续追加历史 */
+  writable: boolean
+  /** 围栏令牌（单调递增）。重启后从 descriptor 恢复，不会回退 */
+  epoch: number
+  /** 当前租约；`null` = 没有（被围栏、已过期或从未获取） */
+  lease: { owner: string, acquiredAt: number, renewedAt: number, expiresAt: number, epoch: number } | null
+  /** 上一次已经通报过的围栏事件（去重用，客户端一般不渲染） */
+  fencedEpoch: number | null
+  fencedWriter: string | null
+  /** 同 `seq` 但内容不同被丢弃的记录（保留首个），最多 20 条 */
+  conflicts: Array<{ seq: number, kept: string, lost: string }>
+  /** 累计冲突数（不受 20 条上限约束） */
+  conflictCount: number
 }
 ```
 
@@ -485,7 +499,8 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
   `cursor > 0`）。`mirrorHistory:false`、或日志读不到/格式不认识/版本更新时，该镜像会话保持 `L1` 并带 `reason`。
 - **`history` 汇总**（仅 `POST /hosts/:id/mirrors/sync` 返回）：`attempted` 本次尝试的会话数，`applied` 本次判定为
   可应用的远端事件数，`appended` 实际写入本地会话的事件数（两者不等说明被 `mirrorSeq` 去重挡下了重复），
-  `folded` 因超出保留上限而被显式折叠的**前缀**事件数，`failures[]` 为 `{ localSessionId, reason }`。
+  `folded` 因超出保留上限而被显式折叠的**前缀**事件数，`failures[]` 为 `{ localSessionId, reason }`，
+  `fenced` 本次因围栏而停写的会话数，`conflicts` 本次上报的冲突数，`conflictSeqs` 对应的 `seq` 列表。
 - **幂等**：写入本地会话的事件都带 `data.mirrorSeq`（远端 `seq`）。同步只应用 `seq > cursor`，并在 append 前用
   会话里已有的 `mirrorSeq` 再挡一次（真机读 `snapshotEvents()`，不是不存在的 `events` 属性），因此重复同步、以及
   「append 成功后 cursor 尚未落盘就崩溃」都不会重复消息。
@@ -513,6 +528,7 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 | `unknown-version` | 日志版本高于本插件，跳过以免错位映射 |
 | `gap-unfilled` | 远端历史有缺口，游标停在缺口前 |
 | `history-disabled` | 设置里关闭了历史回放，保持 L1 |
+| `fenced` | 写入租约被更新的 epoch 接管（§6.2）：本地停止写入、保持只读、`cursor` 不推进；历史仍可查看 |
 
 远端记录到本地事件的映射（保留/丢弃的字段）见 [session-design.md](session-design.md) §6.1。
 
@@ -521,6 +537,30 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 描述数，`skipped` 是其中**确实缺少本地会话**的数量。上限只限制「创建」：不会删除任何早先创建的会话，因此调低上限
 不会让已有会话变成孤儿（它们既不计入 `skipped`，也不会被移除）；上限生效时仍会注册侧边栏分组（只要至少有会话创建
 成功），不会留下空分组。未连接 / 注册表不可读 / 瞬时空注册表时，`truncated` 与 `skipped` 均为 `0`。
+
+**围栏与写入租约（v1.1，L3 前置）**：每次同步会先向远端读一次可选的写入权威
+`<DSH_HOME>/remote-go/lease.json`（`{ writer, epoch }`），再决定本机能否写：
+
+- 远端 `epoch` **高于**本地高水位 → 本机已被接管：`MirrorView.readOnly=true`、`level="L1"`、
+  `reason.code="fenced"`、`cursor` **不推进**、租约被清空，并写一条 `mirror/fenced` 非 surface 通知
+  （`{ readOnly, epoch, remoteEpoch, remoteWriter, reason }`）。历史保持只读可看。
+- 同一个 `epoch` 但写入者不同 → 同样视为围栏（`writer-changed`）；**同一次围栏只通报一次**，
+  重复同步不会刷屏（去重键是 `fencedEpoch` + `fencedWriter`）。
+- 权威文件不存在 / 为空 → 视为「没有竞争写入者」，本机照常持有租约（这是未改造远端的正常状态）。
+- 权威文件存在但损坏 → `lease-malformed`，**不会**被当成「没人写」，本机不推进也不写入。
+- 恢复：竞争消失后本机 `acquire` 会拿到 `epoch+1`，从原 `cursor` 继续；`epoch` 高水位持久化在
+  `mirrors.json` 里，重启不会回退（重启后的自己是「续约」而不是「新写入者」）。
+
+**围栏的适用边界（契约层必须如实告知）**：上述保证只覆盖**共享同一份 `mirrors.json` 的写入者**（同一本地
+profile 的重启、并发同步）以及远端 `lease.json` 显式声明的第三方。**两个互不相识的客户端不会被定序**：它们
+各有自己的描述符存储，都从 `epoch 0` 起步、都会拿到 `epoch 1`、都能通过各自的本地检查；插件也只**读**远端权威，
+从不发布自己的 `{ writer, epoch, expiresAt }`，因此远端没有可用来拒绝过期 epoch 的依据。这不是「已实现的分布式
+互斥」，L3 之前必须补齐双向权威通道、远端侧过期拒绝与真实性绑定（见 session-design.md §6.2 / §11 #9-#10）。
+
+**冲突上报**：同一 `seq` 出现内容不同的记录时，仍按「保留首个」处理（默认策略不变），但会记录到
+`MirrorView.conflicts`（最多 20 条，`kept`/`lost` 各带一段 ≤120 字符摘要 + 7 位短哈希，使截断后仍可区分）。
+`conflictCount` 只统计**本次真正应用**的记录上的冲突，并按 `(seq, kept, lost)` 去重，所以 L2 每次重读整份日志
+（见 session-design.md §11 #7）**不会**让计数虚增；同步响应里对应 `history.conflicts` / `history.conflictSeqs`。
 
 **提示的生命周期**：连接成功后 Host 会在后台跑同一条同步，并创建本地镜像会话（此时 `created:true` /
 `resync.needed:true`）。客户端随后调用本端点时，会话已经存在（`created:false` / `resync:null`），所以
