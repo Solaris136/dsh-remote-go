@@ -505,12 +505,38 @@ test('a gap in the remote log stops the cursor and produces one bounded backfill
       await connectHost(service, host.id, logs)
 
       // Wait for the *history* outcome, not merely for any reason: `planMirror` can
-      // already stamp a `version-unknown` reason before history has run.
-      for (let attempt = 0; attempt < 200; attempt += 1) {
+      // already stamp a `version-unknown` reason before history has run. The predicate
+      // covers everything the assertions below require — cursor, level, typed reason
+      // **and** the log line — because a state-only wait can observe the persisted
+      // descriptor before the failure has been reported (this was a Windows-only flake:
+      // the state was already durable while the log assertion at the bottom was not yet
+      // satisfiable).
+      const settled = async () => {
         const mirrors = await mirrorsOf(service, host.id)
-        if (mirrors.length === HISTORY_SESSIONS.length && mirrors.every((mirror) => mirror.cursor === 2)) break
+        return (
+          mirrors.length === HISTORY_SESSIONS.length &&
+          mirrors.every(
+            (mirror) => mirror.cursor === 2 && mirror.level === 'L1' && mirror.reason?.code === 'gap-unfilled',
+          ) &&
+          logContains(logs, 'gap-unfilled')
+        )
+      }
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (await settled()) break
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
+      assert.equal(
+        await settled(),
+        true,
+        `the gapped sync never settled: ${JSON.stringify({
+          mirrors: (await mirrorsOf(service, host.id)).map((mirror) => ({
+            cursor: mirror.cursor,
+            level: mirror.level,
+            reason: mirror.reason?.code ?? null,
+          })),
+          historyLog: logs.filter((line) => /mirror history/.test(line)).slice(-4),
+        })}`,
+      )
       const mirrors = await mirrorsOf(service, host.id)
       assert.equal(mirrors.length, HISTORY_SESSIONS.length)
       for (const mirror of mirrors) {

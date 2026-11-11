@@ -621,6 +621,23 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
+   * Report a per-session history failure at `info` level.
+   *
+   * The typed `reason` code plus the remote session id is what an operator needs
+   * to tell "the remote log has a hole" from "the transport broke", so a §7
+   * failure must be diagnosable from a normal log, not only from the `debug`
+   * aggregation. It is emitted while the descriptors are still being collected,
+   * i.e. before they are persisted, so a log line always exists by the time the
+   * new mirror state is observable.
+   * @param {any} runtime
+   * @param {import('./mirror.js').MirrorDescriptor} descriptor
+   * @param {string} reason
+   */
+  #logHistoryFailure(runtime, descriptor, reason) {
+    this.#log(runtime, 'info', `mirror history failed for ${descriptor.remoteSessionId}: ${reason}`)
+  }
+
+  /**
    * L2: replay each mirror's remote history into its local session (design §3 L2).
    *
    * One SSH read per mirrored session, bounded by `HISTORY_LIMITS`; the projection
@@ -804,6 +821,7 @@ export class RemoteGoService extends EventEmitter {
           // Typed failure: annotate, keep the cursor, retry next sync.
           summary.failures.push({ localSessionId: descriptor.localSessionId, reason: remote.reason })
           firstReason = firstReason ?? remote.reason
+          this.#logHistoryFailure(runtime, descriptor, remote.reason)
           updated.push({
             ...descriptor,
             level: 'L1',
@@ -895,6 +913,7 @@ export class RemoteGoService extends EventEmitter {
           if (!full.ok) {
             summary.failures.push({ localSessionId: descriptor.localSessionId, reason: full.reason })
             firstReason = firstReason ?? full.reason
+            this.#logHistoryFailure(runtime, descriptor, full.reason)
             updated.push({ ...descriptor, level: 'L1', reason: historyReason(full.reason) })
             continue
           }
@@ -908,6 +927,7 @@ export class RemoteGoService extends EventEmitter {
             // reason until the log becomes readable in one piece again.
             summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'gap-unfilled' })
             firstReason = firstReason ?? 'gap-unfilled'
+            this.#logHistoryFailure(runtime, descriptor, 'gap-unfilled')
             updated.push({
               ...descriptor,
               // Never backwards: the recovery plan is computed from 0, so for a log that
@@ -951,6 +971,7 @@ export class RemoteGoService extends EventEmitter {
           // `mirrorSeq` guard makes the next sync continue from the real position.
           summary.failures.push({ localSessionId: descriptor.localSessionId, reason: appendFailed })
           firstReason = firstReason ?? appendFailed
+          this.#logHistoryFailure(runtime, descriptor, appendFailed)
           updated.push(descriptor)
           continue
         }
@@ -1009,7 +1030,8 @@ export class RemoteGoService extends EventEmitter {
         summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'read-failed' })
         firstReason = firstReason ?? 'read-failed'
         updated.push(descriptor)
-        this.#log(runtime, 'debug', `mirror history failed for ${descriptor.remoteSessionId}: ${reason}`)
+        this.#logHistoryFailure(runtime, descriptor, 'read-failed')
+        this.#log(runtime, 'debug', `mirror history read error for ${descriptor.remoteSessionId}: ${reason}`)
       }
     }
 
