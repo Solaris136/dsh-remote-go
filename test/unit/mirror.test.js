@@ -547,7 +547,8 @@ test('MirrorStore asks for 0600 files inside a 0700 directory and fsyncs atomica
       unlinks.push(target)
     },
     async stat() {
-      const error = (new Error('no lock file')(/** @type {any} */ error).code = 'ENOENT')
+      const error = new Error('no lock file')
+      error.code = 'ENOENT'
       throw error
     },
     async readFile() {
@@ -712,6 +713,97 @@ test('MirrorStore replaces one host, removes records and survives a reload', asy
   assert.deepEqual(
     reloaded.listMirrors().map((descriptor) => descriptor.remoteSessionId),
     ['r1'],
+  )
+})
+
+test('a busy rename is retried and a failed write never leaves a temp file', async () => {
+  /** @type {string[]} */
+  const unlinked = []
+  let attempts = 0
+  const fakeFs = {
+    async mkdir() {},
+    async open() {
+      return {
+        async writeFile() {},
+        async sync() {},
+        async close() {},
+      }
+    },
+    async rename() {
+      attempts += 1
+      const error = new Error('busy')
+      error.code = 'EPERM'
+      throw error
+    },
+    async unlink(target) {
+      unlinked.push(target)
+    },
+    async stat() {
+      const error = new Error('no lock file')
+      error.code = 'ENOENT'
+      throw error
+    },
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-retry-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({ dir, fsImpl: fakeFs, logger: quiet })
+  await store.load()
+  await assert.rejects(() => store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }]), /busy/)
+  // 5 rename attempts with backoff, then the temp file is removed.
+  assert.equal(attempts, 5)
+  assert.equal(
+    unlinked.some((target) => target.endsWith('.tmp')),
+    true,
+  )
+})
+
+test('a rename that hits EPERM twice then succeeds keeps the data', async () => {
+  let attempts = 0
+  /** @type {string[]} */
+  const unlinked = []
+  /** @type {any[]} */
+  const renames = []
+  const fakeFs = {
+    async mkdir() {},
+    async open() {
+      return {
+        async writeFile() {},
+        async sync() {},
+        async close() {},
+      }
+    },
+    async rename(from, to) {
+      attempts += 1
+      if (attempts < 3) {
+        const error = new Error('busy')
+        error.code = 'EPERM'
+        throw error
+      }
+      renames.push({ from, to })
+    },
+    async unlink(target) {
+      unlinked.push(target)
+    },
+    async stat() {
+      const error = new Error('no lock file')
+      error.code = 'ENOENT'
+      throw error
+    },
+    async readFile() {
+      throw new Error('no file')
+    },
+  }
+  const dir = path.join(tmpdir(), `dsh-remote-go-mirror-retry-ok-${process.pid}-${Date.now()}`)
+  const store = new MirrorStore({ dir, fsImpl: fakeFs, logger: quiet })
+  await store.load()
+  await store.upsertMirrors([{ hostId: 'h_1', remoteSessionId: 'r1' }])
+  assert.equal(attempts, 3)
+  assert.equal(renames.length, 1)
+  assert.equal(
+    unlinked.some((target) => target.endsWith('.tmp')),
+    false,
   )
 })
 
