@@ -219,13 +219,39 @@ pnpm run test:e2e   # control DSH → SSH → 测试主机 → 远端 DSH → �
 Web 兼容性验收（`dsh web` + 真实浏览器，不需要远端主机）：
 
 ```bash
-pnpm run test:web   # 隔离的 dsh web → 安装本插件 → Chrome 打开真实界面 → 浅色/深色按钮对比度断言
+pnpm run test:web       # 打包产物 → 隔离的 dsh web 里真装一次 → Chrome 打开真实界面 → 浅色/深色按钮对比度断言
+pnpm run test:desktop   # 仅 Windows：真实 Electron 桌面端（隔离 profile）→ 同样的对比度断言
 ```
 
-`test:web` 需要三样东西：可用的 DSH CLI（`DSH_BIN`/`DSH_EXE`，或 Windows 上已安装的 Harness，或 PATH 上的
-`dsh`）、Chrome/Edge（`CHROME_PATH`），以及安装插件用的 `pnpm`（`DSH_PNPM_CJS` 可指定入口）。缺任何一样都
-**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
-`.github/workflows/web-e2e.yml` 安装 harness + Chrome 后以 `DSH_E2E_STRICT=1` 运行（缺件即失败，避免静默空跑）。
+两个用例都验收**打包产物**而不是工作区：先在仓库里 `pnpm pack`，再把 `dsh-remote-go-<version>.tgz` 装进隔离 profile，
+并断言依赖形如 `file:…tgz`（不是 `link:`）且安装副本含 `client.js`/`index.js`/`cordis.patch.yml`/`locale/`/`vendor/`
+等文件——这样 `files[]`/`exports` 漏文件会在 CI 暴露，而不是发版后才发现。
+
+`test:web` 需要三样东西：可用的 DSH CLI、Chrome/Edge，以及安装插件用的 `pnpm`。CLI 按以下顺序发现：
+`DSH_BIN`（可配 `DSH_EXE` 指定 Electron/Node 解释器）→ Windows 默认安装目录（可用 `DSH_INSTALL_DIR` 覆盖）→
+PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.asar` 是虚拟文件系统，只看文件是否存在不可靠），
+**探测失败即跳过**——注意：装在非默认目录又没有设置 `DSH_INSTALL_DIR` 时，同样只会跳过（不会报错）。
+浏览器用 `CHROME_PATH` / `PUPPETEER_EXECUTABLE_PATH` / `E2E_CHROME` 指定（否则探测 Chrome/Edge 的常见路径），
+`pnpm` 不在 PATH 时可用 `DSH_PNPM_CJS` 指向 pnpm 入口。
+
+`test:desktop` 只在 Windows 有意义（桌面端没有 Linux 构建，也不在 npm 上）。它用 `DSH_DESKTOP_EXE` 指定可执行文件，
+或用 `DSH_DESKTOP_INSTALL_DIR` 指定安装目录，否则在 `%LOCALAPPDATA%\Programs` 与 `%PROGRAMFILES%` 下搜索
+`DeepSeek Harness.exe`。三条实现细节值得记住：
+
+- `dsh plugin --profile desktop add …` 会被 CLI 拒绝（`profile "desktop" is managed exclusively by the Electron
+  application`），所以 profile 是手工写的：`<DSH_HOME>/profiles/desktop/package.json` 里给 `dsh.profile.bundles`
+  加上 `dsh-remote-go` 并声明 `file:<tgz>` 依赖，然后在该目录跑一次 `pnpm install --ignore-scripts`。
+  **这一步不能省**：没有 `node_modules`，客户端半边不会加载。
+- 启动时必须**去掉** `ELECTRON_RUN_AS_NODE`（否则 Electron 以 Node 模式运行，`--user-data-dir` /
+  `--remote-debugging-port` 会被当成非法参数）。
+- 全新 profile 会先弹 `…/renderer/welcome.html`（登录引导），用例点 **`稍后配置`** 跳过，不使用任何凭据。
+  另外 `[data-dsh-remote-go="styles"]` 在桌面端**不存在**（样式却已生效），所以“客户端已加载”一律按行为断言
+  （插件 class + CSS 变量可解析），不用这个标记。
+
+缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
+`.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
+（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**：失败时会上传截图与日志（`web-e2e-failure` /
+`desktop-e2e-failure` artifact）。
 
 目录：
 
@@ -252,6 +278,8 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 | [`codeql.yml`](.github/workflows/codeql.yml) | push/PR `main` / 每周 | CodeQL 静态分析（`security-and-quality`） |
 | [`release.yml`](.github/workflows/release.yml) | `v*` 标签 / 手动 | 校验标签与版本一致 → 跑门禁 → 打包 → 发布 npm（有 token 时，含 provenance）→ 创建 GitHub Release |
 | [`e2e.yml`](.github/workflows/e2e.yml) | 仅手动 | 真实主机端到端：隔离 control DSH → SSH → 远端自举 → 面板 iframe 验收 → 上传证据 |
+| [`web-e2e.yml`](.github/workflows/web-e2e.yml) | push `main` / PR / 手动 | Web 兼容性（**必需检查** `Web E2E (ubuntu-latest)`）：安装 `@deepseek-ai/dsh` + Chrome → 打包产物真装进隔离 `dsh web` → 设置页浅色/深色按钮对比度断言；失败上传截图与日志 |
+| [`desktop-e2e.yml`](.github/workflows/desktop-e2e.yml) | push `main` / PR / 手动 | 桌面端兼容性（**必需检查** `Desktop E2E (windows-latest)`）：静默安装官方 Electron 桌面端（带超时与诊断）→ 手工构建 desktop profile 装打包产物 → CDP 驱动真实窗口 → 同样的对比度断言；失败上传截图与日志 |
 
 发布前请本地跑一遍 `pnpm run verify`；`prepack` 还会自动执行 `market-entry --check`，防止带病发布。完整发布步骤见
 [docs/publish.md](docs/publish.md)。

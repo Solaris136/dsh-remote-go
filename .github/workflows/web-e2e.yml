@@ -1,18 +1,22 @@
 name: Web E2E
 
-# Real-browser acceptance for the "web + desktop compatible" claim.
+# Real-browser acceptance for **web compatibility of the Remote-hosts settings
+# section**. Desktop is covered separately by `desktop-e2e.yml`.
 #
-# Boots an isolated `dsh web` from the published harness package, installs this
-# repository as a plugin into a temporary profile, then drives the real UI with
-# Chrome and asserts the plugin's Remote-hosts settings section renders with
-# legible button labels in light AND dark mode (the bug this guards: an
-# invisible primary-button label, fixed in #10).
+# What it proves: the *packed* plugin artifact installs into an isolated `dsh web`
+# profile (`file:…tgz`, not a `link:` to the working tree — a `files[]`/`exports`
+# drift fails here instead of shipping), the shell renders the plugin's settings
+# section, and every button label is legible (WCAG contrast >= 3, alpha/opacity
+# aware, gradients refused) in light AND dark mode.
 #
-# Deliberately separate from ci.yml: this is the only place that runs
-# test/integration/web.e2e.js, and it runs it in strict mode
-# (DSH_E2E_STRICT=1), where a missing harness/browser FAILS instead of skipping —
-# so provisioning drift cannot silently turn this job into a no-op.
-# `pnpm run verify` never needs a harness: there the same file skips cleanly.
+# Reliability contract for a *required* check:
+# - `DSH_E2E_STRICT=1` makes a missing harness/browser/pnpm a hard failure, so
+#   provisioning drift can never silently turn this job into a no-op;
+# - no fixed sleeps: every wait is a bounded poll on state that changes;
+# - on failure a screenshot + console/harness logs are uploaded;
+# - the job name is fixed (no matrix) so the required context never drifts.
+#
+# `pnpm run verify` never needs a harness: there the same file skips prerequisites.
 
 on:
   push:
@@ -27,11 +31,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # CI is required-grade: a missing prerequisite must fail, never skip.
+  DSH_E2E_STRICT: '1'
+
 jobs:
   web-e2e:
-    name: Web E2E (ubuntu, Node 24)
+    name: Web E2E (ubuntu-latest)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,13 +57,22 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install the DSH harness
-        # `--ignore-scripts` keeps pnpm 11 from failing the job on build-script
-        # approval prompts for optional native deps (node-pty & friends); the
-        # settings UI this test drives needs none of them.
+        # `--ignore-scripts` keeps pnpm 11 from failing on build-script approval
+        # prompts for optional native deps (node-pty & friends); the settings UI
+        # this test drives needs none of them. The published package declares
+        # `bin: {"dsh": "lib/bin.js"}`, so the next step is the real check.
         run: pnpm add --global --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1
 
-      - name: Verify the harness is installed
-        run: dsh --version
+      - name: Put the global bin directory on PATH
+        # Some runner images do not export pnpm's global bin dir, which would make
+        # the next step fail for the wrong reason.
+        run: pnpm bin -g >> "$GITHUB_PATH"
+
+      - name: Report tool versions
+        run: |
+          echo "node $(node --version), pnpm $(pnpm --version)"
+          echo "dsh $(dsh --version)"
+          echo "chrome ${CHROME_PATH:-<not set>}"
 
       - name: Setup Chrome
         id: chrome
@@ -63,6 +80,15 @@ jobs:
 
       - name: Run the web E2E
         env:
-          DSH_E2E_STRICT: '1'
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          DSH_WEB_E2E_ARTIFACTS: ${{ runner.temp }}/web-e2e-artifacts
         run: node --test test/integration/web.e2e.js
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-e2e-failure
+          path: ${{ runner.temp }}/web-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14

@@ -21,6 +21,7 @@ const files = [
   '.github/workflows/codeql.yml',
   '.github/workflows/release.yml',
   '.github/workflows/web-e2e.yml',
+  '.github/workflows/desktop-e2e.yml',
 ]
 
 /** @type {((text: string) => unknown) | null} */
@@ -54,7 +55,8 @@ if (!parse && override) {
 }
 if (!parse) {
   // Fallback: python3 + PyYAML.
-  const probe = spawnSync('python3', ['-c', 'import yaml; print("ok")'], { encoding: 'utf8' })
+  // `windowsHide` keeps a console from flashing for every child the gates start.
+  const probe = spawnSync('python3', ['-c', 'import yaml; print("ok")'], { encoding: 'utf8', windowsHide: true })
   if (probe.status === 0) {
     parse = (text) => {
       const result = spawnSync(
@@ -63,6 +65,7 @@ if (!parse) {
         {
           input: text,
           encoding: 'utf8',
+          windowsHide: true,
         },
       )
       if (result.status !== 0) throw new Error(result.stderr)
