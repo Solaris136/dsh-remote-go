@@ -104,6 +104,8 @@ interface SettingsView {
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
   saveTokens: boolean            // 默认 false（token 仅内存）
+  /** v1.1：把远端镜像会话注册到本地侧边栏（默认 true） */
+  mirrorToSidebar: boolean
   windowMode: 'panel' | 'external'
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
@@ -415,6 +417,17 @@ interface MirrorView {
   "revived": [],
   "resyncRequired": 1,
   "notice": { "zh": "本地镜像会话在重启后不保留…", "en": "Mirror sessions do not survive a restart yet…" },
+  "sidebar": {
+    "ok": true,
+    "enabled": true,
+    "reason": null,
+    "hostId": "h_x",
+    "path": "C:\\Users\\me\\.dsh\\remote-go\\mirrors\\h_x",
+    "title": "Remote: 腾讯云",
+    "workspaceId": "1a2b…",
+    "created": true,
+    "renamed": false
+  },
   "sessions": [
     {
       "ok": true,
@@ -437,6 +450,21 @@ interface MirrorView {
 `resync.needed:true`）。客户端随后调用本端点时，会话已经存在（`created:false` / `resync:null`），所以
 `resyncRequired` / `notice` 返回的是**后台同步留下、尚未确认**的那条提示，而不是本次调用的结果；`GET
 /hosts/:id/mirrors` 也返回同一对字段。客户端展示后应带 `{ "acknowledgeResync": true }` 再调用一次本端点来清除。
+
+**侧边栏工作区（`sidebar`）**：DSH 侧边栏按工作区列会话，工作区成员由会话头的规范化 cwd 推导，所以 Host 会把每台
+主机的镜像目录 `$DSH_HOME/remote-go/mirrors/<hostId>` 注册成一个工作区（标题 `Remote: <主机名>`，与会话 `meta.cwd`
+用同一个路径函数产出）。`sidebar` 是该注册的落地结果：
+
+| 字段 | 含义 |
+|---|---|
+| `ok` / `reason` | `ok:false` 时 `reason` ∈ `adapter-absent` / `adapter-error` / `workspaces-unavailable` / `create-failed` / `no-mirror-root` / `invalid-host`；`ok:true` 且 `reason` 非空表示**有意跳过**：`disabled`（`mirrorToSidebar=false`）、`sessions-unavailable`（没有可分组的本地会话）、`no-mirrors`（远端没有镜像会话） |
+| `enabled` | 设置 `mirrorToSidebar` 是否为开 |
+| `path` / `title` / `workspaceId` | 注册的工作区；跳过或失败时可为 `null` |
+| `created` / `renamed` | 本次是否新建 / 是否因主机改名而改了标题；复用既有注册时两者皆 false |
+
+注册是幂等且非致命的：`workspaceRegistry`（可选依赖）缺失或报错只影响侧边栏分组，连接与镜像本身照常完成。
+`DELETE /hosts/:id` 会同时删除该注册（保留目录与会话日志）。`GET /mirrors` 不返回 `sidebar`（只读端点不做实时
+注册表查询），需要时以本端点的返回为准。
 
 请求（两者均可选，空请求体等价于 `{}`）：
 
@@ -477,3 +505,8 @@ v1.1 约束：
 9. 镜像记录沿用 §3 安全约束：0700 目录、0600 文件、原子写（随机临时名 + `wx` + fsync + 目录 fsync）；
    损坏或更高 `version` 的文件会被**另存**为 `mirrors.json.corrupt-<ts>` / `mirrors.json.future-<ts>` 而不是
    被覆盖；不含任何凭据或 token。
+10. 侧边栏可见性：镜像会话只有在「镜像目录被注册为工作区」时才会出现在 DSH 侧边栏（成员关系由会话头的规范化
+    cwd 决定，`meta` 没有 workspaceId）。Host 通过可选依赖 `ctx.workspaceRegistry` 注册 `Remote: <主机名>` 工作区，
+    路径与会话 `meta.cwd` 完全一致；`create` 前先 `resolveByPath`，因此重连不产生重复注册。设置
+    `mirrorToSidebar=false` 时不注册（`sidebar.reason="disabled"`），已存在的注册不删除；删除主机时删除注册。
+    `workspaceRegistry` 缺失时该能力整体降级为 `adapter-absent`，不影响 v1 的任何字段。
