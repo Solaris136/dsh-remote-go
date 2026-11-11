@@ -37,9 +37,10 @@ import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
 import {
-  LOOPBACK_IFRAME,
   assertBlockedIframe,
+  assertNoNonLoopbackIframes,
   assertFrameRefresh,
+  assertLoopbackUrl,
   assertPanelToolbar,
   connectSimulatedHost,
   describePanel,
@@ -212,9 +213,21 @@ async function findPage(browser, predicate, timeoutMs) {
 }
 
 /** The onboarding window of a fresh profile (`…/renderer/welcome.html`). */
-const isWelcomeUrl = (url) => url.includes('welcome.html')
-/** The app window. */
-const isAppUrl = (url) => url.startsWith('dsh-app://')
+const isWelcomeUrl = (url) => {
+  try {
+    return new URL(url).pathname.endsWith('welcome.html')
+  } catch {
+    return false
+  }
+}
+/** The app window. Compared by parsed protocol, never by a `dsh-app://` prefix. */
+const isAppUrl = (url) => {
+  try {
+    return new URL(url).protocol === 'dsh-app:'
+  } catch {
+    return false
+  }
+}
 
 /**
  * Skip onboarding with "configure later", which needs no credentials.
@@ -619,14 +632,14 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         const frame = await waitForRemoteFrame(page)
         assert.equal(frame.ready, 'complete', 'the iframe document never reached a ready state')
         assert.equal(frame.frameTitle, 'simulated remote DSH')
-        const iframeSrcs = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
+        const iframeSrcs = await assertNoNonLoopbackIframes(page, 'the remote panel')
         assert.ok(iframeSrcs.length >= 1, 'the panel mounted no iframe')
-        for (const src of iframeSrcs) assert.match(src, LOOPBACK_IFRAME, `non-loopback iframe src: ${src}`)
         // The iframe must target the tunnel, never the simulated remote's own
         // listener: embedding the remote port directly would still render the
         // marker, so the port is pinned explicitly.
+        const iframeUrl = assertLoopbackUrl(frame.iframeSrc, 'the remote panel iframe')
         assert.notEqual(
-          Number(new URL(frame.iframeSrc).port),
+          Number(iframeUrl.port),
           Number(sim.state.remotePort),
           'the iframe embeds the simulated remote directly instead of going through the tunnel',
         )
@@ -642,10 +655,12 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         // `--lang`, and CI runs one OS locale, so the assertions accept whichever
         // language appears. (The web suite genuinely drives both `en-US` and `zh-CN`.)
         console.log(`[desktop-e2e] panel toolbar labels: ${JSON.stringify(toolbar.labels)}`)
-        assert.match(toolbar.address, /127\.0\.0\.1:\d+/)
+        // The helper validated the masked address with an anchored pattern; here the
+        // toggle must restore exactly the same text, so "show" cannot be a no-op.
+        assert.equal(toolbar.restored, toolbar.address, 'the address toggle did not restore the address')
         assert.equal(toolbar.hidden, '••••••')
         const refreshed = await assertFrameRefresh(page)
-        assert.match(refreshed.iframeSrc, LOOPBACK_IFRAME)
+        assertLoopbackUrl(refreshed.iframeSrc, 'the refreshed panel iframe')
       })
     })
 
@@ -667,6 +682,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         try {
           const blocked = await assertBlockedIframe(page, {
             intercepted: () => guard.calls(),
+            forbiddenOrigin: guard.origin,
             forceRefetch: () => switchPanelHost(page, { hostId: second.hostId, hostName: 'simulated-remote-b' }),
           })
           assert.equal(blocked.panelIframe, null, 'a blocked URL produced an iframe')

@@ -166,6 +166,33 @@ function render(element) {
   return renderToStaticMarkup(element)
 }
 
+/**
+ * Every `src="…"` attribute value in static markup.
+ *
+ * Structural extraction (no pattern matching on the URL itself): the assertions
+ * then parse each value and compare protocol/host/port, so a lookalike host cannot
+ * satisfy them the way a substring test could.
+ * @param {string} markup
+ * @returns {string[]}
+ */
+function srcAttributes(markup) {
+  const marker = 'src="'
+  /** @type {string[]} */
+  const values = []
+  let from = 0
+  for (;;) {
+    const start = markup.indexOf(marker, from)
+    if (start === -1) break
+    const valueStart = start + marker.length
+    const end = markup.indexOf('"', valueStart)
+    if (end === -1) break
+    // Attribute serialization escapes `&`; a URL comparison needs the literal.
+    values.push(markup.slice(valueStart, end).split('&amp;').join('&'))
+    from = end + 1
+  }
+  return values
+}
+
 /** Minimal HostView factory for render tests. */
 function hostView(overrides) {
   return {
@@ -341,7 +368,9 @@ test('iframe URL guard blocks non-loopback addresses', () => {
       enterNotice: false,
     }),
   )
-  assert.doesNotMatch(blocked, /evil\.example\.com/)
+  // Structural, not textual: if the guard were bypassed the refused URL would
+  // become an iframe `src`, and that is what this reads.
+  assert.deepEqual(srcAttributes(blocked), [], 'a non-loopback URL must not reach an iframe src')
   assert.match(blocked, /已阻止内嵌远端界面/)
 })
 
@@ -372,7 +401,7 @@ test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () =>
 
   const allowed = await client.api.openHost('h_test')
   assert.equal(allowed, 'http://127.0.0.1:54321/?token=abc123')
-  assert.match(requests.at(-1), /\/dsh-remote-go\/api\/hosts\/h_test\/open$/)
+  assert.equal(requests.at(-1), '/dsh-remote-go/api/hosts/h_test/open')
 
   for (const refusedUrl of [
     'https://evil.example.com/?token=secret',
@@ -383,8 +412,9 @@ test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () =>
     answer = refusedUrl
     await assert.rejects(client.api.openHost('h_test'), (error) => {
       assert.equal(error?.view?.code, 'blocked-iframe', `unexpected error view for ${refusedUrl}`)
-      // The refused URL must not be echoed back anywhere.
-      assert.doesNotMatch(String(error?.message ?? ''), /evil\.example\.com|10\.0\.0\.5|localhost/)
+      // The refused URL must not be echoed back: compare the whole message with
+      // the documented localized detail instead of searching for host text.
+      assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止内嵌。')
       return true
     })
   }
@@ -418,7 +448,14 @@ test('RemoteViewport embeds a loopback iframeUrl and refuses a non-loopback one'
     }),
   )
   assert.ok(testIdsOf(embedded).includes('remote-iframe'), 'a loopback URL must render the remote iframe')
-  assert.match(embedded, /src="http:\/\/127\.0\.0\.1:54321\/\?token=abc123"/)
+  const embeddedSrcs = srcAttributes(embedded)
+  assert.equal(embeddedSrcs.length, 1, 'the viewport must render exactly one iframe src')
+  const embeddedUrl = new URL(embeddedSrcs[0])
+  assert.equal(embeddedUrl.protocol, 'http:')
+  assert.equal(embeddedUrl.hostname, '127.0.0.1')
+  assert.equal(embeddedUrl.port, '54321')
+  assert.equal(embeddedUrl.pathname, '/')
+  assert.equal(embeddedUrl.searchParams.get('token'), 'abc123')
 
   // Render-layer guard: without it this URL would become the iframe src.
   const refused = render(
@@ -428,7 +465,9 @@ test('RemoteViewport embeds a loopback iframeUrl and refuses a non-loopback one'
     }),
   )
   assert.equal(testIdsOf(refused).includes('remote-iframe'), false, 'a non-loopback URL must not render an iframe')
-  assert.doesNotMatch(refused, /evil\.example\.com/)
+  // Structural: any surviving src would be parsed here, so a bypass cannot hide
+  // behind a hostname that merely looks similar.
+  assert.deepEqual(srcAttributes(refused), [], 'a non-loopback URL must not reach an iframe src')
   assert.match(refused, /已阻止内嵌远端界面/)
   assert.match(refused, /远端地址不是本地回环地址/)
 })

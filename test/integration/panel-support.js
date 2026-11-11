@@ -70,13 +70,67 @@ export const PANEL = Object.freeze({
 /** The marker painted by the simulated remote web (e2e/sim/simulated-remote.mjs). */
 export const REMOTE_MARKER = 'simulated remote DSH'
 
-/** Only a loopback `http://127.0.0.1:<port>` URL may ever become an iframe src. */
-export const LOOPBACK_IFRAME = /^http:\/\/127\.0\.0\.1:\d{1,5}\//
+/**
+ * Parse an absolute URL, or return `null` when the value is not one.
+ *
+ * Assertions about hosts, ports and protocols go through this instead of pattern
+ * matching: a substring/prefix test can be satisfied by a lookalike
+ * (`https://trusted.test.evil.test`, `https://evil.test/?next=https://trusted.test`),
+ * a parsed component cannot.
+ * @param {unknown} value
+ * @returns {URL | null}
+ */
+export function parseAbsoluteUrl(value) {
+  try {
+    return new URL(String(value ?? ''))
+  } catch {
+    return null
+  }
+}
 
-/** The masked address the toolbar renders while the address is visible. */
-export const MASKED_ADDRESS = /127\.0\.0\.1:\d{1,5}/
+/**
+ * Assert that a URL is the loopback `http://127.0.0.1:<port>` form the tunnel must
+ * expose, and return the parsed URL for further component assertions.
+ * @param {unknown} value
+ * @param {string} label
+ * @returns {URL}
+ */
+export function assertLoopbackUrl(value, label) {
+  const parsed = parseAbsoluteUrl(value)
+  assert.ok(parsed, `${label}: not an absolute URL: ${JSON.stringify(value)}`)
+  assert.equal(parsed.protocol, 'http:', `${label}: expected the http protocol, got ${parsed.protocol}`)
+  assert.equal(parsed.hostname, '127.0.0.1', `${label}: expected a loopback hostname, got ${parsed.hostname}`)
+  const port = Number(parsed.port)
+  assert.ok(Number.isInteger(port) && port > 0 && port <= 65535, `${label}: expected a real port, got ${parsed.port}`)
+  return parsed
+}
+
+/** The masked address the toolbar renders while the address is visible (`user@host:port`). */
+export const MASKED_ADDRESS = /^(?:[^@\s]+@)?127\.0\.0\.1:\d{1,5}$/
 /** What the toolbar renders instead of the address when it is hidden. */
 export const HIDDEN_ADDRESS = '••••••'
+
+/**
+ * Assert that no iframe on the page embeds a non-loopback absolute origin.
+ *
+ * Relative and non-`http(s)` sources (`about:blank`, an app-owned frame) cannot be
+ * a remote embed and are skipped; every absolute http(s) source is parsed and its
+ * hostname compared, so a lookalike host cannot satisfy this.
+ * @param {import('puppeteer-core').Page} page
+ * @param {string} label
+ * @returns {Promise<string[]>} the raw sources, for diagnostics
+ */
+export async function assertNoNonLoopbackIframes(page, label) {
+  const sources = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
+  for (const source of sources) {
+    const parsed = parseAbsoluteUrl(source)
+    if (parsed === null) continue
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue
+    assert.equal(parsed.protocol, 'http:', `${label}: an iframe uses ${parsed.protocol}: ${source}`)
+    assert.equal(parsed.hostname, '127.0.0.1', `${label}: an iframe embeds a non-loopback host: ${source}`)
+  }
+  return sources
+}
 
 /** Toolbar labels, both locales (`client.js` dictionaries). */
 export const LABELS = Object.freeze({
@@ -403,13 +457,16 @@ export async function waitForRemoteFrame(page, options = {}) {
       diagnose: async () => JSON.stringify(await describePanel(page)),
     },
   )
-  assert.match(String(iframeSrc), LOOPBACK_IFRAME, `the iframe src is not a loopback URL: ${iframeSrc}`)
+  assertLoopbackUrl(iframeSrc, 'the panel iframe')
 
   const loaded = await pollUntil(
     async () => {
       const frames = page.frames().filter((frame) => frame !== page.mainFrame())
       for (const frame of frames) {
-        if (!frame.url().startsWith('http://127.0.0.1:')) continue
+        // Parse, don't prefix-match: `http://127.0.0.1.evil.test/` starts with the
+        // loopback literal and would pass a `startsWith` check.
+        const frameUrl = parseAbsoluteUrl(frame.url())
+        if (frameUrl === null || frameUrl.hostname !== '127.0.0.1') continue
         const state = await frame
           .evaluate(
             (marker) => ({
@@ -634,10 +691,11 @@ export async function switchPanelHost(page, options) {
  * client resolves per request (`getFetch()`) works in both shells.
  * @param {import('puppeteer-core').Page} page
  * @param {{ url?: string }} [options]
- * @returns {Promise<{ forcedUrl: string, calls: () => Promise<number>, disable: () => Promise<void> }>}
+ * @returns {Promise<{ forcedUrl: string, origin: string, calls: () => Promise<number>, disable: () => Promise<void> }>}
  */
 export async function stubNonLoopbackIframeUrl(page, options = {}) {
   const forcedUrl = options.url ?? 'https://remote.example.com/?token=e2e-not-loopback'
+  const origin = new URL(forcedUrl).origin
   await page.evaluate((forced) => {
     const scope = window
     if (!scope.__dshPanelE2EOriginalFetch) scope.__dshPanelE2EOriginalFetch = scope.fetch
@@ -655,6 +713,7 @@ export async function stubNonLoopbackIframeUrl(page, options = {}) {
   }, forcedUrl)
   return {
     forcedUrl,
+    origin,
     /** @returns {Promise<number>} how many times the panel asked for `/open` while stubbed */
     async calls() {
       return await page.evaluate(() => window.__dshPanelE2EOpenCalls ?? 0)
@@ -679,7 +738,7 @@ export async function stubNonLoopbackIframeUrl(page, options = {}) {
  * Green here is the security property: a hostile or compromised answer must never
  * become an iframe src in the local GUI.
  * @param {import('puppeteer-core').Page} page
- * @param {{ forceRefetch: () => Promise<void>, intercepted: () => Promise<number>, timeoutMs?: number }} options
+ * @param {{ forceRefetch: () => Promise<void>, intercepted: () => Promise<number>, forbiddenOrigin: string, timeoutMs?: number }} options
  * @returns {Promise<{ cardText: string, iframeSrcs: string[], panelIframe: string | null }>}
  */
 export async function assertBlockedIframe(page, options) {
@@ -689,33 +748,105 @@ export async function assertBlockedIframe(page, options) {
   const timeoutMs = options.timeoutMs ?? 30_000
   await options.forceRefetch()
 
-  const cardText = await pollUntil(
+  // Poll for either outcome, so a bypass is reported as "it embedded <url>"
+  // within milliseconds instead of as a 30 s "card never appeared" timeout.
+  const outcome = await pollUntil(
     async () => {
+      const sources = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
+      for (const source of sources) {
+        const parsed = parseAbsoluteUrl(source)
+        if (parsed === null) continue
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue
+        if (parsed.hostname !== '127.0.0.1') return { kind: 'bypass', source }
+      }
       const text = await page
         .$eval(PANEL.errorCard, (node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim())
         .catch(() => null)
-      if (!text) return null
-      return textIncludesAny(text, BLOCKED_TEXT.title) && textIncludesAny(text, BLOCKED_TEXT.detail) ? text : null
+      if (text && textIncludesAny(text, BLOCKED_TEXT.title) && textIncludesAny(text, BLOCKED_TEXT.detail)) {
+        return { kind: 'blocked', text }
+      }
+      return null
     },
     {
       timeoutMs,
-      intervalMs: 200,
+      intervalMs: 100,
       label: 'the panel to refuse a non-loopback iframe URL',
       diagnose: async () => JSON.stringify(await describePanel(page)),
     },
   )
+  assert.equal(
+    outcome.kind,
+    'blocked',
+    `the panel embedded a non-loopback origin instead of refusing it: ${outcome.source}`,
+  )
+  const cardText = outcome.text
 
   // The client must have asked for the URL at all, or "no iframe" proves nothing.
   const intercepted = await options.intercepted()
   assert.ok(intercepted >= 1, 'the panel never requested /hosts/:id/open, so the guard was not exercised')
-  // No panel iframe, and nothing anywhere may embed the forced origin.
+  // No panel iframe, and nothing anywhere may embed a non-loopback origin. Both
+  // checks parse the URL rather than matching text: a substring test for the
+  // hostname would be satisfied by a lookalike host.
   const panelIframe = await page.$eval(PANEL.iframe, (node) => node.getAttribute('src') ?? '').catch(() => null)
   assert.equal(panelIframe, null, `the panel embedded an iframe for a blocked URL: ${panelIframe}`)
-  const iframeSrcs = await page.$$eval('iframe', (nodes) => nodes.map((node) => node.getAttribute('src') ?? ''))
-  for (const src of iframeSrcs) assert.doesNotMatch(src, /example\.com/, `a blocked URL became an iframe src: ${src}`)
-  const leak = await page.evaluate(() => document.documentElement.outerHTML.includes('remote.example.com'))
-  assert.equal(leak, false, 'the refused URL was still rendered into the page')
+  const iframeSrcs = await assertNoNonLoopbackIframes(page, 'the blocked state')
+  // `outerHTML` cannot be parsed, so scan the rendered attribute/text values for
+  // URL runs, parse each run and compare **origins** with the refused one.
+  const origins = await renderedOrigins(page)
+  assert.equal(
+    new Set(origins).has(options.forbiddenOrigin),
+    false,
+    `the refused origin was rendered into the page: ${options.forbiddenOrigin} (seen: ${JSON.stringify(origins)})`,
+  )
   return { cardText, iframeSrcs, panelIframe }
+}
+
+/**
+ * Every absolute `http(s)` origin rendered in the page's attributes or text.
+ *
+ * `outerHTML` cannot be parsed as a document, and matching a hostname inside it is
+ * exactly the check a lookalike defeats (`https://good.test/?next=https://evil.test`,
+ * `https://good.test.evil.test/`). So the serialized values are split into URL
+ * runs on characters a URL cannot contain, and each run is parsed; the caller then
+ * compares whole origins.
+ * @param {import('puppeteer-core').Page} page
+ * @returns {Promise<string[]>}
+ */
+async function renderedOrigins(page) {
+  return await page.evaluate(() => {
+    const separators = new Set([' ', '\t', '\n', '\r', '"', "'", '<', '>', '(', ')', '`', '\\', ',', ';'])
+    /** @type {string[]} */
+    const values = []
+    for (const element of document.querySelectorAll('*')) {
+      for (const attribute of element.attributes) values.push(attribute.value)
+    }
+    if (document.body) values.push(document.body.innerText)
+    /** @type {Set<string>} */
+    const origins = new Set()
+    for (const value of values) {
+      // Attribute serialization escapes `&`; a URL is compared after decoding it.
+      const text = String(value ?? '')
+        .split('&amp;')
+        .join('&')
+      let run = ''
+      const flush = () => {
+        if (run === '') return
+        try {
+          const parsed = new URL(run)
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') origins.add(parsed.origin)
+        } catch {
+          /* not a URL, ignore */
+        }
+        run = ''
+      }
+      for (const char of text) {
+        if (separators.has(char)) flush()
+        else run += char
+      }
+      flush()
+    }
+    return [...origins]
+  })
 }
 
 /**
