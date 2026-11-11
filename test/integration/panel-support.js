@@ -39,6 +39,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import { clickSelector } from './activation.js'
 import { pollUntil, sleep, tail } from './harness-support.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -204,8 +205,8 @@ export async function assertReadOnlyBadge(page, options = {}) {
   } catch (_error) {
     // The rail reads mirrors once on mount; on a slow host the connect-time replay
     // may not have finished. One explicit refresh asks it to look again (the same
-    // button a user has), instead of asserting a race.
-    await page.click('[data-testid="workspace-rail-refresh"]')
+    // button a user has), instead of asserting a race. DOM click, never coordinates.
+    await clickSelector(page, '[data-testid="workspace-rail-refresh"]')
     try {
       await page.waitForSelector(selector, { timeout: timeoutMs })
     } catch (timeoutError) {
