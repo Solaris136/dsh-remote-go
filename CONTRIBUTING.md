@@ -1,0 +1,168 @@
+# 贡献指南
+
+> **English abstract.** `dsh-remote-go` is a DSH plugin that opens a remote DSH inside a full-page local
+> panel over SSH, with host management, connection diagnostics, remote bootstrap and version parity. This
+> guide covers local setup (Node 24 + pnpm 11, install with `--ignore-scripts`), the canonical checks
+> (`pnpm run verify`), Conventional Commits, the PR flow (fork → branch → PR against `main`, squash merge),
+> review expectations, code style, and private security reporting. The rest is written in Chinese.
+
+感谢你愿意参与 `dsh-remote-go`（「dsh remote go」）。本文说明本地开发、提交与评审的约定；产品与设计背景见
+[README](README.md)、[设计文档](docs/design.md) 与 [实现说明](docs/implementation.md)。
+
+## 1. 开始之前
+
+- 小修小补（错别字、明确的 bug 修复）可以直接提 PR。
+- 行为变更、新能力、契约调整（`docs/api.md`）、依赖变动请先开 issue 说清问题与方案，避免重复劳动。
+- 本项目的核心取舍是「**薄客户端 + 零运行时依赖 + 零安装脚本**」（见 README「关键决策」），评审会以此为准绳。
+
+## 2. 开发环境
+
+| 依赖 | 要求 | 说明 |
+|---|---|---|
+| Node.js | 24 或更高 | `engines.node` 为 `>=24`；单元测试与校验脚本都在 Node 24 上验证，CI 只用 Node 24 |
+| pnpm | 11.x | `package.json` 用 `packageManager: pnpm@11.x` 固定版本，`corepack enable` 即对齐；CI 用 `pnpm/action-setup` |
+| SSH 测试主机 | 可选 | 仅 `test:e2e` 需要：真实 SSH + Linux 远端 + 可用的远端 DSH |
+| Chrome / Edge | 可选 | 仅 `test:e2e` 的浏览器半端需要（`E2E_CHROME` 可覆盖可执行文件路径） |
+
+首次检出后安装依赖：
+
+```bash
+corepack enable                                         # 按 packageManager 固定 pnpm 11
+pnpm install --frozen-lockfile --ignore-scripts
+```
+
+`--ignore-scripts` 是刻意的：本仓库**没有安装期生命周期脚本**（无 `postinstall` / `preinstall` / `prepare`），
+唯一挂载的钩子 `prepack` 只做只读校验（`market-entry.mjs --check`）。发布包 `dependencies` 为空，`ssh2` 以预打包产物
+`vendor/ssh2.bundle.cjs` 随包分发。因此：
+
+- 安装过程不会执行第三方代码（供应链更可控，CI 与插件市场安装更稳定）；
+- **不要**新增 `postinstall` / `preinstall` / `prepare` 等生命周期脚本；需要生成产物时用显式脚本（如
+  `pnpm run build:vendor`）并在 PR 里说明原因；
+- 新增或升级 `devDependencies` 时，请先用普通 `pnpm install` 更新 `pnpm-lock.yaml`，再在干净环境用
+  `--frozen-lockfile` 复验；**不要手改 lockfile**。
+
+## 3. 常用命令
+
+| 命令 | 作用 |
+|---|---|
+| `pnpm run verify` | 提交前必跑；等价于 CI 门禁（组成见下） |
+| `pnpm run lint` | `node scripts/check-repo.mjs`，检查仓库级约定 |
+| `pnpm run check:syntax` | 解析全部 JS/MJS，确认无语法错误 |
+| `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml` |
+| `pnpm run market:check` | 校验包元数据、运行时文件与 format-1 市场索引条目 |
+| `pnpm run pack:check` | 校验 `files[]` 覆盖与 `pnpm pack` 产物内容 |
+| `pnpm run test:unit` | `node --test "test/unit/*.test.js"`（Host + Client，无需网络 / SSH） |
+| `pnpm run check:pr-title` | 按 Conventional Commits 校验 PR 标题（CI 对 PR 强制，见 §5） |
+| `pnpm run build:vendor` | 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
+| `pnpm run test:e2e` | 两个端到端套件（见下），需要 SSH 主机、Chrome 或可用的 pnpm；不在常规 PR CI 中运行 |
+
+`pnpm run verify` 依次执行：`lint` + `check:syntax` + `check:workflows` + `market:check` +
+`pack:check` + `test:unit`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。
+
+### 端到端测试（可选）
+
+`pnpm run test:e2e` 由两个套件组成，都需要 `e2e/control` 下已准备好的隔离 control DSH 运行时
+（见 [e2e/remote/README.md](e2e/remote/README.md)）：
+
+- `test/e2e/plugin.e2e.js`：真实 SSH 主机（**必须**设置 `E2E_SSH_ADDRESS`，取 SSH 别名或 `user@host`；未设置时该套件
+  会被跳过）+ 本机 Chrome/Edge（`E2E_CHROME` 可覆盖路径）；
+- `test/e2e/publish.e2e.js`：把 tarball 装进干净的 DSH profile 验证发布路径，需要 PATH 上有 `pnpm`
+  （或用 `DSH_PNPM` / `PNPM_EXE` 指定入口）。
+
+E2E 会连接真实服务器、启动与停止远端 DSH，并写出报告、截图与证据文件。**提交前务必确认这些证据不含令牌、密码、
+私钥或真实主机名/地址**；`e2e/remote/evidence` 下的文件尤其需要人工复核（详见 [SECURITY.md](SECURITY.md)）。
+
+## 4. 提交信息（Conventional Commits）
+
+格式：`type(scope): subject`
+
+- `type` 取值：`build`、`chore`、`ci`、`docs`、`feat`、`fix`、`perf`、`refactor`、`revert`、`style`、`test`。
+- `scope` 可选，取影响面最小者：`host`、`client`、`ssh`、`tunnel`、`bootstrap`、`ci`、`docs`、`deps` 等；
+  只允许小写字母、数字与连字符。
+- `subject` 用祈使句，小写开头（专有名词除外），**结尾不加句号**，整条标题（含 `type(scope): `）**不超过 72 个字符**。
+- 需要解释「为什么」时，空一行写正文；破坏性变更用 `BREAKING CHANGE:` 页脚，或写成 `feat(host)!: ...`。
+- 合并前记得把标题从 `WIP`/草稿状态改成正式标题——CI 会拒绝以 `WIP` 开头的标题。
+
+| type | 用途 |
+|---|---|
+| `feat` | 用户可见的新能力 |
+| `fix` | 用户可见的缺陷修复 |
+| `perf` | 不改变行为、只改善性能 |
+| `refactor` | 不改变行为的结构整理 |
+| `docs` | 仅文档 |
+| `test` | 仅测试 |
+| `build` | 打包/构建/依赖产物（含 `vendor/`、lockfile） |
+| `ci` | `.github/workflows` 与 CI 脚本 |
+| `chore` | 杂项维护（版本号、仓库元数据） |
+| `style` | 纯格式（空格、换行、引号），不改变语义 |
+| `revert` | 回退既有提交，正文注明被回退的 commit |
+
+## 5. 分支与 PR
+
+1. Fork 仓库，从 `main` 创建分支：`<type>/<short-slug>`，例如 `feat/settings-remote-hosts`、`fix/ssh-timeout`。
+2. 本地跑通 `pnpm run verify`。
+3. 向 `main` 提 PR。保持单一主题：一个 PR 解决一个问题，避免顺手重排整个文件。
+4. 合并方式是 **squash merge**：`main` 上每个 PR 恰好一个提交，所以 **PR 标题必须是合规的 Conventional Commit**
+   —— squash 会拿 PR 标题当提交信息，PR 内部的单条提交信息只作参考；CI 里 `scripts/check-pr-title.mjs` 会直接
+   校验标题格式与长度。
+5. 评审意见用追加提交处理即可，不必强行 rebase；合并前把 PR 标题与最终变更对齐。
+6. 与 `main` 冲突时 rebase 到最新 `main`，然后重跑 `pnpm run verify`。
+
+本地可以先自查标题：
+
+```bash
+node scripts/check-pr-title.mjs "feat(panel): add SSH tunnel keepalive backoff"
+```
+
+### CI 检查项
+
+PR 触发 `.github/workflows/ci.yml`，作业名固定为：
+
+- **Repository conventions** —— `pnpm run lint` + `check:syntax` + `check:workflows`，并在 PR 上校验 PR 标题
+  （`scripts/check-pr-title.mjs`，dependabot 除外）
+- **Unit tests (ubuntu-latest, Node 24)**、**Unit tests (windows-latest, Node 24)** —— 单元测试
+- **Publish artifact (ubuntu-latest)**、**Publish artifact (windows-latest)** —— 市场条目、`files[]` 与 tarball 校验
+
+真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁。
+
+## 6. 评审要求
+
+评审看「可验证」，不看风格口味。合并前置条件：
+
+- **行为变更必须带测试**：修 bug 先写能复现的失败用例；新增分支逻辑补 `test/unit` 用例（`node:test`，纯逻辑优先，
+  需要 I/O 时用测试内的假 SSH / 假 HTTP 服务，不依赖外网）。
+- **用户可见变更必须带文档**：改界面文案、设置项、错误分类、命令、安装方式时，同步更新 README 与 `docs/`，
+  并在 `CHANGELOG.md` 的 `[Unreleased]` 下补一行。
+- **不新增运行时依赖**：零运行时依赖是本项目的卖点；确需新增时先开 issue 说明理由与替代方案，评审通过后再动
+  `package.json`。`ssh2` 走 vendored 打包，不作为运行时依赖发布。
+- **不放密钥**：代码、测试夹具、E2E 证据、截图、日志都不得包含 token、密码、私钥、真实主机名/IP 或内网地址；
+  需要示例时用明显的假值（如 `example.invalid`、`127.0.0.1`）。
+- **不做无关改动**：不顺手升级依赖、不重排格式、不改与本 PR 无关的文档。
+- **契约要保持稳定**：Host↔Client 的 HTTP 契约见 `docs/api.md`；改契约需同步文档、`client.js` 与对应测试。
+
+## 7. 代码风格
+
+仓库不引入独立的格式化工具，按下列约定手写；`pnpm run lint`（`scripts/check-repo.mjs`）另做仓库级校验。
+
+- ESM（`"type": "module"`），优先 Node 内置模块；Host 半端不 import DSH 内部包，避免版本耦合。
+- 2 空格缩进；字符串用单引号（需要内嵌 JSON 或本身含单引号时用双引号）；**语句末尾不加分号**。
+- LF 换行、文件末尾保留一个换行、UTF-8 编码；这些已由 `.gitattributes` / `.editorconfig` 固定，仅 `.cmd` / `.ps1`
+  在 Windows 工作区保留 CRLF。代码文件不留行尾空格；Markdown 用空行分段，不要依赖行尾双空格断开段落。
+- 错误统一用 `src/errors.js` 的分类构造，附中英文案与「下一步」；不要抛裸字符串。
+- 用户可见文案必须中英双语，`locale/` 与 `client.js` 词典保持对齐（单测会校验）。
+- 注释多解释「为什么」而非「是什么」；文档与注释控制在 120 列以内硬换行。
+- `client.js` 是单文件、无构建的浏览器半端：保持可读，不要引入打包步骤，也不要写 `import`。
+
+## 8. 安全相关
+
+- 安全漏洞请**私下**报告，不要开公开 issue；渠道、时限与范围见 [SECURITY.md](SECURITY.md)。
+- 讨论安全问题时（哪怕只是怀疑）也不要贴真实凭据，用占位值复述现象。
+- 诊断导出默认脱敏（token / 密码 / 私钥 / 家目录），但仍可能包含主机名与路径，转贴前请自行复核。
+- 改动 SSH 认证、主机指纹策略、隧道监听地址、本地 HTTP API 鉴权、iframe URL 校验、远端自举命令模板时，
+  请在 PR 描述里写明威胁模型与验证方式。
+
+## 9. 行为准则与许可
+
+- 参与即表示同意遵守 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)（Contributor Covenant 2.1）。
+- 贡献按 [MIT](LICENSE) 授权发布。
+- 拿不准的事先开 issue 问一句，比提一个方向错误的 PR 更省时间。

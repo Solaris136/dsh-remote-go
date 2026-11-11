@@ -174,7 +174,7 @@ data: {}
 ```json
 {
   "ok": true,
-  "aliases": [{ "alias": "tencent-vm", "host": "240d:c000:...", "user": "ubuntu", "port": 22, "source": "config" }],
+  "aliases": [{ "alias": "my-server", "host": "192.0.2.10", "user": "ubuntu", "port": 22, "source": "config" }],
   "knownHosts": { "entries": 12, "hashed": 0, "hosts": ["github.com"] }
 }
 ```
@@ -187,8 +187,8 @@ data: {}
 {
   "host": {
     "id": "h_xxx",
-    "name": "腾讯云测试机",
-    "address": "tencent-vm",
+    "name": "构建服务器",
+    "address": "my-server",
     "port": 22,
     "username": "ubuntu",
     "auth": { "type": "agent" } | { "type": "key", "keyPath": "~/.ssh/id_rsa" } | { "type": "password" },
@@ -323,4 +323,3 @@ data: {}
 4. 所有 `fetch` 用 `credentials: 'same-origin'`，并带 `x-dsh-remote-go: 1`。
 5. iframe 只允许 `http://127.0.0.1:<port>`（Host 保证）；客户端必须校验 `url.startsWith('http://127.0.0.1:')` 再赋值。
 6. 非回环地址在 UI 上给出明确警告（设计 §9.2）。
-
