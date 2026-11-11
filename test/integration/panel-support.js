@@ -887,52 +887,62 @@ export async function stubNonLoopbackIframeUrl(page, options = {}) {
 }
 
 /**
- * Simulate a replay that finishes **after** the panel already read the mirror
- * list — the CI failure mode: the API later has `readOnly: true`, but the client
- * had cached the pre-replay rows and never re-read them.
- *
- * The first `preReplayCalls` `/hosts/:id/mirrors` reads return the real payload
- * with `readOnly` forced to `false` (and `reason: null`), i.e. exactly the
- * descriptors a host publishes before replay lands. Later reads pass through to
- * the real API. Install it before the read that should observe the stale list.
- * @param {import('puppeteer-core').Page} page
- * @param {{ preReplayCalls?: number }} [options]
- * @returns {Promise<{ preReplayCalls: number, calls: () => Promise<number>, disable: () => Promise<void> }>}
+ * Page-side installer for the late-replay stub. Runs in the page; `calls` is the
+ * number of `/mirrors` reads that must be answered with a pre-replay payload.
+ * @param {number} calls
  */
-export async function stubLateReplayMirrors(page, options = {}) {
-  const preReplayCalls = Number.isInteger(options.preReplayCalls) ? options.preReplayCalls : 2
-  await page.evaluate((calls) => {
-    const scope = window
-    if (!scope.__dshPanelE2EOriginalMirrorFetch) scope.__dshPanelE2EOriginalMirrorFetch = scope.fetch
-    const original = scope.__dshPanelE2EOriginalMirrorFetch
-    scope.__dshPanelE2EMirrorCalls = 0
-    scope.__dshPanelE2ELateReplay = calls
-    scope.fetch = async (input, init) => {
-      const raw = typeof input === 'string' ? input : (input && input.url) || ''
-      // Anchored so `/mirrors/sync` is not intercepted.
-      if (/\/dsh-remote-go\/api\/hosts\/[^/]+\/mirrors(?:[?#]|$)/.test(raw)) {
-        scope.__dshPanelE2EMirrorCalls += 1
-        if (scope.__dshPanelE2EMirrorCalls <= scope.__dshPanelE2ELateReplay) {
-          const real = await original.call(scope, input, init)
-          const payload = await real.clone().json()
-          const mirrors = Array.isArray(payload.mirrors) ? payload.mirrors : []
-          const preReplay = {
-            ...payload,
-            mirrors: mirrors.map((mirror) => ({ ...mirror, readOnly: false, reason: null })),
-          }
-          return new Response(JSON.stringify(preReplay), {
-            status: 200,
-            headers: { 'content-type': 'application/json; charset=utf-8' },
-          })
+function installLateReplayStub(calls) {
+  const scope = window
+  if (!scope.__dshPanelE2EOriginalMirrorFetch) scope.__dshPanelE2EOriginalMirrorFetch = scope.fetch
+  const original = scope.__dshPanelE2EOriginalMirrorFetch
+  scope.__dshPanelE2EMirrorCalls = 0
+  scope.__dshPanelE2EPreReplayServed = 0
+  scope.__dshPanelE2ELateReplay = calls
+  scope.__dshPanelE2ESeenUrls = []
+  scope.fetch = async (input, init) => {
+    const raw = typeof input === 'string' ? input : (input && input.url) || ''
+    // Every call is recorded so a "0 mirror reads" failure can tell the difference
+    // between "the client never read" and "the read did not go through fetch".
+    if (scope.__dshPanelE2ESeenUrls.length < 40) scope.__dshPanelE2ESeenUrls.push(raw)
+    // Anchored so `/mirrors/sync` is not intercepted.
+    if (/\/dsh-remote-go\/api\/hosts\/[^/]+\/mirrors(?:[?#]|$)/.test(raw)) {
+      scope.__dshPanelE2EMirrorCalls += 1
+      if (scope.__dshPanelE2EMirrorCalls <= scope.__dshPanelE2ELateReplay) {
+        const real = await original.call(scope, input, init)
+        const payload = await real.clone().json()
+        const mirrors = Array.isArray(payload.mirrors) ? payload.mirrors : []
+        const preReplay = {
+          ...payload,
+          mirrors: mirrors.map((mirror) => ({ ...mirror, readOnly: false, reason: null })),
         }
+        scope.__dshPanelE2EPreReplayServed += 1
+        return new Response(JSON.stringify(preReplay), {
+          status: 200,
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        })
       }
-      return original.call(scope, input, init)
     }
-  }, preReplayCalls)
+    return original.call(scope, input, init)
+  }
+}
+
+/**
+ * Accessors for an installed late-replay stub, bound to the page it guards.
+ * @param {import('puppeteer-core').Page} page
+ * @param {number} preReplayCalls
+ */
+function lateReplayHarness(page, preReplayCalls) {
   return {
     preReplayCalls,
     async calls() {
       return await page.evaluate(() => window.__dshPanelE2EMirrorCalls ?? 0)
+    },
+    async served() {
+      return await page.evaluate(() => window.__dshPanelE2EPreReplayServed ?? 0)
+    },
+    /** Every `fetch` the page made since installation (bounded), for diagnosis. */
+    async urls() {
+      return await page.evaluate(() => window.__dshPanelE2ESeenUrls ?? [])
     },
     async disable() {
       await page.evaluate(() => {
@@ -942,10 +952,30 @@ export async function stubLateReplayMirrors(page, options = {}) {
           delete scope.__dshPanelE2EOriginalMirrorFetch
         }
         delete scope.__dshPanelE2EMirrorCalls
+        delete scope.__dshPanelE2EPreReplayServed
+        delete scope.__dshPanelE2ESeenUrls
         delete scope.__dshPanelE2ELateReplay
       })
     },
   }
+}
+
+/**
+ * Install the late-replay stub **before any page script runs** (a fresh page, or a
+ * reload), which guarantees it owns mirror read #1 instead of racing the client.
+ *
+ * The first `preReplayCalls` `/hosts/:id/mirrors` reads return the real payload
+ * with `readOnly` forced to `false` (and `reason: null`), i.e. exactly the
+ * descriptors a host publishes before replay lands. Later reads pass through to
+ * the real API. `served()` proves the client actually received those payloads, so a
+ * test cannot pass vacuously on a stub that never intercepted anything.
+ * @param {import('puppeteer-core').Page} page
+ * @param {{ preReplayCalls?: number }} [options]
+ */
+export async function stubLateReplayMirrorsOnNewDocument(page, options = {}) {
+  const preReplayCalls = Number.isInteger(options.preReplayCalls) ? options.preReplayCalls : 2
+  await page.evaluateOnNewDocument(installLateReplayStub, preReplayCalls)
+  return lateReplayHarness(page, preReplayCalls)
 }
 
 /**

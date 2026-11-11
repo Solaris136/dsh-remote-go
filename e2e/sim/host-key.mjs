@@ -29,6 +29,13 @@ const ARMOR_PREFIX = '-----BEGIN '
 const CARRIAGE_RETURN = 0x0d
 
 /**
+ * Attempts for host-key generation. `ssh2`'s ed25519 keygen is flaky under CPU
+ * load (see `createHostKey`), and five attempts take the observed ~3% failure rate
+ * to a negligible one without masking a genuinely broken generator.
+ */
+export const HOST_KEY_GENERATION_ATTEMPTS = 5
+
+/**
  * @typedef {{
  *   material: Buffer,
  *   keyType: string,
@@ -99,12 +106,33 @@ export function describeHostKey(material) {
 
 /**
  * Generate a fresh ed25519 host key and validate it before it is used.
+ *
+ * `ssh2`'s synchronous ed25519 keygen occasionally produces armored material its
+ * own parser rejects (`Malformed OpenSSH private key`) when the machine is under
+ * CPU load — observed on the Windows CI runner and reproduced locally with
+ * concurrent test workers (~1 in 30 runs). Handing that key to the SSH server makes
+ * the simulator die at construction, so generation is retried a bounded number of
+ * times; the validation itself stays strict (the assertions are unchanged).
+ * @param {{ generate?: () => { private?: unknown, public?: unknown } }} [options]
+ *   `generate` is a test seam: it lets the retry be exercised deterministically.
  * @returns {HostKey}
  */
-export function createHostKey() {
-  const generated = utils.generateKeyPairSync('ed25519')
-  if (!generated || generated.private === undefined || generated.private === null) {
-    throw new Error('ssh2 generated no private host key')
+export function createHostKey(options = {}) {
+  const generate =
+    typeof options.generate === 'function' ? options.generate : () => utils.generateKeyPairSync('ed25519')
+  /** @type {Error | null} */
+  let lastError = null
+  for (let attempt = 1; attempt <= HOST_KEY_GENERATION_ATTEMPTS; attempt += 1) {
+    const generated = generate()
+    if (!generated || generated.private === undefined || generated.private === null) {
+      lastError = new Error('ssh2 generated no private host key')
+      continue
+    }
+    try {
+      return describeHostKey(generated.private)
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+    }
   }
-  return describeHostKey(generated.private)
+  throw lastError ?? new Error('ssh2 generated no private host key')
 }

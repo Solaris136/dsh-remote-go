@@ -48,7 +48,7 @@ import {
   assertReadOnlyBadge,
   SIMULATED_HISTORY,
   connectSimulatedHost,
-  stubLateReplayMirrors,
+  stubLateReplayMirrorsOnNewDocument,
   describePanel,
   openRemotePanel,
   startSimulatedRemote,
@@ -661,72 +661,71 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
     })
 
     await t.test('the badge returns after a replay that finishes late (pre-replay cache)', async () => {
-      await withPanelDiagnostics(page, async () => {
-        assert.ok(simulatedHostId, 'the simulated host was not connected')
-        const selector = '[data-testid="mirror-readonly-badge"]'
-        // The CI failure mode: the first reads see descriptors that are not yet
-        // read-only, and the badge only appears once a later read sees the replay.
-        const stub = await stubLateReplayMirrors(page, { preReplayCalls: 2 })
-        try {
-          const before = await stub.calls()
-          await page.click('[data-testid="workspace-rail-refresh"]')
-          // The refresh resets the rail's mirror list, so the stale state is visible.
-          await page.waitForSelector(selector, { state: 'detached', timeout: 20_000 })
-          // A fixed retry budget stopped here; polling until settled must not.
-          await page.waitForSelector(selector, { timeout: 45_000 })
-          const reads = (await stub.calls()) - before
-          assert.ok(reads >= 3, `the client stopped before replay settled (only ${reads} mirror reads)`)
-          // Once settled it stops: the request count must stop growing.
-          const settledReads = await stub.calls()
-          await sleep(2500)
-          assert.equal(await stub.calls(), settledReads, 'the client kept polling after the marker settled')
-        } finally {
-          await stub.disable()
-        }
-      })
+      assert.ok(simulatedHostId, 'the simulated host was not connected')
+      // A fresh page whose stub is installed **before any app script runs**
+      // (`evaluateOnNewDocument`), so it owns mirror read #1 by construction. An
+      // in-page install raced the already-mounted rail: CI saw 0 reads and the test
+      // failed on a harness race instead of a product defect. The main page is left
+      // untouched, so later subtests keep their state.
+      const latePage = await browser.newPage()
+      try {
+        const stub = await stubLateReplayMirrorsOnNewDocument(latePage, { preReplayCalls: 2 })
+        await latePage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
+        await openRemoteHostsSection(latePage)
+        await openRemotePanel(latePage, { hostId: simulatedHostId })
+        // Prove the stub owned read #1 before asserting anything about the product:
+        // `served === 2` below means the client really received pre-replay rows.
+        await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
+          timeoutMs: 60_000,
+          label: 'the first mirror read on the fresh page',
+          diagnose: async () =>
+            `stubCalls=${await stub.calls()} served=${await stub.served()} ` +
+            `urls=${JSON.stringify((await stub.urls()).slice(-12))}`,
+        })
+        const badge = await assertReadOnlyBadge(latePage, { hostId: simulatedHostId })
+        const served = await stub.served()
+        assert.equal(served, 2, `the client did not receive the pre-replay payloads (served ${served})`)
+        const reads = await stub.calls()
+        assert.ok(reads >= 3, `the client stopped before replay settled (only ${reads} mirror reads)`)
+        // Once settled it stops: the request count must stop growing.
+        const settledReads = await stub.calls()
+        await sleep(2500)
+        assert.equal(await stub.calls(), settledReads, 'the client kept polling after the marker settled')
+        assert.equal(typeof badge.text, 'string')
+      } finally {
+        await latePage.close()
+      }
     })
 
     await t.test('a host that never replays shows no badge and stops polling', async () => {
-      await withPanelDiagnostics(page, async () => {
-        const selector = '[data-testid="mirror-readonly-badge"]'
-        // Every read stays pre-replay: no badge, and the poll must stay rate-limited
-        // instead of spinning (the 45 s deadline bounds the total in production).
-        const stub = await stubLateReplayMirrors(page, { preReplayCalls: Number.MAX_SAFE_INTEGER })
-        try {
-          const before = await stub.calls()
-          await page.click('[data-testid="workspace-rail-refresh"]')
-          // Wait until at least one *stubbed* read landed and the marker is gone:
-          // the refresh clears the list first, so both conditions are asserted.
-          await pollUntil(
-            async () => {
-              const calls = await stub.calls()
-              const present = (await page.$(selector)) !== null
-              return calls > before && !present ? calls : null
-            },
-            {
-              timeoutMs: 20_000,
-              label: 'the pre-replay list hides the read-only badge',
-              diagnose: async () =>
-                `badgePresent=${(await page.$(selector)) !== null} stubCalls=${await stub.calls()} (start ${before})`,
-            },
-          )
-          const first = await stub.calls()
-          await sleep(6000)
-          const second = await stub.calls()
-          assert.equal(await page.$(selector), null, 'a never-read-only host must not show the badge')
-          assert.ok(second > first, 'the client must retry while replay is still in flight')
-          assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
-        } finally {
-          await stub.disable()
-          // Restore the real list so later subtests see the badge again.
-          await page.click('[data-testid="workspace-rail-refresh"]')
-          try {
-            await page.waitForSelector(selector, { timeout: 30_000 })
-          } catch (error) {
-            throw new Error(`the badge did not return after disabling the stub: ${error.message}`)
-          }
-        }
-      })
+      assert.ok(simulatedHostId, 'the simulated host was not connected')
+      const selector = '[data-testid="mirror-readonly-badge"]'
+      // Same construction as the late-replay test: a fresh page whose stub is
+      // installed before any app script, so the counters describe *this* page's
+      // reads. Every read stays pre-replay, so no badge may ever appear and the
+      // poll must stay rate-limited (the 45 s deadline bounds the total in
+      // production; here the rate is what makes "bounded" observable).
+      const neverPage = await browser.newPage()
+      try {
+        const stub = await stubLateReplayMirrorsOnNewDocument(neverPage, { preReplayCalls: Number.MAX_SAFE_INTEGER })
+        await neverPage.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
+        await openRemoteHostsSection(neverPage)
+        await openRemotePanel(neverPage, { hostId: simulatedHostId })
+        await pollUntil(async () => ((await stub.calls()) > 0 ? true : null), {
+          timeoutMs: 60_000,
+          label: 'the first mirror read on the never-replay page',
+          diagnose: async () => `stubCalls=${await stub.calls()} served=${await stub.served()}`,
+        })
+        await sleep(1500)
+        const first = await stub.calls()
+        await sleep(6000)
+        const second = await stub.calls()
+        assert.equal(await neverPage.$(selector), null, 'a never-read-only host must not show the badge')
+        assert.ok(second > first, 'the client must retry while replay is still in flight')
+        assert.ok(second - first <= 10, `the poll is not rate-limited: ${second - first} reads in 6 s`)
+      } finally {
+        await neverPage.close()
+      }
     })
 
     await t.test('a non-loopback iframe URL is refused instead of embedded', async () => {

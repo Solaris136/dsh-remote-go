@@ -17,7 +17,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import ssh2 from 'ssh2'
-import { createHostKey, describeHostKey, normalizePrivateKey } from '../../e2e/sim/host-key.mjs'
+import {
+  createHostKey,
+  describeHostKey,
+  HOST_KEY_GENERATION_ATTEMPTS,
+  normalizePrivateKey,
+} from '../../e2e/sim/host-key.mjs'
 
 const { utils } = ssh2
 
@@ -87,4 +92,46 @@ test('an unusable host key fails loudly at startup instead of at handshake time'
   const parsed = utils.parseKey(broken)
   assert.equal(parsed instanceof Error, true, 'ssh2 must reject this fixture, or the test proves nothing')
   assert.match(parsed.message, /privateKey|Malformed/i)
+})
+
+// Generation flake (Windows CI + concurrent local workers): ssh2's synchronous
+// ed25519 keygen occasionally yields armor its own parser rejects. The generator
+// retries a bounded number of times; these tests drive that path deterministically
+// instead of hoping the flake shows up.
+
+/** Armored material `ssh2` rejects: valid armor, invalid base64 payload. */
+const UNPARSEABLE_ARMOR = Buffer.from(
+  '-----BEGIN OPENSSH PRIVATE KEY-----\nnot base64\n-----END OPENSSH PRIVATE KEY-----\n',
+)
+
+test('host-key generation retries a malformed key and returns the next valid one', () => {
+  const valid = createHostKey()
+  let calls = 0
+  const key = createHostKey({
+    generate: () => {
+      calls += 1
+      return calls === 1 ? { private: UNPARSEABLE_ARMOR } : { private: valid.material }
+    },
+  })
+  assert.equal(calls, 2, 'the first, unparseable key must trigger exactly one retry')
+  assert.equal(key.keyType, 'ssh-ed25519')
+  assert.equal(Buffer.compare(key.publicBlob, valid.publicBlob), 0)
+})
+
+test('host-key generation stops after the bounded attempts and reports the parse error', () => {
+  let calls = 0
+  assert.throws(
+    () =>
+      createHostKey({
+        generate: () => {
+          calls += 1
+          return { private: UNPARSEABLE_ARMOR }
+        },
+      }),
+    (error) => {
+      assert.match(String(error?.message), /not parseable/)
+      return true
+    },
+  )
+  assert.equal(calls, HOST_KEY_GENERATION_ATTEMPTS, 'generation must be bounded, not unbounded retrying')
 })
