@@ -34,7 +34,7 @@ test('redactText anonymizes home directories by default but keeps them on reques
 
 test('redactObject deep-redacts secret-keyed fields', () => {
   const input = {
-    host: 'tencent-vm',
+    host: 'test-host',
     password: 'p@ss',
     nested: { token: 'abc', label: 'ok' },
     list: [{ apiKey: 'k', name: 'n' }],
@@ -63,11 +63,11 @@ test('redactLongOpaque hides long secrets but keeps diagnostics text', () => {
 
 test('buildDiagnosticBundle redacts nested credentials and adds metadata', () => {
   const bundle = buildDiagnosticBundle({
-    host: 'tencent-vm',
+    host: 'test-host',
     connection: { token: 'secret', port: 22 },
     checks: [{ id: 'ssh', status: 'pass' }],
   })
-  assert.equal(bundle.host, 'tencent-vm')
+  assert.equal(bundle.host, 'test-host')
   assert.equal(bundle.connection.token, '<redacted>')
   assert.equal(bundle.connection.port, 22)
   assert.equal(bundle.plugin, 'dsh-remote-go')
