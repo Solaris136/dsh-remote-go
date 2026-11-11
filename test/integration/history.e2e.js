@@ -235,26 +235,6 @@ async function connectHost(service, hostId, logs, timeoutMs = 90_000) {
   }
 }
 
-/**
- * Wait for the background mirror sync the connect pipeline starts.
- * @param {import('../../src/service.js').RemoteGoService} service
- * @param {string} hostId
- * @param {number} expectedCount
- * @param {(mirrors: any[]) => boolean} [ready]
- * @param {number} [timeoutMs]
- */
-async function waitForMirrors(service, hostId, expectedCount, ready = () => true, timeoutMs = 60_000) {
-  const started = Date.now()
-  for (;;) {
-    const listed = await service.listHostMirrors(hostId)
-    if (listed.mirrors.length === expectedCount && ready(listed.mirrors)) return listed
-    if (Date.now() - started > timeoutMs) {
-      return listed
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
-
 test('L2 history replay projects remote history into the local mirror session', { timeout: 600_000 }, async (t) => {
   const temp = mkdtempSync(path.join(tmpdir(), 'dsh-history-e2e-'))
   const stateFile = path.join(temp, 'sim-state.json')
