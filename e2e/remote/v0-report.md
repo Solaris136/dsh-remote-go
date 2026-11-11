@@ -1,7 +1,7 @@
 # V0 可行性验证报告（远端自举 + token/cookie + 同站 loopback iframe）
 
 - 验证时间：2026-11-11 00:00–00:32（Asia/Shanghai；远端 UTC+0）
-- 测试主机：腾讯云 VM，Ubuntu 24.04 x86_64，用户 `ubuntu`，IPv6 `240d:c000:f05f:8d00:327e:8b66:5c18:0`（本地 SSH 别名 `tencent-vm`；IPv4 回程不可用，全程走 IPv6）
+- 测试主机：腾讯云 VM，Ubuntu 24.04 x86_64，用户 `ubuntu`，IPv6 `<已脱敏>`（本地 SSH 别名 `<host-alias>`；IPv4 回程不可用，全程走 IPv6）
 - 本地：Windows 11，DSH 0.2.2-rc.1，Chromium/Chrome 157.0.8103.39
 - 远端隔离根目录：`/home/ubuntu/.dsh-remote-go`（与旧 `~/.dsh` 完全隔离，未触碰）
 - 任务：task-1（owner `remote-env`）
@@ -100,7 +100,7 @@ PATH=~/.dsh-remote-go/node/bin:$PATH npm install \
 
 ## B. 隧道 + token/cookie 实测（curl）
 
-本地隧道：`ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port> tencent-vm`（后台，`-o ExitOnForwardFailure=yes`），隧道本地端口复用远端端口 `45905`，因此 `Host` 与远端 URL authority 完全一致（都是 `127.0.0.1:45905`）。
+本地隧道：`ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port> <host-alias>`（后台，`-o ExitOnForwardFailure=yes`），隧道本地端口复用远端端口 `45905`，因此 `Host` 与远端 URL authority 完全一致（都是 `127.0.0.1:45905`）。
 报告正文中的端口 `45905` 来自本次 V0 实例（`--port 0` 由 OS 选择）；token 前 6 位 `hXGRV0`、长度 43。
 
 ### B1. 用 token 兑换 cookie：`GET /?token=<TOKEN>`
@@ -211,7 +211,7 @@ return isSameAuthorityOrigin(origin, host);
 
 ## C. V0 iframe 同站嵌入验证（真实浏览器，puppeteer-core）
 
-工具：`puppeteer-core@25.17.0`（不下载浏览器）+ `C:\Users\zhang\scoop\shims\chrome.exe`（Chrome 157.0.8103.39），无头模式 1440×900。
+工具：`puppeteer-core@25.17.0`（不下载浏览器）+ 本机 Chrome/Edge（Chrome 157.0.8103.39），无头模式 1440×900。
 包装页：本地 node http server（随机端口），内容只有 `<iframe src="http://127.0.0.1:45905/?token=<TOKEN>">`；包装页地址 `http://127.0.0.1:58420/`（与远端 same-site、不同 origin，正是插件的实际嵌入形态）。
 脚本：`e2e/remote/embed-check/embed-check.mjs`；结果：`e2e/remote/evidence/embed-check.result.json`；截图：`e2e/remote/evidence/embed-check.png`。
 

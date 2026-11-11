@@ -6,10 +6,32 @@ param(
 # Writes e2e/control/.state.json (port, token, pid, log path) and keeps running.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$node = 'C:\Users\zhang\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe'
-if (-not (Test-Path $node)) { throw "bundled node not found: $node" }
+
+# Resolve the Node.js binary without assuming an installation path:
+#   $env:E2E_NODE wins, otherwise the first `node` on PATH.
+function Resolve-NodeExe {
+  if ($env:E2E_NODE) {
+    if (-not (Test-Path -LiteralPath $env:E2E_NODE)) {
+      throw "E2E_NODE is set but does not point at an existing file: $($env:E2E_NODE)"
+    }
+    return (Resolve-Path -LiteralPath $env:E2E_NODE).Path
+  }
+  $command = Get-Command node -ErrorAction SilentlyContinue
+  if ($command) {
+    $candidate = if ($command.Source) { $command.Source } else { $command.Path }
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+      return (Resolve-Path -LiteralPath $candidate).Path
+    }
+  }
+  throw @"
+Node.js was not found. The Windows E2E control instance needs Node 24 to run DSH.
+Install Node 24 and put it on PATH, or point this script at an existing binary:
+  `$env:E2E_NODE = 'C:\Program Files\nodejs\node.exe'
+"@
+}
+$node = Resolve-NodeExe
 $dshBin = Join-Path $root 'e2e/control/node_modules/@deepseek-ai/dsh/lib/bin.js'
-if (-not (Test-Path $dshBin)) { throw "control runtime missing; run: node <pnpm> --dir e2e/control add --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1" }
+if (-not (Test-Path $dshBin)) { throw "control runtime missing; run: pnpm --dir e2e/control add --ignore-scripts @deepseek-ai/dsh@0.2.2-rc.1" }
 $controlHome = Join-Path $root 'e2e/control/home'
 $logs = Join-Path $root 'e2e/control/logs'
 New-Item -ItemType Directory -Force $logs | Out-Null
@@ -73,4 +95,3 @@ $state = [ordered]@{
 }
 $state | ConvertTo-Json -Depth 4 | Set-Content -Path $statePath -Encoding UTF8
 Write-Output "control started: pid=$($state.pid) port=$($state.port) url=$line"
-

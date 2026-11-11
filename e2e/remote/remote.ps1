@@ -16,19 +16,22 @@
 # E2E, reusing the isolated runtime installed here. Only use `start`/`stop` for
 # manual V0 reproduction; `status` is always safe (it never starts or stops).
 #
-# Env: DSH_REMOTE_HOST (default tencent-vm), DSH_REMOTE_LOCAL_PORT (default: reuse remote port)
+# Env: DSH_REMOTE_HOST (required, ssh alias or user@host), DSH_REMOTE_LOCAL_PORT (default: reuse remote port)
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)]
   [ValidateSet('setup', 'start', 'stop', 'status', 'tunnel-start', 'tunnel-stop', 'all')]
   [string]$Action = 'status',
 
-  [string]$RemoteHost = $(if ($env:DSH_REMOTE_HOST) { $env:DSH_REMOTE_HOST } else { 'tencent-vm' }),
+  [string]$RemoteHost = $(if ($env:DSH_REMOTE_HOST) { $env:DSH_REMOTE_HOST } else { '' }),
 
   [int]$LocalPort = $(if ($env:DSH_REMOTE_LOCAL_PORT) { [int]$env:DSH_REMOTE_LOCAL_PORT } else { 0 })
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RemoteHost)) {
+  throw 'RemoteHost is required: set DSH_REMOTE_HOST (an ~/.ssh/config alias or user@host) or pass -RemoteHost'
+}
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $ProgressPreference = 'SilentlyContinue'
 

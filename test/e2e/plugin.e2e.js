@@ -4,14 +4,14 @@
 //      installed runtime, with this plugin installed into that profile;
 //   2. prove the Host half answers and the browser half is in the client-module graph;
 //   3. create + connect a host through the local API against the real test server
-//      (`E2E_SSH_ADDRESS`, default `tencent-vm`) — SSH, remote probe, T0-local
+//      (`E2E_SSH_ADDRESS`, required) — SSH, remote probe, T0-local
 //      runtime reuse, remote web start, loopback tunnel, token → cookie handshake;
 //   4. drive the real Web GUI in headless Chrome: sidebar entry → full-page panel →
 //      remote DSH iframe renders inside the panel;
 //   5. clean up (stop the remote web, delete the host, stop the control DSH).
 //
 // Run:  node --test "test/e2e/*.e2e.js"
-// Env:  E2E_SSH_ADDRESS (default tencent-vm), E2E_CHROME (browser executable),
+// Env:  E2E_SSH_ADDRESS (required: ssh alias or user@host), E2E_CHROME (browser executable),
 //       E2E_KEEP_CONTROL=1 to keep the control instance for debugging.
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -27,7 +27,7 @@ const CONTROL_DIR = path.join(ROOT, 'e2e', 'control')
 const CONTROL_HOME = path.join(CONTROL_DIR, 'home')
 const DSH_BIN = path.join(CONTROL_DIR, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 const ARTIFACTS = path.join(ROOT, 'e2e', 'artifacts')
-const SSH_ADDRESS = process.env.E2E_SSH_ADDRESS || 'tencent-vm'
+const SSH_ADDRESS = process.env.E2E_SSH_ADDRESS || ''
 const KEEP_CONTROL = process.env.E2E_KEEP_CONTROL === '1'
 const API_HEADER = 'x-dsh-remote-go'
 
@@ -37,15 +37,26 @@ async function readJson(file) {
 }
 
 function resolveChrome() {
+  // Portable discovery only: an explicit override, then the default install
+  // locations of each supported OS. Never a developer-specific path.
+  const localAppData = process.env.LOCALAPPDATA ?? ''
+  const programFiles = process.env.PROGRAMFILES ?? 'C:/Program Files'
+  const programFilesX86 = process.env['PROGRAMFILES(X86)'] ?? 'C:/Program Files (x86)'
   const candidates = [
     process.env.E2E_CHROME,
-    'C:/Users/zhang/scoop/apps/chrome/current/chrome.exe',
-    'C:/Users/zhang/scoop/shims/chrome.exe',
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    process.env.CHROME_PATH,
+    localAppData && `${localAppData}/Google/Chrome/Application/chrome.exe`,
+    `${programFiles}/Google/Chrome/Application/chrome.exe`,
+    `${programFilesX86}/Google/Chrome/Application/chrome.exe`,
+    localAppData && `${localAppData}/Microsoft/Edge/Application/msedge.exe`,
+    `${programFilesX86}/Microsoft/Edge/Application/msedge.exe`,
+    `${programFiles}/Microsoft/Edge/Application/msedge.exe`,
     '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
   ].filter(Boolean)
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
@@ -177,7 +188,10 @@ async function cleanupHosts(origin) {
   }
 }
 
-test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel iframe', { timeout: 420_000 }, async (t) => {
+test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel iframe', {
+  timeout: 420_000,
+  skip: SSH_ADDRESS ? false : 'set E2E_SSH_ADDRESS to an SSH host alias/address this machine can reach',
+}, async (t) => {
   await mkdir(ARTIFACTS, { recursive: true })
   /** @type {Record<string, unknown>} */
   const report = { startedAt: new Date().toISOString(), sshAddress: SSH_ADDRESS, steps: [] }
@@ -569,5 +583,3 @@ test('dsh-remote-go end-to-end: control DSH → SSH → remote DSH in panel ifra
     if (control && !KEEP_CONTROL) await stopControlDsh(control.proc)
   }
 })
-
-

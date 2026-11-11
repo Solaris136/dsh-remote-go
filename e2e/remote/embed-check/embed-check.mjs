@@ -45,10 +45,37 @@ function parseArgs(argv) {
   return out;
 }
 
+/**
+ * Portable Chrome discovery: --chrome, then CHROME_PATH, then the default
+ * install location of each supported OS. No developer-specific path.
+ * @returns {string | null}
+ */
+function resolveChrome() {
+  const localAppData = process.env.LOCALAPPDATA ?? '';
+  const programFiles = process.env.PROGRAMFILES ?? 'C:/Program Files';
+  const programFilesX86 = process.env['PROGRAMFILES(X86)'] ?? 'C:/Program Files (x86)';
+  const candidates = [
+    args.chrome,
+    process.env.CHROME_PATH,
+    localAppData && `${localAppData}/Google/Chrome/Application/chrome.exe`,
+    `${programFiles}/Google/Chrome/Application/chrome.exe`,
+    `${programFilesX86}/Google/Chrome/Application/chrome.exe`,
+    localAppData && `${localAppData}/Microsoft/Edge/Application/msedge.exe`,
+    `${programFilesX86}/Microsoft/Edge/Application/msedge.exe`,
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 const args = parseArgs(process.argv.slice(2));
 const remotePort = Number(args['remote-port']);
 const tokenFile = path.resolve(HERE, args['token-file'] ?? path.join(HERE, '..', '.token'));
-const chromePath = args.chrome ?? process.env.CHROME_PATH ?? 'C:\\Users\\zhang\\scoop\\shims\\chrome.exe';
+const chromePath = resolveChrome();
 const outPath = path.resolve(HERE, args.out ?? path.join(HERE, '..', 'evidence', 'embed-check.result.json'));
 const screenshotPath = path.resolve(HERE, args.screenshot ?? path.join(HERE, '..', 'evidence', 'embed-check.png'));
 const timeoutMs = Number(args['timeout-ms'] ?? 45000);
@@ -61,8 +88,8 @@ if (!fs.existsSync(tokenFile)) {
   console.error(`embed-check: token file not found: ${tokenFile}`);
   process.exit(2);
 }
-if (!fs.existsSync(chromePath)) {
-  console.error(`embed-check: chrome executable not found: ${chromePath}`);
+if (!chromePath) {
+  console.error('embed-check: no Chrome/Edge found; pass --chrome <path> or set CHROME_PATH');
   process.exit(2);
 }
 

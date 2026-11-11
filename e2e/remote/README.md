@@ -1,6 +1,8 @@
 # e2e/remote · 远端测试环境自举与 V0 验证
 
-本目录是 task-1 的交付：在腾讯云测试机（`tencent-vm`）上建立**与本地同版本**的隔离 DSH Web 运行时，并完成 V0 可行性验证（token→cookie→同站 loopback iframe）。实测结论与证据见 **[v0-report.md](v0-report.md)**。
+本目录是远端验证的交付物：在一台可 SSH 访问的 Linux 测试机上建立**与本地同版本**的隔离 DSH Web 运行时，并完成 V0 可行性验证（token→cookie→同站 loopback iframe）。实测结论与证据见 **[v0-report.md](v0-report.md)**。
+
+> 仓库不包含测试主机地址或凭据。所有命令通过 `DSH_REMOTE_HOST`（SSH 别名或 `user@host`）指定目标主机。
 
 ## 当前交接状态（重要）
 
@@ -30,11 +32,11 @@
 
 ## 前置条件
 
-- 本地：Windows + PowerShell 7（`pwsh`）；`ssh tencent-vm` 免密可用；Chrome 或 Edge。
-- 打包运行时（本地无 PATH node/npm/pnpm 时）：
-  - node：`C:\Users\zhang\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe`
-  - pnpm：`...\pnpm\bin\pnpm.mjs`
-  - 本文命令默认使用这两个路径；其他机器可用 `DSH_NODE` / `DSH_PNPM` 覆盖。
+- 本地：Windows + PowerShell 7（`pwsh`）；`ssh <你的主机别名>` 免密可用；Chrome 或 Edge。
+- 运行时：Node ≥ 24 与 pnpm ≥ 11 在 PATH 中即可；若不在 PATH，用环境变量覆盖：
+  - `DSH_NODE`：node 可执行文件（`run-check.ps1` 使用）
+  - `DSH_PNPM`：pnpm 的 JS 入口（如 `pnpm.cjs`/`pnpm.mjs`）
+  - `CHROME_PATH`：Chrome/Edge 可执行文件
 - 远端：Ubuntu 24.04、`curl/tar/xz/sha256sum/setsid/nohup/ss/pgrep/base64` 可用（本次已确认）；能访问 nodejs.org 与 npm registry（本次 npm 走腾讯云镜像，亦可）。
 
 ## 复跑步骤
@@ -83,7 +85,7 @@ pwsh -File e2e/remote/embed-check/run-check.ps1
 首次会自动 `pnpm install`（只装 puppeteer-core，不下载浏览器），读取 `.state.json` 的远端端口与 `.token`，用本机 Chrome 打开一个本地包装页并嵌入 `http://127.0.0.1:<port>/?token=...`。
 期望：`embed-check: verdict=pass checks=11/11`，输出 `evidence/embed-check.result.json` 与 `evidence/embed-check.png`。
 
-可用参数：`-Chrome <path>`（默认 `C:\Users\zhang\scoop\shims\chrome.exe`）、`-RemotePort`、`-TokenFile`、`-TimeoutMs`。
+可用参数：`-Chrome <path>`（默认取 `CHROME_PATH` 或 PATH 中的 chrome/msedge）、`-RemotePort`、`-TokenFile`、`-TimeoutMs`。
 
 ### 5) 状态检查（只读，插件运行期间也可安全执行）
 
@@ -113,14 +115,14 @@ DSH_HOME=$ROOT/home setsid nohup $ROOT/node/bin/node \
 grep -Eo 'dsh web: http://127.0.0.1:[0-9]+/\?token=[^ ]+' $ROOT/logs/remote-web.log
 ```
 
-拿到 `<port>`/`<token>` 后本地：`ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port> tencent-vm`，浏览器/curl 打开 `http://127.0.0.1:<port>/?token=<token>`（首次会 303 到干净 URL 并种 cookie，之后不再需要 token）。
+拿到 `<port>`/`<token>` 后本地：`ssh -N -L 127.0.0.1:<port>:127.0.0.1:<port> <你的主机别名>`，浏览器/curl 打开 `http://127.0.0.1:<port>/?token=<token>`（首次会 303 到干净 URL 并种 cookie，之后不再需要 token）。
 
 ## 已知坑与规避
 
 1. **必须用回环 authority**：cookie 名是 `dsh-auth-<base64url(sha256(Host))>` 且 `SameSite=Strict`；跨 site 地址（公网域名 / Tailscale IP / 非回环 IP）会 401/403 且 iframe 发不出 cookie。本地一律 `127.0.0.1`，不要混用 `localhost`。
 2. **npm 11 的 install-scripts 门禁**：`npm install` 默认不跑依赖安装脚本；本栈真正需要的是 `@deepseek-ai/dsh-subprocess-local` 的 postinstall（给 node-pty 的 helper 补可执行位），`setup-remote.sh` 已直接执行该幂等脚本；`node-pty`/`koffi` 的原生模块随包自带 prebuild，无需编译工具链。
 3. **长安装步骤防 SIGHUP**：本次首次 npm 安装即因本地 SSH 瞬时断开被 SIGHUP 中断（文件已落盘）。重跑幂等脚本即恢复；插件实现建议把长安装放 `setsid/nohup`，用远端完成标记判断成功。
-4. **IPv6 链路抖动**：本地→VM 的 IPv6 偶发超时（`ssh: banner exchange` 超时）。`remote.ps1` 对 ssh 调用有重试，但仍建议失败后隔几秒重试；仍不通时先 `Test-NetConnection 240d:c000:f05f:8d00:327e:8b66:5c18:0 -Port 22`。
+4. **IPv6 链路抖动**：本地→VM 的 IPv6 偶发超时（`ssh: banner exchange` 超时）。`remote.ps1` 对 ssh 调用有重试，但仍建议失败后隔几秒重试；仍不通时先 `Test-NetConnection <主机地址> -Port 22`。
 5. **空工作区**：远端 `home/storages/workspace.json` 为空时，首屏会弹「预览版说明」+「无法创建默认工作区」toast，composer 不出现；E2E 若要会话操作需先选工作区或预置 workspace。
 6. **单实例**：同一 `DSH_HOME` 不要并发跑多个 web 进程；交接后由插件独占。
 

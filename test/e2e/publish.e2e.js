@@ -27,19 +27,20 @@ const NODE_BIN_DIR = path.dirname(process.execPath)
 const API_HEADER = 'x-dsh-remote-go'
 
 /**
- * Resolve how to invoke pnpm: prefer an explicit Node script path (bundled
- * pnpm.mjs in this workspace), otherwise fall back to `pnpm` on PATH (CI).
+ * Resolve how to invoke pnpm without depending on a developer-specific path:
+ * an explicit override (DSH_PNPM / PNPM_EXE, either a JS entry or an
+ * executable), otherwise `pnpm` from PATH. On Windows a `.cmd` shim cannot be
+ * spawned directly, so both cases are routed through cmd.exe.
  * @returns {{ command: string, prefixArgs: string[] }}
  */
 function resolvePnpmInvocation() {
-  if (process.env.DSH_PNPM && existsSync(process.env.DSH_PNPM)) {
-    return { command: process.execPath, prefixArgs: [process.env.DSH_PNPM] }
+  const explicit = process.env.DSH_PNPM ?? process.env.PNPM_EXE
+  if (explicit && existsSync(explicit)) {
+    if (/\.(?:c?js|mjs)$/.test(explicit)) return { command: process.execPath, prefixArgs: [explicit] }
+    if (process.platform === 'win32') return { command: 'cmd.exe', prefixArgs: ['/c', explicit] }
+    return { command: explicit, prefixArgs: [] }
   }
-  const guesses = [
-    'C:/Users/zhang/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/pnpm/bin/pnpm.mjs',
-    '/usr/local/lib/node_modules/pnpm/bin/pnpm.cjs',
-  ]
-  for (const guess of guesses) if (existsSync(guess)) return { command: process.execPath, prefixArgs: [guess] }
+  if (process.platform === 'win32') return { command: 'cmd.exe', prefixArgs: ['/c', 'pnpm'] }
   return { command: 'pnpm', prefixArgs: [] }
 }
 
