@@ -24,7 +24,7 @@
  * No DSH package is imported: the service object (or a `ctx` that can resolve
  * it) is injected, so every branch is unit-testable with a fake.
  */
-import { promises as fsp } from 'node:fs'
+import { mkdirSync, realpathSync, promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { MIRROR_ID_PREFIX, decideResync, mirrorSessionId } from './mirror.js'
 
@@ -323,6 +323,39 @@ export function mirrorHostDir(mirrorRoot, hostId) {
     .replace(/[^A-Za-z0-9._-]/g, '_')
     .replace(/^\.+$/, '')
   return path.join(String(mirrorRoot).trim(), hostSegment || 'unknown')
+}
+
+/**
+ * Canonicalize the mirror root **once**, at plugin load.
+ *
+ * The host's `workspaceRegistry` canonicalizes every registration through
+ * `fs.realpath`, while a session header keeps the exact `meta.cwd` we hand it. If
+ * the mirror root is reached through a symlink or a Windows junction, the literal
+ * spelling and the registry's canonical spelling differ, and sidebar grouping
+ * then depends on the registry canonicalizing the *header* as well — an
+ * assumption this plugin cannot verify. Realpathing the root once and giving the
+ * same canonical root to both adapters makes the two spellings identical by
+ * construction, on every filesystem.
+ *
+ * Tolerant by design: the directory is created when missing (the plugin owns
+ * `$DSH_HOME/remote-go/mirrors`), and any failure falls back to the literal path,
+ * so an unusual filesystem only loses the symlink guarantee — never the feature.
+ *
+ * @param {unknown} dir absolute mirror root as configured.
+ * @param {{ logger?: { warn?: (...args: any[]) => void } }} [options]
+ * @returns {string} the canonical mirror root, or the literal path on failure.
+ */
+export function canonicalMirrorRoot(dir, options = {}) {
+  const literal = typeof dir === 'string' ? dir.trim() : ''
+  if (literal === '') return literal
+  try {
+    mkdirSync(literal, { recursive: true, mode: 0o700 })
+    return realpathSync(literal)
+  } catch (error) {
+    const logger = options.logger ?? console
+    logger.warn?.('[dsh-remote-go] cannot canonicalize the mirror root; using the literal path:', error)
+    return literal
+  }
 }
 
 /** @param {unknown} value @returns {boolean} */

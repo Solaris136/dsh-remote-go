@@ -137,6 +137,9 @@ export class RemoteGoService extends EventEmitter {
     await this.store.load()
     if (this.mirrorStore && typeof this.mirrorStore.load === 'function') await this.mirrorStore.load()
     for (const host of this.store.listHosts()) this.#ensureRuntime(host)
+    // Repairs ghosts a failed unregister left behind (fix for an empty group with
+    // no host); no-op when the optional registry is absent.
+    await this.#pruneOrphanWorkspaces()
     this.initialized = true
     return this
   }
@@ -332,17 +335,14 @@ export class RemoteGoService extends EventEmitter {
     }
     await this.mirrorStore?.removeHostMirrors?.(id)
     // Remove the host's sidebar workspace too: its directory stays (session logs
-    // live elsewhere), but the group must not outlive the host it represents.
+    // live elsewhere), but the group must not outlive the host it represents. A
+    // failure here is repaired by the startup sweep, so it never blocks deletion.
     if (this.workspaceAdapter) {
-      try {
-        const removed = await this.workspaceAdapter.removeHostWorkspace({ hostId: id })
-        if (removed?.ok !== true) {
-          this.logger.warn?.(
-            `[dsh-remote-go] could not remove the mirror workspace for ${id}: ${removed?.reason ?? 'unknown'}`,
-          )
-        }
-      } catch (error) {
-        this.logger.warn?.('[dsh-remote-go] cannot remove the mirror workspace:', error)
+      const removed = await this.#callWorkspaceAdapter(null, 'removeHostWorkspace', { hostId: id })
+      if (removed?.ok !== true) {
+        this.logger.warn?.(
+          `[dsh-remote-go] could not remove the mirror workspace for ${id}: ${removed?.reason ?? 'unknown'}`,
+        )
       }
     }
     if (this.activeHostId === id) this.activeHostId = null
@@ -541,7 +541,7 @@ export class RemoteGoService extends EventEmitter {
     const reconciled = reconcileMirrors({ existing, planned })
     const mirrors = await this.mirrorStore.replaceHostMirrors(runtime.id, reconciled.mirrors)
     const sessions = await this.#ensureMirrorSessions(runtime, mirrors)
-    const sidebar = await this.#ensureHostWorkspace(runtime, mirrors)
+    const sidebar = await this.#ensureHostWorkspace(runtime, mirrors, sessions)
     const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
     if (freshRequired > 0) {
       // Keep the notice until a client acknowledges it: the client's own sync
@@ -610,7 +610,7 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
-   * Register the host's mirror directory as a sidebar workspace.
+   * Register (or unregister) the host's mirror directory as a sidebar workspace.
    *
    * DSH's sidebar lists sessions per workspace and membership is derived from the
    * session header's canonical cwd, so the per-host directory the mirror sessions
@@ -619,44 +619,58 @@ export class RemoteGoService extends EventEmitter {
    * title)` is idempotent, and the adapter always resolves before creating, so a
    * reconnect never produces a duplicate.
    *
-   * Degradations are explicit rather than silent: `mirrorToSidebar:false` skips
-   * registration on purpose, a missing sessions service makes the grouping
-   * pointless, and any adapter failure is logged and reported as `ok:false`
-   * without touching the connect result.
+   * Degradations are explicit rather than silent: `mirrorToSidebar:false`
+   * **unregisters** the group (a mere skip would leave it on screen forever), a
+   * missing sessions service or a sync where every `sessions.create` failed means
+   * there is nothing to group (`sessions-unavailable`, never an empty group), and
+   * any adapter failure is logged and reported as `ok:false` without touching the
+   * connect result.
    *
    * @param {any} runtime
    * @param {import('./mirror.js').MirrorDescriptor[]} mirrors
+   * @param {{ ok?: boolean }[]} [sessionResults] outcomes of the session adapter.
    */
-  async #ensureHostWorkspace(runtime, mirrors) {
+  async #ensureHostWorkspace(runtime, mirrors, sessionResults = []) {
     const settings = this.store.getSettings()
     const enabled = settings?.mirrorToSidebar !== false
     const active = mirrors.filter((descriptor) => descriptor.status === 'active')
     if (!this.workspaceAdapter) return { ok: false, enabled, reason: 'adapter-absent', path: null, workspaceId: null }
     if (!enabled) {
-      this.#log(runtime, 'debug', 'mirror sidebar workspace: disabled by settings (mirrorToSidebar)')
-      return { ok: true, enabled: false, reason: 'disabled', path: null, workspaceId: null }
+      // Turning the setting off must remove an existing group, not just stop
+      // creating new ones: otherwise the "Remote: <host>" workspace stays in the
+      // sidebar forever (the mirror sessions behind it are memory-only).
+      const removed = await this.#callWorkspaceAdapter(runtime, 'ensureHostWorkspace', {
+        hostId: runtime.id,
+        hostName: runtime.entry?.name ?? null,
+        enabled: false,
+      })
+      if (removed?.ok !== true) return { ...removed, enabled: false, reason: removed?.reason ?? 'adapter-error' }
+      if (removed.removed === true) {
+        this.#log(runtime, 'info', 'mirror sidebar workspace: unregistered (mirrorToSidebar is off)')
+      } else {
+        this.#log(runtime, 'debug', 'mirror sidebar workspace: disabled by settings (mirrorToSidebar)')
+      }
+      return removed
     }
     if (!this.sessionAdapter) {
       // No local sessions to group, so a workspace would only be an empty group.
       return { ok: true, enabled, reason: 'sessions-unavailable', path: null, workspaceId: null }
     }
+    const grouped = sessionResults.filter((entry) => entry?.ok === true).length
     if (active.length === 0) {
       return { ok: true, enabled, reason: 'no-mirrors', path: null, workspaceId: null }
     }
-    /** @type {any} */
-    let result = null
-    try {
-      result = await this.workspaceAdapter.ensureHostWorkspace({
-        hostId: runtime.id,
-        hostName: runtime.entry?.name ?? null,
-        enabled,
-      })
-    } catch (error) {
-      // The adapter promises never to throw; this is the belt-and-braces guard so
-      // a broken service can never fail a connect.
-      this.#log(runtime, 'warn', `mirror sidebar workspace failed: ${messageOf(error)}`)
-      return { ok: false, enabled, reason: 'adapter-error', path: null, workspaceId: null }
+    if (grouped === 0) {
+      // Every `sessions.create` failed: registering now would show an empty group
+      // that contradicts the documented `sessions-unavailable` meaning.
+      this.#log(runtime, 'debug', 'mirror sidebar workspace: no local session was created, skipping the group')
+      return { ok: true, enabled, reason: 'sessions-unavailable', path: null, workspaceId: null }
     }
+    const result = await this.#callWorkspaceAdapter(runtime, 'ensureHostWorkspace', {
+      hostId: runtime.id,
+      hostName: runtime.entry?.name ?? null,
+      enabled,
+    })
     if (result?.ok === true) {
       // Reuse is the steady state (every re-sync hits it), so it stays at debug
       // level; only an actual create/retitle is worth an info line.
@@ -665,7 +679,7 @@ export class RemoteGoService extends EventEmitter {
         runtime,
         changed ? 'info' : 'debug',
         `mirror sidebar workspace: ${result.created ? 'created' : result.renamed ? 'retitled' : 'reused'} ` +
-          `${JSON.stringify(result.title ?? '')} (${active.length} session(s))`,
+          `${JSON.stringify(result.title ?? '')} (${grouped} session(s))`,
       )
     } else {
       this.#log(
@@ -675,7 +689,69 @@ export class RemoteGoService extends EventEmitter {
           (result?.error ? ` (${result.error})` : ''),
       )
     }
-    return result ?? { ok: false, enabled, reason: 'no-result', path: null, workspaceId: null }
+    return result
+  }
+
+  /** Shape of a sidebar result when the adapter is unusable. */
+  #sidebarFailure(reason) {
+    return { ok: false, enabled: true, reason, path: null, workspaceId: null }
+  }
+
+  /**
+   * Call one adapter method, converting a throw (the adapters promise not to, but
+   * a broken or third-party implementation might) into a typed failure so a
+   * sidebar problem can never fail a connect or a delete.
+   *
+   * @param {any} runtime
+   * @param {string} method
+   * @param {Record<string, any>} request
+   */
+  async #callWorkspaceAdapter(runtime, method, request) {
+    const adapter = this.workspaceAdapter
+    if (!adapter || typeof adapter[method] !== 'function') return this.#sidebarFailure('adapter-absent')
+    try {
+      const result = await adapter[method](request)
+      return result ?? this.#sidebarFailure('no-result')
+    } catch (error) {
+      // The adapters promise never to throw; this is the belt-and-braces guard so
+      // a broken or third-party implementation can never fail a connect or a
+      // delete. `runtime` is null when the caller has no live runtime to log to.
+      if (runtime && Array.isArray(runtime.logs)) {
+        this.#log(runtime, 'warn', `mirror sidebar workspace ${method} failed: ${messageOf(error)}`)
+      } else {
+        this.logger.warn?.(`[dsh-remote-go] mirror sidebar workspace ${method} failed:`, error)
+      }
+      return this.#sidebarFailure('adapter-error')
+    }
+  }
+
+  /**
+   * Startup sweep: delete sidebar registrations under the mirror root whose host
+   * no longer exists. A failed unregister used to leave a permanently empty
+   * "Remote: …" group behind (mirror sessions are memory-only, so nothing ever
+   * fills it again); this repairs such ghosts on the next load.
+   */
+  async #pruneOrphanWorkspaces() {
+    if (!this.workspaceAdapter || typeof this.workspaceAdapter.pruneOrphanWorkspaces !== 'function') return null
+    const hostIds = this.store.listHosts().map((host) => host.id)
+    try {
+      const result = await this.workspaceAdapter.pruneOrphanWorkspaces({ hostIds })
+      if (result?.ok !== true) {
+        this.logger.warn?.(
+          '[dsh-remote-go] cannot prune orphan mirror workspaces:',
+          result?.reason ?? 'unknown',
+          result?.error ?? '',
+        )
+        return result ?? null
+      }
+      if (Array.isArray(result.removed) && result.removed.length > 0) {
+        this.logger.info?.(`[dsh-remote-go] removed ${result.removed.length} orphan mirror workspace(s) with no host`)
+      }
+      return result
+    } catch (error) {
+      this.logger.warn?.('[dsh-remote-go] cannot prune orphan mirror workspaces:', error)
+      return null
+    }
   }
 
   /** Start one directory sync without blocking the caller. @param {any} runtime */

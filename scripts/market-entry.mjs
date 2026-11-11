@@ -46,6 +46,10 @@ const RUNTIME_SRC = [
   'src/constants.js',
   'src/local-version.js',
   'src/local-ssh.js',
+  'src/mirror.js',
+  'src/mirror-store.js',
+  'src/session-adapter.js',
+  'src/workspace-adapter.js',
 ]
 
 function fail(message) {
