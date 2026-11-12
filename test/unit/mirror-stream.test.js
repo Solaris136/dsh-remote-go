@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  FrameBuffer,
   logVisible,
   buildFollowCommand,
   ingestStreamEvents,
@@ -62,24 +61,6 @@ test('the start guard names the condition that fired instead of returning bare',
   assert.equal(streamGuard({ ...base, hasAdapter: false }).guard, 'no-session-adapter')
   assert.equal(streamGuard({ ...base, runtime: { ssh: { connected: false } } }).guard, 'ssh-down')
   assert.equal(streamGuard({ ...base, runtime: { ssh: { connected: true }, closing: true } }).guard, 'host-closing')
-})
-
-test('a slow consumer stays bounded and reports exactly what it dropped', () => {
-  const buffer = new FrameBuffer(4)
-  for (let index = 0; index < 100; index += 1) {
-    buffer.push({ offset: index, events: [{ seq: index + 1 }] })
-  }
-  assert.equal(buffer.size, 4, 'the buffer never exceeds its cap')
-  const drained = buffer.drain()
-  assert.deepEqual(
-    drained.frames.map((frame) => frame.offset),
-    [96, 97, 98, 99],
-    'the newest frames are kept — they are what a watcher is looking at',
-  )
-  assert.equal(drained.dropped, 96, 'every dropped frame is counted')
-  assert.equal(drained.droppedEvents, 96, 'with the event mass it lost')
-  assert.equal(buffer.size, 0, 'drain empties it')
-  assert.equal(buffer.dropped, 0, 'and the counters reset with the frames')
 })
 
 test('ingestStreamEvents reuses the L2 pipeline, so streamed state equals log-read state', () => {

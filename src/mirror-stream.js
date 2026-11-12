@@ -32,8 +32,6 @@ export const STREAM_LIMITS = Object.freeze({
   maxBytes: 256 * 1024,
   /** Records per frame; the tail is kept and the remainder reported (same policy as L2). */
   maxEvents: 500,
-  /** Frames buffered before the oldest is dropped and a gap reported. */
-  maxBuffered: 64,
   /** Per-invocation timeout for one poll. */
   timeoutMs: 20_000,
 })
@@ -208,47 +206,6 @@ export function parseFrame(text) {
     events: Array.isArray(parsed.events) ? parsed.events : [],
     truncated: parsed.truncated === true,
     bytes: Number.isFinite(Number(parsed.bytes)) ? Math.floor(Number(parsed.bytes)) : 0,
-  }
-}
-
-/**
- * A bounded buffer of pending frames.
- *
- * A slow consumer must not grow memory. Pushing past the cap **drops the oldest** and counts it,
- * because the newest events are what a watcher is looking at and the dropped range is then
- * reported precisely rather than silently lost.
- */
-export class FrameBuffer {
-  /** @param {number} [cap] */
-  constructor(cap = STREAM_LIMITS.maxBuffered) {
-    this.cap = Math.max(1, Math.floor(Number(cap) || STREAM_LIMITS.maxBuffered))
-    /** @type {{ offset: number, events: any[] }[]} */
-    this.frames = []
-    this.dropped = 0
-    this.droppedEvents = 0
-  }
-
-  /** @param {{ offset: number, events: any[] }} frame */
-  push(frame) {
-    this.frames.push(frame)
-    while (this.frames.length > this.cap) {
-      const lost = this.frames.shift()
-      this.dropped += 1
-      this.droppedEvents += Array.isArray(lost?.events) ? lost.events.length : 0
-    }
-    return this.frames.length
-  }
-
-  drain() {
-    const report = { frames: this.frames, dropped: this.dropped, droppedEvents: this.droppedEvents }
-    this.frames = []
-    this.dropped = 0
-    this.droppedEvents = 0
-    return report
-  }
-
-  get size() {
-    return this.frames.length
   }
 }
 

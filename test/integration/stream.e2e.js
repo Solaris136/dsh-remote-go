@@ -173,11 +173,20 @@ async function waitFor(service, hostId, predicate, timeoutMs = 45_000) {
   return mirrors
 }
 
-async function harness({ mirrorStream, fence = false }) {
+async function harness({ mirrorStream, fence = false, logLevel }) {
   const dir = mkdtempSync(path.join(tmpdir(), 'dsh-stream-'))
   writeFixtures(dir)
   const sim = await startSim(dir, fence)
-  const quiet = { warn() {}, info() {}, debug() {}, error() {} }
+  /** Every line that actually reached the logger, with its level. @type {{level: string, line: string}[]} */
+  const captured = []
+  /** @param {string} level */
+  const recorder =
+    (level) =>
+    (...parts) => {
+      const line = parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' ')
+      captured.push({ level, line })
+    }
+  const quiet = { warn: recorder('warn'), info: recorder('info'), debug: recorder('debug'), error: recorder('error') }
   const sessions = fakeSessions()
   const stateDir = path.join(dir, 'state')
   const adapter = createSessionAdapter({ sessions, logger: quiet, mirrorRoot: path.join(stateDir, 'mirrors') })
@@ -186,7 +195,8 @@ async function harness({ mirrorStream, fence = false }) {
     home: path.join(dir, 'home'),
     localVersion: '0.2.2-rc.1',
     logger: quiet,
-    logLevel: 'debug',
+    // Only set when a test asks: the default path must be the shipped one.
+    ...(typeof logLevel === 'string' ? { logLevel } : {}),
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
     resolveTarget: () => ({ targetVersion: '0.2.2-rc.1', source: 'test' }),
     sessionAdapter: adapter,
@@ -208,6 +218,7 @@ async function harness({ mirrorStream, fence = false }) {
     host,
     sessions,
     sim,
+    captured,
     async close() {
       await service.shutdown?.().catch?.(() => null)
       await stopSim(sim.child)
@@ -363,6 +374,40 @@ test('a reconnect resumes from the persisted cursor without duplicating records'
       'the cursor must be where it was after reconnecting',
     )
     assert.equal(countMirrored(), beforeCount, 'a reconnect must not re-append records it already has')
+
+    // (c) The instrument's own proof, at the **shipped** default log level with no override.
+    // Reconnecting resets the ephemeral offset to 0, so the follower re-reads records it has
+    // already applied: those polls legitimately do not advance the cursor, which is exactly the
+    // branch that must be visible without enabling debugging.
+    // Wait for the instrument, not for the cursor: the cursor is already where it was, so
+    // asserting immediately would run before the first post-reconnect poll.
+    const deadline = Date.now() + 30_000
+    while (Date.now() < deadline) {
+      if (h.captured.some((entry) => entry.level === 'info' && entry.line.includes('mirror stream: trace'))) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    const traces = h.captured.filter((entry) => entry.line.includes('mirror stream: trace'))
+    assert.equal(traces.length > 0, true, 'a non-advancing poll must emit a trace at the default level')
+    const visible = traces.filter((entry) => entry.level === 'info')
+    assert.equal(visible.length > 0, true, 'the no-advance trace must reach the logger at info, not debug')
+    for (const field of [
+      'sessionId',
+      'offsetBefore',
+      'rawBytes',
+      'parsedEvents',
+      'planCursor',
+      'persistedCursor',
+      'guard',
+    ]) {
+      assert.equal(visible[0].line.includes(`${field}:`), true, `the visible trace must report ${field}`)
+    }
+    // And the threshold is real in the other direction: at the default level no debug line reaches
+    // the logger, so the info trace above was not simply "everything gets printed".
+    assert.equal(
+      h.captured.some((entry) => entry.level === 'debug'),
+      false,
+      'at the default level nothing at debug may reach the logger',
+    )
   } finally {
     await h.close()
   }

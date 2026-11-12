@@ -330,8 +330,8 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 - **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)`（`src/mirror-writer.js:54`）让任意镜像
   操作排进同一条链；`removeHost` 的删除通过它执行（`#removeMirrorsForHost`，`src/service.js:2069`），
   因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
-- **墓碑优先于排序。** `removeHost`（`src/service.js:377`）在**第一个 `await` 之前**就置
-  `runtime.mirrorDeleted = true`（`src/service.js:384`）；这个判断放在 `withMirrorWriter` 的**排队操作内部**
+- **墓碑优先于排序。** `removeHost`（`src/service.js:404`）在**第一个 `await` 之前**就置
+  `runtime.mirrorDeleted = true`（`src/service.js:411`）；这个判断放在 `withMirrorWriter` 的**排队操作内部**
   （`src/mirror-writer.js:35`），所以哪怕某次写入是在删除**之前**入队、在删除**之后**才执行，它也只返回 `current`、
   不写回，不会复活。队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
   把判断放在 `withMirrorWriter` 而不是某个调用方，是为了让**所有**写入路径自动继承它，也让它可以被测试直接驱动
@@ -341,7 +341,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
   它被删了」。新建描述符是 reconcile 的职责（它返回计划的全集），不是 merge 的。
 - **reconcile 只看当前存储。** 旧的 `current.length > 0 ? current : existing` 回退会在 `current` 为空时用删除前
   的快照重建描述符，是复活 bug 的第二个入口，已移除。
-- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`，`src/service.js:385`），
+- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`，`src/service.js:412`），
   不再静默。
 
 ### 6.4 L3 第一阶段：轮询跟随（已落地，默认关闭）
@@ -350,6 +350,11 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 **轮询跟随**——每个 host 一个定时器，重复调用远端小助手取「偏移之后的日志切片」。诚实的性质：**延迟 ≈ 轮询间隔**
 （`STREAM_LIMITS.pollMs`，`src/mirror-stream.js:30`）、按日志顺序、**至少一次**投递（由 `seq > cursor` 与
 `data.mirrorSeq` 幂等化）、单帧有界、内存有界。真正的推送通道（`ws-mux`）仍未实现，这是已知缺口。
+
+**内存为什么有界**：没有队列。每一帧在下一 tick 被排程**之前**就应用完（`setTimeout` 在 `await` 之后，
+`src/service.js:2132`），所以慢的下游自然产生背压，而不是积压；占用上界就是**单帧**的大小
+（`maxBytes` 256 KB / `maxEvents` 500，`src/mirror-stream.js:32`）。早期版本有一个 `FrameBuffer`，但轮询循环
+从不入队，它只是装饰，已删除——不要在没有队列的情况下声称「丢帧计数」。。
 
 **状态存放**：`cursor` 是**唯一持久真相**，只在描述符里，且所有描述符写入都经 `withMirrorWriter`
 （`src/mirror-writer.js:28`）；流式路径不直接调 `replaceHostMirrors`。`offset` 与日志路径是**每连接的内存状态**
@@ -369,10 +374,16 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 **可观测性（本节的教训）**：第一次尝试的插桩发在 `debug`，默认 `logLevel` 为 `info` 会把它过滤掉，于是「看不到」被
 误读成「没发生」。现在轮询在**没有前进**时以 `info` 打印六值轨迹
 （`{sessionId, offsetBefore, rawBytes, parsedEvents, planCursor, persistedCursor, guard}`，`src/service.js:2224` 附近），
-可见性由**被测试覆盖**的 `logVisible`（`src/mirror-stream.js:329`）决定，`options.logLevel` 可覆盖（`src/service.js:180`）；
+可见性由**被测试覆盖**的 `logVisible`（`src/mirror-stream.js:287`）决定，`options.logLevel` 可覆盖（`src/service.js:180`）；
 `runtime.logs` 环形缓冲始终保留全部行。**一条一般规则**：插桩必须在**默认配置**下就能看见，且要用一个断言证明它
 真的会打印——否则它只会安慰写它的人。
 
+**远端那一半是模拟的——必须知道这一点**：上面列的都是**插件侧**性质。远端助手
+（`remoteStreamScriptSource()`，`src/mirror-stream.js`）在 CI 里**从未真正执行**：单元测试只把它当**字符串**读
+（`test/unit/mirror-stream.test.js`），集成测试里**模拟远端拦截了命令并直接返回预制 JSON**
+（`e2e/sim/simulated-remote.mjs:580` 丢弃安装命令、`:584` 用正则匹配 follow 命令）。也就是说，助手的偏移算术、
+epoch 检查、切片与 JSON 组帧从未跑过；被验证的是**模拟端对协议的重新实现**。要让它真正跑起来需要一台装了 `node`
+且在 `PATH` 上、并有可写 `remote-go/` 的远端 DSH。因此 §10 的 P2 只应读作「插件侧端到端已验证，远端为模拟」。
 **开关**：`mirrorStream` 默认 **false**（`src/settings.js:51`）。关闭时行为与引入跟随者之前逐字节相同；开启后每个 host
 多一次轮询，把远端新记录追加到本地镜像。**激活已端到端验证**：`test/integration/stream.e2e.js` 四个测试——连接期间
 追加的记录无需手动同步即出现且只出现一次、**关闭开关的负对照**、被围栏的 host 不流任何东西、重连从持久 cursor 续接且
@@ -468,6 +479,9 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
     历史回放（PR #25 的 swallow 守卫）。**本次实测的第三个障碍是插桩本身**：轨迹发在 `debug`，默认 `logLevel` 过滤掉，
     于是「看不到」被误读成「没发生」——教训是插桩必须在默认配置下可见，并用断言证明它真的会打印（现由
     `logVisible` + 单元测试保证）。**还有一个纯属我自己的 bug**：诊断输出写在会先失败的断言之后，所以它从未执行。
+    **诚实边界**：远端助手（`remoteStreamScriptSource()`）在 CI 中**从未执行**——模拟远端拦截命令并返回预制 JSON
+    （`e2e/sim/simulated-remote.mjs:580`/`:584`），单元测试只把它当字符串读。被验证的是插件侧加上模拟端对协议的
+    重新实现，真实远端行为需要一台有 `node` 与可写 `remote-go/` 的机器才能验证。
     **现状**：`mirrorStream` 默认 false；开启后连接期间追加的远端记录无需手动同步即出现且只出现一次（负对照：关闭时
     不出现）；被围栏的 host 不流任何东西；重连从持久 cursor 续接且不重复。**下一个尝试者需要**：一条真正的推送通道
     （`ws-mux`）来消掉「延迟 ≈ 轮询间隔」，以及 L3 的输入转发与审批桥。

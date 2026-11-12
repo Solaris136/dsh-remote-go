@@ -2146,7 +2146,6 @@ export class RemoteGoService extends EventEmitter {
     }
     runtime.streamFiles?.clear?.()
     runtime.streamOffsets?.clear?.()
-    runtime.streamBuffer = null
   }
 
   /**
