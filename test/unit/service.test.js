@@ -668,6 +668,8 @@ test('connect registers one sidebar workspace per host with the host name', asyn
     sshFactory: registrySshFactory(stdout),
   })
   const host = await createHost(service)
+  // The sidebar group is opt-in since 0.1.0; this test covers the opt-in path.
+  await service.saveSettings({ mirrorToSidebar: true })
   const synced0 = await service.connect(host.id)
   assert.equal(synced0.accepted, true)
   await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
@@ -755,6 +757,8 @@ test('mirrorToSidebar:false unregisters the group a host already registered', as
   })
   const host = await createHost(service)
   try {
+    // Register first, then prove turning the toggle off removes the group.
+    await service.saveSettings({ mirrorToSidebar: true })
     await service.connect(host.id)
     await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
     await waitFor(() => registry.list().length === 1, { label: 'the sidebar registration' })
@@ -865,6 +869,7 @@ test('without a sessions service no empty sidebar group is created', async () =>
   }
   const { service } = await makeTestService({ workspaceAdapter, sshFactory: registrySshFactory(stdout) })
   const host = await createHost(service)
+  await service.saveSettings({ mirrorToSidebar: true })
   await service.connect(host.id)
   await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1)
 
@@ -896,6 +901,7 @@ test('a sync where every session create fails registers no empty group', async (
   })
   const host = await createHost(service)
   try {
+    await service.saveSettings({ mirrorToSidebar: true })
     await service.connect(host.id)
     await waitFor(() => ensured.length === 2, { label: 'the failing session creates' })
     const synced = await service.syncHostMirrors(host.id)

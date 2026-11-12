@@ -157,8 +157,11 @@
 - overlay：**接管整个窗口**（只在 DSH 桌面端可用）。远端 DSH 由桌面端自带的 browser-guest 通道以真正的 Chromium guest 渲染：`window.dshDesktop.browser.acquire(workspace)` 拿到 lease 与 partition，页面创建 `<webview src="about:blank#<lease>" partition=...>` 挂到 `document.body`，`dom-ready` 后 `loadURL(隧道 URL)`。
   guest 是独立浏览器上下文（自己的 cookie），不是 iframe；它铺满整个页面，所以用户看到的就是远端那台机器。顶部保留一条 36px 控制条（主机名 / 刷新 / 退出）——guest 抢走键盘焦点后，这是唯一可靠的退出口。
   放行规则（壳）：guest 只允许 http(s)、无账号密码、且不是「当前应用 host」；判定是 `url.port === hostUrl.port && (同 hostname || loopback)`，隧道端口与本地 DSH 端口不同，因此放行。
-  代价（壳写死）：guest 会话 `will-download` 被 preventDefault（下载不可用）、所有权限请求拒绝、弹窗转交宿主；应用重载后浮层需重建。这些都在卡片的提示里写明。
-  载体挂在 React 树之外，切换面板不会销毁；切换主机或卸载面板时释放 lease 并移除。浏览器里无 `window.dshDesktop`，该形态降级为卡片上的说明。
+  代价（壳写死）：guest 会话 `will-download` 被 preventDefault（下载不可用）、所有权限请求拒绝、弹窗转交宿主；应用重载后浮层需重建。
+  载体挂在 React 树之外，切换面板不会销毁；切换主机或卸载面板时释放 lease 并移除。浏览器里无 `window.dshDesktop`，该形态降级为一句说明。
+  **这个形态下面板没有自己的界面**：选中主机后整块面板只剩一行接管状态（失败时可「重试 / 打开设置」），单一主机时打开面板即接管；
+  点「退出」只关掉浮层、**不断开连接**（SSH、隧道、远端进程照旧），并把窗口交还给本地会话（`ctx.layout.selectPanel(null)`）。
+  多主机时仍显示常规面板——那是唯一能选主机的入口。
 
 ### 4.4 连接状态与诊断
 
