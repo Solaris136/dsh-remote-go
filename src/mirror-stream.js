@@ -317,3 +317,20 @@ export function streamGuard(input) {
 }
 
 export { applyEvents }
+
+/**
+ * Whether a line at `level` clears the `threshold`.
+ *
+ * Extracted so the rule is **tested** rather than an inline comparison nobody looks at. The lesson
+ * from the first two attempts (design §6.4): an instrument that cannot be seen is not an
+ * instrument, so the visibility decision gets its own assertion.
+ * @param {string} level @param {string} [threshold] @returns {boolean}
+ */
+export function logVisible(level, threshold = 'info') {
+  const rank = LOG_LEVELS[level] ?? LOG_LEVELS.info
+  const floor = LOG_LEVELS[threshold] ?? LOG_LEVELS.info
+  return rank >= floor
+}
+
+/** Severity order. @type {Readonly<Record<string, number>>} */
+export const LOG_LEVELS = Object.freeze({ debug: 10, info: 20, warn: 30, error: 40 })

@@ -71,6 +71,7 @@ import {
   buildFollowCommand,
   buildInstallStreamScriptCommand,
   ingestStreamEvents,
+  logVisible,
   nextOffset,
   parseFrame,
   remoteStreamScript,
@@ -174,6 +175,9 @@ export class RemoteGoService extends EventEmitter {
     // sessions are grouped where DSH's sidebar actually lists them.
     this.workspaceAdapter = options.workspaceAdapter ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
+    // Log verbosity override: set it to `debug` to see the §6.4 poll trace in full. Unset means the
+    // configured `logLevel` decides.
+    this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
     this.clock = options.clock ?? (() => Date.now())
     // L3 prerequisite (design §6.2): every mirror write carries a fencing epoch, and the
     // writer id identifies *which* local side holds it. Stable per host so a restart
@@ -242,13 +246,13 @@ export class RemoteGoService extends EventEmitter {
       idleTimer: null,
       connectPromise: null,
       mirrorSync: null,
-    // Ephemeral per-connection follower state (§6.4). The log path and byte offset are **not
-    // persisted**: the descriptor's cursor is the only durable truth, and a restart re-discovers
-    // the path on connect and re-reads from offset 0 (`seq > cursor` makes that a no-op).
-    streamFiles: new Map(),
-    streamOffsets: new Map(),
-    streamHelperPath: null,
-    streamTimer: null,
+      // Ephemeral per-connection follower state (§6.4). The log path and byte offset are **not
+      // persisted**: the descriptor's cursor is the only durable truth, and a restart re-discovers
+      // the path on connect and re-reads from offset 0 (`seq > cursor` makes that a no-op).
+      streamFiles: new Map(),
+      streamOffsets: new Map(),
+      streamHelperPath: null,
+      streamTimer: null,
       mirrorResync: null,
       closing: false,
       logs: [],
@@ -280,6 +284,11 @@ export class RemoteGoService extends EventEmitter {
     const line = `[dsh-remote-go:${runtime.id}] ${args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')}`
     if (runtime.logs.length > 200) runtime.logs.shift()
     runtime.logs.push({ at: nowIso(), level, line })
+    // `runtime.logs` above is the unfiltered ring an operator inspects. The logger below honours a
+    // threshold so verbosity is a runtime decision: `options.logLevel` (tests, diagnostics) or the
+    // configured `logLevel`.
+    const threshold = this.logLevel ?? this.store.getSettings()?.logLevel ?? 'info'
+    if (!logVisible(level, threshold)) return
     const method = this.logger[level] ?? this.logger.info
     method?.(line)
   }
@@ -2156,7 +2165,7 @@ export class RemoteGoService extends EventEmitter {
     })
     if (verdict.ok !== true) return
     if ((await this.#ensureStreamHelper(runtime)) !== true) {
-      this.#log(runtime, 'debug', 'mirror stream: trace { guard: no-helper }')
+      this.#log(runtime, 'info', 'mirror stream: trace { guard: no-helper }')
       return
     }
     const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
@@ -2169,7 +2178,11 @@ export class RemoteGoService extends EventEmitter {
       if (streamAllowed(descriptor).ok !== true) continue
       const logPath = runtime.streamFiles.get(descriptor.remoteSessionId)
       if (typeof logPath !== 'string' || logPath === '') {
-        this.#log(runtime, 'debug', `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, guard: no-log-path }`)
+        this.#log(
+          runtime,
+          'info',
+          `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, guard: no-log-path }`,
+        )
         continue
       }
       const offsetBefore = runtime.streamOffsets.get(descriptor.remoteSessionId) ?? 0
@@ -2186,7 +2199,7 @@ export class RemoteGoService extends EventEmitter {
             ...descriptor,
             writable: false,
             level: 'L1',
-            reason: { code: 'fenced', detail: null },
+            reason: historyReason('fenced'),
             mirroredAt: nowIso(),
           })
         }
@@ -2197,7 +2210,7 @@ export class RemoteGoService extends EventEmitter {
         this.#log(
           runtime,
           'debug',
-          `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: 0, guard: idle }`,
+          `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: 0, planCursor: ${descriptor.cursor ?? 0}, persistedCursor: ${descriptor.cursor ?? 0}, guard: idle }`,
         )
         continue
       }
@@ -2205,17 +2218,17 @@ export class RemoteGoService extends EventEmitter {
         maxEvents: STREAM_LIMITS.maxEvents,
       })
       const persisted = await this.#applyStreamed(runtime, descriptor, plan)
+      const advanced = persisted !== null && persisted.cursor > (descriptor.cursor ?? 0)
       this.#log(
         runtime,
-        'debug',
-        `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: ${frame.events.length}, planCursor: ${plan.cursor}, persistedCursor: ${persisted?.cursor ?? 'none'} }`,
+        advanced ? 'debug' : 'info',
+        `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: ${frame.events.length}, planCursor: ${plan.cursor}, persistedCursor: ${persisted?.cursor ?? 'none'}, guard: ${advanced ? 'advanced' : 'no-advance'} }`,
       )
       // The asymmetric rule (§6.4): advance only once the *persisted* cursor actually moved.
       if (persisted !== null && persisted.cursor > (descriptor.cursor ?? 0)) {
         runtime.streamOffsets.set(descriptor.remoteSessionId, nextOffset(offsetBefore, frame.offset))
       }
-      const applied = (persisted?.cursor ?? 0) > (descriptor.cursor ?? 0)
-      if (applied && persisted !== null) deltas.push(persisted)
+      if (advanced && persisted !== null) deltas.push(persisted)
     }
     if (deltas.length > 0) await this.#mutateMirrors(runtime, (current) => this.#mergeDelta(current, deltas))
   }

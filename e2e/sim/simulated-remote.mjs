@@ -369,7 +369,7 @@ const WORKSPACE = loadWorkspaceAnswer()
 const HISTORY = loadHistoryAnswer()
 /** Records served by the polled follower (design §6.4). @returns {Record<string, any[]>} */
 function loadStreamAnswer() {
-  const file = argValue('--stream-fixture')
+  const file = args['stream-fixture'] ?? process.env.SIM_STREAM_FIXTURE ?? null
   if (!file) return {}
   /** @type {any} */
   let parsed = null

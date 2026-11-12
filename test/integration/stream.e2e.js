@@ -177,15 +177,7 @@ async function harness({ mirrorStream, fence = false }) {
   const dir = mkdtempSync(path.join(tmpdir(), 'dsh-stream-'))
   writeFixtures(dir)
   const sim = await startSim(dir, fence)
-  /** @type {string[]} */
-  const logLines = []
-  const line = (...parts) => parts.map((p) => (typeof p === 'string' ? p : JSON.stringify(p))).join(' ')
-  const quiet = {
-    warn: (...p) => logLines.push(`W ${line(...p)}`),
-    info: (...p) => logLines.push(`I ${line(...p)}`),
-    debug: (...p) => logLines.push(`D ${line(...p)}`),
-    error: (...p) => logLines.push(`E ${line(...p)}`),
-  }
+  const quiet = { warn() {}, info() {}, debug() {}, error() {} }
   const sessions = fakeSessions()
   const stateDir = path.join(dir, 'state')
   const adapter = createSessionAdapter({ sessions, logger: quiet, mirrorRoot: path.join(stateDir, 'mirrors') })
@@ -194,6 +186,7 @@ async function harness({ mirrorStream, fence = false }) {
     home: path.join(dir, 'home'),
     localVersion: '0.2.2-rc.1',
     logger: quiet,
+    logLevel: 'debug',
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
     resolveTarget: () => ({ targetVersion: '0.2.2-rc.1', source: 'test' }),
     sessionAdapter: adapter,
@@ -215,7 +208,6 @@ async function harness({ mirrorStream, fence = false }) {
     host,
     sessions,
     sim,
-    logLines,
     async close() {
       await service.shutdown?.().catch?.(() => null)
       await stopSim(sim.child)
@@ -241,77 +233,88 @@ async function connect(service, id, logs) {
   throw new Error(`connect timed out\n${logs.join('')}`)
 }
 
-test('records appended while connected arrive through the follower, without another sync', { timeout: 600_000 }, async () => {
-  const h = await harness({ mirrorStream: true })
-  try {
-    await connect(h.service, h.host.id, h.sim.logs)
-    // Count syncs now: any further syncHostMirrors call would let the test pass for the wrong
-    // reason (a background sync delivering the records instead of the follower).
-    const syncCalls = { count: 0 }
-    const original = h.service.syncHostMirrors.bind(h.service)
-    h.service.syncHostMirrors = async (...args) => {
-      syncCalls.count += 1
-      return original(...args)
+test(
+  'records appended while connected arrive through the follower, without another sync',
+  { timeout: 600_000 },
+  async () => {
+    const h = await harness({ mirrorStream: true })
+    try {
+      await connect(h.service, h.host.id, h.sim.logs)
+      // Count syncs now: any further syncHostMirrors call would let the test pass for the wrong
+      // reason (a background sync delivering the records instead of the follower).
+      const syncCalls = { count: 0 }
+      const original = h.service.syncHostMirrors.bind(h.service)
+      h.service.syncHostMirrors = async (...args) => {
+        syncCalls.count += 1
+        return original(...args)
+      }
+
+      const mirrors = await waitFor(h.service, h.host.id, (list) =>
+        list.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2' && mirror.reason === null),
+      )
+      assert.equal(
+        mirrors.every((mirror) => mirror.cursor === 5),
+        true,
+        `the follower must advance the cursor to 5, got ${JSON.stringify(
+          mirrors.map((mirror) => ({ cursor: mirror.cursor, level: mirror.level, reason: mirror.reason?.code })),
+        )}`,
+      )
+      assert.equal(syncCalls.count, 0, 'no manual or background sync may have delivered these records')
+
+      const session = [...h.sessions.live.values()][0]
+      const seqs = [...(session?.mirrorEventSeqs?.() ?? [])].sort((left, right) => left - right)
+      assert.deepEqual(seqs, [1, 2, 3, 4, 5], 'every remote record appears')
+      // Count mirrored records, not every event: replay can add a bookkeeping event that carries no
+      // `mirrorSeq` (folding/notice), and asserting a raw total would conflate the two.
+      const all = session?.snapshotEvents?.() ?? []
+      const mirrored = all.filter((event) => Number.isInteger(event?.data?.mirrorSeq))
+      const mirroredSeqs = mirrored.map((event) => event.data.mirrorSeq).sort((left, right) => left - right)
+      assert.deepEqual(mirroredSeqs, [1, 2, 3, 4, 5], 'each remote record is applied exactly once')
+      assert.equal(mirrored.length, 5, 'no record is applied twice — no duplication between log and stream')
+      assert.equal(
+        all.length - mirrored.length <= 1,
+        true,
+        `at most one bookkeeping event may accompany the records, got ${all.length - mirrored.length}`,
+      )
+    } finally {
+      await h.close()
     }
+  },
+)
 
-    const mirrors = await waitFor(h.service, h.host.id, (list) =>
-      list.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2' && mirror.reason === null),
-    )
-    assert.equal(
-      mirrors.every((mirror) => mirror.cursor === 5),
-      true,
-      `the follower must advance the cursor to 5, got ${JSON.stringify(
-        mirrors.map((mirror) => ({ cursor: mirror.cursor, level: mirror.level, reason: mirror.reason?.code })),
-      )}`,
-    )
-    assert.equal(syncCalls.count, 0, 'no manual or background sync may have delivered these records')
-    if (mirrors.every((m) => m.cursor !== 5)) {
-      throw new Error(`TRACE:
-${h.logLines.filter((l) => l.includes('mirror stream')).slice(0, 12).join('\n')}`)
+test(
+  'with the setting off nothing is appended, so the follower is what did the work',
+  { timeout: 600_000 },
+  async () => {
+    // The negative control. Without it, a background sync could be delivering the records and the
+    // activation test above would pass for the wrong reason.
+    const h = await harness({ mirrorStream: false })
+    try {
+      await connect(h.service, h.host.id, h.sim.logs)
+      const mirrors = await waitFor(h.service, h.host.id, (list) => list.every((mirror) => mirror.cursor === 3), 20_000)
+      assert.equal(
+        mirrors.every((mirror) => mirror.cursor === 3),
+        true,
+        'with the follower off the cursor must stay at the log-read position (3)',
+      )
+      const session = [...h.sessions.live.values()][0]
+      const seqs = [...(session?.mirrorEventSeqs?.() ?? [])].sort((left, right) => left - right)
+      assert.deepEqual(seqs, [1, 2, 3], 'no streamed record may appear while the setting is off')
+    } finally {
+      await h.close()
     }
-
-    const session = [...h.sessions.live.values()][0]
-    const seqs = [...(session?.mirrorEventSeqs?.() ?? [])].sort((left, right) => left - right)
-    assert.deepEqual(seqs, [1, 2, 3, 4, 5], 'every remote record appears')
-    const all = session?.snapshotEvents?.() ?? []
-    assert.equal(all.length, 5, 'and exactly once each — no duplication between log and stream')
-  } finally {
-    await h.close()
-  }
-})
-
-test('with the setting off nothing is appended, so the follower is what did the work', { timeout: 600_000 }, async () => {
-  // The negative control. Without it, a background sync could be delivering the records and the
-  // activation test above would pass for the wrong reason.
-  const h = await harness({ mirrorStream: false })
-  try {
-    await connect(h.service, h.host.id, h.sim.logs)
-    const mirrors = await waitFor(
-      h.service,
-      h.host.id,
-      (list) => list.every((mirror) => mirror.cursor === 3),
-      20_000,
-    )
-    assert.equal(
-      mirrors.every((mirror) => mirror.cursor === 3),
-      true,
-      'with the follower off the cursor must stay at the log-read position (3)',
-    )
-    const session = [...h.sessions.live.values()][0]
-    const seqs = [...(session?.mirrorEventSeqs?.() ?? [])].sort((left, right) => left - right)
-    assert.deepEqual(seqs, [1, 2, 3], 'no streamed record may appear while the setting is off')
-  } finally {
-    await h.close()
-  }
-})
+  },
+)
 
 test('a fenced host streams nothing and keeps its cursor where the log left it', { timeout: 600_000 }, async () => {
   const h = await harness({ mirrorStream: true, fence: true })
   try {
     await connect(h.service, h.host.id, h.sim.logs)
     // Wait for the fenced end state specifically: an L2 mirror also has a non-null reason.
-    const mirrors = await waitFor(h.service, h.host.id, (list) =>
-      list.every((mirror) => mirror.reason?.code === 'fenced'),
+    const mirrors = await waitFor(
+      h.service,
+      h.host.id,
+      (list) => list.every((mirror) => mirror.reason?.code === 'fenced'),
       45_000,
     )
     assert.equal(
@@ -326,6 +329,40 @@ test('a fenced host streams nothing and keeps its cursor where the log left it',
       true,
       'a fenced host must not consume streamed records',
     )
+  } finally {
+    await h.close()
+  }
+})
+
+test('a reconnect resumes from the persisted cursor without duplicating records', { timeout: 600_000 }, async () => {
+  const h = await harness({ mirrorStream: true })
+  try {
+    await connect(h.service, h.host.id, h.sim.logs)
+    const mirrors = await waitFor(h.service, h.host.id, (list) =>
+      list.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2'),
+    )
+    const before = mirrors.every((mirror) => mirror.cursor === 5)
+    assert.equal(before, true, 'the follower must reach the streamed records first')
+
+    const countMirrored = () => {
+      const session = [...h.sessions.live.values()][0]
+      return (session?.snapshotEvents?.() ?? []).filter((event) => Number.isInteger(event?.data?.mirrorSeq)).length
+    }
+    const beforeCount = countMirrored()
+
+    // Drop the connection and bring it back: the follower restarts with an empty offset, so the
+    // only thing preventing duplicates is the persisted cursor plus `seq > cursor` / `mirrorSeq`.
+    await h.service.disconnect(h.host.id).catch(() => null)
+    await connect(h.service, h.host.id, h.sim.logs)
+    const after = await waitFor(h.service, h.host.id, (list) =>
+      list.every((mirror) => mirror.cursor === 5 && mirror.level === 'L2' && mirror.reason === null),
+    )
+    assert.equal(
+      after.every((mirror) => mirror.cursor === 5),
+      true,
+      'the cursor must be where it was after reconnecting',
+    )
+    assert.equal(countMirrored(), beforeCount, 'a reconnect must not re-append records it already has')
   } finally {
     await h.close()
   }

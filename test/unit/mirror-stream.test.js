@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   FrameBuffer,
+  logVisible,
   buildFollowCommand,
   ingestStreamEvents,
   nextOffset,
@@ -60,10 +61,7 @@ test('the start guard names the condition that fired instead of returning bare',
   assert.equal(streamGuard({ ...base, settings: { mirrorStream: true, mirrorHistory: false } }).guard, 'history-off')
   assert.equal(streamGuard({ ...base, hasAdapter: false }).guard, 'no-session-adapter')
   assert.equal(streamGuard({ ...base, runtime: { ssh: { connected: false } } }).guard, 'ssh-down')
-  assert.equal(
-    streamGuard({ ...base, runtime: { ssh: { connected: true }, closing: true } }).guard,
-    'host-closing',
-  )
+  assert.equal(streamGuard({ ...base, runtime: { ssh: { connected: true }, closing: true } }).guard, 'host-closing')
 })
 
 test('a slow consumer stays bounded and reports exactly what it dropped', () => {
@@ -93,7 +91,10 @@ test('ingestStreamEvents reuses the L2 pipeline, so streamed state equals log-re
   }))
   const fromZero = ingestStreamEvents({ cursor: 0 }, events)
   assert.equal(fromZero.cursor, 3, 'it advances to the last applied seq')
-  assert.deepEqual(fromZero.append.map((event) => event.seq), [1, 2, 3])
+  assert.deepEqual(
+    fromZero.append.map((event) => event.seq),
+    [1, 2, 3],
+  )
 
   // Re-delivering applied records is a no-op: this is what makes at-least-once delivery safe.
   const again = ingestStreamEvents({ cursor: 3 }, events)
@@ -128,4 +129,33 @@ test('the follow command quotes its arguments so a path cannot break out', () =>
   assert.equal(command.includes("it's"), false, 'no raw path text is interpolated')
   const payload = JSON.parse(Buffer.from(parts[2].replaceAll("'", ''), 'base64').toString('utf8'))
   assert.equal(payload.logPath, "/tmp/it's a log.jsonl", 'the path survives the round trip intact')
+})
+
+test('the poll trace is visible at the default level when a poll does not advance', async () => {
+  // The lesson from two failed attempts (design §6.4): the first instrument was emitted at `debug`,
+  // which the default `logLevel: info` filters out, so the failure was undiagnosable. These assert
+  // the *visibility* rule directly rather than trusting that someone will enable debugging.
+  assert.equal(logVisible('info', 'info'), true, 'the no-advance trace reaches a default logger')
+  assert.equal(logVisible('debug', 'info'), false, 'healthy chatter stays quiet by default')
+  assert.equal(logVisible('debug', 'debug'), true, 'an operator can raise verbosity')
+  assert.equal(logVisible('warn', 'info'), true)
+  assert.equal(logVisible('info', 'warn'), false)
+})
+
+test('every failure-case trace names the six fields and is emitted at info', async () => {
+  // Structural, because the trace is built inline in the poll loop: assert the *shape* an operator
+  // will read, and that the non-advancing branch is not left at debug again.
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../../src/service.js', import.meta.url), 'utf8')
+  const fields = ['sessionId', 'offsetBefore', 'rawBytes', 'parsedEvents', 'planCursor', 'persistedCursor', 'guard']
+  for (const field of fields) {
+    assert.equal(source.includes(`${field}:`), true, `the trace must report ${field}`)
+  }
+  // The decisive branch — records parsed but the cursor did not move — must be info, not debug.
+  assert.match(
+    source,
+    /advanced \? 'debug' : 'info'/,
+    'a non-advancing poll must log at info so it is visible by default',
+  )
+  assert.match(source, /guard: \$\{advanced \? 'advanced' : 'no-advance'\}/, 'the trace names the outcome')
 })
