@@ -126,22 +126,23 @@ node scripts/check-pr-title.mjs "feat(panel): add SSH tunnel keepalive backoff"
 
 PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 
-- **Repository conventions** —— `pnpm run lint` + `format:check` + `test:coverage` + `check:syntax` + `check:workflows`，
+- **Repository conventions** —— `pnpm run lint` + `format:check` + `check:syntax` + `check:workflows`，
   并在 PR 上校验 PR 标题（`scripts/check-pr-title.mjs`，dependabot 除外）
-- **Unit tests (ubuntu-latest, Node 24)**、**Unit tests (windows-latest, Node 24)** —— 单元测试
-- **Integration tests (ubuntu-latest)**、**Integration tests (windows-latest)** —— 集成/E2E（模拟远端；不是必需检查）
-- **Publish artifact (ubuntu-latest)**、**Publish artifact (windows-latest)** —— 市场条目、`files[]` 与 tarball 校验
+- **Tests (ubuntu-latest, Node 24)**、**Tests (windows-latest, Node 24)** —— 单元测试（ubuntu 侧另跑
+  `test:coverage` 覆盖率门禁）+ 模拟远端集成/E2E（`test/integration`）
+- **Publish artifact (ubuntu-latest)** —— 市场条目、`files[]` 与 tarball 校验并上传 artifact
 
-真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁。另外三个**必需检查**来自独立工作流：
-`Analyze (javascript-typescript)`（`codeql.yml`）、`Web E2E (ubuntu-latest)`（`web-e2e.yml`）、
-`Desktop E2E (windows-latest)`（`desktop-e2e.yml`）。
+真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁；Web 兼容性由
+`.github/workflows/web-e2e.yml` **夜间定时 + 手动**运行，同样不构成门禁（真实 Chrome + 打包安装对 runner
+负载敏感，偶发超时不应阻塞合并）。另外两项**必需检查**来自独立工作流：
+`Analyze (javascript-typescript)`（`codeql.yml`）与 `Desktop E2E (windows-latest)`（`desktop-e2e.yml`）。
 
 ### 仓库规则（已在仓库设置中启用）
 
 - **`main` 受保护**（ruleset「main protection」，`strict` = 开启、**无绕过者**）：禁止删除与强推、要求线性历史、
-  要求通过 PR 合并，并且必须通过 **8 项必需检查**——`Repository conventions`、`Unit tests (ubuntu-latest, Node 24)`、
-  `Unit tests (windows-latest, Node 24)`、`Publish artifact (ubuntu-latest)`、`Publish artifact (windows-latest)`、
-  `Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`。
+  要求通过 PR 合并，并且必须通过 **6 项必需检查**——`Repository conventions`、`Tests (ubuntu-latest, Node 24)`、
+  `Tests (windows-latest, Node 24)`、`Publish artifact (ubuntu-latest)`、`Analyze (javascript-typescript)`、
+  `Desktop E2E (windows-latest)`。
   `strict` 表示分支必须与 `main` 同步后才算通过（需要先 rebase/合并最新 `main`）。
 - **只允许 squash merge**：合并后自动删除来源分支；PR 标题即最终提交标题。
 - **`v*` 标签受保护**（ruleset「release tags」，无绕过者）：禁止删除与移动，发布标签一旦推送即不可变。
