@@ -60,7 +60,7 @@ jobs:
 
       - name: Cache the desktop installer
         # ~280 MB per run; the key is bumped manually when a new build is needed.
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\dsh-desktop-installer.exe
           key: dsh-desktop-installer-v1
