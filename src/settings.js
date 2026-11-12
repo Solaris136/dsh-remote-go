@@ -18,7 +18,7 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   mirrorMaxSessions: number,
  *   mirrorMaxEvents: number,
  *   mirrorHistory: boolean,
- *   windowMode: 'panel' | 'external',
+ *   windowMode: 'panel' | 'overlay',
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
  *   bootstrap: { targetVersion: string, mode: 'auto' | 'reuse' | 'npx' | 'isolated', remoteDir: string, nodeVersion: string },
@@ -118,7 +118,10 @@ export function sanitizeSettings(raw) {
         : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
     mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
     mirrorStream: boolean(input.mirrorStream, defaults.mirrorStream),
-    windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
+    // The removed 'external' (local browser window) mode migrates to the
+    // window takeover, which covers the same intent inside the desktop app.
+    windowMode:
+      input.windowMode === 'external' ? 'overlay' : oneOf(input.windowMode, ['panel', 'overlay'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
     bootstrap: {

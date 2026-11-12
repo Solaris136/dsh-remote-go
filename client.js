@@ -55,6 +55,10 @@ window.__ModuleLoader__.load({
     const RAIL_COLLAPSED_KEY = 'dsh-remote-go.rail.collapsed'
     /** iframe sandbox: enough for the remote DSH UI, nothing more. */
     const IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads'
+    /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
+    const DESKTOP_BRIDGE_VERSION = 1
+    /** DOM id of the full-window remote carrier, so a reload can drop a stale one. */
+    const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
     /** Only loopback URLs may ever become an iframe src (contract §3.5). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /** Ordered connect phases (contract ConnectPhase). */
@@ -224,6 +228,20 @@ window.__ModuleLoader__.load({
       viewportBack: '返回主机清单',
       viewportSwitch: '切换主机',
       viewportExternal: '在新窗口打开',
+      viewportOverlayTitle: '接管整个窗口',
+      viewportOverlayBody:
+        '远端 DSH 在本地窗口里用真正的 Chromium guest 渲染（不是 iframe，也不是另开的浏览器）。顶部保留一条窄控制条：刷新、退出；其余画面就是远端那台机器。',
+      viewportOverlayOpen: '接管窗口',
+      viewportOverlayClose: '退出远端窗口',
+      viewportOverlayUnsupported:
+        '当前环境不支持接管窗口：只在 DSH 桌面端可用，浏览器里请改用「面板内嵌」或「本机独立窗口」。',
+      viewportOverlayFailed: '接管窗口失败，请重试，或改用「面板内嵌」。',
+      viewportOverlayHint: '接管期间下载会被桌面端禁用、权限请求会被拒绝；点顶部控制条的「退出」即可回到本地界面。',
+      viewportOverlayBarLabel: '远端：{name}',
+      viewportOverlayRefresh: '刷新',
+      viewportOverlayExit: '退出',
+      viewportOverlayLoading: '正在载入远端界面…',
+      viewportOverlayLoadFailed: '远端界面加载失败',
       viewportAddressShow: '显示地址',
       viewportAddressHide: '隐藏地址',
       viewportFrameBlocked: '远端地址不是本地回环地址，已阻止内嵌。',
@@ -364,9 +382,10 @@ window.__ModuleLoader__.load({
       'settings.title': '设置',
       'settings.window': '窗口',
       'settings.windowMode': '呈现形态',
-      'settings.windowModePanel': '全局面板（推荐）',
-      'settings.windowModeExternal': '外部浏览器',
-      'settings.windowModeHint': 'V1 使用全局面板整页显示远端界面。',
+      'settings.windowModePanel': '面板内嵌（iframe）',
+      'settings.windowModeOverlay': '接管整个窗口（推荐，仅桌面端）',
+      'settings.windowModeHint':
+        '面板内嵌：在插件面板里用 iframe 显示远端界面。接管整个窗口：远端 DSH 以真正的 Chromium guest 铺满整个窗口（仅在 DSH 桌面端可用，下载与权限受桌面端限制）。本机独立窗口：远端界面在单独的本地浏览器窗口渲染。',
       'settings.closeBehavior': '关闭视窗行为',
       'settings.closeBehaviorValue': '保留远端会话（V1 固定）',
       'settings.closeBehaviorHint': '关闭本地视窗不会结束远端任务。',
@@ -543,6 +562,21 @@ window.__ModuleLoader__.load({
       viewportBack: 'Back to hosts',
       viewportSwitch: 'Switch host',
       viewportExternal: 'Open in new window',
+      viewportOverlayTitle: 'Take over the whole window',
+      viewportOverlayBody:
+        'The remote DSH renders in this window through a real Chromium guest — no iframe, no second browser window. A thin control strip on top carries refresh and exit; everything below it is the remote machine.',
+      viewportOverlayOpen: 'Take over the window',
+      viewportOverlayClose: 'Leave the remote window',
+      viewportOverlayUnsupported:
+        'Taking over the window needs the DSH desktop app; in a browser use the embedded panel or a local window instead.',
+      viewportOverlayFailed: 'Could not take over the window. Retry, or switch to the embedded panel.',
+      viewportOverlayHint:
+        'While the window is taken over, downloads are disabled by the desktop app and permission requests are denied. Use "Exit" in the top strip to return.',
+      viewportOverlayBarLabel: 'Remote: {name}',
+      viewportOverlayRefresh: 'Refresh',
+      viewportOverlayExit: 'Exit',
+      viewportOverlayLoading: 'Loading the remote UI…',
+      viewportOverlayLoadFailed: 'The remote UI failed to load',
       viewportAddressShow: 'Show address',
       viewportAddressHide: 'Hide address',
       viewportFrameBlocked: 'The remote address is not a loopback address; embedding was blocked.',
@@ -682,9 +716,10 @@ window.__ModuleLoader__.load({
       'settings.title': 'Settings',
       'settings.window': 'Window',
       'settings.windowMode': 'Presentation',
-      'settings.windowModePanel': 'Global panel (recommended)',
-      'settings.windowModeExternal': 'External browser',
-      'settings.windowModeHint': 'V1 shows the remote UI full-page in the global panel.',
+      'settings.windowModePanel': 'Embedded panel (iframe)',
+      'settings.windowModeOverlay': 'Take over the window (recommended, desktop only)',
+      'settings.windowModeHint':
+        'Embedded: the remote UI is shown inside this panel with an iframe. Take over: the remote DSH fills the whole window through a real Chromium guest (DSH desktop only; downloads and permissions are limited by the shell). Local window: the remote UI renders in a separate local browser window.',
       'settings.closeBehavior': 'Closing behavior',
       'settings.closeBehaviorValue': 'Keep the remote session (fixed in V1)',
       'settings.closeBehaviorHint': 'Closing the local view never stops remote tasks.',
@@ -2505,6 +2540,230 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Card shown while the window takeover is not active. In the desktop app
+     * the carrier is created imperatively (see `openOverlay`); this card is the
+     * launcher and the explanation of what the mode does.
+     * @param {object} props - t, status, callbacks.
+     * @returns {object} div element.
+     */
+    function OverlayViewerCard(props) {
+      const t = translatorOf(props)
+      const status = typeof props.status === 'string' ? props.status : 'idle'
+      const unsupported = status === 'unsupported'
+      const failed = status === 'failed' || status === 'acquire-failed' || status === 'bad-url'
+      return h(
+        'div',
+        { className: 'drg-overlay-card', 'data-testid': 'overlay-viewer', 'data-state': status },
+        h('div', { className: 'drg-overlay-card-icon', 'aria-hidden': 'true' }, h(IconExternal, { size: 28 })),
+        h('h2', null, t('viewportOverlayTitle')),
+        h('p', null, t('viewportOverlayBody')),
+        h('p', { className: 'drg-overlay-card-status' }, t('viewportOverlayHint')),
+        unsupported ? h(Notice, { tone: 'warn' }, t('viewportOverlayUnsupported')) : null,
+        failed ? h(Notice, { tone: 'warn' }, t('viewportOverlayFailed')) : null,
+        h(
+          'div',
+          { className: 'drg-row drg-row-wrap' },
+          h(
+            Button,
+            {
+              variant: 'primary',
+              testId: 'overlay-open',
+              disabled: unsupported,
+              onClick: props.onOpen,
+            },
+            t('viewportOverlayOpen'),
+          ),
+          h(
+            Button,
+            { variant: 'secondary', testId: 'overlay-close', disabled: !props.open, onClick: props.onClose },
+            t('viewportOverlayClose'),
+          ),
+        ),
+      )
+    }
+
+    //#region 9b. full-window remote carrier (DSH desktop only)
+
+    /**
+     * The DSH desktop shell exposes a browser-guest bridge on the page:
+     * `window.dshDesktop` (protocol v1) -> `browser.acquire(workspace)` reserves a
+     * Chromium guest in a per-workspace partition, and a `<webview>` whose src is
+     * "about:blank#<lease>" attaches it. The guest is a real browser context (own
+     * cookies, real downloads pipeline), not an iframe, and it can be sized to
+     * cover the whole application page — that is what makes the desktop window
+     * show the remote host instead of this UI.
+     *
+     * The carrier element lives on `document.body` outside the React tree so it
+     * survives panel switches; the control strip at the top of the carrier is the
+     * only way back, because keyboard focus belongs to the guest while it is up.
+     */
+    const overlayCarrier = { hostId: null, lease: null, root: null, view: null, url: null, onExit: null }
+
+    /** @returns {object | null} the desktop browser bridge, or null outside the desktop app. */
+    function desktopBrowserBridge() {
+      if (typeof window === 'undefined') return null
+      const carrier = window.dshDesktop
+      if (!carrier || carrier.protocolVersion !== DESKTOP_BRIDGE_VERSION) return null
+      const browser = carrier.browser
+      if (!browser || typeof browser.acquire !== 'function' || typeof browser.release !== 'function') return null
+      return browser
+    }
+
+    /** @param {string} label @param {Function} onClick @param {string} extra @returns {object} */
+    function overlayButton(label, onClick, extra) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = label
+      button.style.cssText =
+        'border:1px solid #34343c;background:#232329;color:#e6e6e8;border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer' +
+        (extra || '')
+      button.addEventListener('click', onClick)
+      return button
+    }
+
+    /**
+     * Take over the whole window with a live remote-DSH guest.
+     * @param {{ hostId: string, name: string, url: string, t: Function, onExit?: Function }} options
+     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
+     */
+    async function openOverlay(options) {
+      const bridge = desktopBrowserBridge()
+      if (bridge === null) return { ok: false, reason: 'unsupported' }
+      const hostId = typeof options.hostId === 'string' ? options.hostId : ''
+      const url = typeof options.url === 'string' ? options.url : ''
+      if (!isValidIframeUrl(url)) return { ok: false, reason: 'bad-url' }
+      const t = typeof options.t === 'function' ? options.t : (key) => key
+      if (overlayCarrier.root !== null) {
+        if (overlayCarrier.hostId === hostId) {
+          const changed = overlayCarrier.url !== url
+          overlayCarrier.url = url
+          overlayCarrier.onExit = typeof options.onExit === 'function' ? options.onExit : overlayCarrier.onExit
+          if (changed && overlayCarrier.view !== null) {
+            try {
+              await overlayCarrier.view.loadURL(url)
+            } catch (_error) {
+              // the guest reports navigation failures through did-fail-load
+            }
+          }
+          return { ok: true, reused: true }
+        }
+        await closeOverlay()
+      }
+      let reservation = null
+      try {
+        reservation = await bridge.acquire('dsh-remote-go:' + (hostId || 'host'))
+      } catch (_error) {
+        return { ok: false, reason: 'acquire-failed' }
+      }
+      if (
+        !reservation ||
+        typeof reservation.lease !== 'string' ||
+        typeof reservation.partition !== 'string' ||
+        reservation.lease === ''
+      ) {
+        return { ok: false, reason: 'acquire-failed' }
+      }
+
+      const root = document.createElement('div')
+      root.id = OVERLAY_ROOT_ID
+      root.setAttribute('data-testid', 'remote-overlay')
+      // The desktop window is frameless with a 40px titlebar overlay (Windows
+      // caption buttons / macOS traffic lights), so the carrier starts below it:
+      // clicks in that band belong to the OS, not to this page.
+      root.style.cssText =
+        'position:fixed;left:0;right:0;bottom:0;top:40px;z-index:2147483000;display:flex;flex-direction:column;background:#0b0b0d;color:#e6e6e8;font:13px system-ui,-apple-system,Segoe UI,sans-serif'
+
+      const strip = document.createElement('div')
+      strip.style.cssText =
+        'display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;flex:none;background:#18181b;border-bottom:1px solid #2a2a2f'
+      const label = document.createElement('div')
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0;flex:1'
+      const dot = document.createElement('span')
+      dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:#22a06b;flex:none'
+      const name = document.createElement('span')
+      name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
+      name.textContent = t('viewportOverlayBarLabel', { name: options.name || hostId })
+      label.append(dot, name)
+      const status = document.createElement('span')
+      status.style.cssText = 'color:#8a8a92;font-size:12px;white-space:nowrap'
+      status.textContent = t('viewportOverlayLoading')
+      const actions = document.createElement('div')
+      actions.style.cssText = 'display:flex;align-items:center;gap:6px;flex:none'
+
+      const refresh = overlayButton(t('viewportOverlayRefresh'), () => {
+        if (overlayCarrier.view === null) return
+        status.textContent = t('viewportOverlayLoading')
+        overlayCarrier.view.loadURL(overlayCarrier.url).catch(() => {})
+      })
+      const exit = overlayButton(
+        t('viewportOverlayExit'),
+        () => {
+          closeOverlay().catch(() => {})
+        },
+        ';background:#2b2b33',
+      )
+      actions.append(refresh, exit)
+      strip.append(label, status, actions)
+
+      const view = document.createElement('webview')
+      view.setAttribute('name', String(reservation.lease))
+      view.setAttribute('partition', String(reservation.partition))
+      view.setAttribute('allowpopups', '')
+      view.setAttribute('src', 'about:blank#' + String(reservation.lease))
+      view.style.cssText = 'flex:1;min-height:0;width:100%;border:0;background:#000'
+      // `dom-ready` fires once per committed navigation, so navigating from it
+      // unconditionally would reload the remote page forever (visible as flicker).
+      // The carrier's own refresh button re-navigates explicitly.
+      let navigated = false
+      view.addEventListener('dom-ready', () => {
+        if (overlayCarrier.view !== view || navigated) return
+        navigated = true
+        view.loadURL(overlayCarrier.url).catch(() => {})
+      })
+      view.addEventListener('did-stop-loading', () => {
+        if (overlayCarrier.view === view) status.textContent = ''
+      })
+      view.addEventListener('did-fail-load', () => {
+        if (overlayCarrier.view === view) status.textContent = t('viewportOverlayLoadFailed')
+      })
+
+      root.append(strip, view)
+      document.body.appendChild(root)
+      overlayCarrier.hostId = hostId
+      overlayCarrier.lease = String(reservation.lease)
+      overlayCarrier.root = root
+      overlayCarrier.view = view
+      overlayCarrier.url = url
+      overlayCarrier.onExit = typeof options.onExit === 'function' ? options.onExit : null
+      return { ok: true, reused: false }
+    }
+
+    /** Remove the carrier, release its lease, and notify the panel. */
+    async function closeOverlay() {
+      const root = overlayCarrier.root
+      const lease = overlayCarrier.lease
+      const onExit = overlayCarrier.onExit
+      overlayCarrier.root = null
+      overlayCarrier.view = null
+      overlayCarrier.lease = null
+      overlayCarrier.url = null
+      overlayCarrier.hostId = null
+      overlayCarrier.onExit = null
+      if (root !== null && root.parentNode !== null) root.parentNode.removeChild(root)
+      const bridge = desktopBrowserBridge()
+      if (bridge !== null && lease !== null) {
+        try {
+          await bridge.release(lease)
+        } catch (_error) {
+          // a lease the shell already dropped is a no-op
+        }
+      }
+      if (typeof onExit === 'function') onExit()
+    }
+
+    //#endregion
+
+    /**
      * The remote viewport: toolbar on top, then the iframe once the Host has
      * confirmed the connection. The iframe URL is validated loopback-only
      * before it is ever assigned (contract §3.5).
@@ -2521,6 +2780,7 @@ window.__ModuleLoader__.load({
       const invalidIframe = typeof props.iframeUrl === 'string' && props.iframeUrl.length > 0 && iframeUrl === null
       const iframeError = props.iframeError || null
       const iframeLoading = props.iframeLoading === true
+      const viewerMode = props.viewerMode === 'overlay' ? 'overlay' : 'panel'
 
       let body
       if (host === null) {
@@ -2569,6 +2829,14 @@ window.__ModuleLoader__.load({
           onRetry: props.onRetryIframe,
           onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
           onBack: props.onBack,
+        })
+      } else if (viewerMode === 'overlay') {
+        body = h(OverlayViewerCard, {
+          t,
+          status: props.overlayStatus,
+          open: props.overlayOpen === true,
+          onOpen: props.onOpenOverlay,
+          onClose: props.onCloseOverlay,
         })
       } else if (iframeUrl !== null) {
         body = h(
@@ -3534,7 +3802,7 @@ window.__ModuleLoader__.load({
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
         saveTokens: draft.saveTokens === true,
         mirrorToSidebar: draft.mirrorToSidebar === true,
-        windowMode: draft.windowMode === 'external' ? 'external' : 'panel',
+        windowMode: normalizeWindowMode(draft.windowMode),
         language: draft.language === 'zh' || draft.language === 'en' ? draft.language : 'auto',
         logLevel: ['error', 'warn', 'info', 'debug'].indexOf(draft.logLevel) >= 0 ? draft.logLevel : 'info',
         bootstrap: {
@@ -3546,13 +3814,18 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** @param {unknown} value @returns {'panel' | 'overlay'} */
+    function normalizeWindowMode(value) {
+      return value === 'overlay' ? 'overlay' : 'panel'
+    }
+
     /** Create the editable settings draft from a SettingsView. */
     function settingsDraft(settings) {
       const view = settings && typeof settings === 'object' ? settings : {}
       const auto = view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
       const bootstrap = view.bootstrap && typeof view.bootstrap === 'object' ? view.bootstrap : {}
       return {
-        windowMode: view.windowMode === 'external' ? 'external' : 'panel',
+        windowMode: normalizeWindowMode(view.windowMode),
         defaultPort: view.defaultPort === undefined ? 22 : view.defaultPort,
         defaultAuth: view.defaultAuth || 'agent',
         connectTimeoutSec: view.connectTimeoutSec === undefined ? 30 : view.connectTimeoutSec,
@@ -3634,8 +3907,8 @@ window.__ModuleLoader__.load({
                 value: draft.windowMode,
                 ariaLabel: t('settings.windowMode'),
                 options: [
+                  { value: 'overlay', label: t('settings.windowModeOverlay') },
                   { value: 'panel', label: t('settings.windowModePanel') },
-                  { value: 'external', label: t('settings.windowModeExternal') },
                 ],
                 onChange: set('windowMode'),
               }),
@@ -4052,6 +4325,17 @@ window.__ModuleLoader__.load({
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
       const activeHost = activeHostId ? hosts.find((host) => host && host.id === activeHostId) || null : null
       const activeStatus = activeHost ? activeHost.status : null
+      // `windowMode: 'overlay'` hands the whole window to a live remote-DSH guest
+      // (DSH desktop only); 'panel' keeps the iframe inside this panel.
+      const settingsView = state && state.settings && typeof state.settings === 'object' ? state.settings : {}
+      const viewerMode = normalizeWindowMode(settingsView.windowMode)
+      // Mirror of the imperative full-window carrier (it lives outside React).
+      const [overlayStatus, setOverlayStatus] = useState('closed')
+      // The user pressed "exit": stay on the local UI, keep the connection, and do
+      // not take the window back until they ask for it again.
+      const overlayDismissed = useRef(false)
+      const viewerModeRef = useRef(viewerMode)
+      viewerModeRef.current = viewerMode
 
       // Restore the Host's active host once, on the first state read.
       const bootstrapped = useRef(false)
@@ -4066,6 +4350,19 @@ window.__ModuleLoader__.load({
         ) {
           setActiveHostId(id)
           setView('viewport')
+          return
+        }
+        // Takeover mode goes straight to the remote: with exactly one host there is
+        // nothing to choose, so opening the panel is the same as opening the far side.
+        const sole = Array.isArray(state.hosts) && state.hosts.length === 1 ? state.hosts[0] : null
+        if (sole && viewerMode === 'overlay') {
+          setActiveHostId(sole.id)
+          setView('viewport')
+          if (sole.status === 'connected' || sole.status === 'disconnected') {
+            api.activate(sole.id).catch(() => {})
+          } else if (sole.status !== 'connecting' && sole.status !== 'fingerprint-pending') {
+            performConnect(sole)
+          }
         }
       }, [state])
 
@@ -4296,7 +4593,35 @@ window.__ModuleLoader__.load({
         setView('viewport')
       }
       const toggleAddress = () => setAddressVisible((visible) => !visible)
+      /** Start (or re-navigate) the full-window remote carrier. */
+      const takeOverOverlay = () => {
+        if (iframeUrl === null) return
+        overlayDismissed.current = false
+        setOverlayStatus('opening')
+        openOverlay({
+          hostId: activeHostId || '',
+          name: activeHost ? activeHost.name || '' : '',
+          url: iframeUrl,
+          t,
+          onExit: () => setOverlayStatus('closed'),
+        }).then((result) => {
+          setOverlayStatus(result.ok ? 'open' : result.reason || 'failed')
+        })
+      }
+      const releaseOverlay = () => {
+        // Leaving the carrier is a view change, not a disconnect: the SSH link,
+        // the tunnel and the remote DSH all stay up.
+        overlayDismissed.current = true
+        setOverlayStatus('closing')
+        closeOverlay().catch(() => {})
+        setOverlayStatus('closed')
+        setView('viewport')
+      }
       const refreshFrame = () => {
+        if (viewerMode === 'overlay') {
+          takeOverOverlay()
+          return
+        }
         setIframeKey((key) => key + 1)
         setIframeLoading(true)
       }
@@ -4321,6 +4646,35 @@ window.__ModuleLoader__.load({
         if (!activeHost) return
         api.openHost(activeHost.id).then(openWith, (error) => notify(errorMessage(error), 'error'))
       }
+
+      // Full-window takeover: create the carrier once a loopback URL exists, and
+      // drop it on a host switch or when the panel goes away. The carrier itself
+      // survives panel switches (it lives on document.body), which is the point
+      // of the mode: the window belongs to the remote host until the user exits.
+      useEffect(() => {
+        if (viewerMode !== 'overlay' || overlayDismissed.current) return
+        if (view !== 'viewport' || activeStatus !== 'connected' || iframeUrl === null) return
+        let cancelled = false
+        openOverlay({
+          hostId: activeHostId || '',
+          name: activeHost ? activeHost.name || '' : '',
+          url: iframeUrl,
+          t,
+          onExit: () => setOverlayStatus('closed'),
+        }).then((result) => {
+          if (!cancelled) setOverlayStatus(result.ok ? 'open' : result.reason || 'failed')
+        })
+        return () => {
+          cancelled = true
+        }
+      }, [viewerMode, view, activeStatus, iframeUrl, activeHostId])
+
+      useEffect(() => {
+        return () => {
+          if (viewerModeRef.current === 'overlay') closeOverlay().catch(() => {})
+          overlayDismissed.current = false
+        }
+      }, [activeHostId])
 
       const acceptFingerprint = (remember) => {
         if (!activeHost) return
@@ -4408,6 +4762,9 @@ window.__ModuleLoader__.load({
               iframeKey,
               iframeLoading,
               iframeError,
+              viewerMode,
+              overlayStatus,
+              overlayOpen: overlayStatus === 'open',
               addressVisible,
               enterNotice: showEnterNotice,
               fingerprintBusy,
@@ -4419,6 +4776,8 @@ window.__ModuleLoader__.load({
               onSwitchHost: switchHost,
               onToggleAddress: toggleAddress,
               onOpenExternal: openExternal,
+              onOpenOverlay: takeOverOverlay,
+              onCloseOverlay: releaseOverlay,
               onDiagnose: runDiagnose,
               onAcceptFingerprint: acceptFingerprint,
               onConnect: (host) => {
@@ -5408,6 +5767,10 @@ window.__ModuleLoader__.load({
 .drg-connect-prompt { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 420px; padding: 32px 16px; color: var(--drg-label-2); }
 .drg-connect-prompt h2 { font-size: 16px; color: var(--drg-label); }
 .drg-connect-prompt-icon { color: var(--drg-label-3); }
+.drg-overlay-card { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 460px; padding: 32px 16px; color: var(--drg-label-2); }
+.drg-overlay-card h2 { font-size: 16px; color: var(--drg-label); }
+.drg-overlay-card-icon { color: var(--drg-label-3); }
+.drg-overlay-card-status { font-size: 12px; color: var(--drg-label-3); }
 
 .drg-progress { margin: auto; width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 24px 8px; }
 .drg-progress-head { display: flex; align-items: center; gap: 10px; }

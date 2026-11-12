@@ -696,6 +696,68 @@ test('viewport toolbar renders host, status, address and the tool actions', () =
   assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"/)
 })
 
+test('window takeover renders its launcher card and never an iframe', () => {
+  const host = hostView()
+  const html = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      t,
+      host,
+      hosts: [host],
+      iframeUrl: 'http://127.0.0.1:54321/?token=one-time',
+      iframeKey: 0,
+      iframeLoading: false,
+      iframeError: null,
+      viewerMode: 'overlay',
+      overlayStatus: 'closed',
+      overlayOpen: false,
+      addressVisible: true,
+      enterNotice: false,
+      onBack: () => {},
+      onReconnect: () => {},
+      onRefreshFrame: () => {},
+      onSwitchHost: () => {},
+      onToggleAddress: () => {},
+      onOpenExternal: () => {},
+      onOpenOverlay: () => {},
+      onCloseOverlay: () => {},
+      onDiagnose: () => {},
+    }),
+  )
+  assert.match(html, /data-testid="overlay-viewer"/)
+  assert.match(html, /接管整个窗口/)
+  assert.match(html, /接管窗口/)
+  // The takeover owns the window; the panel never mounts a second carrier.
+  assert.doesNotMatch(html, /data-testid="remote-iframe"/)
+  assert.doesNotMatch(html, /<iframe/)
+})
+
+test('window takeover explains that it needs the desktop app', () => {
+  const host = hostView()
+  const html = render(
+    React.createElement(plugin.components.RemoteViewport, {
+      t,
+      host,
+      hosts: [host],
+      iframeUrl: 'http://127.0.0.1:54321/?token=one-time',
+      viewerMode: 'overlay',
+      overlayStatus: 'unsupported',
+      overlayOpen: false,
+      addressVisible: true,
+      onBack: () => {},
+      onReconnect: () => {},
+      onRefreshFrame: () => {},
+      onSwitchHost: () => {},
+      onToggleAddress: () => {},
+      onOpenExternal: () => {},
+      onOpenOverlay: () => {},
+      onCloseOverlay: () => {},
+      onDiagnose: () => {},
+    }),
+  )
+  assert.match(html, /只在 DSH 桌面端可用/)
+  assert.doesNotMatch(html, /<iframe/)
+})
+
 test('disconnected viewport shows the yellow banner and reconnect action', () => {
   const host = hostView({ status: 'disconnected' })
   const html = render(
@@ -873,6 +935,9 @@ test('settings modal renders contract fields and the save action', () => {
   )
   assert.match(html, /设置/)
   assert.match(html, /呈现形态/)
+  // The presentation mode must advertise both real options, not "external browser".
+  assert.match(html, /面板内嵌/)
+  assert.match(html, /本机独立窗口/)
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)

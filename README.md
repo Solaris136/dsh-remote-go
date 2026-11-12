@@ -88,6 +88,7 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | 认证：SSH Agent / 密钥文件 / 一次性密码（不落盘） | ✅ 0.1.0 |
 | 跳板机（跳板 SSH → forwardOut → 目标 SSH） | ✅ 0.1.0 |
 | 全局面板整页呈现远端 DSH（同站 loopback iframe） | ✅ 0.1.0 |
+| **呈现形态可选**：面板内嵌（iframe）／**接管整个窗口**——在 DSH 桌面端把远端 DSH 以真正的 Chromium guest 铺满整个窗口（无 iframe、无第二个浏览器窗口；顶部保留窄控制条刷新/退出；下载与权限受桌面端限制） | ✅ 0.1.0 |
 | 视窗工具条：状态点、重连、刷新、切主机、新窗口打开、返回 | ✅ 0.1.0 |
 | 连接状态 / 分阶段进度 / 断线自动重连 | ✅ 0.1.0 |
 | 诊断检查表（9 项）+ 复制脱敏诊断信息 | ✅ 0.1.0 |

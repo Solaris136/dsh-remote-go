@@ -26,6 +26,16 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.bootstrap.mode, 'auto')
 })
 
+test('windowMode keeps the takeover mode and migrates the retired local-window mode', () => {
+  assert.equal(defaultSettings().windowMode, 'panel')
+  assert.equal(sanitizeSettings({ windowMode: 'overlay' }).windowMode, 'overlay')
+  assert.equal(sanitizeSettings({ windowMode: 'panel' }).windowMode, 'panel')
+  // The removed "separate local browser window" mode lands on the takeover mode
+  // instead of silently resetting to the embedded panel.
+  assert.equal(sanitizeSettings({ windowMode: 'external' }).windowMode, 'overlay')
+  assert.equal(sanitizeSettings({ windowMode: 'nonsense' }).windowMode, 'panel')
+})
+
 test('sanitizeSettings recovers from malformed input', () => {
   const settings = sanitizeSettings({
     defaultPort: 99999,
