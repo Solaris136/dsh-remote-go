@@ -186,14 +186,15 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
   不要在脚本里 `Start-Process taskkill`。
 - 非 Windows 平台不受影响：这些参数在 POSIX 上被忽略。
 
-## 9. 测试基础设施约定（三条硬规则）
+## 9. 测试基础设施约定（四条硬规则）
 
-> **English abstract.** Three test-infrastructure rules, each derived from a real CI failure: (1) a wait predicate
-> must cover **every** state the assertions after it require; (2) an activation must use the **same** locator as its
-> readiness check, click via the DOM, and be verified by its effect; (3) a service double must **enforce** the host
-> contract instead of accepting any shape.
+> **English abstract.** Four rules, each derived from a real failure or CI incident: (1) a wait predicate must cover
+> **every** state the assertions after it require; (2) an activation must use the **same** locator as its readiness
+> check, click via the DOM, and be verified by its effect; (3) a service double must **enforce** the host contract
+> instead of accepting any shape; (4) a `catch` that turns an unknown failure into a normal-looking state must log at
+> error level and stay distinguishable — never let an internal defect masquerade as a remote condition.
 
-这三条不是风格偏好，而是过去四个 CI 失败里三个的根因。改 `test/**` 时请对照执行：
+这四条不是风格偏好，而是过去几个 CI 失败与一次「全绿的静默故障」的根因。改 `test/**` 与 `src/**` 时请对照执行：
 
 1. **等待谓词必须覆盖其后的断言（wait predicate ⊇ assertion）。**
    `pollUntil` / `while` 轮询 / `waitForFunction` 返回真之后的第一段断言，涉及的每一个状态都必须在谓词里出现过。
@@ -221,6 +222,31 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
    surface 事件必须带 intent，`Session` **没有** `events` 数组。反例：一个忽略 `create` 选项的替身让「每次镜像
    会话创建都失败」这样的生产缺陷一路绿灯通过 CI。
    需要钩子就放在替身里，**不要**为此给生产代码加分支或导出。
+
+4. **不要把内部缺陷伪装成正常/远端状态（never swallow an internal defect into a plausible state）。**
+   一个把未知异常转成「看起来正常」的结果的 `catch`，必须**在 error 级别记录**并且**可区分**。
+   判定的结构性做法：`try` 的边界就是 I/O 调用本身（只包住 `await ssh.exec(...)` 这类传输调用），
+   这样只有传输失败才会落到远端原因；其它语句（拼路径、解析、映射）抛出的异常一律是插件自己的缺陷，
+   必须走独立的类型化原因 + `error` 日志（含堆栈），**不能**复用远端原因。
+   反例（本约定的来源）：L3 流式回放尝试里，`streamFile` 在 `const` 之前被读取（TDZ `ReferenceError`），
+   外层的兜底 `catch` 把**任意**异常映射成 `read-failed`——一个可信的远端原因。结果是历史回放被静默关闭，
+   而所有测试依然全绿；只有真机上「历史永远为空」暴露了它。现在这种精况会变成
+   `reason.code="internal-error"` + `error` 级日志（异常名/消息/堆栈）+ `history.internalErrors` 计数。
+   允许的例外只有一种，且必须写明理由：
+   ```js
+   try {
+     result = await ssh.exec(command) // try 体只有传输调用
+   } catch {
+     // swallow-ok: read-failed — try body is only ssh.exec, a rejection is transport
+     return { ok: false, reason: 'read-failed' }
+   }
+   ```
+   `// swallow-ok: <理由>` 标记会被 `test/unit/swallow-guard.test.js` 识别：它**递归**扫描 `src/**/*.js`，
+   把**任何**「产出 `reason:` 字段」的 `catch` 都当作违规（默认违规，而不是维护一份远端原因黑名单——
+   变量、helper 调用、新造的名字都逃不掉），除非该 `catch` 已经**可区分**（出现 `internal-error` /
+   `internalHistoryFault(` / 真正的 `#log(…, 'error', …)` 或 `logger.error(` 调用 / 重新抛出），
+   或者带有该标记。判定前会**先剥离注释**，所以注释里的 "throw"、"error" 不算数。
+   标记后**必须**跟至少两个词的理由，空的 `// swallow-ok` 不生效。不要用它掩盖一个本该 log 的分支。
 
 ## 10. 安全相关
 

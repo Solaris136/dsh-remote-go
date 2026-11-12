@@ -15,6 +15,7 @@ import {
   classifyReadFailure,
   fetchRemoteHistory,
   foldNoticeRange,
+  internalHistoryFault,
   mapRemoteRecord,
   mapRemoteRecords,
   parseRemoteSessionLog,
@@ -392,6 +393,103 @@ test('fetchRemoteHistory degrades with typed reasons instead of throwing', async
     },
   }
   assert.equal((await fetchRemoteHistory(broken, { remoteDshHome: '/h', remoteSessionId: 's' })).reason, 'read-failed')
+})
+
+/**
+ * The incident this guards: a defect in *our* read path (there: `streamFile` used
+ * before its `const`, a TDZ `ReferenceError`) was caught by the blanket `catch` and
+ * reported as `read-failed` — a plausible remote condition — so history replay was
+ * silently disabled while every test stayed green.
+ *
+ * The rule under test: the `try` boundary is the I/O call, so only a rejected
+ * `ssh.exec` may become a remote reason; anything thrown by our own code becomes
+ * `internal-error` with `internal: true`, and carries the error for the caller to log.
+ */
+test('an internal fault is reported as internal-error, never as a remote reason', async () => {
+  // A result whose `stdout` getter throws is our code blowing up while reading the
+  // remote's answer — not the remote failing.
+  const ssh = {
+    async exec(command) {
+      if (/^test -d /.test(command)) return { code: 0, stdout: 'yes\n', stderr: '' }
+      if (/^find /.test(command)) return { code: 0, stdout: '/h/sessions/session-s.json\n', stderr: '' }
+      return {
+        code: 0,
+        get stdout() {
+          throw new TypeError('cannot read properties of undefined (reading "lines")')
+        },
+        stderr: '',
+      }
+    },
+  }
+  const result = await fetchRemoteHistory(ssh, { remoteDshHome: '/h', remoteSessionId: 's' })
+
+  // The whole point: NOT a remote reason.
+  assert.equal(result.reason, 'internal-error')
+  assert.notEqual(result.reason, 'read-failed', 'an internal defect must not look like a read failure')
+  assert.notEqual(result.reason, 'permission-denied')
+  assert.equal(result.internal, true, 'the caller must be able to tell this apart without string matching')
+  assert.equal(result.ok, false)
+
+  // Loud requires the detail: the caller logs name/message/stack at error level.
+  assert.equal(result.internalError.name, 'TypeError')
+  assert.match(result.internalError.message, /cannot read properties/)
+  assert.match(result.internalError.stack, /TypeError/)
+  assert.match(result.internalError.stack, /history\.test\.js|history\.js/)
+})
+
+test('an internal fault from a bad input shape is classified the same way', async () => {
+  const ssh = {
+    async exec() {
+      return { code: 0, stdout: 'yes\n', stderr: '' }
+    },
+  }
+  // The getter throws while *we* read the input, i.e. inside our own code.
+  const input = {
+    remoteDshHome: '/h',
+    get remoteSessionId() {
+      throw new ReferenceError('Cannot access remoteSessionId before initialization')
+    },
+  }
+  const result = await fetchRemoteHistory(ssh, input)
+  assert.equal(result.reason, 'internal-error')
+  assert.equal(result.internal, true)
+  assert.equal(result.internalError.name, 'ReferenceError')
+})
+
+test('a genuine transport failure keeps its remote reason (regression pair)', async () => {
+  const denied = {
+    async exec() {
+      throw new Error('Permission denied (publickey)')
+    },
+  }
+  const deniedResult = await fetchRemoteHistory(denied, { remoteDshHome: '/h', remoteSessionId: 's' })
+  assert.equal(deniedResult.reason, 'permission-denied', 'a real auth refusal stays a remote reason')
+  assert.equal(deniedResult.internal, false)
+
+  const closed = {
+    async exec() {
+      throw new Error('SSH connection is not open')
+    },
+  }
+  const closedResult = await fetchRemoteHistory(closed, { remoteDshHome: '/h', remoteSessionId: 's' })
+  assert.equal(closedResult.reason, 'read-failed', 'a dropped connection stays a remote reason')
+  assert.equal(closedResult.internal, false)
+})
+
+test('internalHistoryFault keeps the stack out of the reason and tolerates non-errors', () => {
+  const fault = internalHistoryFault(new TypeError('boom'))
+  assert.equal(fault.reason, 'internal-error')
+  assert.equal(fault.internal, true)
+  assert.equal(fault.internalError.name, 'TypeError')
+  assert.equal(fault.internalError.message, 'boom')
+  assert.ok(fault.internalError.stack)
+
+  // A thrown string (or anything without name/message/stack) still classifies.
+  const thrownString = internalHistoryFault('not-an-error')
+  assert.equal(thrownString.reason, 'internal-error')
+  assert.equal(thrownString.internalError.name, 'Error')
+  assert.equal(thrownString.internalError.message, 'not-an-error')
+  assert.equal(thrownString.internalError.stack, null)
 })
 
 test('fetchRemoteHistory reports truncation instead of replaying a partial log', async () => {

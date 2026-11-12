@@ -141,6 +141,7 @@ export function parseRemoteLease(text) {
   try {
     parsed = JSON.parse(raw)
   } catch {
+    // swallow-ok: malformed — the parsed text is remote authority content, not our code
     return { ok: false, reason: 'malformed' }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, reason: 'malformed' }
@@ -196,6 +197,7 @@ export async function fetchRemoteLease(ssh, input) {
   try {
     result = await ssh.exec(buildLeaseReadCommand(file, maxBytes), { timeoutMs })
   } catch {
+    // swallow-ok: read-failed — the try body is only ssh.exec, so a rejection is a transport condition
     return { ok: false, reason: 'read-failed', file }
   }
   const stdout = String(result?.stdout ?? '')
@@ -370,6 +372,7 @@ export async function publishRemoteLease(ssh, input) {
   try {
     result = await ssh.exec(buildLeasePublishCommand(file, input.record), { timeoutMs })
   } catch (error) {
+    // swallow-ok: publish-failed — the try body is only ssh.exec, so this is the transport failing
     return { ok: false, reason: 'publish-failed', remoteEpoch: null, message: String(error), file }
   }
   const verdict = classifyPublishResult(result)

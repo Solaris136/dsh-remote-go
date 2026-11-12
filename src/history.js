@@ -49,8 +49,15 @@ export const HISTORY_LIMITS = Object.freeze({
 /**
  * Typed failure reasons (design §7). Each one is "keep the mirror, do not advance
  * the cursor, annotate the descriptor".
+ *
+ * `internal-error` is deliberately **not** a remote condition: it means a defect in
+ * this plugin (a thrown TypeError/ReferenceError, an unexpected shape) was caught
+ * while reading history. It exists so a bug can never be presented as "the remote
+ * refused", which is how the L3 stream attempt disabled replay while staying green
+ * (see the classification note on `fetchRemoteHistory`).
  * @typedef {'sessions-dir-missing' | 'no-session-log' | 'read-failed' | 'permission-denied'
- *   | 'log-truncated' | 'log-malformed' | 'unknown-version' | 'gap-unfilled' | 'history-disabled'} HistoryFailure
+ *   | 'log-truncated' | 'log-malformed' | 'unknown-version' | 'gap-unfilled' | 'history-disabled'
+ *   | 'internal-error'} HistoryFailure
  */
 
 /** Reasoning limits for the `sanitizeValue` projection of unknown record types. */
@@ -187,11 +194,18 @@ export function parseRemoteSessionLog(text) {
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim()
       if (trimmed === '' || trimmed.startsWith('//')) continue
+      // Only `JSON.parse` — our own input — is allowed to turn into `log-malformed`.
+      // `records.push` sits outside the `try` so a defect in *our* loop cannot be
+      // reported as a malformed remote log.
+      /** @type {unknown} */
+      let parsedLine
       try {
-        records.push(JSON.parse(trimmed))
+        parsedLine = JSON.parse(trimmed)
       } catch {
+        // swallow-ok: log-malformed — the input is remote log text, not our code
         return { ok: false, reason: 'log-malformed', version: null }
       }
+      records.push(parsedLine)
     }
     if (records.length === 0) return { ok: false, reason: 'log-malformed', version: null }
     return { ok: true, records, version: 1 }
@@ -528,6 +542,43 @@ export function recoveredCursor(current, planned) {
 }
 
 /**
+ * Classify an exception thrown by the **transport call** (`ssh.exec`).
+ *
+ * This is the remote half of the classification rule: a rejected `ssh.exec` promise
+ * is the remote (or the connection to it) failing, so it keeps its honest typed
+ * reason. Note the asymmetry — this function is only ever called from around the
+ * `await ssh.exec(...)` expression itself, never around the surrounding body.
+ * @param {unknown} error
+ * @returns {HistoryFailure}
+ */
+function remoteReasonFor(error) {
+  return /permission denied/i.test(String(/** @type {any} */ (error)?.message ?? ''))
+    ? 'permission-denied'
+    : 'read-failed'
+}
+
+/**
+ * Describe an exception that came from **our own code**, not from the remote.
+ *
+ * `stack` is returned for the caller to log (it must never be rendered in the UI or
+ * persisted into a descriptor); the reason is the distinguishable `internal-error`.
+ * @param {unknown} error
+ * @returns {{ reason: 'internal-error', internal: true, internalError: { name: string, message: string, stack: string | null } }}
+ */
+export function internalHistoryFault(error) {
+  const asError = /** @type {any} */ (error)
+  return {
+    reason: 'internal-error',
+    internal: true,
+    internalError: {
+      name: typeof asError?.name === 'string' ? asError.name : 'Error',
+      message: String(asError?.message ?? asError),
+      stack: typeof asError?.stack === 'string' ? asError.stack : null,
+    },
+  }
+}
+
+/**
  * Read one remote session's history over SSH.
  *
  * Three bounded commands, each of which can fail into a typed reason:
@@ -536,11 +587,23 @@ export function recoveredCursor(current, planned) {
  * over-size or unparseable file becomes `log-truncated` / `log-malformed`. The
  * caller keeps the mirror and retries on the next sync.
  *
+ * **Classification rule (the guard against the L3 incident).** The `try` boundary
+ * *is* the I/O call: `execRemote` catches only around `await ssh.exec(...)`, so a
+ * rejected transport promise maps to a remote reason. Every other statement —
+ * building paths and commands, parsing, mapping, projecting — runs in the outer
+ * `try`, whose catch can only mean "this plugin has a bug", and reports
+ * `internal-error` with `internal: true`. The bug that motivated this rule computed
+ * `streamFile` before its `const` (a TDZ `ReferenceError`); the old blanket catch
+ * reported it as `read-failed`, so replay was silently disabled while every test
+ * stayed green.
+ *
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string, timedOut?: boolean }> }} ssh
  * @param {{ remoteDshHome: string, remoteSessionId: string, maxBytes?: number, maxEvents?: number, timeoutMs?: number }} input
  * @returns {Promise<{
  *   ok: boolean,
  *   reason: HistoryFailure | null,
+ *   internal?: boolean,
+ *   internalError?: { name: string, message: string, stack: string | null },
  *   file: string | null,
  *   version: number | null,
  *   events: { seq: number, type: string, data: Record<string, unknown>, at: string | null }[],
@@ -555,6 +618,7 @@ export async function fetchRemoteHistory(ssh, input) {
   const empty = {
     ok: false,
     reason: /** @type {HistoryFailure | null} */ (null),
+    internal: false,
     file: null,
     version: null,
     events: [],
@@ -564,36 +628,55 @@ export async function fetchRemoteHistory(ssh, input) {
     truncated: false,
     bytes: 0,
   }
-  const root = remoteSessionsRoot(input?.remoteDshHome)
-  if (root === '/sessions' || String(input?.remoteDshHome ?? '').trim() === '') {
-    // No remote DSH_HOME: we cannot name a path, so this is a missing layout.
-    return { ...empty, reason: 'sessions-dir-missing' }
+  /**
+   * Run one remote command. Whatever this promise rejects with is a transport
+   * condition, so it is the *only* thing allowed to become a remote reason.
+   * @param {string} command
+   * @param {Record<string, unknown>} options
+   */
+  const execRemote = async (command, options) => {
+    try {
+      return { ok: /** @type {const} */ (true), result: await ssh.exec(command, options) }
+    } catch (error) {
+      // swallow-ok: read-failed / permission-denied — the try body is only `ssh.exec`,
+      // so a rejection here is the transport, which is exactly a remote condition
+      return { ok: /** @type {const} */ (false), reason: remoteReasonFor(error) }
+    }
   }
-  if (!ssh || typeof ssh.exec !== 'function') return { ...empty, reason: 'read-failed' }
-  const timeoutMs = input?.timeoutMs ?? HISTORY_LIMITS.timeoutMs
-  const maxBytes = input?.maxBytes ?? HISTORY_LIMITS.maxBytes
 
   try {
-    const probe = await ssh.exec(buildDirProbeCommand(root), { timeoutMs })
-    if (String(probe?.stdout ?? '').trim() !== 'yes') {
+    const root = remoteSessionsRoot(input?.remoteDshHome)
+    if (root === '/sessions' || String(input?.remoteDshHome ?? '').trim() === '') {
+      // No remote DSH_HOME: we cannot name a path, so this is a missing layout.
+      return { ...empty, reason: 'sessions-dir-missing' }
+    }
+    if (!ssh || typeof ssh.exec !== 'function') return { ...empty, reason: 'read-failed' }
+    const timeoutMs = input?.timeoutMs ?? HISTORY_LIMITS.timeoutMs
+    const maxBytes = input?.maxBytes ?? HISTORY_LIMITS.maxBytes
+
+    const probe = await execRemote(buildDirProbeCommand(root), { timeoutMs })
+    if (!probe.ok) return { ...empty, reason: probe.reason }
+    if (String(probe.result?.stdout ?? '').trim() !== 'yes') {
       return { ...empty, reason: 'sessions-dir-missing' }
     }
 
-    const listing = await ssh.exec(buildDiscoveryCommand(root, input.remoteSessionId), { timeoutMs })
-    const file = pickLogFile(listing?.stdout ?? '')
+    const listing = await execRemote(buildDiscoveryCommand(root, input.remoteSessionId), { timeoutMs })
+    if (!listing.ok) return { ...empty, reason: listing.reason }
+    const file = pickLogFile(listing.result?.stdout ?? '')
     if (file === null) return { ...empty, reason: 'no-session-log' }
 
-    const read = await ssh.exec(buildReadCommand(file, maxBytes), { timeoutMs, maxBytes })
-    const failure = classifyReadFailure(read ?? {})
+    const read = await execRemote(buildReadCommand(file, maxBytes), { timeoutMs, maxBytes })
+    if (!read.ok) return { ...empty, file, reason: read.reason }
+    const failure = classifyReadFailure(read.result ?? {})
     if (failure !== null) return { ...empty, file, reason: failure }
-    const text = String(read?.stdout ?? '')
+    const text = String(read.result?.stdout ?? '')
     if (text.trim() === '') return { ...empty, file, reason: 'no-session-log' }
 
     // `head -c maxBytes + 1` was requested, so a length strictly greater than the cap
     // means there IS more data. Comparing `>=` would mark a complete log that is
     // exactly at the cap as permanently truncated.
     const bytes = Buffer.byteLength(text, 'utf8')
-    const truncated = bytes > maxBytes || read?.timedOut === true
+    const truncated = bytes > maxBytes || read.result?.timedOut === true
     if (truncated) return { ...empty, file, reason: 'log-truncated', truncated: true, bytes: maxBytes }
 
     const parsed = parseRemoteSessionLog(text)
@@ -603,6 +686,7 @@ export async function fetchRemoteHistory(ssh, input) {
     const capped = parsed.records.length > maxEvents ? parsed.records.slice(-maxEvents) : parsed.records
     const mapped = mapRemoteRecords(capped)
     return {
+      ...empty,
       ok: mapped.events.length > 0,
       reason: mapped.events.length > 0 ? null : 'log-malformed',
       file,
@@ -615,11 +699,10 @@ export async function fetchRemoteHistory(ssh, input) {
       bytes: Buffer.byteLength(text, 'utf8'),
     }
   } catch (error) {
-    // A closed connection, a timeout or a protocol error: keep the mirror.
-    return {
-      ...empty,
-      reason: /permission denied/i.test(String(error?.message ?? '')) ? 'permission-denied' : 'read-failed',
-    }
+    // Reaching here means our own code failed (the transport is handled above), so it
+    // must not look like a remote condition. The caller logs it at error level with the
+    // stack; the descriptor gets the distinguishable `internal-error` reason.
+    return { ...empty, ...internalHistoryFault(error) }
   }
 }
 

@@ -168,6 +168,8 @@ export function createSessionAdapter(options = {}) {
     try {
       sessions.create(localSessionId, buildCreateOptions(descriptor))
     } catch (error) {
+      // swallow-ok: create-failed — the local sessions service threw; the message is
+      // carried in the result and logged with the error, so nothing is disguised
       logger.warn?.('[dsh-remote-go] cannot create the mirror session:', error)
       return { ok: false, reason: 'create-failed', localSessionId, error: messageOf(error) }
     }
@@ -214,6 +216,8 @@ export function createSessionAdapter(options = {}) {
       const appended = surface ? session.append(type, data, { surfaceOp: 'append' }) : session.append(type, data)
       return { ok: true, localSessionId: id, type, surface, seq: appended?.seq ?? null }
     } catch (error) {
+      // swallow-ok: append-failed — the local sessions service threw; the message is
+      // carried in the result and logged with the error, so nothing is disguised
       logger.warn?.('[dsh-remote-go] cannot append to the mirror session:', error)
       return { ok: false, reason: 'append-failed', localSessionId: id, error: messageOf(error) }
     }
@@ -244,6 +248,8 @@ export function createSessionAdapter(options = {}) {
         remover.call(sessions, id)
         return { ok: true, localSessionId: id, removed: true, reason: null }
       } catch (error) {
+        // swallow-ok: remove-failed — the local sessions service threw; the message is
+        // carried in the result and logged with the error, so nothing is disguised
         logger.warn?.('[dsh-remote-go] cannot remove the mirror session:', error)
         return { ok: false, reason: 'remove-failed', localSessionId: id, error: messageOf(error) }
       }

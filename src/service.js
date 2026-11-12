@@ -49,7 +49,14 @@ import {
   renewLease,
 } from './mirror.js'
 import { MirrorStore } from './mirror-store.js'
-import { HISTORY_LIMITS, fetchRemoteHistory, foldNoticeRange, planHistoryWindow, recoveredCursor } from './history.js'
+import {
+  HISTORY_LIMITS,
+  fetchRemoteHistory,
+  foldNoticeRange,
+  internalHistoryFault,
+  planHistoryWindow,
+  recoveredCursor,
+} from './history.js'
 import {
   LEASE_LIMITS,
   buildLeaseRecord,
@@ -676,8 +683,31 @@ export class RemoteGoService extends EventEmitter {
    * @param {import('./mirror.js').MirrorDescriptor} descriptor
    * @param {string} reason
    */
-  #logHistoryFailure(runtime, descriptor, reason) {
-    this.#log(runtime, 'info', `mirror history failed for ${descriptor.remoteSessionId}: ${reason}`)
+  /**
+   * Report one failed history read for a mirror.
+   *
+   * A remote condition is routine: the mirror keeps its cursor and retries on the
+   * next sync, so `info`. An **internal** fault is a defect in this plugin — it must
+   * be loud (error level, with the stack) instead of blending in with the remote
+   * reasons, because that blending is what let a broken replay path look green.
+   * @param {any} runtime
+   * @param {any} descriptor
+   * @param {{ reason?: string | null, internal?: boolean, internalError?: { name?: string, message?: string, stack?: string | null } } | string} failure
+   */
+  #logHistoryFailure(runtime, descriptor, failure) {
+    const outcome = typeof failure === 'string' ? { reason: failure, internal: false } : (failure ?? {})
+    if (outcome.internal === true || outcome.reason === 'internal-error') {
+      const detail = outcome.internalError ?? {}
+      const summary = `${detail.name ?? 'Error'}: ${detail.message ?? 'unknown internal failure'}`
+      this.#log(
+        runtime,
+        'error',
+        `mirror history INTERNAL ERROR for ${descriptor.remoteSessionId} (reason internal-error): ${summary}`,
+      )
+      if (detail.stack) this.#log(runtime, 'error', detail.stack)
+      return
+    }
+    this.#log(runtime, 'info', `mirror history failed for ${descriptor.remoteSessionId}: ${outcome.reason}`)
   }
 
   /**
@@ -717,6 +747,13 @@ export class RemoteGoService extends EventEmitter {
       skipped: 0,
       /** Fencing events seen this sync (a stale writer refused to write). */
       fenced: 0,
+      /**
+       * History reads that failed **inside this plugin** (reason `internal-error`).
+       * Counted separately from remote failures so a defect cannot be summarised as
+       * "the remote refused" — that is the signal that was missing when the L3 stream
+       * attempt silently disabled replay.
+       */
+      internalErrors: 0,
       /** Epoch jumps too large to believe (refused, never adopted). */
       suspicious: 0,
       /** Same-`seq` payload conflicts reported by `applyEvents` (design §6.2). */
@@ -925,8 +962,9 @@ export class RemoteGoService extends EventEmitter {
         if (!remote.ok) {
           // Typed failure: annotate, keep the cursor, retry next sync.
           summary.failures.push({ localSessionId: descriptor.localSessionId, reason: remote.reason })
+          if (remote.internal === true) summary.internalErrors += 1
           firstReason = firstReason ?? remote.reason
-          this.#logHistoryFailure(runtime, descriptor, remote.reason)
+          this.#logHistoryFailure(runtime, descriptor, remote)
           updated.push({
             ...descriptor,
             level: 'L1',
@@ -1017,8 +1055,9 @@ export class RemoteGoService extends EventEmitter {
           })
           if (!full.ok) {
             summary.failures.push({ localSessionId: descriptor.localSessionId, reason: full.reason })
+            if (full.internal === true) summary.internalErrors += 1
             firstReason = firstReason ?? full.reason
-            this.#logHistoryFailure(runtime, descriptor, full.reason)
+            this.#logHistoryFailure(runtime, descriptor, full)
             updated.push({ ...descriptor, level: 'L1', reason: historyReason(full.reason) })
             continue
           }
@@ -1130,13 +1169,18 @@ export class RemoteGoService extends EventEmitter {
           mirroredAt: nowIso(),
         })
       } catch (error) {
-        // Never let history break the sync: record and keep the descriptor.
-        const reason = error instanceof Error ? error.message : String(error)
-        summary.failures.push({ localSessionId: descriptor.localSessionId, reason: 'read-failed' })
-        firstReason = firstReason ?? 'read-failed'
+        // Never let history break the sync — but never let a defect in our own code look
+        // like a remote condition either. By construction every *remote* failure on this
+        // path is already returned as a typed reason (and handled above), so anything
+        // that throws here came from us: classify it as `internal-error`, log it at error
+        // level with the stack, and count it. Labelling this `read-failed` is exactly the
+        // shape that silently disabled replay in the L3 stream attempt.
+        const fault = internalHistoryFault(error)
+        summary.failures.push({ localSessionId: descriptor.localSessionId, reason: fault.reason })
+        summary.internalErrors += 1
+        firstReason = firstReason ?? fault.reason
         updated.push(descriptor)
-        this.#logHistoryFailure(runtime, descriptor, 'read-failed')
-        this.#log(runtime, 'debug', `mirror history read error for ${descriptor.remoteSessionId}: ${reason}`)
+        this.#logHistoryFailure(runtime, descriptor, fault)
       }
     }
 
@@ -1192,6 +1236,9 @@ export class RemoteGoService extends EventEmitter {
         await this.sessionAdapter.ensureMirrorCwd?.(descriptor)
         results.push(this.sessionAdapter.ensureMirrorSession(descriptor))
       } catch (error) {
+        // swallow-ok: adapter-error — the adapter contract is never-throw, so a broken
+        // or third-party implementation is reported with its message instead of failing
+        // the connect; the enclosing sync logs and counts the result
         results.push({
           ok: false,
           reason: 'adapter-error',
@@ -2380,6 +2427,12 @@ function historyReason(code) {
     'unknown-version': {
       zh: '远端会话日志版本高于本插件，已跳过回放以免错位。',
       en: 'The remote log uses a newer version than this plugin; replay was skipped to avoid mis-mapping it.',
+    },
+    // Deliberately distinct from every remote reason: this one means the plugin itself
+    // failed while reading history. A defect must never be presented as a remote state.
+    'internal-error': {
+      zh: '插件内部错误导致无法回放历史（不是远端问题），请报告该缺陷并附上日志。',
+      en: 'A defect inside this plugin prevented replay (this is not a remote condition). Please report it with the log.',
     },
     'gap-unfilled': {
       zh: '远端历史存在缺口且补齐失败，游标停在缺口前。',

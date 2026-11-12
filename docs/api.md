@@ -500,7 +500,8 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 - **`history` 汇总**（仅 `POST /hosts/:id/mirrors/sync` 返回）：`attempted` 本次尝试的会话数，`applied` 本次判定为
   可应用的远端事件数，`appended` 实际写入本地会话的事件数（两者不等说明被 `mirrorSeq` 去重挡下了重复），
   `folded` 因超出保留上限而被显式折叠的**前缀**事件数，`failures[]` 为 `{ localSessionId, reason }`，
-  `fenced` 本次因围栏而停写的会话数，`conflicts` 本次上报的冲突数，`conflictSeqs` 对应的 `seq` 列表。
+  `fenced` 本次因围栏而停写的会话数，`conflicts` 本次上报的冲突数，`conflictSeqs` 对应的 `seq` 列表，
+  `internalErrors` 本次因**插件自身缺陷**而失败的次数（对应 `reason.code="internal-error"`，与远端失败分开计数）。
 - **幂等**：写入本地会话的事件都带 `data.mirrorSeq`（远端 `seq`）。同步只应用 `seq > cursor`，并在 append 前用
   会话里已有的 `mirrorSeq` 再挡一次（真机读 `snapshotEvents()`，不是不存在的 `events` 属性），因此重复同步、以及
   「append 成功后 cursor 尚未落盘就崩溃」都不会重复消息。
@@ -535,6 +536,14 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 | `gap-unfilled` | 远端历史有缺口，游标停在缺口前 |
 | `history-disabled` | 设置里关闭了历史回放，保持 L1 |
 | `fenced` | 写入租约被更新的 epoch 接管（§6.2）：本地停止写入、保持只读、`cursor` 不推进；历史仍可查看 |
+| `internal-error` | **插件自身缺陷**导致本次读取失败（例如代码里的 `TypeError`/`ReferenceError`、非预期的返回结构）。**这不是远端条件**：同一次同步会在 `logs` 里留下一条 `error` 级别的 `mirror history INTERNAL ERROR …`（含异常名、消息与堆栈），并把 `history.internalErrors` 加一。客户端应把它当作缺陷上报，而不是「远端拒绝」 |
+
+**内部缺陷 vs 远端条件（v1.1 增补）**：`internal-error` 是唯一一个**不代表远端状态**的取值，它的存在是为了
+让缺陷无法伪装成远端条件。判定规则是结构性的，不是靠匹配错误文案：`try` 的边界就是 I/O 调用本身
+（`src/history.js` 里的 `execRemote()` 只包住 `await ssh.exec(...)`），因此只有传输层的 reject 才会映射成
+`read-failed` / `permission-denied`；`fetchRemoteHistory()` 外层 `catch` 只可能捕获到插件自己代码抛出的异常，
+统一报告为 `internal-error` + `internal: true` + `internalError: { name, message, stack }`。同步汇总里的
+`internalErrors` 与 `failures[].reason="internal-error"` 是对外可观测的信号，`CONTRIBUTING` §9 把这套写法定为约定。
 
 远端记录到本地事件的映射（保留/丢弃的字段）见 [session-design.md](session-design.md) §6.1。
 

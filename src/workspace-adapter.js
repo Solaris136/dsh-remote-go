@@ -229,6 +229,7 @@ export function createWorkspaceAdapter(options = {}) {
       }
     } catch (error) {
       // Sidebar grouping is a convenience: log and degrade, never fail a connect.
+      // swallow-ok: create-failed — degrade by design; the message rides in the result
       logger.warn?.('[dsh-remote-go] cannot register the mirror workspace:', error)
       return { ...base, path: dir, title, reason: 'create-failed', error: messageOf(error) }
     }
@@ -279,6 +280,8 @@ export function createWorkspaceAdapter(options = {}) {
       const removed = await registry.delete(workspaceId)
       return { ...base, ok: true, path: existingPath, workspaceId, removed: removed !== false, reason: null }
     } catch (error) {
+      // swallow-ok: delete-failed — sidebar grouping degrades by design; the message
+      // rides in the result and the caller logs it
       logger.warn?.('[dsh-remote-go] cannot remove the mirror workspace:', error)
       return { ...base, path: dir, reason: 'delete-failed', error: messageOf(error) }
     }
@@ -333,6 +336,8 @@ export function createWorkspaceAdapter(options = {}) {
       }
       return { ...base, ok: true, removed, kept }
     } catch (error) {
+      // swallow-ok: prune-failed — sidebar grouping degrades by design; the message
+      // rides in the result and the caller logs it
       logger.warn?.('[dsh-remote-go] cannot prune orphan mirror workspaces:', error)
       return { ...base, reason: 'prune-failed', error: messageOf(error) }
     }

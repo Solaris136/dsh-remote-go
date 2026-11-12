@@ -425,6 +425,32 @@ function registrySshFactory(stdout) {
   return (options) => new FakeSsh({ options, exec: async () => ({ code: 0, stdout, stderr: '' }) })
 }
 
+/**
+ * A fake SSH that answers the directory-registry read normally and the history read
+ * path in a way that makes **our own code** throw (the `head -c` result's `stdout`
+ * getter raises a `TypeError`). This reproduces the shape of the L3 incident: a
+ * defect inside the read path, not the remote failing.
+ * @param {string} registryStdout
+ */
+function internalFaultSshFactory(registryStdout) {
+  return (options) =>
+    new FakeSsh({
+      options,
+      exec: async (command) => {
+        if (/workspace\.json/.test(command)) return { code: 0, stdout: registryStdout, stderr: '' }
+        if (/^test -d /.test(command)) return { code: 0, stdout: 'yes\n', stderr: '' }
+        if (/^find /.test(command)) return { code: 0, stdout: '/h/sessions/ws/session-s-a.json\n', stderr: '' }
+        return {
+          code: 0,
+          get stdout() {
+            throw new TypeError('cannot read properties of undefined (reading "lines")')
+          },
+          stderr: '',
+        }
+      },
+    })
+}
+
 test('connect mirrors the remote workspace directory into L1 descriptors', async () => {
   const stdout = remoteRegistry({
     'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
@@ -658,6 +684,57 @@ test('connect registers one sidebar workspace per host with the host name', asyn
   assert.equal(synced.sidebar.workspaceId, 'ws_mirror')
   assert.equal(synced.sidebar.title, `Remote: ${host.name}`)
   await service.shutdown()
+})
+
+test('an internal history fault is loud: internal-error, error log with the stack, and a counted signal', async () => {
+  const stdout = remoteRegistry({
+    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a'] },
+  })
+  const { service } = await makeTestService({
+    sessionAdapter: {
+      ensureMirrorSession: (descriptor) => ({ ok: true, created: true, localSessionId: descriptor.localSessionId }),
+    },
+    sshFactory: internalFaultSshFactory(stdout),
+  })
+  const host = await createHost(service)
+  try {
+    await service.connect(host.id)
+    await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 1, { label: 'the mirror row' })
+    const synced = await service.syncHostMirrors(host.id)
+
+    // The fault is exposed as its own reason, not as a remote condition. The history
+    // summary is the `summary` member of the sync result.
+    const summary = synced.history
+    const failure = summary.failures.find((entry) => entry.reason === 'internal-error')
+    assert.ok(failure, `expected an internal-error failure, got ${JSON.stringify(summary.failures)}`)
+    assert.equal(
+      summary.failures.some((entry) => entry.reason === 'read-failed' || entry.reason === 'permission-denied'),
+      false,
+      'an internal defect must not be reported as a remote reason',
+    )
+    // And it is counted separately so a summary cannot hide it among remote failures.
+    assert.equal(summary.internalErrors, 1)
+
+    // The sync-level reason is the distinguishable one (bilingual), not a remote reason.
+    assert.equal(synced.reason.code, 'internal-error')
+    assert.equal(synced.reason.message.en.includes('defect inside this plugin'), true)
+    assert.equal(synced.reason.message.zh.includes('插件内部错误'), true)
+
+    // Loud: error level, with the exception name, message and stack in the runtime log.
+    const runtime = service.runtimes.get(host.id)
+    const errors = runtime.logs.filter((entry) => entry.level === 'error')
+    const summaryLine = errors.find((entry) => entry.line.includes('INTERNAL ERROR'))
+    assert.ok(summaryLine, `expected an error-level internal report, got ${JSON.stringify(errors.map((e) => e.line))}`)
+    assert.ok(summaryLine.line.includes('TypeError'), 'the exception name must be in the log')
+    const messageLine = errors.find((entry) => entry.line.includes('cannot read properties'))
+    assert.ok(messageLine, 'the message and stack must be logged, not just the reason')
+    assert.ok(
+      errors.some((entry) => /\n\s+at /.test(entry.line)),
+      'the stack trace itself must reach the log',
+    )
+  } finally {
+    await service.shutdown()
+  }
 })
 
 test('mirrorToSidebar:false unregisters the group a host already registered', async () => {

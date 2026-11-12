@@ -121,6 +121,7 @@ export async function readRemoteWorkspaces(ssh, remoteDshHome, options = {}) {
   try {
     return { ok: true, file, ...parseWorkspaceStorage(JSON.parse(result.stdout)) }
   } catch {
+    // swallow-ok: malformed — the parsed text is the remote's workspace registry, not our code
     return { ok: false, file, reason: 'malformed', ...parseWorkspaceStorage(null) }
   }
 }
