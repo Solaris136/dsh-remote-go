@@ -66,6 +66,17 @@ import {
   leaseExpiryFor,
   publishRemoteLease,
 } from './lease.js'
+import {
+  STREAM_LIMITS,
+  buildFollowCommand,
+  buildInstallStreamScriptCommand,
+  ingestStreamEvents,
+  nextOffset,
+  parseFrame,
+  remoteStreamScript,
+  streamAllowed,
+  streamGuard,
+} from './mirror-stream.js'
 import { mergeDescriptorDeltas, withMirrorQueue, withMirrorWriter } from './mirror-writer.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
 
@@ -231,6 +242,13 @@ export class RemoteGoService extends EventEmitter {
       idleTimer: null,
       connectPromise: null,
       mirrorSync: null,
+    // Ephemeral per-connection follower state (§6.4). The log path and byte offset are **not
+    // persisted**: the descriptor's cursor is the only durable truth, and a restart re-discovers
+    // the path on connect and re-reads from offset 0 (`seq > cursor` makes that a no-op).
+    streamFiles: new Map(),
+    streamOffsets: new Map(),
+    streamHelperPath: null,
+    streamTimer: null,
       mirrorResync: null,
       closing: false,
       logs: [],
@@ -637,6 +655,8 @@ export class RemoteGoService extends EventEmitter {
     // §6 cursor, §7 failure modes). Runs after the session step because there is
     // nothing to append into before it; failures never affect the connect result.
     const historyRun = await this.#syncMirrorHistory(runtime, mirrors, sessions, decision)
+    // L3 (§6.4): keep the projection live. No-op unless `mirrorStream` is on.
+    this.#startMirrorStream(runtime)
     const mirrorsWithHistory = historyRun.mirrors
     const sidebar = await this.#ensureHostWorkspace(runtime, mirrorsWithHistory, sessions)
     const freshRequired = sessions.filter((entry) => entry?.resync?.needed === true).length
@@ -1147,6 +1167,12 @@ export class RemoteGoService extends EventEmitter {
         if (plan.conflicts && plan.conflicts.length > 0) {
           summary.conflicts += plan.conflicts.length
           summary.conflictSeqs.push(...plan.conflicts.map((conflict) => conflict.seq))
+        }
+        // Remember which remote log this session lives in, for the follower (§6.4). Discovered per
+        // connection and deliberately **not** persisted: the descriptor's cursor stays the only
+        // durable truth, and a restart re-discovers this path on the next sync.
+        if (typeof remote?.file === 'string' && remote.file !== '') {
+          runtime.streamFiles.set(descriptor.remoteSessionId, remote.file)
         }
         updated.push({
           ...descriptor,
@@ -2039,6 +2065,228 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
+   * Install the remote follower helper — **lazily, on first poll**.
+   *
+   * The previous attempt installed it during connect, before the probe had reported a home, so
+   * the path stayed `undefined` and the start guard bailed silently. Here we only try once the
+   * facts are known, and the outcome is reported (§6.4 trace `guard: no-helper`).
+   * @param {any} runtime @returns {Promise<boolean>}
+   */
+  async #ensureStreamHelper(runtime) {
+    if (typeof runtime.streamHelperPath === 'string' && runtime.streamHelperPath !== '') return true
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.home) return false
+    const scriptPath = remoteStreamScript(layout.home)
+    try {
+      const result = await runtime.ssh.exec(buildInstallStreamScriptCommand(scriptPath), {
+        timeoutMs: STREAM_LIMITS.timeoutMs,
+      })
+      if (result?.code !== 0) return false
+      runtime.streamHelperPath = scriptPath
+      return true
+    } catch (error) {
+      // swallow-ok: helper install failure is expected on a read-only remote; the follower
+      // simply never starts, which is exactly the pre-follower behaviour.
+      this.#log(runtime, 'debug', `mirror stream: helper install failed: ${String(error?.message ?? error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Start the follower for this host. Idempotent; reports **which** guard fired.
+   * @param {any} runtime
+   */
+  #startMirrorStream(runtime) {
+    if (runtime.streamTimer) return
+    const verdict = streamGuard({
+      runtime,
+      settings: this.store.getSettings(),
+      hasAdapter: this.sessionAdapter !== null && this.sessionAdapter !== undefined,
+    })
+    if (verdict.ok !== true) {
+      // The guard name is the whole point: a bare early return is what made the first attempt
+      // undiagnosable. Logged once per start attempt, at debug, so it is quiet in production.
+      this.#log(runtime, 'debug', `mirror stream: not started (${verdict.guard})`)
+      return
+    }
+    runtime.streamStopped = false
+    const tick = async () => {
+      if (runtime.streamStopped === true || runtime.closing === true) return
+      if (!this.runtimes.has(runtime.id)) return
+      try {
+        await this.#pollStreamOnce(runtime)
+      } catch (error) {
+        // swallow-ok: one failed poll must never take the host down; the next tick retries.
+        this.#log(runtime, 'debug', `mirror stream: poll failed: ${String(error?.message ?? error)}`)
+      }
+      if (runtime.streamStopped === true || runtime.closing === true) return
+      runtime.streamTimer = setTimeout(tick, STREAM_LIMITS.pollMs)
+      runtime.streamTimer.unref?.()
+    }
+    runtime.streamTimer = setTimeout(tick, STREAM_LIMITS.pollMs)
+    runtime.streamTimer.unref?.()
+    this.#log(runtime, 'debug', `mirror stream: started (poll ${STREAM_LIMITS.pollMs}ms)`)
+  }
+
+  /** Stop the follower. Idempotent and safe before the transport goes away. @param {any} runtime */
+  #stopMirrorStream(runtime) {
+    runtime.streamStopped = true
+    if (runtime.streamTimer) {
+      clearTimeout(runtime.streamTimer)
+      runtime.streamTimer = null
+    }
+    runtime.streamFiles?.clear?.()
+    runtime.streamOffsets?.clear?.()
+    runtime.streamBuffer = null
+  }
+
+  /**
+   * One poll of every streamable mirror on this host.
+   *
+   * Emits one **six-value trace** per poll — `{sessionId, offsetBefore, rawBytes, parsedEvents,
+   * planCursor, persistedCursor, guard}` — because the first attempt could not distinguish "never
+   * polled" from "polled and got nothing", and the failure was invisible.
+   * @param {any} runtime
+   */
+  async #pollStreamOnce(runtime) {
+    const verdict = streamGuard({
+      runtime,
+      settings: this.store.getSettings(),
+      hasAdapter: this.sessionAdapter !== null && this.sessionAdapter !== undefined,
+    })
+    if (verdict.ok !== true) return
+    if ((await this.#ensureStreamHelper(runtime)) !== true) {
+      this.#log(runtime, 'debug', 'mirror stream: trace { guard: no-helper }')
+      return
+    }
+    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.home) return
+    const descriptors = this.mirrorStore.listMirrors({ hostId: runtime.id })
+    /** @type {any[]} */
+    const deltas = []
+    for (const descriptor of descriptors) {
+      if (descriptor.status !== 'active') continue
+      if (streamAllowed(descriptor).ok !== true) continue
+      const logPath = runtime.streamFiles.get(descriptor.remoteSessionId)
+      if (typeof logPath !== 'string' || logPath === '') {
+        this.#log(runtime, 'debug', `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, guard: no-log-path }`)
+        continue
+      }
+      const offsetBefore = runtime.streamOffsets.get(descriptor.remoteSessionId) ?? 0
+      const raw = await this.#execFollow(runtime, layout.home, descriptor, logPath, offsetBefore)
+      const frame = parseFrame(raw)
+      if (frame.ok !== true) {
+        this.#log(
+          runtime,
+          'debug',
+          `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, guard: ${frame.reason} }`,
+        )
+        if (frame.reason === 'fenced') {
+          deltas.push({
+            ...descriptor,
+            writable: false,
+            level: 'L1',
+            reason: { code: 'fenced', detail: null },
+            mirroredAt: nowIso(),
+          })
+        }
+        continue
+      }
+      if (frame.events.length === 0) {
+        runtime.streamOffsets.set(descriptor.remoteSessionId, nextOffset(offsetBefore, frame.offset))
+        this.#log(
+          runtime,
+          'debug',
+          `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: 0, guard: idle }`,
+        )
+        continue
+      }
+      const plan = ingestStreamEvents({ cursor: descriptor.cursor ?? 0 }, frame.events, {
+        maxEvents: STREAM_LIMITS.maxEvents,
+      })
+      const persisted = await this.#applyStreamed(runtime, descriptor, plan)
+      this.#log(
+        runtime,
+        'debug',
+        `mirror stream: trace { sessionId: ${descriptor.remoteSessionId}, offsetBefore: ${offsetBefore}, rawBytes: ${String(raw).length}, parsedEvents: ${frame.events.length}, planCursor: ${plan.cursor}, persistedCursor: ${persisted?.cursor ?? 'none'} }`,
+      )
+      // The asymmetric rule (§6.4): advance only once the *persisted* cursor actually moved.
+      if (persisted !== null && persisted.cursor > (descriptor.cursor ?? 0)) {
+        runtime.streamOffsets.set(descriptor.remoteSessionId, nextOffset(offsetBefore, frame.offset))
+      }
+      const applied = (persisted?.cursor ?? 0) > (descriptor.cursor ?? 0)
+      if (applied && persisted !== null) deltas.push(persisted)
+    }
+    if (deltas.length > 0) await this.#mutateMirrors(runtime, (current) => this.#mergeDelta(current, deltas))
+  }
+
+  /**
+   * Run the remote follower once.
+   * @param {any} runtime @param {string} home @param {any} descriptor
+   * @param {string} logPath @param {number} offset
+   * @returns {Promise<string>}
+   */
+  async #execFollow(runtime, home, descriptor, logPath, offset) {
+    try {
+      const result = await runtime.ssh.exec(
+        buildFollowCommand(runtime.streamHelperPath, {
+          logPath,
+          leasePath: remoteLeaseFile(home, descriptor.remoteSessionId),
+          offset,
+          epoch: descriptor.epoch ?? 0,
+        }),
+        { timeoutMs: STREAM_LIMITS.timeoutMs },
+      )
+      return String(result?.stdout ?? '')
+    } catch (error) {
+      // swallow-ok: a transport hiccup is retried on the next tick by the caller.
+      this.#log(runtime, 'debug', `mirror stream: follow failed: ${String(error?.message ?? error)}`)
+      return ''
+    }
+  }
+
+  /**
+   * Apply one streamed window and persist the new cursor through the **single writer**.
+   *
+   * Returns the descriptor that actually persisted, so the caller can compare it with the plan
+   * and decide whether the offset may advance. Returns `null` when nothing was written (a
+   * tombstoned host returns `current` untouched, which is the deleted-host no-op).
+   * @param {any} runtime @param {any} descriptor @param {any} plan
+   */
+  async #applyStreamed(runtime, descriptor, plan) {
+    const appended = this.#appendStreamed(runtime, descriptor, plan)
+    if (appended === 0) return null
+    const next = {
+      ...descriptor,
+      cursor: plan.cursor,
+      level: 'L2',
+      reason: null,
+      mirroredAt: nowIso(),
+    }
+    const written = await this.#mutateMirrors(runtime, (current) => this.#mergeDelta(current, [next]))
+    return written.find((entry) => entry.localSessionId === descriptor.localSessionId) ?? null
+  }
+
+  /**
+   * Append streamed records to the local session. Idempotent on `mirrorSeq`.
+   * @param {any} runtime @param {any} descriptor @param {any} plan @returns {number}
+   */
+  #appendStreamed(runtime, descriptor, plan) {
+    if (plan.append.length === 0) return 0
+    const already = this.sessionAdapter?.mirrorEventSeqs?.(descriptor.localSessionId) ?? new Set()
+    let appended = 0
+    for (const event of plan.append) {
+      if (already.has(event.seq)) continue
+      const result = this.sessionAdapter.appendEvent(descriptor.localSessionId, {
+        type: event.type,
+        data: { ...event.data, mirrorSeq: event.seq },
+      })
+      if (result?.ok !== true) continue
+      appended += 1
+    }
+    return appended
+  }
+  /**
    * The **single writer** for one host's descriptors (design §6.3).
    *
    * Delegates to `withMirrorWriter`, which owns the per-host queue: every descriptor mutation
@@ -2149,6 +2397,7 @@ export class RemoteGoService extends EventEmitter {
    * @param {{ stopRemote?: boolean, keepRemote?: boolean, keepSshForIdle?: boolean }} [options]
    */
   async #teardownRuntime(runtime, options = {}) {
+    this.#stopMirrorStream(runtime)
     // Publish the tombstone while the transport still exists: a released lease lets another
     // client take over immediately instead of waiting out the TTL, and it is the honest
     // "I am gone" signal a single-writer protocol needs.
