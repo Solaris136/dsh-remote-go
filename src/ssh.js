@@ -143,6 +143,13 @@ export class SshConnection extends EventEmitter {
       }
       const client = this.clientFactory()
       this.client = client
+      // A rejected earlier candidate tears its transport down through
+      // `cleanupClient()`, which marks this object closed. A new attempt owns a
+      // fresh client, so it must clear the flag again; otherwise a successful
+      // fallback (agent -> key on a machine without an SSH agent) would report
+      // `connected === false` and every later `exec`/`forwardOut` would throw
+      // "SSH connection is not open" on a transport that is actually up.
+      this.closed = false
       /** @type {string | null} */
       let serverBanner = null
       client.on('banner', (message) => {
