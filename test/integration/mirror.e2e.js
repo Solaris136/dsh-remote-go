@@ -762,6 +762,8 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         workspaceAdapter,
       })
       await withSidebar.init()
+      // The sidebar group is opt-in since 0.1.0; this scenario covers the opt-in.
+      await withSidebar.saveSettings({ mirrorToSidebar: true })
       const host = await withSidebar.saveHost({
         name: 'simulated-remote-sidebar',
         address: '127.0.0.1',
