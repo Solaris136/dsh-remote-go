@@ -260,7 +260,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 时钟是**注入**的（`RemoteGoService` 的 `clock`），所以过期与围栏由测试推进假时钟验证，不靠真实等待。
 **时钟假设**：`expiresAt` 写在远端墙上时钟里，而 TTL 由本地（注入）时钟度量，两者之间目前没有容差；远端时钟比本地
 快超过一个 TTL 时，一条仍有效的记录会被当成已过期而允许一次伪接管。同源时钟的偏差远小于 30 s，所以现阶段只把
-这个假设写下来（见 §11 #13），跨时区/跨虚拟化部署时应加显式 skew allowance。
+这个假设作为已知限制记在本节，跨时区/跨虚拟化部署时应加显式 skew allowance。
 
 **围栏的适用边界（先说清楚，别把 L3 建在错的假设上）**
 
@@ -307,11 +307,12 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 
 修法：`src/mirror-writer.js`
 
-- `withMirrorWriter(runtime, read, write, delta)`——**读当前值 → 应用增量 → 持久化**，每个 host 一条 Promise
-  队列串行执行；读与写之间没有可被插入的 `await`。delta 抛错不会把队列卡死。
-- `mergeDescriptorDeltas`——单调字段（`cursor` / `epoch` / `conflictCount`）只增不减；delta 未提及的描述符
-  原样保留，不会被顺手删掉。
-- 两个既有持久化点都改走这里，是**单一入口**而不是在某一处加锁。
+- `withMirrorWriter(runtime, read, write, delta)`（`src/mirror-writer.js:28`）——**读当前值 → 应用增量 → 持久化**，
+  每个 host 一条 Promise 队列串行执行；读与写之间没有可被插入的 `await`。delta 抛错不会把队列卡死
+  （`withMirrorQueue` 在 `src/mirror-writer.js:54` 用 `then(run, run)` 接上失败）。
+- `mergeDescriptorDeltas`（`src/mirror-writer.js:80`）——单调字段（`cursor` / `epoch` / `conflictCount`）只增不减
+  （`src/mirror-writer.js:93`）；delta 未提及的描述符原样保留，不会被顺手删掉。
+- 两个既有持久化点都改走这里（`#mutateMirrors`，`src/service.js:2051`），是**单一入口**而不是在某一处加锁。
 
 #### 删除也必须走同一条队列（否则会「复活」）
 
@@ -326,21 +327,24 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 
 **规则（本版定稿）**：
 
-- **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)` 让任意镜像操作排进同一条链；
-  `removeHost` 的删除通过它执行，因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
-- **墓碑优先于排序。** `removeHost` 在**第一个 `await` 之前**就置 `runtime.mirrorDeleted = true`；这个判断放在
-  `withMirrorWriter` 的**排队操作内部**（`src/mirror-writer.js`），所以哪怕某次写入是在删除**之前**入队、在删除
-  **之后**才执行，它也只返回 `current`、不写回，不会复活。队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
+- **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)`（`src/mirror-writer.js:54`）让任意镜像
+  操作排进同一条链；`removeHost` 的删除通过它执行（`#removeMirrorsForHost`，`src/service.js:2069`），
+  因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
+- **墓碑优先于排序。** `removeHost`（`src/service.js:377`）在**第一个 `await` 之前**就置
+  `runtime.mirrorDeleted = true`（`src/service.js:384`）；这个判断放在 `withMirrorWriter` 的**排队操作内部**
+  （`src/mirror-writer.js:35`），所以哪怕某次写入是在删除**之前**入队、在删除**之后**才执行，它也只返回 `current`、
+  不写回，不会复活。队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
   把判断放在 `withMirrorWriter` 而不是某个调用方，是为了让**所有**写入路径自动继承它，也让它可以被测试直接驱动
   （不必在测试里复制一份守卫逻辑）。
-- **合并是更新，不是 upsert。** `mergeDescriptorDeltas` 只改 `current` 里已存在的描述符；delta 指向一个已经
-  不存在的 `localSessionId` 时**丢弃**它——那正意味着「快照读完之后它被删了」。新建描述符是 reconcile 的职责
-  （它返回计划的全集），不是 merge 的。
+- **合并是更新，不是 upsert。** `mergeDescriptorDeltas` 只改 `current` 里已存在的描述符（`src/mirror-writer.js:80`）；
+  delta 指向一个已经不存在的 `localSessionId` 时**丢弃**它（`src/mirror-writer.js:88`）——那正意味着「快照读完之后
+  它被删了」。新建描述符是 reconcile 的职责（它返回计划的全集），不是 merge 的。
 - **reconcile 只看当前存储。** 旧的 `current.length > 0 ? current : existing` 回退会在 `current` 为空时用删除前
   的快照重建描述符，是复活 bug 的第二个入口，已移除。
-- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`），不再静默。
+- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`，`src/service.js:385`），
+  不再静默。
 
-### 6.4 事件流尝试（已移除；失败归因见 §11 #14）
+### 6.4 事件流尝试（已移除；失败归因见 §11 #13）
 
 事件流的传输、远端 epoch 拒绝脚本、有界帧缓冲与「流式/日志共用一条 ingest 流水线」的等价性都实现并通过了单测。
 **激活时撞到两个集成缺陷**：
@@ -350,7 +354,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 2. 上面 §6.3 那条 lost update 在轮询器与同步并发时把 `cursor` 覆盖掉，表现为「流式事件到了但游标不动」。
 
 两者都已修复。**修复之后没有重新端到端验证传输本身是否可用**——模块是在这个节点上为收敛范围而移除的，
-不是因为「传输被证明不可用」。这个区别很重要：§11 #14 记录的是未验证，不是一个已证伪的结论。
+不是因为「传输被证明不可用」。这个区别很重要：§11 #13 记录的是未验证，不是一个已证伪的结论。
 
 **仍然成立的判断（属于设计层面，不是本次失败的证据）**：设计想要的是一条 `ws-mux` 推送通道；在请求/响应式的
 `ssh.exec` 上做轮询跟随，天生只有「延迟 ≈ 轮询间隔」「至少一次投递」「没有真正的推送」这些性质。它可能可用，
@@ -391,7 +395,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
 | P1 ✅（宿主限制：标识在面板工作区栏） | 历史回放（L2）+ 可见只读标识 | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 在 Host/契约层提供（`test/unit/history.test.js` + `test/integration/history.e2e.js`）。**可见标识已交付**：插件面板的工作区栏在对应远端工作区行渲染「只读镜像 / Read-only mirror」徽标（`data-testid="mirror-readonly-badge"`），tooltip 带级别与原因，中英双语并有两个 locale 的断言；真实 `dsh web` + 含历史的模拟远端在 `DSH_E2E_LANG=en-US` 与 `zh-CN` 下都断言了它。**仍是宿主限制**：DSH 未向插件暴露「会话头/标题」slot（插件只能注册 `main` 与 `settings.section`），所以 Conversation UI 内部仍没有徽标，见 §11 #8 |
-| P2 🔴 | 事件流 + 输入转发（L3） | **事件流：激活未验证即移除**。传输、远端 epoch 拒绝脚本、有界缓冲与 ingest 等价性均实现并有单测，激活时撞到两个集成缺陷（TDZ 吞错关掉历史回放、轮询器与同步的 lost update），两处已修复但**修复后未重新验证传输是否可用**，模块在该节点为收敛范围而删除（§6.4 / §11 #14）。**保留的副产品**：§6.3 单写者（修复 reconcile 与 history 互相覆盖 cursor 的真实缺陷，可独立成立）。**输入转发与审批桥未开始** |
+| P2 🔴 | 事件流 + 输入转发（L3） | **事件流：激活未验证即移除**。传输、远端 epoch 拒绝脚本、有界缓冲与 ingest 等价性均实现并有单测，激活时撞到两个集成缺陷（TDZ 吞错关掉历史回放、轮询器与同步的 lost update），两处已修复但**修复后未重新验证传输是否可用**，模块在该节点为收敛范围而删除（§6.4 / §11 #13）。**保留的副产品**：§6.3 单写者（修复 reconcile 与 history 互相覆盖 cursor 的真实缺陷，可独立成立）。**输入转发与审批桥未开始** |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 
 L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的会话日志，因此没有实时性承诺；`stream` / `input` /
@@ -441,7 +445,7 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
     所以走那条路径的接管可以采纳一个任意大的 epoch（不构成永久 DoS——下一个写入者仍可 +1 拿回，但它确实绕过了
     `epochJumpLimit` 窗口）。真实实现应把窗口检查放在最前面；这里保持现状是因为它只影响测试替身，且已有测试
     覆盖窗口本身。
-14. **事件流：激活尝试未完成验证即移除以收敛范围（状态=未验证，不是已证伪）**：实现过 `src/stream.js`——基于
+13. **事件流：激活尝试未完成验证即移除以收敛范围（状态=未验证，不是已证伪）**：实现过 `src/stream.js`——基于
     `ssh.exec` 的轮询跟随、远端 `follow.mjs`（在**远端侧**拒绝过期 epoch）、有界 `FrameBuffer`（丢最旧并记缺口）、
     以及与 L2 共用的 `planHistoryWindow`/`applyEvents` ingest 流水线，并有等价性单测。激活时撞到两个集成缺陷：
     ① `streamFile` 的 TDZ 异常被吞成 `read-failed`，静默关掉历史回放；② §6.3 的 lost update 在轮询器与同步并发时

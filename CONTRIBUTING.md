@@ -21,8 +21,8 @@
 |---|---|---|
 | Node.js | 24 或更高 | `engines.node` 为 `>=24`；单元测试与校验脚本都在 Node 24 上验证，CI 只用 Node 24 |
 | pnpm | 11.x | `package.json` 用 `packageManager: pnpm@11.x` 固定版本，`corepack enable` 即对齐；CI 用 `pnpm/action-setup` |
-| SSH 测试主机 | 可选 | 仅 `test:e2e` 需要：真实 SSH + Linux 远端 + 可用的远端 DSH |
-| Chrome / Edge | 可选 | 仅 `test:e2e` 的浏览器半端需要（`E2E_CHROME` 可覆盖可执行文件路径） |
+| SSH 测试主机 | 可选 | 仅 `test:e2e` 需要：真实 SSH + Linux 远端 + 可用的远端 DSH（`E2E_SSH_ADDRESS`，必填） |
+| Chrome / Edge | 可选 | `test:e2e` 与 `test:integration` 的浏览器套件需要（`CHROME_PATH` / `E2E_CHROME` 可覆盖） |
 
 首次检出后安装依赖：
 
@@ -54,13 +54,15 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run market:check` | 校验包元数据、运行时文件与 format-1 市场索引条目 |
 | `pnpm run pack:check` | 校验 `files[]` 覆盖与 `pnpm pack` 产物内容 |
 | `pnpm run test:unit` | `node --test "test/unit/*.test.js"`（Host + Client，无需网络 / SSH） |
+| `pnpm run test:integration` | 集成/E2E（模拟远端 + `Web E2E` + `Desktop E2E`；缺 harness/浏览器时跳过，`DSH_E2E_STRICT=1` 下改为失败） |
 | `pnpm run test:coverage` | 单元测试 + 覆盖率门禁（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%，不含 `vendor/` 与自己） |
 | `pnpm run check:pr-title` | 按 Conventional Commits 校验 PR 标题（CI 对 PR 强制，见 §5） |
 | `pnpm run build:vendor` | 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
 | `pnpm run test:e2e` | 两个端到端套件（见下），需要 SSH 主机、Chrome 或可用的 pnpm；不在常规 PR CI 中运行 |
 
 `pnpm run verify` 依次执行：`lint` + `format:check` + `check:syntax` + `check:workflows` + `market:check` +
-`pack:check` + `test:unit`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。
+`pack:check` + `test:unit` + `test:integration`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。
+（覆盖率门禁 `test:coverage` 不在 `verify` 里，由 CI 的 `Repository conventions` 作业执行。）
 
 代码风格由 Prettier 统一（`.prettierrc.json`：无分号、单引号、行宽 120、ES 尾逗号、LF）。不要手工调格式：
 改完代码跑 `pnpm run format` 即可。Markdown 由人换行（列在 `.prettierignore` 中），不会被格式化工具重排。
@@ -124,20 +126,25 @@ node scripts/check-pr-title.mjs "feat(panel): add SSH tunnel keepalive backoff"
 
 PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 
-- **Repository conventions** —— `pnpm run lint` + `check:syntax` + `check:workflows`，并在 PR 上校验 PR 标题
-  （`scripts/check-pr-title.mjs`，dependabot 除外）
+- **Repository conventions** —— `pnpm run lint` + `format:check` + `test:coverage` + `check:syntax` + `check:workflows`，
+  并在 PR 上校验 PR 标题（`scripts/check-pr-title.mjs`，dependabot 除外）
 - **Unit tests (ubuntu-latest, Node 24)**、**Unit tests (windows-latest, Node 24)** —— 单元测试
+- **Integration tests (ubuntu-latest)**、**Integration tests (windows-latest)** —— 集成/E2E（模拟远端；不是必需检查）
 - **Publish artifact (ubuntu-latest)**、**Publish artifact (windows-latest)** —— 市场条目、`files[]` 与 tarball 校验
 
-真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁。
+真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**，不构成 PR 门禁。另外三个**必需检查**来自独立工作流：
+`Analyze (javascript-typescript)`（`codeql.yml`）、`Web E2E (ubuntu-latest)`（`web-e2e.yml`）、
+`Desktop E2E (windows-latest)`（`desktop-e2e.yml`）。
 
 ### 仓库规则（已在仓库设置中启用）
 
-- **`main` 受保护**（ruleset「main protection」）：禁止删除与强推、要求线性历史、要求通过 PR 合并，并且必须通过
-  `Repository conventions`、`Unit tests (ubuntu-latest, Node 24)`、`Publish artifact (ubuntu-latest)` 三个检查。
-  维护者保留绕过权限，仅用于发布与紧急修复。
+- **`main` 受保护**（ruleset「main protection」，`strict` = 开启、**无绕过者**）：禁止删除与强推、要求线性历史、
+  要求通过 PR 合并，并且必须通过 **8 项必需检查**——`Repository conventions`、`Unit tests (ubuntu-latest, Node 24)`、
+  `Unit tests (windows-latest, Node 24)`、`Publish artifact (ubuntu-latest)`、`Publish artifact (windows-latest)`、
+  `Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`。
+  `strict` 表示分支必须与 `main` 同步后才算通过（需要先 rebase/合并最新 `main`）。
 - **只允许 squash merge**：合并后自动删除来源分支；PR 标题即最终提交标题。
-- **`v*` 标签受保护**（ruleset「release tags」）：禁止删除与移动，发布标签一旦推送即不可变。
+- **`v*` 标签受保护**（ruleset「release tags」，无绕过者）：禁止删除与移动，发布标签一旦推送即不可变。
 - **安全相关**：Dependabot 安全更新自动开 PR；CodeQL 在 PR 上扫描；secret scanning 与 push protection 已开启——
   如果推送被拒绝并提示检测到密钥，请按 [SECURITY.md](SECURITY.md) 处理并立即轮换该凭据。
 
@@ -158,7 +165,9 @@ PR 触发 `.github/workflows/ci.yml`，作业名固定为：
 
 ## 7. 代码风格
 
-仓库不引入独立的格式化工具，按下列约定手写；`pnpm run lint`（`scripts/check-repo.mjs`）另做仓库级校验。
+格式由 **Prettier** 统一（`package.json` 的 devDependency，配置在 `.prettierrc.json`：无分号、单引号、行宽 120、
+ES 尾逗号、LF）；提交前跑 `pnpm run format`，不要手工调格式，也不要引入第二个格式化工具。Markdown 列在
+`.prettierignore` 里，由人换行，不会被重排。`pnpm run lint`（`scripts/check-repo.mjs`）另做仓库级校验。
 
 - ESM（`"type": "module"`），优先 Node 内置模块；Host 半端不 import DSH 内部包，避免版本耦合。
 - 2 空格缩进；字符串用单引号（需要内嵌 JSON 或本身含单引号时用双引号）；**语句末尾不加分号**。

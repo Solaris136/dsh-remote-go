@@ -517,10 +517,13 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
   所以它是这一组镜像的类目标签，而不是逐会话标签。镜像列表读取失败时**不显示**徽标（首次读取与重新读取都一样，
   失败会清空缓存列表，避免残留旧徽标）。DSH 尚未向插件暴露会话头 slot，因此 Conversation UI 内部没有该徽标
   （见 session-design.md §10 P1 / §11 #8）。
-- **保留上限**：`mirrorMaxEvents`（默认 200，`0` = 不限）限制单次回放的事件窗口。超限时保留**最新**的 N 条并在
-  会话里先写一条 `mirror/history-folded`（非 surface 事件，带真实的 `folded` / `from` / `to` / `retained`，
-  以及 `retentionCap` / `fetchCap` 两个上限），然后从新的窗口起点继续；折叠只发生在首次同步（`cursor == 0`），
-  之后的溢出按缺口处理，避免「游标说完整、正文却有洞」。
+- **保留上限**：`mirrorMaxEvents`（默认 200，`0` = 不限；默认值在 `src/settings.js:46`，生效值在
+  `src/service.js:740`）限制单次回放的事件窗口。超限时保留**最新**的 N 条并在会话里先写一条
+  `mirror/history-folded`（非 surface 事件，带真实的 `folded` / `from` / `to` / `retained`，
+  以及 `retentionCap` / `fetchCap` 两个上限；见 `src/service.js:998`），然后从新的窗口起点继续；折叠只发生在
+  首次同步（`src/service.js:1036` 传入 `foldBeforeCursor: cursor === 0`，判定在 `src/history.js:745`），
+  之后的溢出按缺口处理（`src/service.js:1064` 用 `cursor: 0` + `foldBeforeCursor: true` 全量重拉一次），
+  避免「游标说完整、正文却有洞」。
 
 `reason.code` 在 L2 新增的取值：
 
@@ -540,10 +543,15 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 
 **内部缺陷 vs 远端条件（v1.1 增补）**：`internal-error` 是唯一一个**不代表远端状态**的取值，它的存在是为了
 让缺陷无法伪装成远端条件。判定规则是结构性的，不是靠匹配错误文案：`try` 的边界就是 I/O 调用本身
-（`src/history.js` 里的 `execRemote()` 只包住 `await ssh.exec(...)`），因此只有传输层的 reject 才会映射成
-`read-failed` / `permission-denied`；`fetchRemoteHistory()` 外层 `catch` 只可能捕获到插件自己代码抛出的异常，
-统一报告为 `internal-error` + `internal: true` + `internalError: { name, message, stack }`。同步汇总里的
-`internalErrors` 与 `failures[].reason="internal-error"` 是对外可观测的信号，`CONTRIBUTING` §9 把这套写法定为约定。
+（`src/history.js:637` 的 `execRemote()` 只包住 `await ssh.exec(...)`），因此只有传输层的 reject 才会映射成
+`read-failed` / `permission-denied`（`src/history.js:554`）；`fetchRemoteHistory()`（`src/history.js:617`）外层
+`catch` 只可能捕获到插件自己代码抛出的异常，统一由 `internalHistoryFault()`（`src/history.js:568`）报告为
+`internal-error` + `internal: true` + `internalError: { name, message, stack }`。
+`stack` **只进 error 日志**（`src/service.js:707`），**不写入描述符**：失败落盘时描述符只保留
+`{ level: 'L1', reason }`（`src/service.js:968-972`），所以镜像记录里不会出现堆栈。同步汇总里的
+`internalErrors`（`src/service.js:965` 计数）与 `failures[].reason="internal-error"` 是对外可观测的信号，
+`CONTRIBUTING` §9 把这套写法定为约定；防回归的扫描器是 `test/unit/swallow-guard.test.js`（默认违规：
+任何产出 `reason:` 的 `catch` 都必须可区分或带 `// swallow-ok: <≥2 词>`）。
 
 远端记录到本地事件的映射（保留/丢弃的字段）见 [session-design.md](session-design.md) §6.1。
 

@@ -26,14 +26,23 @@
 
 ### 修复
 
-- 修复删除主机后镜像「复活」的缺陷：主机删除现在与镜像同步共用同一条队列，并且删除时会给该主机的描述符写入
-  打上墓碑——因此同步进行中删除主机不会再让它的镜像会话重新出现。同时移除了 reconcile 的过期快照回退
+- 修复删除主机后镜像「复活」的缺陷：主机删除现在与镜像同步共用同一条每主机队列（`src/mirror-writer.js:54`），
+  并且删除时在第一个 `await` 之前给该主机的描述符写入打上墓碑（`src/service.js:384`，由 `src/mirror-writer.js:35`
+  在排队操作内部检查）——因此同步进行中删除主机不会再让它的镜像会话重新出现。同时移除了 reconcile 的过期快照回退
   （`current.length > 0 ? current : existing`），它会在描述符被清空后用删除前的快照重建。
 
 
 - 修复镜像描述符的并发写入：`reconcile` 与历史回放两路写入各自读快照再整体写回，可能互相覆盖 `cursor`
   （lost update）。现在所有描述符变更走同一个单写者（读 → 应用增量 → 持久化，每个主机串行），
   且 `cursor` / `epoch` / 冲突计数只增不减。
+
+- 修复「内部缺陷被当成远端原因」的静默故障：历史读取里插件自己抛出的异常（例如 TDZ `ReferenceError`、非预期结构）
+  现在分类为 `reason.code="internal-error"` + `internal: true` + `internalError {name, message, stack}`
+  （`src/history.js:568`），在 `logs` 里记 error 级日志并单独计入 `history.internalErrors`（`src/service.js:965`），
+  不再伪装成 `read-failed` 这样的远端条件。堆栈只进日志、不写入描述符（`src/service.js:968-972`）。
+  同时新增默认违规的防回归扫描器 `test/unit/swallow-guard.test.js`：任何产出 `reason:` 的 `catch` 都必须可区分
+  （`internal-error` / 真正的 error 日志 / 重新抛出），或带 `// swallow-ok: <≥2 词>` 标记并被评审接受。
+
 ### 工程与仓库治理
 
 面向贡献者与发布流程，不改变产品行为：
@@ -41,11 +50,12 @@
 - 引入 Prettier 作为唯一格式化工具（`pnpm run format` / `format:check`，已接入 CI），
   并用 `.git-blame-ignore-revs` 让格式提交不污染 `git blame`。
 - 新增零依赖的覆盖率门禁 `pnpm run test:coverage`（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%）；
-  当前基线 90.97 / 74.41 / 86.51（排除 `vendor/` 与测试自身）。
+  当前基线 92.01 / 78.37 / 91.01（排除 `vendor/` 与测试自身）。
 - 新增仓库规范检查 `pnpm run lint`（必需文件、包元数据、版本一致性、换行/空白、密钥泄漏、workflow 约定）
   与 `pnpm run verify` 聚合门禁。
-- 新增 CI 工作流 `Repository conventions` / `CodeQL` / `Release`（`v*` 标签触发，带 tag 与版本一致性断言、
-  provenance 发布与 GitHub Release），并补充 issue/PR 模板、Dependabot、CODEOWNERS。
+- 新增 CI 工作流 `Repository conventions` / `Integration tests` / `CodeQL` / `Release`（`v*` 标签触发，带 tag 与
+  版本一致性断言、provenance 发布与 GitHub Release），并补充 issue/PR 模板、Dependabot、CODEOWNERS。
+  分支保护由 ruleset「main protection」定义：8 项必需检查、`strict`、无绕过者。
 - 社区健康文件：`CONTRIBUTING`、`CODE_OF_CONDUCT`、`SECURITY`、`CHANGELOG`。
 - 仓库行尾统一为 LF（`.gitattributes`），Windows 入口脚本保持 CRLF。
 - E2E 工具链去机器化：不再硬编码个人路径或默认测试主机，改用 `E2E_SSH_ADDRESS` / `E2E_CHROME` /
