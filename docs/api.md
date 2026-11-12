@@ -112,7 +112,8 @@ interface SettingsView {
   mirrorHistory: boolean
   /** v1.1（L2）：单个镜像会话保留/回放的事件上限（默认 200，0 = 不限；超出保留最新 N 条） */
   mirrorMaxEvents: number
-  windowMode: 'panel' | 'external'
+  /** 呈现形态：'panel' = 面板内嵌（iframe）；'overlay' = 接管整个窗口（DSH 桌面端用 Chromium guest 铺满窗口，顶部窄条可刷新/退出） */
+  windowMode: 'panel' | 'overlay'
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
   /** 自举：目标版本取 'local' = 跟随本机 DSH 版本 */

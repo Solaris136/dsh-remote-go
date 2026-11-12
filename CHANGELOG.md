@@ -14,6 +14,13 @@
 
 ### 新增
 
+- **新增「接管整个窗口」呈现形态**（`windowMode: 'overlay'`，仅 DSH 桌面端）：通过桌面端自带的 browser-guest 通道
+  （`window.dshDesktop.browser.acquire` + `<webview src="about:blank#<lease>">`）把远端 DSH 以真正的 Chromium guest 铺满整个窗口——
+  不是 iframe、不是第二个浏览器窗口。顶部保留 36px 控制条（主机名 / 刷新 / 退出），因为 guest 获得焦点后这是唯一可靠退出口。
+  已知限制（桌面端写死）：guest 会话禁止下载、拒绝所有权限请求、弹窗转交宿主；应用重载后需重建浮层。
+  `panel`（iframe 面板）仍是默认形态；旧的 `external`（本机独立浏览器窗口）形态已移除，已保存的该值在加载时迁移为 `overlay`。
+  新增单测覆盖接管形态（渲染卡片而非 iframe、桌面端不可用时的说明）与设置项文案。
+
 - 镜像会话的**写入租约现在是双向的**：插件会发布自己的 `{ writer, epoch, expiresAt, sessionKey }`
   （拿到租约时、心跳续约时发布，断开时写墓碑），并**读取并遵守**远端权威的校验结果——过期 epoch / 会话密钥不符 /
   可疑跳变都会被拒绝，被拒绝的一方转为只读（`reason.code="fenced"`，`cursor` 不推进，历史仍可读）。
