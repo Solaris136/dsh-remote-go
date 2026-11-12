@@ -1,44 +1,105 @@
-name: Desktop E2E
+name: Acceptance E2E
 
-# Real-installation acceptance for the **Electron desktop shell** (Windows only —
-# the desktop app is not on npm and ships no Linux build).
+# Real-environment acceptance, deliberately **off the PR gate**:
+# - Web E2E: the packed plugin installs into an isolated `dsh web` profile and a
+#   real Chrome renders its settings section in light and dark mode;
+# - Desktop E2E: the official Electron desktop app on Windows installs the packed
+#   plugin and renders the same section.
 #
-# The job installs the official per-user app, hand-crafts the `desktop` profile
-# (the CLI refuses `plugin --profile desktop add`), installs the *packed* plugin
-# into it, launches the app with an isolated `DSH_HOME`/`--user-data-dir` and a
-# CDP port, skips onboarding with "configure later", then asserts the plugin's
-# Remote-hosts settings section renders with legible buttons in light and dark.
+# Both suites drive real browsers, take minutes and are sensitive to runner load,
+# so they run nightly and on demand. A red run is a signal to investigate, not a
+# merge blocker; the PR gate is `.github/workflows/ci.yml` plus CodeQL.
 #
-# Reliability contract for a *required* check:
-# - `DSH_E2E_STRICT=1`: a missing app/installer is a hard failure, never a skip;
-# - the installer runs with an explicit timeout, and a failure dumps where the app
-#   (not) appeared, because a silent NSIS install can stall when an instance is
-#   already running or when elevation cannot be prompted for;
-# - the app is located by *searching* `%LOCALAPPDATA%\Programs` and
-#   `%PROGRAMFILES%`, never by assuming one path;
-# - on failure a screenshot + console/harness logs are uploaded;
-# - the job name is fixed (no matrix) so the required context never drifts.
+# `DSH_E2E_STRICT=1` makes a missing harness/browser/app a hard failure, so
+# provisioning drift can never silently turn a job into a no-op.
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:
-  group: desktop-e2e-${{ github.ref }}
+  group: acceptance-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 env:
-  # CI is required-grade: a missing prerequisite must fail, never skip.
+  # Nightly runs are still strict: a missing prerequisite must fail, never skip.
   DSH_E2E_STRICT: '1'
+  # ~280 MB per run; the key is bumped manually when a new build is needed.
   DSH_DESKTOP_INSTALLER_URL: https://download.deepseek.com/desktop/dsh-latest-windows-x64.exe
 
 jobs:
-  desktop-e2e:
+  web:
+    name: Web E2E (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies (no lifecycle scripts)
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Install the DSH harness
+        # Installed with npm, not `pnpm add --global --ignore-scripts`:
+        # - the harness needs its native addon (`node-addon-require-builtin`), and
+        #   `--ignore-scripts` skips building it, so `dsh` died with
+        #   "Cannot find module .../require_builtin.node" on the first CI run;
+        # - npm runs install scripts without pnpm 11's build-approval gate;
+        # - a local directory means no global bin/PATH juggling either.
+        run: |
+          mkdir -p "${{ runner.temp }}/harness"
+          cd "${{ runner.temp }}/harness"
+          npm init -y >/dev/null
+          npm install --no-fund --no-audit --loglevel=error @deepseek-ai/dsh@0.2.2-rc.1
+          node node_modules/@deepseek-ai/dsh/lib/bin.js --version
+
+      - name: Report tool versions
+        env:
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
+        run: |
+          echo "node $(node --version), pnpm $(pnpm --version)"
+          echo "dsh $(node "$DSH_CLI_JS" --version)"
+
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+
+      - name: Report the browser version
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: echo "chrome ${CHROME_PATH:-<not set>}"
+
+      - name: Run the web E2E
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+          # The suite resolves the harness from this path, so no global bin is needed.
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
+          DSH_WEB_E2E_ARTIFACTS: ${{ runner.temp }}/web-e2e-artifacts
+        run: node --test test/integration/web.e2e.js
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-e2e-failure
+          path: ${{ runner.temp }}/web-e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 14
+
+  desktop:
     name: Desktop E2E (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 60
