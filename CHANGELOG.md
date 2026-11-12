@@ -61,8 +61,9 @@
 - 新增 CI 工作流 `Repository conventions` / `Integration tests` / `CodeQL` / `Release`（`v*` 标签触发，带 tag 与
   版本一致性断言、provenance 发布与 GitHub Release），并补充 issue/PR 模板、Dependabot、CODEOWNERS。
   分支保护由 ruleset「main protection」定义：必需检查、`strict`、无绕过者。
-- 精简 CI 门禁：`ci.yml` 的单元测试与模拟远端集成合并为 `Tests` 作业（覆盖率门禁只在 ubuntu 侧跑），
-  打包校验只在 ubuntu 跑；`Web E2E` 改为夜间定时 + 手动，不再作为必需检查。必需检查由 8 项降为 6 项。
+- 精简 CI：`ci.yml` 合并为两个作业——`Verify (ubuntu-latest)`（规范/格式/语法/PR 标题 + 覆盖率门禁 +
+  模拟远端集成/E2E + 打包与 tarball 校验）与 `Tests (windows-latest, Node 24)`；Web/Desktop E2E 合并为
+  `acceptance.yml`（夜间定时 + 手动），与手动触发的真实主机 E2E 一样不构成 PR 门禁。必需检查由 8 项降为 3 项。
 - 社区健康文件：`CONTRIBUTING`、`CODE_OF_CONDUCT`、`SECURITY`、`CHANGELOG`。
 - 仓库行尾统一为 LF（`.gitattributes`），Windows 入口脚本保持 CRLF。
 - E2E 工具链去机器化：不再硬编码个人路径或默认测试主机，改用 `E2E_SSH_ADDRESS` / `E2E_CHROME` /
