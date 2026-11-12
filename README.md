@@ -79,7 +79,7 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | **镜像会话（L1 目录镜像）**：每台远端一个 `Remote: <主机名>` 侧边栏工作区，远端会话以本地镜像会话出现；远端已删除的会话标记 `remote-deleted`，不删除本地记录 | ✅ 0.1.0 |
 | **历史回放（L2）**：经 SSH 读远端会话日志，投影进本地镜像会话；`cursor` 持久化、重复同步不重复消息、缺口按「重置游标 + 全量重拉」恢复一次 | ✅ 0.1.0 |
 | **只读标识**：回放过历史的镜像在插件面板工作区行显示「只读镜像 / Read-only mirror」徽标（按**工作区行**粒度，不按会话） | ✅ 0.1.0 |
-| **镜像设置**：`mirrorToSidebar`（默认开）、`mirrorHistory`（默认开）、`mirrorMaxSessions`（默认 200）、`mirrorMaxEvents`（默认 200，0 = 不限） | ✅ 0.1.0 |
+| **镜像设置**：`mirrorToSidebar`（默认关，接管整窗后不再需要侧边栏镜像分组）、`mirrorHistory`（默认开）、`mirrorMaxSessions`（默认 200）、`mirrorMaxEvents`（默认 200，0 = 不限） | ✅ 0.1.0 |
 | 事件流 / 输入转发 / 审批桥（L3） | ⏳ 未实现：传输尝试已移除，状态是**未验证**而非已证伪（见 `docs/session-design.md` §6.4 / §11） |
 | 不占用侧边栏入口（入口在设置页与面板内） | ✅ 0.1.0 |
 | 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ 0.1.0 |

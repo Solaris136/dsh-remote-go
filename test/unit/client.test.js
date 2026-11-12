@@ -696,66 +696,61 @@ test('viewport toolbar renders host, status, address and the tool actions', () =
   assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"/)
 })
 
-test('window takeover renders its launcher card and never an iframe', () => {
+test('takeover mode keeps only a status surface: no rail, no host list, no iframe', () => {
   const host = hostView()
   const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
+    React.createElement(plugin.components.MainPanel, {
       t,
-      host,
-      hosts: [host],
-      iframeUrl: 'http://127.0.0.1:54321/?token=one-time',
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      viewerMode: 'overlay',
-      overlayStatus: 'closed',
-      overlayOpen: false,
-      addressVisible: true,
-      enterNotice: false,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onOpenOverlay: () => {},
-      onCloseOverlay: () => {},
-      onDiagnose: () => {},
+      getLocaleId: () => 'zh',
+      openPanel: () => {},
+      closePanel: () => {},
+      initialState: {
+        hostVersion: '0.2.2-rc.1',
+        targetVersion: '0.2.2-rc.1',
+        hosts: [host],
+        settings: { windowMode: 'overlay' },
+        activeHostId: host.id,
+        firstRun: false,
+      },
     }),
   )
-  assert.match(html, /data-testid="overlay-viewer"/)
+  assert.match(html, /data-testid="overlay-surface"/)
   assert.match(html, /接管整个窗口/)
-  assert.match(html, /接管窗口/)
-  // The takeover owns the window; the panel never mounts a second carrier.
-  assert.doesNotMatch(html, /data-testid="remote-iframe"/)
+  assert.match(html, /正在接管远端窗口/)
+  // The carrier is the UI; the panel must not compete with it.
+  assert.doesNotMatch(html, /data-testid="workspace-rail"/)
+  assert.doesNotMatch(html, /data-testid="host-list"/)
   assert.doesNotMatch(html, /<iframe/)
 })
 
-test('window takeover explains that it needs the desktop app', () => {
-  const host = hostView()
+test('the takeover surface explains a missing desktop bridge and offers a way out', () => {
   const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
+    React.createElement(plugin.components.OverlaySurface, {
       t,
-      host,
-      hosts: [host],
-      iframeUrl: 'http://127.0.0.1:54321/?token=one-time',
-      viewerMode: 'overlay',
-      overlayStatus: 'unsupported',
-      overlayOpen: false,
-      addressVisible: true,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onOpenOverlay: () => {},
-      onCloseOverlay: () => {},
-      onDiagnose: () => {},
+      status: 'unsupported',
+      onRetry: () => {},
+      onOpenSettings: () => {},
     }),
   )
+  assert.match(html, /data-testid="overlay-surface"/)
   assert.match(html, /只在 DSH 桌面端可用/)
-  assert.doesNotMatch(html, /<iframe/)
+  assert.match(html, /data-testid="overlay-settings"/)
+  // Nothing to retry when the bridge simply does not exist.
+  assert.doesNotMatch(html, /data-testid="overlay-retry"/)
+})
+
+test('a failed takeover offers a retry next to the settings escape hatch', () => {
+  const html = render(
+    React.createElement(plugin.components.OverlaySurface, {
+      t,
+      status: 'failed',
+      onRetry: () => {},
+      onOpenSettings: () => {},
+    }),
+  )
+  assert.match(html, /接管窗口失败/)
+  assert.match(html, /data-testid="overlay-retry"/)
+  assert.match(html, /data-testid="overlay-settings"/)
 })
 
 test('disconnected viewport shows the yellow banner and reconnect action', () => {
@@ -937,7 +932,7 @@ test('settings modal renders contract fields and the save action', () => {
   assert.match(html, /呈现形态/)
   // The presentation mode must advertise both real options, not "external browser".
   assert.match(html, /面板内嵌/)
-  assert.match(html, /本机独立窗口/)
+  assert.match(html, /接管整个窗口/)
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)

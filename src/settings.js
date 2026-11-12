@@ -34,9 +34,10 @@ export function defaultSettings() {
     autoReconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 800 },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
-    // Mirrored remote sessions are grouped into a sidebar workspace per host by
-    // default; turning this off keeps them out of the sidebar entirely.
-    mirrorToSidebar: true,
+    // Mirrored remote sessions stay OUT of the sidebar by default: the window
+    // takeover already presents the remote host as-is, and the extra
+    // "Remote: <host>" workspace only duplicates it. Opt in to get it back.
+    mirrorToSidebar: false,
     // Upper bound on local mirror sessions created per sync; 0 means unlimited.
     // It only limits creation: a session a previous sync created is never removed.
     mirrorMaxSessions: 200,

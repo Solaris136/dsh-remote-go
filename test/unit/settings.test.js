@@ -19,7 +19,7 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.defaultAuth, 'agent')
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
-  assert.equal(settings.mirrorToSidebar, true)
+  assert.equal(settings.mirrorToSidebar, false)
   assert.equal(settings.mirrorMaxSessions, 200)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.targetVersion, 'local')
@@ -54,8 +54,8 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal(settings.bootstrap.nodeVersion, defaultSettings().bootstrap.nodeVersion)
   assert.equal(settings.bootstrap.targetVersion, 'local')
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
-  // A malformed opt-out must fall back to the documented default (on).
-  assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, true)
+  // A malformed value falls back to the documented default (off since 0.1.0).
+  assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, false)
   assert.equal(sanitizeSettings({ mirrorToSidebar: false }).mirrorToSidebar, false)
 })
 

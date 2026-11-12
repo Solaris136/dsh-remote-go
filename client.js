@@ -230,11 +230,11 @@ window.__ModuleLoader__.load({
       viewportExternal: '在新窗口打开',
       viewportOverlayTitle: '接管整个窗口',
       viewportOverlayBody:
-        '远端 DSH 在本地窗口里用真正的 Chromium guest 渲染（不是 iframe，也不是另开的浏览器）。顶部保留一条窄控制条：刷新、退出；其余画面就是远端那台机器。',
-      viewportOverlayOpen: '接管窗口',
-      viewportOverlayClose: '退出远端窗口',
-      viewportOverlayUnsupported:
-        '当前环境不支持接管窗口：只在 DSH 桌面端可用，浏览器里请改用「面板内嵌」或「本机独立窗口」。',
+        '远端 DSH 在本地窗口里用真正的 Chromium guest 渲染，不是 iframe。顶部保留一条窄控制条：刷新、退出；其余画面就是远端那台机器。',
+      viewportOverlayPending: '正在接管远端窗口…',
+      viewportOverlayRetry: '重试',
+      viewportOverlaySettings: '打开设置',
+      viewportOverlayUnsupported: '当前环境不支持接管窗口：只在 DSH 桌面端可用，浏览器里请改用「面板内嵌」。',
       viewportOverlayFailed: '接管窗口失败，请重试，或改用「面板内嵌」。',
       viewportOverlayHint: '接管期间下载会被桌面端禁用、权限请求会被拒绝；点顶部控制条的「退出」即可回到本地界面。',
       viewportOverlayBarLabel: '远端：{name}',
@@ -385,7 +385,7 @@ window.__ModuleLoader__.load({
       'settings.windowModePanel': '面板内嵌（iframe）',
       'settings.windowModeOverlay': '接管整个窗口（推荐，仅桌面端）',
       'settings.windowModeHint':
-        '面板内嵌：在插件面板里用 iframe 显示远端界面。接管整个窗口：远端 DSH 以真正的 Chromium guest 铺满整个窗口（仅在 DSH 桌面端可用，下载与权限受桌面端限制）。本机独立窗口：远端界面在单独的本地浏览器窗口渲染。',
+        '面板内嵌：在插件面板里用 iframe 显示远端界面。接管整个窗口：远端 DSH 以真正的 Chromium guest 铺满整个窗口（仅在 DSH 桌面端可用，下载与权限受桌面端限制）。',
       'settings.closeBehavior': '关闭视窗行为',
       'settings.closeBehaviorValue': '保留远端会话（V1 固定）',
       'settings.closeBehaviorHint': '关闭本地视窗不会结束远端任务。',
@@ -407,7 +407,7 @@ window.__ModuleLoader__.load({
       'settings.mirror': '镜像会话',
       'settings.mirrorToSidebar': '把远端镜像会话显示在本地侧边栏',
       'settings.mirrorToSidebarHint':
-        '默认开启。每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭后会移除已注册的分组，重新开启并在下次同步（连接或刷新镜像）时恢复。',
+        '默认关闭。开启后每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭会移除已注册的分组，重新开启并在下次同步（连接或刷新镜像）时恢复。',
       'settings.reconnect': '自动重连',
       'settings.reconnectEnabled': '断线后自动重连',
       'settings.maxAttempts': '最大重试次数',
@@ -564,11 +564,12 @@ window.__ModuleLoader__.load({
       viewportExternal: 'Open in new window',
       viewportOverlayTitle: 'Take over the whole window',
       viewportOverlayBody:
-        'The remote DSH renders in this window through a real Chromium guest — no iframe, no second browser window. A thin control strip on top carries refresh and exit; everything below it is the remote machine.',
-      viewportOverlayOpen: 'Take over the window',
-      viewportOverlayClose: 'Leave the remote window',
+        'The remote DSH renders in this window through a real Chromium guest — no iframe. A thin control strip on top carries refresh and exit; everything below it is the remote machine.',
+      viewportOverlayPending: 'Taking over the remote window…',
+      viewportOverlayRetry: 'Retry',
+      viewportOverlaySettings: 'Open settings',
       viewportOverlayUnsupported:
-        'Taking over the window needs the DSH desktop app; in a browser use the embedded panel or a local window instead.',
+        'Taking over the window needs the DSH desktop app; in a browser use the embedded panel instead.',
       viewportOverlayFailed: 'Could not take over the window. Retry, or switch to the embedded panel.',
       viewportOverlayHint:
         'While the window is taken over, downloads are disabled by the desktop app and permission requests are denied. Use "Exit" in the top strip to return.',
@@ -719,7 +720,7 @@ window.__ModuleLoader__.load({
       'settings.windowModePanel': 'Embedded panel (iframe)',
       'settings.windowModeOverlay': 'Take over the window (recommended, desktop only)',
       'settings.windowModeHint':
-        'Embedded: the remote UI is shown inside this panel with an iframe. Take over: the remote DSH fills the whole window through a real Chromium guest (DSH desktop only; downloads and permissions are limited by the shell). Local window: the remote UI renders in a separate local browser window.',
+        'Embedded: the remote UI is shown inside this panel with an iframe. Take over: the remote DSH fills the whole window through a real Chromium guest (DSH desktop only; downloads and permissions are limited by the shell).',
       'settings.closeBehavior': 'Closing behavior',
       'settings.closeBehaviorValue': 'Keep the remote session (fixed in V1)',
       'settings.closeBehaviorHint': 'Closing the local view never stops remote tasks.',
@@ -2540,43 +2541,46 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Card shown while the window takeover is not active. In the desktop app
-     * the carrier is created imperatively (see `openOverlay`); this card is the
-     * launcher and the explanation of what the mode does.
+     * The panel's whole surface in takeover mode. The carrier is imperative and
+     * covers the window, so the panel is only its host: a status line plus the
+     * two escape hatches (retry / settings). No workspace rail, no host list.
      * @param {object} props - t, status, callbacks.
      * @returns {object} div element.
      */
-    function OverlayViewerCard(props) {
+    function OverlaySurface(props) {
       const t = translatorOf(props)
       const status = typeof props.status === 'string' ? props.status : 'idle'
       const unsupported = status === 'unsupported'
       const failed = status === 'failed' || status === 'acquire-failed' || status === 'bad-url'
       return h(
         'div',
-        { className: 'drg-overlay-card', 'data-testid': 'overlay-viewer', 'data-state': status },
-        h('div', { className: 'drg-overlay-card-icon', 'aria-hidden': 'true' }, h(IconExternal, { size: 28 })),
-        h('h2', null, t('viewportOverlayTitle')),
-        h('p', null, t('viewportOverlayBody')),
-        h('p', { className: 'drg-overlay-card-status' }, t('viewportOverlayHint')),
-        unsupported ? h(Notice, { tone: 'warn' }, t('viewportOverlayUnsupported')) : null,
-        failed ? h(Notice, { tone: 'warn' }, t('viewportOverlayFailed')) : null,
+        { className: 'drg-overlay-surface', 'data-testid': 'overlay-surface', 'data-state': status },
+        h('div', { className: 'drg-overlay-surface-icon', 'aria-hidden': 'true' }, h(IconExternal, { size: 26 })),
+        h('p', { className: 'drg-overlay-surface-title' }, t('viewportOverlayTitle')),
+        h(
+          'p',
+          { className: 'drg-overlay-surface-status' },
+          unsupported
+            ? t('viewportOverlayUnsupported')
+            : failed
+              ? t('viewportOverlayFailed')
+              : t('viewportOverlayPending'),
+        ),
+        unsupported || failed ? h('p', { className: 'drg-overlay-surface-hint' }, t('viewportOverlayHint')) : null,
         h(
           'div',
           { className: 'drg-row drg-row-wrap' },
+          failed
+            ? h(
+                Button,
+                { variant: 'primary', testId: 'overlay-retry', onClick: props.onRetry },
+                t('viewportOverlayRetry'),
+              )
+            : null,
           h(
             Button,
-            {
-              variant: 'primary',
-              testId: 'overlay-open',
-              disabled: unsupported,
-              onClick: props.onOpen,
-            },
-            t('viewportOverlayOpen'),
-          ),
-          h(
-            Button,
-            { variant: 'secondary', testId: 'overlay-close', disabled: !props.open, onClick: props.onClose },
-            t('viewportOverlayClose'),
+            { variant: 'secondary', testId: 'overlay-settings', onClick: props.onOpenSettings },
+            t('viewportOverlaySettings'),
           ),
         ),
       )
@@ -2798,7 +2802,6 @@ window.__ModuleLoader__.load({
       const invalidIframe = typeof props.iframeUrl === 'string' && props.iframeUrl.length > 0 && iframeUrl === null
       const iframeError = props.iframeError || null
       const iframeLoading = props.iframeLoading === true
-      const viewerMode = props.viewerMode === 'overlay' ? 'overlay' : 'panel'
 
       let body
       if (host === null) {
@@ -2847,14 +2850,6 @@ window.__ModuleLoader__.load({
           onRetry: props.onRetryIframe,
           onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
           onBack: props.onBack,
-        })
-      } else if (viewerMode === 'overlay') {
-        body = h(OverlayViewerCard, {
-          t,
-          status: props.overlayStatus,
-          open: props.overlayOpen === true,
-          onOpen: props.onOpenOverlay,
-          onClose: props.onCloseOverlay,
         })
       } else if (iframeUrl !== null) {
         body = h(
@@ -4299,10 +4294,15 @@ window.__ModuleLoader__.load({
     function MainPanel(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
-      const remote = useRemoteState()
+      // The host passes no initial state; the seam lets tests and tooling render a
+      // concrete panel without a live transport.
+      const remote = useRemoteState(props.initialState)
       const state = remote.state
       const [view, setView] = useState('hosts')
-      const [activeHostId, setActiveHostId] = useState(null)
+      const [activeHostId, setActiveHostId] = useState(() => {
+        const initial = props.initialState
+        return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
+      })
       const [iframeUrl, setIframeUrl] = useState(null)
       const [iframeKey, setIframeKey] = useState(0)
       const [iframeLoading, setIframeLoading] = useState(false)
@@ -4632,11 +4632,20 @@ window.__ModuleLoader__.load({
       }
       const releaseOverlay = () => {
         // Leaving the carrier is a view change, not a disconnect: the SSH link,
-        // the tunnel and the remote DSH all stay up.
+        // the tunnel and the remote DSH all stay up. The panel has nothing left
+        // to show in this mode, so it hands the window back to the local UI.
         overlayDismissed.current = true
         setOverlayStatus('closing')
         closeOverlay().catch(() => {})
         setOverlayStatus('closed')
+        if (typeof props.closePanel === 'function') {
+          try {
+            props.closePanel()
+            return
+          } catch (_error) {
+            // falling back to the panel body is still usable
+          }
+        }
         setView('viewport')
       }
       const refreshFrame = () => {
@@ -4784,9 +4793,6 @@ window.__ModuleLoader__.load({
               iframeKey,
               iframeLoading,
               iframeError,
-              viewerMode,
-              overlayStatus,
-              overlayOpen: overlayStatus === 'open',
               addressVisible,
               enterNotice: showEnterNotice,
               fingerprintBusy,
@@ -4798,8 +4804,6 @@ window.__ModuleLoader__.load({
               onSwitchHost: switchHost,
               onToggleAddress: toggleAddress,
               onOpenExternal: openExternal,
-              onOpenOverlay: takeOverOverlay,
-              onCloseOverlay: releaseOverlay,
               onDiagnose: runDiagnose,
               onAcceptFingerprint: acceptFingerprint,
               onConnect: (host) => {
@@ -4831,34 +4835,48 @@ window.__ModuleLoader__.load({
               onDiagnoseHost: runDiagnose,
             })
 
+      // In takeover mode the carrier owns the window, so the panel itself is
+      // only a host for it: no rail, no host list, no wizards. Without a chosen
+      // host (several hosts configured) the normal panel stays, because that is
+      // the only way to pick one.
+      const panelBody =
+        viewerMode === 'overlay' && activeHostId !== null
+          ? h(OverlaySurface, {
+              t,
+              status: overlayStatus,
+              onRetry: takeOverOverlay,
+              onOpenSettings: () => setSettingsOpen(true),
+            })
+          : h(
+              'div',
+              { className: 'drg-panel-layout' },
+              h(WorkspaceRail, {
+                t,
+                locale,
+                localeId: locale,
+                hosts,
+                activeHostId,
+                onOpenHost: openHost,
+                onConnectHost: connectHost,
+                onDiagnoseHost: runDiagnose,
+                onOpenLocalWorkspace: (workspaceId) => {
+                  if (typeof props.openLocalWorkspace === 'function') {
+                    try {
+                      props.openLocalWorkspace(workspaceId)
+                    } catch (_error) {
+                      // switching local workspaces is optional; the panel still closes
+                    }
+                  }
+                },
+              }),
+              h('div', { className: 'drg-panel-main' }, content),
+            )
+
       return h(
         'div',
         { className: 'drg-root', 'data-testid': 'dsh-remote-go-panel' },
         h(StyleSheet),
-        h(
-          'div',
-          { className: 'drg-panel-layout' },
-          h(WorkspaceRail, {
-            t,
-            locale,
-            localeId: locale,
-            hosts,
-            activeHostId,
-            onOpenHost: openHost,
-            onConnectHost: connectHost,
-            onDiagnoseHost: runDiagnose,
-            onOpenLocalWorkspace: (workspaceId) => {
-              if (typeof props.openLocalWorkspace === 'function') {
-                try {
-                  props.openLocalWorkspace(workspaceId)
-                } catch (_error) {
-                  // switching local workspaces is optional; the panel still closes
-                }
-              }
-            },
-          }),
-          h('div', { className: 'drg-panel-main' }, content),
-        ),
+        panelBody,
         wizard
           ? h(WizardDialog, {
               key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
@@ -5789,10 +5807,11 @@ window.__ModuleLoader__.load({
 .drg-connect-prompt { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 420px; padding: 32px 16px; color: var(--drg-label-2); }
 .drg-connect-prompt h2 { font-size: 16px; color: var(--drg-label); }
 .drg-connect-prompt-icon { color: var(--drg-label-3); }
-.drg-overlay-card { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 460px; padding: 32px 16px; color: var(--drg-label-2); }
-.drg-overlay-card h2 { font-size: 16px; color: var(--drg-label); }
-.drg-overlay-card-icon { color: var(--drg-label-3); }
-.drg-overlay-card-status { font-size: 12px; color: var(--drg-label-3); }
+.drg-overlay-surface { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 460px; padding: 32px 16px; color: var(--drg-label-2); }
+.drg-overlay-surface-icon { color: var(--drg-label-3); }
+.drg-overlay-surface-title { font-size: 15px; font-weight: 600; color: var(--drg-label); }
+.drg-overlay-surface-status { font-size: 13px; color: var(--drg-label-2); }
+.drg-overlay-surface-hint { font-size: 12px; color: var(--drg-label-3); }
 
 .drg-progress { margin: auto; width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 24px 8px; }
 .drg-progress-head { display: flex; align-items: center; gap: 10px; }
@@ -5968,6 +5987,14 @@ window.__ModuleLoader__.load({
       /** Host/panel request channel shared by the settings section and the panel. */
       const panelStore = createPanelRequestStore()
       const openPanel = () => ctx.layout.selectPanel(PANEL_ID)
+      /** Hand the window back to the local UI (used when the takeover ends). */
+      const closePanel = () => {
+        try {
+          ctx.layout.selectPanel(null)
+        } catch (_error) {
+          // leaving the panel is best-effort; the caller falls back to its body
+        }
+      }
       /**
        * Leave the remote panel for the local conversation and switch the local
        * workspace. The uiWorkspace service is declared in `inject`; the lookup
@@ -5990,7 +6017,7 @@ window.__ModuleLoader__.load({
           // the local conversation is already visible; a missing service is fine
         }
       }
-      const sharedInject = () => ({ openPanel, panelStore, openLocalWorkspace, getLocaleId })
+      const sharedInject = () => ({ openPanel, closePanel, panelStore, openLocalWorkspace, getLocaleId })
 
       ctx.slots.inject('main', () =>
         ctx.slots.register(
@@ -6030,6 +6057,7 @@ window.__ModuleLoader__.load({
       EmptyHosts,
       RemoteViewport,
       ViewportToolbar,
+      OverlaySurface,
       ConnectProgress,
       ErrorCard,
       FingerprintCard,
