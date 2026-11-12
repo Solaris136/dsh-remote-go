@@ -46,6 +46,9 @@ export function defaultSettings() {
     mirrorMaxEvents: 200,
     // L2 toggle: false keeps every mirror at L1 (directory only).
     mirrorHistory: true,
+    // L3 polled follower (design §6.4). **Off by default**: with it false the plugin behaves
+    // exactly as it did before the follower existed, so a regression cannot break anyone.
+    mirrorStream: false,
     windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
@@ -114,6 +117,7 @@ export function sanitizeSettings(raw) {
         ? defaults.mirrorMaxEvents
         : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
     mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
+    mirrorStream: boolean(input.mirrorStream, defaults.mirrorStream),
     windowMode: oneOf(input.windowMode, ['panel', 'external'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),

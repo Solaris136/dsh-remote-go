@@ -367,6 +367,22 @@ function loadWorkspaceAnswer() {
 
 const WORKSPACE = loadWorkspaceAnswer()
 const HISTORY = loadHistoryAnswer()
+/** Records served by the polled follower (design §6.4). @returns {Record<string, any[]>} */
+function loadStreamAnswer() {
+  const file = args['stream-fixture'] ?? process.env.SIM_STREAM_FIXTURE ?? null
+  if (!file) return {}
+  /** @type {any} */
+  let parsed = null
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf8'))
+  } catch {
+    parsed = null
+  }
+  if (!parsed || typeof parsed !== 'object') return {}
+  return parsed.sessions && typeof parsed.sessions === 'object' ? parsed.sessions : {}
+}
+const STREAM = loadStreamAnswer()
+const STREAM_FENCE = process.argv.includes('--stream-fence')
 
 /**
  * The writer authority the simulated remote publishes (L3 prerequisite, design §6.2).
@@ -560,6 +576,64 @@ function respond(command, sim) {
   const cmd = command.trim()
   /** @param {string} stdout @returns {CommandResult} */
   const ok = (stdout) => ({ code: 0, stdout, stderr: '' })
+
+  // 4c. The polled follower (src/mirror-stream.js). The install command is accepted and discarded:
+  // the simulated remote has no filesystem to install into, and the plugin only requires exit 0.
+  if (cmd.startsWith('mkdir -p ') && cmd.includes('follow.mjs')) return ok('')
+
+  const follow = cmd.match(/^node '([^']*follow\.mjs)' '([A-Za-z0-9+/=]+)'$/)
+  if (follow) {
+    sim.streamPolls = (sim.streamPolls ?? 0) + 1
+    if (STREAM_FENCE === true) {
+      // The remote refuses on its own side of the boundary, exactly as the real helper does.
+      sim.streamRefusals = (sim.streamRefusals ?? 0) + 1
+      return ok(JSON.stringify({ ok: false, reason: 'stale-epoch', remoteEpoch: 9 }))
+    }
+    /** @type {any} */
+    let args = null
+    try {
+      args = JSON.parse(Buffer.from(follow[2], 'base64').toString('utf8'))
+    } catch {
+      args = null
+    }
+    if (!args) return ok(JSON.stringify({ ok: false, reason: 'log-malformed' }))
+    // The log is the history fixture plus whatever the scenario says landed after connect.
+    /** @type {any[]} */
+    const records = []
+    for (const [sessionId, entry] of Object.entries(HISTORY)) {
+      const own = Array.isArray(entry?.events) ? entry.events : []
+      for (const event of own) records.push({ sessionId, event })
+    }
+    for (const [sessionId, extra] of Object.entries(STREAM)) {
+      for (const event of Array.isArray(extra) ? extra : []) records.push({ sessionId, event, streamed: true })
+    }
+    const wanted = records
+      .filter((record) => args.logPath.includes(record.sessionId))
+      .sort((left, right) => Number(left.event.seq) - Number(right.event.seq))
+    const body = wanted.map((record) => JSON.stringify(record.event)).join('\n')
+    const bytes = Buffer.from(body + (body === '' ? '' : '\n'), 'utf8')
+    const from = Math.min(Math.max(0, Number(args.offset) || 0), bytes.length)
+    const slice = bytes.subarray(from)
+    const text = slice.toString('utf8')
+    const cut = text.lastIndexOf('\n')
+    const usable = cut < 0 ? '' : text.slice(0, cut + 1)
+    /** @type {any[]} */
+    const events = []
+    for (const line of usable.split('\n')) {
+      const trimmed = line.trim()
+      if (trimmed === '') continue
+      events.push(JSON.parse(trimmed))
+    }
+    return ok(
+      JSON.stringify({
+        ok: true,
+        offset: from + Buffer.byteLength(usable, 'utf8'),
+        bytes: bytes.length,
+        events,
+        truncated: false,
+      }),
+    )
+  }
 
   // 1. The one compound probe (src/probe.js buildProbeScript): its first line
   //    is `set -u` and the first assignment is DIR=.

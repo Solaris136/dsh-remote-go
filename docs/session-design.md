@@ -330,8 +330,8 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 - **删除与同步写入共用一条每 host 队列。** `withMirrorQueue(runtime, run)`（`src/mirror-writer.js:54`）让任意镜像
   操作排进同一条链；`removeHost` 的删除通过它执行（`#removeMirrorsForHost`，`src/service.js:2069`），
   因此不可能插进某次同步的「读 → 增量 → 持久化」中间。
-- **墓碑优先于排序。** `removeHost`（`src/service.js:377`）在**第一个 `await` 之前**就置
-  `runtime.mirrorDeleted = true`（`src/service.js:384`）；这个判断放在 `withMirrorWriter` 的**排队操作内部**
+- **墓碑优先于排序。** `removeHost`（`src/service.js:404`）在**第一个 `await` 之前**就置
+  `runtime.mirrorDeleted = true`（`src/service.js:411`）；这个判断放在 `withMirrorWriter` 的**排队操作内部**
   （`src/mirror-writer.js:35`），所以哪怕某次写入是在删除**之前**入队、在删除**之后**才执行，它也只返回 `current`、
   不写回，不会复活。队列只能重排顺序，墓碑才能保证结果——这就是两者都要的原因。
   把判断放在 `withMirrorWriter` 而不是某个调用方，是为了让**所有**写入路径自动继承它，也让它可以被测试直接驱动
@@ -341,25 +341,53 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
   它被删了」。新建描述符是 reconcile 的职责（它返回计划的全集），不是 merge 的。
 - **reconcile 只看当前存储。** 旧的 `current.length > 0 ? current : existing` 回退会在 `current` 为空时用删除前
   的快照重建描述符，是复活 bug 的第二个入口，已移除。
-- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`，`src/service.js:385`），
+- **可观测**：删除时写一行日志（`mirror host removed: descriptor writes are now no-ops`，`src/service.js:412`），
   不再静默。
 
-### 6.4 事件流尝试（已移除；失败归因见 §11 #13）
+### 6.4 L3 第一阶段：轮询跟随（已落地，默认关闭）
 
-事件流的传输、远端 epoch 拒绝脚本、有界帧缓冲与「流式/日志共用一条 ingest 流水线」的等价性都实现并通过了单测。
-**激活时撞到两个集成缺陷**：
+**这不是推送通道，先说清它是什么**：传输是请求/响应式 `ssh.exec`，`tail -f` 会阻塞到超时并返回空，所以实现是
+**轮询跟随**——每个 host 一个定时器，重复调用远端小助手取「偏移之后的日志切片」。诚实的性质：**延迟 ≈ 轮询间隔**
+（`STREAM_LIMITS.pollMs`，`src/mirror-stream.js:30`）、按日志顺序、**至少一次**投递（由 `seq > cursor` 与
+`data.mirrorSeq` 幂等化）、单帧有界、内存有界。真正的推送通道（`ws-mux`）仍未实现，这是已知缺口。
 
-1. `streamFile` 在历史读取结果存在之前就被引用，抛出 TDZ 错误，被外层 `catch` 吞成 `read-failed`——历史回放
-   **静默失效**；
-2. 上面 §6.3 那条 lost update 在轮询器与同步并发时把 `cursor` 覆盖掉，表现为「流式事件到了但游标不动」。
+**内存为什么有界**：没有队列。每一帧在下一 tick 被排程**之前**就应用完（`setTimeout` 在 `await` 之后，
+`src/service.js:2132`），所以慢的下游自然产生背压，而不是积压；占用上界就是**单帧**的大小
+（`maxBytes` 256 KB / `maxEvents` 500，`src/mirror-stream.js:32`）。早期版本有一个 `FrameBuffer`，但轮询循环
+从不入队，它只是装饰，已删除——不要在没有队列的情况下声称「丢帧计数」。。
 
-两者都已修复。**修复之后没有重新端到端验证传输本身是否可用**——模块是在这个节点上为收敛范围而移除的，
-不是因为「传输被证明不可用」。这个区别很重要：§11 #13 记录的是未验证，不是一个已证伪的结论。
+**状态存放**：`cursor` 是**唯一持久真相**，只在描述符里，且所有描述符写入都经 `withMirrorWriter`
+（`src/mirror-writer.js:28`）；流式路径不直接调 `replaceHostMirrors`。`offset` 与日志路径是**每连接的内存状态**
+（`runtime.streamOffsets` / `runtime.streamFiles`，`src/service.js:253` 创建），**不持久化**——两个必须一致的持久
+数字就是漂移 bug；重启时 offset 归零、路径在连接同步时重新发现，`seq > cursor` 让重读成为 no-op。
 
-**仍然成立的判断（属于设计层面，不是本次失败的证据）**：设计想要的是一条 `ws-mux` 推送通道；在请求/响应式的
-`ssh.exec` 上做轮询跟随，天生只有「延迟 ≈ 轮询间隔」「至少一次投递」「没有真正的推送」这些性质。它可能可用，
-但那需要被真正验证过，并且需要两台真实主机才能验证时序。
+**非对称规则**：offset 只在描述符写入成功**且持久化的 cursor 真的前进**之后才推进（`advanced` 判断，
+`src/service.js:2224`）。offset 落后只会重读已应用字节（廉价且正确）；offset 超前而 cursor 没动会**跳过从未应用的
+事件 = 永久丢数据**，所以永不提前推进。
 
+**生效路径**：`#startMirrorStream` 在 `#syncMirrors` 里紧随 `#syncMirrorHistory` 调用——**让激活真正生效的那一行是
+`src/service.js:668` 的 `this.#startMirrorStream(runtime)`**。远端助手在**第一次轮询时**惰性安装
+（`#ensureStreamHelper`，`src/service.js:2084`）：早期尝试在 connect 时安装，那时 `runtime.facts?.home` 还不存在，
+路径留空且静默放弃——这就是「已实现但看不到」的根因。守卫以 `streamGuard`（`src/mirror-stream.js`）返回
+`guard` 名称而不是裸 `return`。
+
+**可观测性（本节的教训）**：第一次尝试的插桩发在 `debug`，默认 `logLevel` 为 `info` 会把它过滤掉，于是「看不到」被
+误读成「没发生」。现在轮询在**没有前进**时以 `info` 打印六值轨迹
+（`{sessionId, offsetBefore, rawBytes, parsedEvents, planCursor, persistedCursor, guard}`，`src/service.js:2224` 附近），
+可见性由**被测试覆盖**的 `logVisible`（`src/mirror-stream.js:287`）决定，`options.logLevel` 可覆盖（`src/service.js:180`）；
+`runtime.logs` 环形缓冲始终保留全部行。**一条一般规则**：插桩必须在**默认配置**下就能看见，且要用一个断言证明它
+真的会打印——否则它只会安慰写它的人。
+
+**远端那一半是模拟的——必须知道这一点**：上面列的都是**插件侧**性质。远端助手
+（`remoteStreamScriptSource()`，`src/mirror-stream.js`）在 CI 里**从未真正执行**：单元测试只把它当**字符串**读
+（`test/unit/mirror-stream.test.js`），集成测试里**模拟远端拦截了命令并直接返回预制 JSON**
+（`e2e/sim/simulated-remote.mjs:580` 丢弃安装命令、`:584` 用正则匹配 follow 命令）。也就是说，助手的偏移算术、
+epoch 检查、切片与 JSON 组帧从未跑过；被验证的是**模拟端对协议的重新实现**。要让它真正跑起来需要一台装了 `node`
+且在 `PATH` 上、并有可写 `remote-go/` 的远端 DSH。因此 §10 的 P2 只应读作「插件侧端到端已验证，远端为模拟」。
+**开关**：`mirrorStream` 默认 **false**（`src/settings.js:51`）。关闭时行为与引入跟随者之前逐字节相同；开启后每个 host
+多一次轮询，把远端新记录追加到本地镜像。**激活已端到端验证**：`test/integration/stream.e2e.js` 四个测试——连接期间
+追加的记录无需手动同步即出现且只出现一次、**关闭开关的负对照**、被围栏的 host 不流任何东西、重连从持久 cursor 续接且
+不重复。
 ## 7. 生命周期与失败模式
 
 | 场景 | 期望行为 |
@@ -395,7 +423,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
 | P1 ✅（宿主限制：标识在面板工作区栏） | 历史回放（L2）+ 可见只读标识 | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 在 Host/契约层提供（`test/unit/history.test.js` + `test/integration/history.e2e.js`）。**可见标识已交付**：插件面板的工作区栏在对应远端工作区行渲染「只读镜像 / Read-only mirror」徽标（`data-testid="mirror-readonly-badge"`），tooltip 带级别与原因，中英双语并有两个 locale 的断言；真实 `dsh web` + 含历史的模拟远端在 `DSH_E2E_LANG=en-US` 与 `zh-CN` 下都断言了它。**仍是宿主限制**：DSH 未向插件暴露「会话头/标题」slot（插件只能注册 `main` 与 `settings.section`），所以 Conversation UI 内部仍没有徽标，见 §11 #8 |
-| P2 🔴 | 事件流 + 输入转发（L3） | **事件流：激活未验证即移除**。传输、远端 epoch 拒绝脚本、有界缓冲与 ingest 等价性均实现并有单测，激活时撞到两个集成缺陷（TDZ 吞错关掉历史回放、轮询器与同步的 lost update），两处已修复但**修复后未重新验证传输是否可用**，模块在该节点为收敛范围而删除（§6.4 / §11 #13）。**保留的副产品**：§6.3 单写者（修复 reconcile 与 history 互相覆盖 cursor 的真实缺陷，可独立成立）。**输入转发与审批桥未开始** |
+| P2 🟢 | 事件流（L3 第一阶段） | **已落地，默认关闭**（`mirrorStream`）。轮询跟随：远端助手在远端侧拒绝过期 epoch，本地按偏移取帧、复用 L2 的 `planHistoryWindow` 落库，`cursor` 是唯一持久真相、`offset` 只存内存且仅在持久化 cursor 前进后才推进。端到端验证见 §6.4 与 `test/integration/stream.e2e.js`。**仍未做**：真正的推送通道（`ws-mux`）、L3 输入转发、审批桥 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 
 L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的会话日志，因此没有实时性承诺；`stream` / `input` /
@@ -445,14 +473,15 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
     所以走那条路径的接管可以采纳一个任意大的 epoch（不构成永久 DoS——下一个写入者仍可 +1 拿回，但它确实绕过了
     `epochJumpLimit` 窗口）。真实实现应把窗口检查放在最前面；这里保持现状是因为它只影响测试替身，且已有测试
     覆盖窗口本身。
-13. **事件流：激活尝试未完成验证即移除以收敛范围（状态=未验证，不是已证伪）**：实现过 `src/stream.js`——基于
-    `ssh.exec` 的轮询跟随、远端 `follow.mjs`（在**远端侧**拒绝过期 epoch）、有界 `FrameBuffer`（丢最旧并记缺口）、
-    以及与 L2 共用的 `planHistoryWindow`/`applyEvents` ingest 流水线，并有等价性单测。激活时撞到两个集成缺陷：
-    ① `streamFile` 的 TDZ 异常被吞成 `read-failed`，静默关掉历史回放；② §6.3 的 lost update 在轮询器与同步并发时
-    覆盖 `cursor`（症状正是「流式事件到了、游标不动」）。**两处都已修复，但修复后没有重新端到端验证传输是否可用**；
-    模块是在该节点上为收敛范围而删除的。后来者请注意：这不是「`ssh.exec` 轮询已被证明不可用」的结论。
-    **设计层面的判断**（与上述失败无关）：设计要的是 `ws-mux` 推送通道；轮询跟随天生只有「延迟 ≈ 轮询间隔」
-    「至少一次投递」「无真推送」。它可能可用，但需要真正被验证，并且需要两台真实主机验证时序。
-    **L3 若要继续，需要**：一条真正的推送通道（或可靠驱动的远端跟随进程）、逐次写校验、以及两主机 + 真分区测试。
-    **保留的修复**：单写者 `withMirrorWriter`（§6.3），它修的是 reconcile 与 history 两路写入互相覆盖 cursor 的
-    真实缺陷——这条缺陷独立存在，与流式是否落地无关，校准见 §6.3。
+13. **事件流：第三次尝试成功，激活已端到端验证（默认关闭）**：前两次的结论（「与同步路径无法共存」）是**错的归因**，
+    真正的原因有两个，都在之后修掉了：① `#syncMirrors` 与 `#syncMirrorHistory` 各自读快照再整体写回造成的 lost update
+    （PR #23 的 `withMirrorWriter`）；② `streamFile` 在历史结果存在前被引用的 TDZ 异常被吞成 `read-failed`，静默关掉
+    历史回放（PR #25 的 swallow 守卫）。**本次实测的第三个障碍是插桩本身**：轨迹发在 `debug`，默认 `logLevel` 过滤掉，
+    于是「看不到」被误读成「没发生」——教训是插桩必须在默认配置下可见，并用断言证明它真的会打印（现由
+    `logVisible` + 单元测试保证）。**还有一个纯属我自己的 bug**：诊断输出写在会先失败的断言之后，所以它从未执行。
+    **诚实边界**：远端助手（`remoteStreamScriptSource()`）在 CI 中**从未执行**——模拟远端拦截命令并返回预制 JSON
+    （`e2e/sim/simulated-remote.mjs:580`/`:584`），单元测试只把它当字符串读。被验证的是插件侧加上模拟端对协议的
+    重新实现，真实远端行为需要一台有 `node` 与可写 `remote-go/` 的机器才能验证。
+    **现状**：`mirrorStream` 默认 false；开启后连接期间追加的远端记录无需手动同步即出现且只出现一次（负对照：关闭时
+    不出现）；被围栏的 host 不流任何东西；重连从持久 cursor 续接且不重复。**下一个尝试者需要**：一条真正的推送通道
+    （`ws-mux`）来消掉「延迟 ≈ 轮询间隔」，以及 L3 的输入转发与审批桥。
