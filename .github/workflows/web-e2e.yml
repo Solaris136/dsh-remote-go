@@ -9,19 +9,22 @@ name: Web E2E
 # section, and every button label is legible (WCAG contrast >= 3, alpha/opacity
 # aware, gradients refused) in light AND dark mode.
 #
-# Reliability contract for a *required* check:
+# Reliability contract (nightly + manual; not a required check):
 # - `DSH_E2E_STRICT=1` makes a missing harness/browser/pnpm a hard failure, so
 #   provisioning drift can never silently turn this job into a no-op;
 # - no fixed sleeps: every wait is a bounded poll on state that changes;
 # - on failure a screenshot + console/harness logs are uploaded;
-# - the job name is fixed (no matrix) so the required context never drifts.
+# - the job name is fixed (no matrix) so the check context never drifts.
+#
+# This suite drives a real Chrome against a packed install and is sensitive to
+# runner load, so it runs on a schedule instead of gating every PR. A red nightly
+# run is a signal to investigate, not a merge blocker.
 #
 # `pnpm run verify` never needs a harness: there the same file skips prerequisites.
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 concurrency:

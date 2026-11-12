@@ -60,8 +60,8 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 | 单元测试（Host + Client） | `pnpm run test:unit` → **355** 用例全部通过；集成/E2E `pnpm run test:integration` → **60** 用例（模拟远端 36 + `Web E2E` 14 + `Desktop E2E` 10；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
 | 覆盖率门禁 | `pnpm run test:coverage` → 行 **92.01%** / 分支 **78.37%** / 函数 **91.01%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-workspace-rail.png`（面板内工作区栏按远端分组）、`panel-remote-dsh.png` |
-| 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现已由必需检查 `Web E2E` 每次 CI 复核 |
-| 持续集成 | GitHub Actions 共 **8 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Repository conventions`（规范 + Prettier 格式 + 覆盖率 + PR 标题）、`Unit tests (ubuntu-latest, Node 24)`、`Unit tests (windows-latest, Node 24)`、`Publish artifact (ubuntu-latest)`、`Publish artifact (windows-latest)`、`Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`；`ci.yml` 另跑 `Integration tests (ubuntu-latest)` / `(windows-latest)`（模拟远端），真实主机 E2E 为手动触发 |
+| 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现由 `Web E2E` 工作流（夜间定时 + 手动）复核 |
+| 持续集成 | GitHub Actions 共 **6 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Repository conventions`（规范 + Prettier 格式 + PR 标题）、`Tests (ubuntu-latest, Node 24)`、`Tests (windows-latest, Node 24)`（单元 + 覆盖率门禁 + 模拟远端集成/E2E）、`Publish artifact (ubuntu-latest)`、`Analyze (javascript-typescript)`、`Desktop E2E (windows-latest)`；`Web E2E` 改为夜间定时 + 手动，真实主机 E2E 仍为手动触发 |
 | V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：同站 loopback iframe 可嵌入，无需同源反代 |
 
 > 端到端测试依赖一台可通过 SSH 访问、由你自行准备的主机（见 `e2e/remote/README.md`）；仓库不包含任何真实主机地址或凭据。
@@ -273,10 +273,12 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 
 缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
 `.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
-（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**（ruleset「main protection」共 8 项必需检查、`strict`
-且无绕过：`Repository conventions`、双平台单测、双平台打包、`Analyze (javascript-typescript)`、
-`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
-失败时都会上传截图与日志（`web-e2e-failure` / `desktop-e2e-failure` artifact）。
+（缺件即失败，避免静默空跑）。`desktop-e2e.yml` 是**必需检查**（ruleset「main protection」共 6 项必需检查、
+`strict` 且无绕过：`Repository conventions`、双平台 `Tests`、`Publish artifact (ubuntu-latest)`、
+`Analyze (javascript-typescript)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
+`web-e2e.yml` 改为**夜间定时 + 手动**，不再构成 PR 门禁——这个套件要驱动真实 Chrome 且对 runner 负载敏感，
+放在门禁里只会让偶发超时阻塞合并。两个工作流失败时都会上传截图与日志
+（`web-e2e-failure` / `desktop-e2e-failure` artifact）。
 
 ### 模拟远端主机（`e2e/sim`）
 
@@ -313,11 +315,11 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 
 | 工作流 | 触发 | 内容 |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（仓库规范 + Prettier 格式 + 覆盖率门禁 + PR 标题）、`Unit tests`（ubuntu/windows × Node 24）、`Integration tests`（ubuntu/windows，模拟远端跑集成/E2E 套件）、`Publish artifact`（市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
+| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（仓库规范 + Prettier 格式 + PR 标题）、`Tests`（ubuntu/windows × Node 24：单元测试 + 覆盖率门禁 + 模拟远端集成/E2E）、`Publish artifact`（ubuntu：市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
 | [`codeql.yml`](.github/workflows/codeql.yml) | push/PR `main` / 每周 | CodeQL 静态分析（`security-and-quality`） |
 | [`release.yml`](.github/workflows/release.yml) | `v*` 标签 / 手动 | 校验标签与版本一致 → 跑门禁 → 打包 → 发布 npm（有 token 时，含 provenance）→ 创建 GitHub Release |
 | [`e2e.yml`](.github/workflows/e2e.yml) | 仅手动 | 真实主机端到端：隔离 control DSH → SSH → 远端自举 → 面板 iframe 验收 → 上传证据 |
-| [`web-e2e.yml`](.github/workflows/web-e2e.yml) | push `main` / PR / 手动 | Web 兼容性（**必需检查** `Web E2E (ubuntu-latest)`）：安装 `@deepseek-ai/dsh` + Chrome → 打包产物真装进隔离 `dsh web` → 设置页浅色/深色按钮对比度断言；失败上传截图与日志 |
+| [`web-e2e.yml`](.github/workflows/web-e2e.yml) | 夜间定时 / 手动 | Web 兼容性（不再是 PR 门禁）：安装 `@deepseek-ai/dsh` + Chrome → 打包产物真装进隔离 `dsh web` → 设置页浅色/深色按钮对比度断言；失败上传截图与日志 |
 | [`desktop-e2e.yml`](.github/workflows/desktop-e2e.yml) | push `main` / PR / 手动 | 桌面端兼容性（**必需检查** `Desktop E2E (windows-latest)`）：静默安装官方 Electron 桌面端（带超时与诊断）→ 手工构建 desktop profile 装打包产物 → CDP 驱动真实窗口 → 同样的对比度断言；失败上传截图与日志 |
 
 发布前请本地跑一遍 `pnpm run verify`；`prepack` 还会自动执行 `market-entry --check`，防止带病发布。完整发布步骤见

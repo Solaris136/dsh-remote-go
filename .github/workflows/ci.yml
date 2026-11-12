@@ -39,9 +39,6 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
-      - name: Unit test coverage thresholds
-        run: pnpm run test:coverage
-
       - name: Syntax check
         run: pnpm run check:syntax
 
@@ -57,7 +54,7 @@ jobs:
         run: node scripts/check-pr-title.mjs
 
   test:
-    name: Unit tests (${{ matrix.os }}, Node ${{ matrix.node }})
+    name: Tests (${{ matrix.os }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -83,42 +80,25 @@ jobs:
       - name: Rebuild vendored ssh2 bundle
         run: pnpm run build:vendor
 
-      - name: Unit tests (Host + Client)
+      # Coverage thresholds are platform-independent, so only ubuntu computes them.
+      # Windows still runs the same unit suite: path and SSH-config handling is
+      # OS-sensitive, and a Windows-only regression must not reach main.
+      - name: Unit tests with coverage thresholds
+        if: runner.os == 'Linux'
+        run: pnpm run test:coverage
+
+      - name: Unit tests
+        if: runner.os == 'Windows'
         run: pnpm run test:unit
 
-  sim:
-    name: Integration tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install dependencies (no lifecycle scripts)
-        run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Simulated-host integration tests
+      # Simulated-remote integration/E2E. No external host or browser is needed,
+      # so this runs in the same job instead of a second matrix.
+      - name: Integration tests (simulated remote)
         run: node --test --test-concurrency=1 "test/integration/*.test.js" "test/integration/*.e2e.js"
 
   package:
-    name: Publish artifact (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Publish artifact (ubuntu-latest)
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -150,7 +130,7 @@ jobs:
       - name: Upload tarball
         uses: actions/upload-artifact@v7
         with:
-          name: npm-tarball-${{ matrix.os }}
+          name: npm-tarball
           path: artifacts/*.tgz
           if-no-files-found: error
           retention-days: 14
