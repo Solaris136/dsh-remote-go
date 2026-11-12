@@ -57,11 +57,11 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 
 | 证据 | 结果 |
 |---|---|
-| 单元测试（Host + Client） | `pnpm run test:unit` → **268** 用例全部通过；集成/E2E `pnpm run test:integration` → **31** 用例全部通过 |
-| 覆盖率门禁 | `pnpm run test:coverage` → 行 **93.19%** / 分支 **78.39%** / 函数 **89.78%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
+| 单元测试（Host + Client） | `pnpm run test:unit` → **355** 用例全部通过；集成/E2E `pnpm run test:integration` → **60** 用例（模拟远端 36 + `Web E2E` 14 + `Desktop E2E` 10；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
+| 覆盖率门禁 | `pnpm run test:coverage` → 行 **92.01%** / 分支 **78.37%** / 函数 **91.01%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 端到端（真实 SSH + 真实远端 DSH + 真实浏览器） | `pnpm run test:e2e` → 通过；报告 `e2e/artifacts/plugin-e2e-report.json`，截图 `settings-remote-section.png`、`panel-workspace-rail.png`（面板内工作区栏按远端分组）、`panel-remote-dsh.png` |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现已由必需检查 `Web E2E` 每次 CI 复核 |
-| 持续集成 | GitHub Actions 共 **8 项必需检查**：`Repository conventions`（规范 + 格式 + 覆盖率 + PR 标题）、双平台单测、双平台打包、`Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`；另有 CodeQL 与手动触发的真实主机 E2E |
+| 持续集成 | GitHub Actions 共 **8 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Repository conventions`（规范 + Prettier 格式 + 覆盖率 + PR 标题）、`Unit tests (ubuntu-latest, Node 24)`、`Unit tests (windows-latest, Node 24)`、`Publish artifact (ubuntu-latest)`、`Publish artifact (windows-latest)`、`Analyze (javascript-typescript)`、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`；`ci.yml` 另跑 `Integration tests (ubuntu-latest)` / `(windows-latest)`（模拟远端），真实主机 E2E 为手动触发 |
 | V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：同站 loopback iframe 可嵌入，无需同源反代 |
 
 > 端到端测试依赖一台可通过 SSH 访问、由你自行准备的主机（见 `e2e/remote/README.md`）；仓库不包含任何真实主机地址或凭据。
@@ -76,6 +76,11 @@ host inventory, SSH connection plus tunnel, panel hosting, and connection status
 |---|---|
 | **设置页「远程主机」**：主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ 0.1.0 |
 | **面板左侧「工作区」栏**：本地工作区 + 按远端分组 / 远端工作区，点击本地工作区回本地会话 | ✅ 0.1.0 |
+| **镜像会话（L1 目录镜像）**：每台远端一个 `Remote: <主机名>` 侧边栏工作区，远端会话以本地镜像会话出现；远端已删除的会话标记 `remote-deleted`，不删除本地记录 | ✅ 0.1.0 |
+| **历史回放（L2）**：经 SSH 读远端会话日志，投影进本地镜像会话；`cursor` 持久化、重复同步不重复消息、缺口按「重置游标 + 全量重拉」恢复一次 | ✅ 0.1.0 |
+| **只读标识**：回放过历史的镜像在插件面板工作区行显示「只读镜像 / Read-only mirror」徽标（按**工作区行**粒度，不按会话） | ✅ 0.1.0 |
+| **镜像设置**：`mirrorToSidebar`（默认开）、`mirrorHistory`（默认开）、`mirrorMaxSessions`（默认 200）、`mirrorMaxEvents`（默认 200，0 = 不限） | ✅ 0.1.0 |
+| 事件流 / 输入转发 / 审批桥（L3） | ⏳ 未实现：传输尝试已移除，状态是**未验证**而非已证伪（见 `docs/session-design.md` §6.4 / §11） |
 | 不占用侧边栏入口（入口在设置页与面板内） | ✅ 0.1.0 |
 | 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ 0.1.0 |
 | SSH 别名自动发现（`~/.ssh/config`）、known_hosts 只读解析 | ✅ 0.1.0 |
@@ -206,12 +211,15 @@ pnpm run verify                                   # 一条命令跑完下面全�
 |---|---|
 | `pnpm run lint` | 仓库规范检查（必需文件、元数据、版本一致性、换行/空白、密钥泄漏、workflow 约定） |
 | `pnpm run format:check` | Prettier 格式检查（配置见 `.prettierrc.json`） |
-| `pnpm run check:syntax` | 用 `node --check` 解析所有生产/测试/脚本 JS |
-| `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml` |
-| `pnpm run market:check` | 用官方 `dsh-plugin-market-index` 校验市场条目 |
+| `pnpm run check:syntax` | 用 `node --check` 解析所有生产/测试/脚本 JS（当前 81 个文件） |
+| `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml`（当前 6 个工作流） |
+| `pnpm run market:check` | 用官方 `dsh-plugin-market-index` 校验市场条目（当前 30 个运行时文件） |
 | `pnpm run pack:check` | 校验 `files[]` 覆盖与打包内容 |
-| `pnpm run test:unit` | 单元测试（Host + Client，无需网络/SSH） |
-| `pnpm run test:coverage` | 同上 + 覆盖率门禁（CI 也会跑；不含 `vendor/`） |
+| `pnpm run test:unit` | 单元测试（355 用例，Host + Client，无需网络/SSH） |
+| `pnpm run test:integration` | 集成/E2E（60 用例）：模拟远端 + `Web E2E` + `Desktop E2E`，缺 harness/浏览器时跳过 |
+
+覆盖率门禁（`pnpm run test:coverage`，阈值 85 / 70 / 80）**不在** `verify` 里：它由 CI 的
+`Repository conventions` 作业执行，本地可单独跑。
 
 端到端（需要真实测试主机与本机 Chrome/Edge）：
 
@@ -265,8 +273,9 @@ PATH 上的 `dsh`。Windows 安装目录会用 `--version` 实际探测（`app.a
 
 缺任何一样都**跳过而不是失败**，所以 `pnpm run verify` 与 `ci.yml` 在没有 Harness 的机器上仍然全绿；CI 里由
 `.github/workflows/web-e2e.yml` / `desktop-e2e.yml` 备好 harness / 桌面端后以 `DSH_E2E_STRICT=1` 运行
-（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**（分支保护共 8 项必需检查：仓库规范、双平台单测、
-双平台打包、CodeQL 分析、`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
+（缺件即失败，避免静默空跑）。这两个工作流是**必需检查**（ruleset「main protection」共 8 项必需检查、`strict`
+且无绕过：`Repository conventions`、双平台单测、双平台打包、`Analyze (javascript-typescript)`、
+`Web E2E (ubuntu-latest)`、`Desktop E2E (windows-latest)`），失败会阻塞合并；
 失败时都会上传截图与日志（`web-e2e-failure` / `desktop-e2e-failure` artifact）。
 
 ### 模拟远端主机（`e2e/sim`）
@@ -304,7 +313,7 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 
 | 工作流 | 触发 | 内容 |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（仓库规范 + Prettier 格式 + 覆盖率门禁 + 提交规范）、`Unit tests`（ubuntu/windows × Node 24）、`Publish artifact`（市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
+| [`ci.yml`](.github/workflows/ci.yml) | push `main` / PR / 手动 | `Repository conventions`（仓库规范 + Prettier 格式 + 覆盖率门禁 + PR 标题）、`Unit tests`（ubuntu/windows × Node 24）、`Integration tests`（ubuntu/windows，模拟远端跑集成/E2E 套件）、`Publish artifact`（市场条目校验 + `pnpm pack` + tarball 校验并上传 artifact） |
 | [`codeql.yml`](.github/workflows/codeql.yml) | push/PR `main` / 每周 | CodeQL 静态分析（`security-and-quality`） |
 | [`release.yml`](.github/workflows/release.yml) | `v*` 标签 / 手动 | 校验标签与版本一致 → 跑门禁 → 打包 → 发布 npm（有 token 时，含 provenance）→ 创建 GitHub Release |
 | [`e2e.yml`](.github/workflows/e2e.yml) | 仅手动 | 真实主机端到端：隔离 control DSH → SSH → 远端自举 → 面板 iframe 验收 → 上传证据 |
@@ -322,6 +331,13 @@ E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@ho
 - 刷新本地页面需要重新打开视窗（远端任务不受影响）。
 - 修改 Host 插件代码需重启本地 DSH 生效（Client 半端随页面刷新加载）。
 - 端到端测试需要一台真实可达的 SSH 主机，无法在普通 CI 上无条件复现（因此单独设为手动工作流）。
+- **镜像会话只到 L2（回放，不流式）**：`stream` / `input` / `approve` 三个能力仍为 `false`，实时性没有承诺。
+  事件流（L3）曾在别的传输上尝试过，在**修复两个真实缺陷之后没有重新验证**就为收敛范围移除——所以它是
+  「未验证」，不是「已证明不可用」（`docs/session-design.md` §6.4 / §11）。
+- **写入租约的远端校验目前只由模拟远端实现**（`e2e/sim`）：未改造的真实 DSH 没有这段校验，因此
+  「两个客户端只有一个能写」只在模拟远端下成立（`docs/session-design.md` §11）。
+- 只读徽标以**工作区行**为粒度（`mirror.workspaceId === workspace.id`），不是逐会话标签；DSH 未向插件暴露会话头
+  slot，所以 Conversation UI 内部没有徽标。
 
 ## 参与贡献
 
