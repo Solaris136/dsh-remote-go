@@ -161,6 +161,52 @@ test('late ssh2 errors after a failed auth attempt never crash the host process'
   await new Promise((resolve) => setTimeout(resolve, 20))
 })
 
+test('a failed auth candidate does not leave the fallback connection marked closed', async () => {
+  const { EventEmitter } = await import('node:events')
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-fallback-'))
+  const keyFile = path.join(dir, 'id_test')
+  await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
+  let attempt = 0
+  class FakeClient extends EventEmitter {
+    connect() {
+      attempt += 1
+      if (attempt === 1) {
+        // The agent candidate: no agent is running, so ssh2 reports auth failure.
+        queueMicrotask(() => {
+          this.emit(
+            'error',
+            Object.assign(new Error('All configured authentication methods failed'), {
+              level: 'client-authentication',
+            }),
+          )
+        })
+        return
+      }
+      queueMicrotask(() => this.emit('ready'))
+    }
+    end() {}
+  }
+  // Two deterministic candidates on every platform: a bogus agent plus a key.
+  const previousAgent = process.env.SSH_AUTH_SOCK
+  process.env.SSH_AUTH_SOCK = '/tmp/agent.sock'
+  try {
+    const ssh = new SshConnection({
+      host: 'example.com',
+      username: 'u',
+      auth: { type: 'agent' },
+      identityFiles: [keyFile],
+      home: dir,
+      clientFactory: () => new FakeClient(),
+    })
+    await ssh.connect()
+    assert.equal(attempt, 2, 'the second candidate must be tried after the first fails')
+    assert.equal(ssh.connected, true, 'the successful fallback must not stay marked closed')
+  } finally {
+    if (previousAgent === undefined) delete process.env.SSH_AUTH_SOCK
+    else process.env.SSH_AUTH_SOCK = previousAgent
+  }
+})
+
 test('post-connect ssh errors are contained and reach optional listeners', async () => {
   const { EventEmitter } = await import('node:events')
   class FakeClient extends EventEmitter {
