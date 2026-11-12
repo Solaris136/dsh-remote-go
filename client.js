@@ -2690,10 +2690,16 @@ window.__ModuleLoader__.load({
       const actions = document.createElement('div')
       actions.style.cssText = 'display:flex;align-items:center;gap:6px;flex:none'
 
+      // Reload in place: the guest already holds the session cookie, so a rerun of
+      // the one-time token URL is both pointless and risky (the token is spent).
       const refresh = overlayButton(t('viewportOverlayRefresh'), () => {
         if (overlayCarrier.view === null) return
         status.textContent = t('viewportOverlayLoading')
-        overlayCarrier.view.loadURL(overlayCarrier.url).catch(() => {})
+        try {
+          overlayCarrier.view.reload()
+        } catch (_error) {
+          // a guest that went away reports through did-fail-load
+        }
       })
       const exit = overlayButton(
         t('viewportOverlayExit'),
@@ -2736,6 +2742,18 @@ window.__ModuleLoader__.load({
       overlayCarrier.url = url
       overlayCarrier.onExit = typeof options.onExit === 'function' ? options.onExit : null
       return { ok: true, reused: false }
+    }
+
+    /** Reload the live carrier in place; a no-op while it is closed. */
+    function reloadOverlay() {
+      const view = overlayCarrier.view
+      if (view === null) return false
+      try {
+        view.reload()
+        return true
+      } catch (_error) {
+        return false
+      }
     }
 
     /** Remove the carrier, release its lease, and notify the panel. */
@@ -4593,9 +4611,13 @@ window.__ModuleLoader__.load({
         setView('viewport')
       }
       const toggleAddress = () => setAddressVisible((visible) => !visible)
-      /** Start (or re-navigate) the full-window remote carrier. */
+      /** Start the carrier, or — when it is already up — reload it in place. */
       const takeOverOverlay = () => {
         if (iframeUrl === null) return
+        if (overlayDismissed.current === false && reloadOverlay()) {
+          setOverlayStatus('open')
+          return
+        }
         overlayDismissed.current = false
         setOverlayStatus('opening')
         openOverlay({
@@ -4619,7 +4641,7 @@ window.__ModuleLoader__.load({
       }
       const refreshFrame = () => {
         if (viewerMode === 'overlay') {
-          takeOverOverlay()
+          if (!reloadOverlay()) takeOverOverlay()
           return
         }
         setIframeKey((key) => key + 1)
