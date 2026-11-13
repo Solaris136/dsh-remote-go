@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { SshConnection, parseSshKeyType, toSshError, WINDOWS_AGENT_PIPE } from '../../src/ssh.js'
+import { SshConnection, parseSshKeyType, toSshError } from '../../src/ssh.js'
 import { fingerprintFromBlob } from '../../src/known-hosts.js'
 import { errors } from '../../src/errors.js'
 
@@ -100,7 +100,7 @@ test('verifyHostKey can be told to accept unknown keys (automation)', async () =
   assert.equal(await ssh.verifyHostKey(makeKeyBlob()), true)
 })
 
-test('resolveAuthCandidates returns password, key and agent candidates', async () => {
+test('resolveAuthCandidates returns password and key-file candidates only', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-key-'))
   const keyFile = path.join(dir, 'id_test')
   await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
@@ -113,20 +113,36 @@ test('resolveAuthCandidates returns password, key and agent candidates', async (
   assert.equal(keyCandidates.length, 1)
   assert.equal(Buffer.from(keyCandidates[0].privateKey).toString('utf8'), 'PRIVATE-KEY-BYTES')
 
+  // A configured path that does not exist falls back to the conventional names,
+  // which do not exist in this temporary home either: no candidate, no crash.
   const missing = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: path.join(dir, 'nope') }, home: dir })
   assert.deepEqual(await missing.resolveAuthCandidates(), [])
 
+  // The conventional names are the default: a key placed there is picked up even
+  // when the host entry carries only the default path.
+  const conventional = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: '~/.ssh/id_ed25519' }, home: dir })
+  await mkdir(path.join(dir, '.ssh'), { recursive: true })
+  await writeFile(path.join(dir, '.ssh', 'id_ed25519'), 'DEFAULT-KEY-BYTES', 'utf8')
+  const conventionalCandidates = await conventional.resolveAuthCandidates()
+  assert.ok(conventionalCandidates.length >= 1)
+  assert.equal(Buffer.from(conventionalCandidates[0].privateKey).toString('utf8'), 'DEFAULT-KEY-BYTES')
+
+  // There is no agent candidate any more, even with a live agent environment: the
+  // plugin authenticates with key files only.
   const previousAgent = process.env.SSH_AUTH_SOCK
   process.env.SSH_AUTH_SOCK = '/tmp/agent.sock'
   try {
     const agent = new SshConnection({ host: 'h', auth: { type: 'agent' }, home: dir })
     const agentCandidates = await agent.resolveAuthCandidates()
-    assert.equal(agentCandidates[0].agent, '/tmp/agent.sock')
+    assert.equal(
+      agentCandidates.some((candidate) => 'agent' in candidate),
+      false,
+      'no agent candidate may be produced',
+    )
   } finally {
     if (previousAgent === undefined) delete process.env.SSH_AUTH_SOCK
     else process.env.SSH_AUTH_SOCK = previousAgent
   }
-  assert.equal(typeof WINDOWS_AGENT_PIPE, 'string')
 })
 
 test('exec refuses to run without an open connection', async () => {
@@ -186,25 +202,21 @@ test('a failed auth candidate does not leave the fallback connection marked clos
     }
     end() {}
   }
-  // Two deterministic candidates on every platform: a bogus agent plus a key.
-  const previousAgent = process.env.SSH_AUTH_SOCK
-  process.env.SSH_AUTH_SOCK = '/tmp/agent.sock'
-  try {
-    const ssh = new SshConnection({
-      host: 'example.com',
-      username: 'u',
-      auth: { type: 'agent' },
-      identityFiles: [keyFile],
-      home: dir,
-      clientFactory: () => new FakeClient(),
-    })
-    await ssh.connect()
-    assert.equal(attempt, 2, 'the second candidate must be tried after the first fails')
-    assert.equal(ssh.connected, true, 'the successful fallback must not stay marked closed')
-  } finally {
-    if (previousAgent === undefined) delete process.env.SSH_AUTH_SOCK
-    else process.env.SSH_AUTH_SOCK = previousAgent
-  }
+  // Two readable key candidates: the first is rejected by the (fake) server, the
+  // second authenticates. This is the key-file fallback the plugin actually has.
+  const secondKey = path.join(dir, 'id_second')
+  await writeFile(secondKey, 'SECOND-KEY-BYTES', 'utf8')
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'key', keyPath: keyFile },
+    identityFiles: [secondKey],
+    home: dir,
+    clientFactory: () => new FakeClient(),
+  })
+  await ssh.connect()
+  assert.equal(attempt, 2, 'the second candidate must be tried after the first fails')
+  assert.equal(ssh.connected, true, 'the successful fallback must not stay marked closed')
 })
 
 test('post-connect ssh errors are contained and reach optional listeners', async () => {

@@ -12,76 +12,39 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **新增「接管整个窗口」呈现形态**（`windowMode: 'overlay'`，仅 DSH 桌面端）：通过桌面端自带的 browser-guest 通道
-  （`window.dshDesktop.browser.acquire` + `<webview src="about:blank#<lease>">`）把远端 DSH 以真正的 Chromium guest 铺满整个窗口——
-  不是 iframe、不是第二个浏览器窗口。顶部保留 36px 控制条（主机名 / 刷新 / 退出），因为 guest 获得焦点后这是唯一可靠退出口。
-  该形态下**插件面板不再有自己的界面**：只有一行接管状态（失败时可重试 / 打开设置），单一主机时打开面板即接管；
-  点「退出」只关掉浮层、**不断开连接**，并把窗口交还给本地会话（远端任务照跑）。
-  已知限制（桌面端写死）：guest 会话禁止下载、拒绝所有权限请求、弹窗转交宿主；应用重载后需重建浮层。
-  `panel`（iframe 面板）仍是默认形态；旧的 `external`（本机独立浏览器窗口）形态已移除，已保存的该值在加载时迁移为 `overlay`。
-  新增单测覆盖接管面板（无工作区栏 / 无 iframe）、桌面端不可用与接管失败的提示，以及设置项迁移。
-
-- 镜像会话的**写入租约现在是双向的**：插件会发布自己的 `{ writer, epoch, expiresAt, sessionKey }`
-  （拿到租约时、心跳续约时发布，断开时写墓碑），并**读取并遵守**远端权威的校验结果——过期 epoch / 会话密钥不符 /
-  可疑跳变都会被拒绝，被拒绝的一方转为只读（`reason.code="fenced"`，`cursor` 不推进，历史仍可读）。
-  可调：`epochJumpLimit`（默认 1000）限制可信的 epoch 跳变窗口，超出者被拒绝并记录为 suspicious，
-  不会被采纳——避免「发布一个巨大 epoch」把真正的写入者永久围栏。
-  **重要**：**远端的校验逻辑目前只由模拟远端实现（`e2e/sim`），未改造的真实 DSH 没有这段代码**。因此
-  「两个客户端只有一个能写」这一效果**只在模拟远端下成立**；对真实远端而言它是设计而非已交付的保证。
-  这只是 L3 的前置条件之一，L3（流式/输入转发/审批）仍未实现；真实性绑定也仍只到「同一文件」层面，
-  详见 `docs/session-design.md` §6.2 与 §11 #9-#11。
-
 ### 变更
 
-- `mirrorToSidebar` **默认改为关闭**：接管整窗已经把远端原样呈现，侧边栏再挂一个「Remote: 主机名」镜像分组只是重复。
-  需要镜像会话的人可以在「设置 → 远程主机 → 镜像会话」里重新打开；关闭状态会在下次同步时移除已注册的分组。
+- **呈现方式收敛为「主内容区接管」**：远端 DSH 由桌面端以 Chromium guest 铺在`侧栏右侧的主内容区`，不再有任何内嵌、
+  浮层或独立窗口形态。随之删除：`windowMode` 设置项（已存值加载时忽略）、iframe 视口与视窗工具条组件
+  （`RemoteViewport` / `ViewportToolbar`）、iframe 沙箱与 `blocked-iframe` 错误视图（改为 `blocked-url`）、
+  `window.open`「在新窗口打开」逃生通道、右上角浮层胶囊（含刷新/退出/主机切换菜单），以及只服务于它们的 i18n 文案。
 
-- 新增 L3 第一阶段的**轮询跟随**（`mirrorStream`，**默认关闭**）：开启后，远端会话在主机会话连接期间新增的记录会
-  自动追加到本地镜像，无需手动同步。远端助手在远端侧拒绝过期 epoch；本地以描述符里的 `cursor` 为唯一持久真相，
-  字节偏移只存内存且仅在游标真正前进后推进，因此重启与重连都只会重读、不会跳过或重复。关闭时行为与之前完全相同。
+- **「切换」统一到侧边栏，两个方向同一个动作**：侧边栏只有一个「远程主机」入口，点开是主机管理页（清单 / 添加 / 编辑 /
+  诊断 / 删除 / 打开 / 断开）；点「打开」后远端接管主内容区，**点侧边栏任何其他项即离开远端**。规则由组件生命周期实现
+  （接管只在主机管理页被选中时存在），不靠全局点击监听去猜意图。接管区按侧边栏右边缘定位，侧栏折叠/窗口缩放会重算。
 
+- **面板内的「工作区」栏整体移除**：`WorkspaceRail` 组件、它的取数 hook、整套 `.drg-rail*` 样式与 20 余条相关文案都删了，
+  面板只保留主机管理页。侧边栏镜像工作区（`mirrorToSidebar`）仍由 Host 侧维护。
 
-- 修复删除主机后镜像「复活」的缺陷：主机删除现在与镜像同步共用同一条每主机队列（`src/mirror-writer.js:54`），
-  并且删除时在第一个 `await` 之前给该主机的描述符写入打上墓碑（`src/service.js:384`，由 `src/mirror-writer.js:35`
-  在排队操作内部检查）——因此同步进行中删除主机不会再让它的镜像会话重新出现。同时移除了 reconcile 的过期快照回退
-  （`current.length > 0 ? current : existing`），它会在描述符被清空后用删除前的快照重建。
+- **移除「接管整个窗口」与「面板内嵌」两种旧形态的中间状态页**：连接时不再出现"正在接管远端窗口…"卡片；载入失败改为主内容区里
+  一行普通提示。相关浏览器验收（`test/e2e/plugin.e2e.js`、`.github/workflows/e2e.yml`、`web/desktop` e2e 里的面板断言）一并删除，
+  单测改为断言客户端**不渲染 iframe、不调用 `window.open`、面板不含工作区栏**。
 
+- **SSH 认证只剩「私钥文件」与「密码」**：SSH Agent 通道整体移除（不再读 `SSH_AUTH_SOCK` / Windows OpenSSH 管道，
+  也不再提供 `agent` 候选项）；默认认证方式改为 `key`，旧的 `agent` 在加载时迁移为 `key`。新增 `defaultKeyPath`
+  （默认 `~/.ssh/id_ed25519`）：新主机预填，未显式指定时按 `id_ed25519 → id_rsa → id_ecdsa` 回退；密钥路径一律按**用户主目录**
+  展开（此前 `home` 没传给 SSH 层，`~/.ssh/...` 会展开失败，已修复）。
 
-- 修复镜像描述符的并发写入：`reconcile` 与历史回放两路写入各自读快照再整体写回，可能互相覆盖 `cursor`
-  （lost update）。现在所有描述符变更走同一个单写者（读 → 应用增量 → 持久化，每个主机串行），
-  且 `cursor` / `epoch` / 冲突计数只增不减。
+- **密码可以记住**：勾选后写入 DSH 的**凭据存储**（插件自有记录空间 `dsh-remote-go:ssh-password:<hostId>`），重连自动复用，
+  `hosts.json` 里永远没有密码。该存储在本机是「仅当前用户可读的明文 YAML」，不是加密库——README 与界面都如实标注；
+  没有凭据服务时明确说「无法保存，只能本次使用」，不假装保存。
 
-- 修复「内部缺陷被当成远端原因」的静默故障：历史读取里插件自己抛出的异常（例如 TDZ `ReferenceError`、非预期结构）
-  现在分类为 `reason.code="internal-error"` + `internal: true` + `internalError {name, message, stack}`
-  （`src/history.js:568`），在 `logs` 里记 error 级日志并单独计入 `history.internalErrors`（`src/service.js:965`），
-  不再伪装成 `read-failed` 这样的远端条件。堆栈只进日志、不写入描述符（`src/service.js:968-972`）。
-  同时新增默认违规的防回归扫描器 `test/unit/swallow-guard.test.js`：任何产出 `reason:` 的 `catch` 都必须可区分
-  （`internal-error` / 真正的 error 日志 / 重新抛出），或带 `// swallow-ok: <≥2 词>` 标记并被评审接受。
+### 新增
 
-### 工程与仓库治理
+- **私钥文件浏览器**：`GET /keyfile/list` + 客户端「选择文件…」弹窗（目录可进入、文件可选中）。DSH 只提供目录选择器、
+  没有选文件能力，因此由 Host 自己列目录：只读、限制在用户主目录内，`..` 与符号链接逃逸都拒绝。
 
-面向贡献者与发布流程，不改变产品行为：
-
-- 引入 Prettier 作为唯一格式化工具（`pnpm run format` / `format:check`，已接入 CI），
-  并用 `.git-blame-ignore-revs` 让格式提交不污染 `git blame`。
-- 新增零依赖的覆盖率门禁 `pnpm run test:coverage`（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%）；
-  当前基线 92.01 / 78.37 / 91.01（排除 `vendor/` 与测试自身）。
-- 新增仓库规范检查 `pnpm run lint`（必需文件、包元数据、版本一致性、换行/空白、密钥泄漏、workflow 约定）
-  与 `pnpm run verify` 聚合门禁。
-- 新增 CI 工作流 `Repository conventions` / `Integration tests` / `CodeQL` / `Release`（`v*` 标签触发，带 tag 与
-  版本一致性断言、provenance 发布与 GitHub Release），并补充 issue/PR 模板、Dependabot、CODEOWNERS。
-  分支保护由 ruleset「main protection」定义：必需检查、`strict`、无绕过者。
-- 精简 CI：`ci.yml` 合并为两个作业——`Verify (ubuntu-latest)`（规范/格式/语法/PR 标题 + 覆盖率门禁 +
-  模拟远端集成/E2E + 打包与 tarball 校验）与 `Tests (windows-latest, Node 24)`；Web/Desktop E2E 合并为
-  `acceptance.yml`（夜间定时 + 手动），与手动触发的真实主机 E2E 一样不构成 PR 门禁。必需检查由 8 项降为 3 项。
-- 社区健康文件：`CONTRIBUTING`、`CODE_OF_CONDUCT`、`SECURITY`、`CHANGELOG`。
-- 仓库行尾统一为 LF（`.gitattributes`），Windows 入口脚本保持 CRLF。
-- E2E 工具链去机器化：不再硬编码个人路径或默认测试主机，改用 `E2E_SSH_ADDRESS` / `E2E_CHROME` /
-  `E2E_NODE` / `DSH_PNPM` / `PNPM_EXE` 与 PATH 解析。
-- 安全：清除已提交的 E2E 证据中的 cookie/token 值；文档与默认值不再包含测试主机地址。
-- 修复：接入向导的地址输入提示不再展示维护者自己的 SSH 别名，改用通用示例（`ubuntu@192.0.2.10` / `my-server`）。
+- **侧边栏「远程主机」入口**（`sidebar.panellist`，order 20）：与 插件 / 自动化任务 同级的一行，图标为远端节点图形。
 
 ## [0.1.0] - 2026-11-11
 

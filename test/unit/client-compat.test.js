@@ -50,13 +50,12 @@ test('clipboard access is feature detected', async () => {
   )
 })
 
-test('opening a link is feature detected', async () => {
+test('the client never opens an external window', async () => {
   const source = await clientSource()
-  assert.match(
-    source,
-    /typeof window !== 'undefined' &&\s*typeof window\.open === 'function'/,
-    'window.open must be guarded before use',
-  )
+  // The embedded-panel presentation is gone: a remote UI only ever reaches the
+  // desktop browser guest, so no `window.open` escape hatch may remain.
+  assert.doesNotMatch(source, /window\.open\s*\(/, 'the client must not open an external window')
+  assert.doesNotMatch(source, /_blank['"]\s*,\s*'noopener/, 'no new-window target may remain')
 })
 
 test('the client half ships no host-only import', async () => {

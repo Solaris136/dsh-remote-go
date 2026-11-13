@@ -15,9 +15,6 @@ import { errors, RemoteGoError } from './errors.js'
 
 const { Client } = ssh2
 
-/** Windows OpenSSH agent pipe; POSIX uses SSH_AUTH_SOCK. */
-export const WINDOWS_AGENT_PIPE = '\\\\.\\pipe\\openssh-ssh-agent'
-
 /** @param {Buffer | Uint8Array} blob */
 export function parseSshKeyType(blob) {
   try {
@@ -101,8 +98,8 @@ export class SshConnection extends EventEmitter {
     const candidates = await this.resolveAuthCandidates()
     if (candidates.length === 0) {
       throw errors.invalidInput('auth', {
-        zh: '没有可用的 SSH 认证方式：请选择 SSH Agent、可读的密钥文件，或输入一次密码。',
-        en: 'No usable SSH authentication: pick the agent, a readable key file, or enter a one-time password.',
+        zh: '没有可用的 SSH 认证方式：请选择一个可读的私钥文件（或输入一次密码）。',
+        en: 'No usable SSH authentication: choose a readable private-key file (or enter a one-time password).',
       })
     }
     /** @type {unknown} */
@@ -239,25 +236,18 @@ export class SshConnection extends EventEmitter {
    * @returns {Promise<Record<string, unknown>[]>}
    */
   async resolveAuthCandidates() {
-    const auth = this.options.auth ?? { type: 'agent' }
+    const auth = this.options.auth ?? { type: 'key' }
     /** @type {Record<string, unknown>[]} */
     const out = []
     if (auth.type === 'password') {
       if (auth.password) out.push({ password: auth.password, tryKeyboard: true })
       return out
     }
-    if (auth.type === 'key') {
-      const keyPath = auth.keyPath ? expandHome(auth.keyPath, this.options.home) : null
-      if (keyPath) {
-        const privateKey = await readKey(keyPath)
-        if (privateKey) out.push({ privateKey, passphrase: auth.passphrase ?? undefined })
-      }
-      return out
-    }
-    // agent / auto
-    const agent = process.env.SSH_AUTH_SOCK || (process.platform === 'win32' ? WINDOWS_AGENT_PIPE : null)
-    if (agent) out.push({ agent })
+    // Key-file authentication only: there is deliberately no agent candidate. The
+    // configured path wins; when it is missing or unset the conventional names are
+    // tried, so a host added with the default key path still connects.
     const keyPaths = [
+      ...(auth.keyPath ? [expandHome(auth.keyPath, this.options.home)] : []),
       ...(this.options.identityFiles ?? []),
       path.join(this.options.home, '.ssh', 'id_ed25519'),
       path.join(this.options.home, '.ssh', 'id_rsa'),
@@ -265,8 +255,10 @@ export class SshConnection extends EventEmitter {
     ]
     const seen = new Set()
     for (const keyPath of keyPaths) {
-      if (!keyPath || seen.has(keyPath)) continue
-      seen.add(keyPath)
+      if (!keyPath) continue
+      const normalized = path.resolve(keyPath)
+      if (seen.has(normalized)) continue
+      seen.add(normalized)
       const privateKey = await readKey(keyPath)
       if (privateKey) out.push({ privateKey, passphrase: auth.passphrase ?? undefined })
     }

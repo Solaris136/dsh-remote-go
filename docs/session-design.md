@@ -1,6 +1,6 @@
 # 完全会话设计（remote sessions as first-class local sessions）
 
-> **English abstract.** Today the remote DSH is shown as a full-page iframe panel: everything works, but the remote
+> **English abstract.** Today the remote DSH takes the main content column over as a desktop browser guest (no frame):
 > sessions never appear in the local sidebar and never use the local Conversation UI. This document designs the next
 > step — *complete sessions*: remote sessions become first-class local sessions (listed natively, opened in the normal
 > Conversation UI, streamed, and able to carry approvals back), while the plugin keeps its thin-client, zero-remote-
@@ -9,12 +9,12 @@
 
 ## 1. 为什么需要这一层
 
-现状（[docs/design.md](design.md) §v0.7 附录，行 529-538）：远端 DSH 在自己的 iframe 面板里整页运行，等价于
-「把另一台机器的界面显示出来」。它的问题不是能不能用，而是**不是本地一等公民**：
+现状（[docs/design.md](design.md) §4.3）：远端 DSH 以桌面端 guest 接管主内容区，等价于「把另一台机器的界面显示出来」。
+它的问题不是能不能用，而是**不是本地一等公民**：
 
-- 远端会话不出现在本地侧边栏，切会话必须先切主机再在面板里找；
+- 远端会话不出现在本地侧边栏，切会话必须先切主机再在远端界面里找；
 - 远端会话不能进本地 Conversation UI，本地的工作区栏、搜索、快捷键都用不上；
-- 两套界面并存（本地一套、iframe 一套），用户要在两套心智模型之间切换。
+- 两套界面并存（本地一套、远端 guest 一套），用户要在两套心智模型之间切换。
 
 同类项目的经验（[docs/research-competitors.md](research-competitors.md)）：`Golden-Pigeon/dsh-remote` 用
 「local mirror Session + Agent façade」把远端会话镜像成本地原生会话，宣称 “remote sessions appear in the normal
@@ -33,7 +33,7 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 目标：
 
 1. 远端会话出现在**本地原生**侧边栏会话列表里，与本地会话同列（可分组到所属远端主机）。
-2. 点开即用**本地原生 Conversation UI** 渲染（不是 iframe）。
+2. 点开即用**本地原生 Conversation UI** 渲染（不是远端 guest）。
 3. 支持流式增量、历史回翻、可归档/改名，状态（等待审批/运行中/空闲）与本地会话一致呈现。
 4. 保持既有的安全姿态：凭据不出本地、隧道只回环、版本一致、零远端专属组件。
 
@@ -41,7 +41,7 @@ sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。�
 
 - 不在本地重跑一个 Agent（本地不持有模型凭据、不代跑工具）。
 - 不做双向并发写：同一会话同时只允许一个写入者（本地或远端），冲突显式拒绝而不是合并。
-- 不接管远端 DSH 的插件/设置/文件/终端管理；这些仍在 iframe 面板里完成。
+- 不接管远端 DSH 的插件/设置/文件/终端管理；这些仍在远端界面（guest 接管的主内容区）里完成。
 
 ## 3. 核心概念：镜像会话（mirror session）
 

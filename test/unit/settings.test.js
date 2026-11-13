@@ -16,7 +16,8 @@ test('mirrorMaxSessions defaults to 200, accepts 0 (unlimited) and clamps junk',
 test('defaultSettings matches the documented defaults', () => {
   const settings = defaultSettings()
   assert.equal(settings.defaultPort, 22)
-  assert.equal(settings.defaultAuth, 'agent')
+  assert.equal(settings.defaultAuth, 'key')
+  assert.equal(settings.defaultKeyPath, '~/.ssh/id_ed25519')
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
   assert.equal(settings.mirrorToSidebar, false)
@@ -26,14 +27,14 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.bootstrap.mode, 'auto')
 })
 
-test('windowMode keeps the takeover mode and migrates the retired local-window mode', () => {
-  assert.equal(defaultSettings().windowMode, 'panel')
-  assert.equal(sanitizeSettings({ windowMode: 'overlay' }).windowMode, 'overlay')
-  assert.equal(sanitizeSettings({ windowMode: 'panel' }).windowMode, 'panel')
-  // The removed "separate local browser window" mode lands on the takeover mode
-  // instead of silently resetting to the embedded panel.
-  assert.equal(sanitizeSettings({ windowMode: 'external' }).windowMode, 'overlay')
-  assert.equal(sanitizeSettings({ windowMode: 'nonsense' }).windowMode, 'panel')
+test('the retired presentation mode is gone from settings entirely', () => {
+  // The embedded panel and the separate local-browser-window mode are both
+  // retired: the window takeover is the only presentation, so there is no mode
+  // field left to choose, migrate or validate.
+  assert.equal('windowMode' in defaultSettings(), false)
+  assert.equal('windowMode' in sanitizeSettings({ windowMode: 'panel' }), false)
+  assert.equal('windowMode' in sanitizeSettings({ windowMode: 'overlay' }), false)
+  assert.equal('windowMode' in sanitizeSettings({ windowMode: 'external' }), false)
 })
 
 test('sanitizeSettings recovers from malformed input', () => {
@@ -45,7 +46,8 @@ test('sanitizeSettings recovers from malformed input', () => {
     bootstrap: { mode: 'nope', nodeVersion: 'not-a-version', targetVersion: '' },
   })
   assert.equal(settings.defaultPort, 65535)
-  assert.equal(settings.defaultAuth, 'agent')
+  assert.equal(settings.defaultAuth, 'key')
+  assert.equal(settings.defaultKeyPath, '~/.ssh/id_ed25519')
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.autoReconnect.maxAttempts, 0)
   assert.equal(settings.autoReconnect.baseDelayMs, 100)

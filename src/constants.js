@@ -27,6 +27,13 @@ export const API_VERSION = '1.1'
 /** Default remote directory (tilde keeps it user-owned; expanded remotely). */
 export const DEFAULT_REMOTE_DIR = '~/.dsh-remote-go'
 
+/**
+ * Default private-key path offered for key-file authentication. Key-only SSH is
+ * the supported model, so a new host starts with this value pre-filled instead of
+ * asking for a path from scratch.
+ */
+export const DEFAULT_KEY_PATH = '~/.ssh/id_ed25519'
+
 /** How long the remote web may take to print its URL line. */
 export const REMOTE_START_TIMEOUT_MS = 300_000
 

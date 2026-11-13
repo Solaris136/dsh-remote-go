@@ -3,7 +3,7 @@
  *
  * Registers the local HTTP API used by the browser panel and owns the SSH /
  * bootstrap / tunnel lifecycle. The remote DSH UI itself is rendered by the
- * remote host inside a loopback iframe; this half never proxies UI bytes
+ * remote host through a window takeover; this half never proxies UI bytes
  * (design §2, §7.0).
  */
 import { API_PREFIX, PLUGIN_ID } from './constants.js'
@@ -14,13 +14,14 @@ import { detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
 import { canonicalMirrorRoot, createSessionAdapter } from './session-adapter.js'
 import { createWorkspaceAdapter } from './workspace-adapter.js'
+import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 
 export const name = PLUGIN_ID
 export const inject = ['webServer']
 
 /** Services the plugin can use when the composition provides them. */
-export const optional = ['connection', 'workspaceRegistry']
+export const optional = ['connection', 'workspaceRegistry', 'credentials']
 
 /**
  * @param {any} ctx Cordis context.
@@ -55,10 +56,13 @@ export function apply(ctx, config = {}) {
     logger,
     mirrorRoot,
   })
+  // Saved SSH passwords live in DSH's credential store, never in hosts.json.
+  const secrets = createSecretStore({ ctx, logger })
   const service = new RemoteGoService({
     store,
     home,
     logger,
+    secrets,
     localVersion: config.localVersion ? String(config.localVersion) : null,
     hostKeyConfirmTimeoutMs: config.hostKeyConfirmTimeoutMs,
     sessionAdapter,

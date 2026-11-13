@@ -3,9 +3,9 @@
  *
  * A single-file browser plugin (no build step) that contributes the
  * Settings → "Remote hosts" section and a global main panel. The panel lists
- * SSH hosts, runs the connect wizard, and embeds the remote DSH Web UI —
- * reached through a local loopback tunnel — in a sandboxed iframe. A left rail
- * in the panel groups local and per-host workspaces.
+ * SSH hosts, runs the connect wizard, and hands the whole window to the remote
+ * DSH Web UI — reached through a local loopback tunnel — as a live browser
+ * guest. A left rail in the panel groups local and per-host workspaces.
  *
  * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
  * source of truth; this file renders that state and sends user intents back.
@@ -19,7 +19,7 @@
  *   6. HTTP + SSE API client
  *   7. icons and small UI primitives
  *   8. host list view
- *   9. remote viewport (toolbar + iframe)
+ *   9. full-window remote carrier (DSH desktop guest)
  *  10. connect wizard
  *  11. diagnostics drawer
  *  12. settings modal
@@ -48,23 +48,20 @@ window.__ModuleLoader__.load({
     const EVENT_PATH = '/dsh-remote-go/api/events'
     /** Fallback polling cadence when SSE is unavailable (contract §1). */
     const POLL_INTERVAL_MS = 3000
-    /** LocalStorage flags (never store tokens or iframe URLs). */
-    const ENTER_HINT_KEY = 'dsh-remote-go.hint.remote-enter'
+    /** LocalStorage flags (never store tokens or remote URLs). */
     const CLOSE_HINT_KEY = 'dsh-remote-go.hint.remote-close'
     /** The workspace rail's collapsed state (UI preference only). */
     const RAIL_COLLAPSED_KEY = 'dsh-remote-go.rail.collapsed'
-    /** iframe sandbox: enough for the remote DSH UI, nothing more. */
-    const IFRAME_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-downloads'
     /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
     const DESKTOP_BRIDGE_VERSION = 1
     /** DOM id of the full-window remote carrier, so a reload can drop a stale one. */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
-    /** Only loopback URLs may ever become an iframe src (contract §3.5). */
+    /** Only loopback URLs may ever be handed to the guest (contract §3.5). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /** Ordered connect phases (contract ConnectPhase). */
     const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'ready']
-    /** Statuses that keep the viewport open with the iframe mounted. */
-    const VIEWPORT_STATUSES = ['connected', 'disconnected']
+    /** Statuses that keep the carrier up for one host. */
+    const REMOTE_STATUSES = ['connected', 'disconnected']
     /** Known diagnostic check ids, in the contract's fixed order. */
     const DIAGNOSE_IDS = [
       'ssh-reachable',
@@ -132,8 +129,6 @@ window.__ModuleLoader__.load({
       retry: '重试',
       diagnose: '诊断',
       reconnect: '重连',
-      reconnectNow: '立即重连',
-      refreshView: '刷新界面',
       open: '打开',
       connect: '连接',
       disconnect: '断开',
@@ -195,24 +190,6 @@ window.__ModuleLoader__.load({
       statusUnknownHostBody: '主机可能已被删除，或状态尚未同步。',
 
       // -- workspace rail ------------------------------------------------------
-      workspaceRailTitle: '工作区',
-      workspaceRailToggleCollapse: '收起工作区栏',
-      workspaceRailToggleExpand: '展开工作区栏',
-      workspaceRailRefresh: '刷新工作区',
-      workspaceLocalGroup: '本地工作区',
-      workspaceRemoteGroup: '远端工作区',
-      workspaceRailHint: '本地工作区仍可在左侧边栏切换',
-      workspaceRailEmpty: '还没有远程主机。添加一台后，这里会显示它的工作区。',
-      workspaceLocalEmpty: '没有本地工作区',
-      workspaceRemoteEmpty: '没有远端工作区',
-      workspaceRailDisconnected: '未连接',
-      workspaceRailRemoteError: '无法读取远端工作区',
-      workspaceRailLocalError: '无法读取本地工作区',
-      workspaceRailLoading: '正在读取…',
-      workspaceRailSessions: '{count} 个会话',
-      workspaceDefault: '默认',
-      workspaceLocalOrigin: '本地',
-      workspaceRemoteOrigin: '远端',
       // Mirrored (replayed) remote sessions are read-only until L3 adds input.
       mirrorReadOnlyBadge: '只读镜像',
       mirrorReadOnlyTitle: '{level} 只读镜像：{reason}',
@@ -220,40 +197,10 @@ window.__ModuleLoader__.load({
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
-      viewportOpening: '正在连接「{name}」，准备远端界面…',
-      viewportLoadingFrame: '正在加载远端界面…',
-      viewportConnected: '远端界面已就绪',
-      viewportDisconnected: '连接断开，远端任务可能仍在运行',
-      viewportDisconnectedBody: '自动重连由本机负责；恢复后远端任务不会中断。你也可以手动重连。',
-      viewportBack: '返回主机清单',
-      viewportSwitch: '切换主机',
-      viewportExternal: '在新窗口打开',
-      viewportOverlayTitle: '接管整个窗口',
-      viewportOverlayBody:
-        '远端 DSH 在本地窗口里用真正的 Chromium guest 渲染，不是 iframe。顶部保留一条窄控制条：刷新、退出；其余画面就是远端那台机器。',
-      viewportOverlayPending: '正在接管远端窗口…',
-      viewportOverlayRetry: '重试',
-      viewportOverlaySettings: '打开设置',
-      viewportOverlayUnsupported: '当前环境不支持接管窗口：只在 DSH 桌面端可用，浏览器里请改用「面板内嵌」。',
-      viewportOverlayFailed: '接管窗口失败，请重试，或改用「面板内嵌」。',
-      viewportOverlayHint: '接管期间下载会被桌面端禁用、权限请求会被拒绝；点顶部控制条的「退出」即可回到本地界面。',
-      viewportOverlayBarLabel: '远端：{name}',
-      viewportOverlayRefresh: '刷新',
-      viewportOverlayExit: '退出',
-      viewportOverlayLoading: '正在载入远端界面…',
-      viewportOverlayLoadFailed: '远端界面加载失败',
-      viewportAddressShow: '显示地址',
-      viewportAddressHide: '隐藏地址',
-      viewportFrameBlocked: '远端地址不是本地回环地址，已阻止内嵌。',
-      viewportFrameBlockedBody: '请使用「在新窗口打开」，或重新连接 / 诊断以刷新本地回环地址。',
-      viewportUnconfigured: '这台服务器还没有连接',
-      viewportUnconfiguredBody: '连接后即可在这里整页使用远端 DSH。',
-      enterNoticeTitle: '你正在操作远端服务器',
-      enterNoticeBody: '视窗里显示的是远端 DSH 的界面，所有操作都在远端执行。关闭本机视窗不会结束远端任务。',
+      remoteEntryLabel: '远端',
+      viewportOverlayLoadFailed: '远端界面加载失败，请从侧栏切换后重试。',
       closeNoticeTitle: '远端任务会继续运行',
       closeNoticeBody: '已返回主机清单。远端 DSH 与正在运行的任务不会停止，下次打开会直接回到该主机。',
-      toolbarStatus: '状态：{status}',
-      remoteVersionShort: '远端 {version}',
 
       // -- connect progress (contract §2) -------------------------------------
       'progress.ssh-connecting': '正在连接 SSH…',
@@ -291,7 +238,9 @@ window.__ModuleLoader__.load({
       fingerprintReject: '取消',
       fingerprintAccepting: '正在提交…',
       passwordPromptTitle: '输入 SSH 密码',
-      passwordPromptBody: '「{name}」使用密码认证。密码只用于本次连接，不会保存。',
+      passwordPromptBody: '「{name}」使用密码认证。密码只用于本次连接；勾选后存进 DSH 的凭据存储（不写进主机配置）。',
+      passwordPromptRemember: '安全保存这个密码（DSH 凭据存储）',
+      passwordPromptNoStorage: '当前环境没有可用的凭据存储，密码只用于本次连接。',
       passwordPromptLabel: '密码',
       passwordPromptSubmit: '连接',
       passwordPromptRequired: '请输入密码',
@@ -310,14 +259,14 @@ window.__ModuleLoader__.load({
       'wizard.username': '用户名',
       'wizard.usernamePlaceholder': '例如：ubuntu',
       'wizard.auth': '认证方式',
-      'wizard.authAgent': '使用 SSH Agent',
-      'wizard.authKey': '指定密钥文件',
+      'wizard.authKey': '密钥文件',
       'wizard.authPassword': '密码（仅本次，不保存）',
       'wizard.keyPath': '密钥文件路径',
       'wizard.keyPathPlaceholder': '例如：~/.ssh/id_ed25519',
+      'wizard.keyPathPick': '选择文件…',
       'wizard.password': '密码',
       'wizard.passwordPlaceholder': '仅用于本次连接，不会保存',
-      'wizard.authHint': '建议优先使用 SSH Agent 或密钥文件；密码只用于本次连接。',
+      'wizard.authHint': '使用私钥文件认证；也可以改用密码（仅本次连接）。',
       'wizard.jumpHost': '跳板机（可选）',
       'wizard.jumpHostPlaceholder': '例如：另一台已添加主机的地址',
       'wizard.keepAlive': '远端存活策略',
@@ -357,7 +306,7 @@ window.__ModuleLoader__.load({
       'wizard.validationPort': '端口应为 1-65535',
       'wizard.validationUsername': '请填写用户名',
       'wizard.validationKeyPath': '请填写密钥文件路径',
-      'wizard.validationPassword': '请输入密码，或改用 SSH Agent / 密钥文件',
+      'wizard.validationPassword': '请输入密码，或改用密钥文件',
 
       // -- diagnostics ---------------------------------------------------------
       'diag.title': '连接诊断',
@@ -381,20 +330,25 @@ window.__ModuleLoader__.load({
       // -- settings ------------------------------------------------------------
       'settings.title': '设置',
       'settings.window': '窗口',
-      'settings.windowMode': '呈现形态',
-      'settings.windowModePanel': '面板内嵌（iframe）',
-      'settings.windowModeOverlay': '接管整个窗口（推荐，仅桌面端）',
-      'settings.windowModeHint':
-        '面板内嵌：在插件面板里用 iframe 显示远端界面。接管整个窗口：远端 DSH 以真正的 Chromium guest 铺满整个窗口（仅在 DSH 桌面端可用，下载与权限受桌面端限制）。',
       'settings.closeBehavior': '关闭视窗行为',
       'settings.closeBehaviorValue': '保留远端会话（V1 固定）',
       'settings.closeBehaviorHint': '关闭本地视窗不会结束远端任务。',
       'settings.ssh': 'SSH 默认值',
       'settings.defaultPort': '默认端口',
       'settings.defaultAuth': '默认认证方式',
-      'settings.defaultAuthAgent': 'SSH Agent',
       'settings.defaultAuthKey': '密钥文件',
       'settings.defaultAuthPassword': '密码（仅本次）',
+      'settings.defaultKeyPath': '默认密钥文件',
+      'settings.defaultKeyPathHint': '新增主机时预填这个路径；仍可在向导里改。',
+      'settings.keyPathPick': '选择文件…',
+      'keyFile.title': '选择 SSH 私钥文件',
+      'keyFile.hint': '只列出用户主目录内的文件；点击目录进入，点击文件选中。',
+      'keyFile.parent': '上一级',
+      'keyFile.loading': '正在读取目录…',
+      'keyFile.empty': '这个目录里没有可选项',
+      'keyFile.error': '读取目录失败',
+      'keyFile.retry': '重试',
+      'keyFile.pick': '选中此文件',
       'settings.connectTimeout': '连接超时（秒）',
       'settings.security': '安全',
       'settings.hostKeyPolicy': '主机指纹策略',
@@ -466,8 +420,6 @@ window.__ModuleLoader__.load({
       retry: 'Retry',
       diagnose: 'Diagnose',
       reconnect: 'Reconnect',
-      reconnectNow: 'Reconnect now',
-      refreshView: 'Refresh view',
       open: 'Open',
       connect: 'Connect',
       disconnect: 'Disconnect',
@@ -529,69 +481,17 @@ window.__ModuleLoader__.load({
       statusUnknownHostTitle: 'Cannot read this host',
       statusUnknownHostBody: 'It may have been deleted, or its state has not synced yet.',
 
-      workspaceRailTitle: 'Workspaces',
-      workspaceRailToggleCollapse: 'Collapse the workspaces bar',
-      workspaceRailToggleExpand: 'Expand the workspaces bar',
-      workspaceRailRefresh: 'Refresh workspaces',
-      workspaceLocalGroup: 'Local workspaces',
-      workspaceRemoteGroup: 'Remote workspaces',
-      workspaceRailHint: 'Local workspaces can still be switched from the left sidebar',
-      workspaceRailEmpty: 'No remote hosts yet. Add one and its workspaces will show here.',
-      workspaceLocalEmpty: 'No local workspaces',
-      workspaceRemoteEmpty: 'No remote workspaces',
-      workspaceRailDisconnected: 'Not connected',
-      workspaceRailRemoteError: 'Cannot read remote workspaces',
-      workspaceRailLocalError: 'Cannot read local workspaces',
-      workspaceRailLoading: 'Loading…',
-      workspaceRailSessions: '{count} sessions',
-      workspaceDefault: 'Default',
-      workspaceLocalOrigin: 'Local',
-      workspaceRemoteOrigin: 'Remote',
       // Mirrored (replayed) remote sessions are read-only until L3 adds input.
       mirrorReadOnlyBadge: 'Read-only mirror',
       mirrorReadOnlyTitle: 'Read-only {level} mirror: {reason}',
       mirrorReadOnlyReasonDefault: 'Remote history is replayed read-only; local input is not supported yet',
 
       viewportConnecting: 'Connecting to "{name}"…',
-      viewportOpening: 'Connecting to "{name}" and preparing the remote UI…',
-      viewportLoadingFrame: 'Loading the remote UI…',
-      viewportConnected: 'Remote UI ready',
-      viewportDisconnected: 'Connection lost — remote tasks may still be running',
-      viewportDisconnectedBody:
-        'Automatic reconnect is handled locally; running remote tasks are not interrupted. You can also reconnect manually.',
-      viewportBack: 'Back to hosts',
-      viewportSwitch: 'Switch host',
-      viewportExternal: 'Open in new window',
-      viewportOverlayTitle: 'Take over the whole window',
-      viewportOverlayBody:
-        'The remote DSH renders in this window through a real Chromium guest — no iframe. A thin control strip on top carries refresh and exit; everything below it is the remote machine.',
-      viewportOverlayPending: 'Taking over the remote window…',
-      viewportOverlayRetry: 'Retry',
-      viewportOverlaySettings: 'Open settings',
-      viewportOverlayUnsupported:
-        'Taking over the window needs the DSH desktop app; in a browser use the embedded panel instead.',
-      viewportOverlayFailed: 'Could not take over the window. Retry, or switch to the embedded panel.',
-      viewportOverlayHint:
-        'While the window is taken over, downloads are disabled by the desktop app and permission requests are denied. Use "Exit" in the top strip to return.',
-      viewportOverlayBarLabel: 'Remote: {name}',
-      viewportOverlayRefresh: 'Refresh',
-      viewportOverlayExit: 'Exit',
-      viewportOverlayLoading: 'Loading the remote UI…',
-      viewportOverlayLoadFailed: 'The remote UI failed to load',
-      viewportAddressShow: 'Show address',
-      viewportAddressHide: 'Hide address',
-      viewportFrameBlocked: 'The remote address is not a loopback address; embedding was blocked.',
-      viewportFrameBlockedBody: 'Use "Open in new window", or reconnect / diagnose to refresh the loopback address.',
-      viewportUnconfigured: 'This server is not connected yet',
-      viewportUnconfiguredBody: 'Connect to use the remote DSH on this page.',
-      enterNoticeTitle: 'You are operating a remote server',
-      enterNoticeBody:
-        'This window shows the remote DSH interface; everything runs remotely. Closing this window does not stop remote tasks.',
+      remoteEntryLabel: 'Remote',
+      viewportOverlayLoadFailed: 'The remote UI failed to load. Switch away in the sidebar and try again.',
       closeNoticeTitle: 'Remote tasks keep running',
       closeNoticeBody:
         'Back to the host list. The remote DSH and its running tasks keep running; reopen to return to this host.',
-      toolbarStatus: 'Status: {status}',
-      remoteVersionShort: 'Remote {version}',
 
       'progress.ssh-connecting': 'Connecting over SSH…',
       'progress.host-key-checking': 'Verifying the host key…',
@@ -630,6 +530,9 @@ window.__ModuleLoader__.load({
       passwordPromptTitle: 'Enter the SSH password',
       passwordPromptBody:
         '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
+      passwordPromptRemember: 'Remember this password (DSH credential store)',
+      passwordPromptNoStorage:
+        'No credential store is available here, so the password is used for this connection only.',
       passwordPromptLabel: 'Password',
       passwordPromptSubmit: 'Connect',
       passwordPromptRequired: 'Enter the password',
@@ -647,14 +550,14 @@ window.__ModuleLoader__.load({
       'wizard.username': 'User',
       'wizard.usernamePlaceholder': 'e.g. ubuntu',
       'wizard.auth': 'Authentication',
-      'wizard.authAgent': 'SSH agent',
       'wizard.authKey': 'Key file',
       'wizard.authPassword': 'Password (this connection only)',
       'wizard.keyPath': 'Key file path',
       'wizard.keyPathPlaceholder': 'e.g. ~/.ssh/id_ed25519',
+      'wizard.keyPathPick': 'Choose file…',
       'wizard.password': 'Password',
       'wizard.passwordPlaceholder': 'Used for this connection only; never saved',
-      'wizard.authHint': 'Prefer the SSH agent or a key file; a password is used for this connection only.',
+      'wizard.authHint': 'Authenticates with a private-key file; a password works too, for this connection only.',
       'wizard.jumpHost': 'Jump host (optional)',
       'wizard.jumpHostPlaceholder': 'e.g. another saved host address',
       'wizard.keepAlive': 'Remote keep-alive',
@@ -694,7 +597,7 @@ window.__ModuleLoader__.load({
       'wizard.validationPort': 'The port must be 1–65535',
       'wizard.validationUsername': 'Enter a user name',
       'wizard.validationKeyPath': 'Enter the key file path',
-      'wizard.validationPassword': 'Enter the password, or use the SSH agent / a key file',
+      'wizard.validationPassword': 'Enter the password, or switch to a key file',
 
       'diag.title': 'Connection diagnostics',
       'diag.running': 'Running checks…',
@@ -716,20 +619,26 @@ window.__ModuleLoader__.load({
 
       'settings.title': 'Settings',
       'settings.window': 'Window',
-      'settings.windowMode': 'Presentation',
-      'settings.windowModePanel': 'Embedded panel (iframe)',
-      'settings.windowModeOverlay': 'Take over the window (recommended, desktop only)',
-      'settings.windowModeHint':
-        'Embedded: the remote UI is shown inside this panel with an iframe. Take over: the remote DSH fills the whole window through a real Chromium guest (DSH desktop only; downloads and permissions are limited by the shell).',
       'settings.closeBehavior': 'Closing behavior',
       'settings.closeBehaviorValue': 'Keep the remote session (fixed in V1)',
       'settings.closeBehaviorHint': 'Closing the local view never stops remote tasks.',
       'settings.ssh': 'SSH defaults',
       'settings.defaultPort': 'Default port',
       'settings.defaultAuth': 'Default authentication',
-      'settings.defaultAuthAgent': 'SSH agent',
       'settings.defaultAuthKey': 'Key file',
       'settings.defaultAuthPassword': 'Password (this connection only)',
+      'settings.defaultKeyPath': 'Default key file',
+      'settings.defaultKeyPathHint': 'Pre-filled for a new host; the wizard can still override it.',
+      'settings.keyPathPick': 'Choose file…',
+      'keyFile.title': 'Choose an SSH private key',
+      'keyFile.hint':
+        'Only files under your home directory are listed. Click a folder to enter it, a file to select it.',
+      'keyFile.parent': 'Up',
+      'keyFile.loading': 'Reading the directory…',
+      'keyFile.empty': 'Nothing selectable in this directory',
+      'keyFile.error': 'The directory could not be read',
+      'keyFile.retry': 'Retry',
+      'keyFile.pick': 'Use this file',
       'settings.connectTimeout': 'Connect timeout (seconds)',
       'settings.security': 'Security',
       'settings.hostKeyPolicy': 'Host key policy',
@@ -893,12 +802,12 @@ window.__ModuleLoader__.load({
 
     /**
      * Validate a URL returned by `GET /hosts/:id/open` before it may become an
-     * iframe src. The Host guarantees loopback, and the client re-checks it
+     * guest. The Host guarantees loopback, and the client re-checks it
      * (contract §3.5); anything else is refused rather than embedded.
      * @param {unknown} url - candidate URL.
      * @returns {boolean} whether the URL is a loopback http URL.
      */
-    function isValidIframeUrl(url) {
+    function isValidLoopbackUrl(url) {
       return typeof url === 'string' && url.startsWith(LOOPBACK_PREFIX)
     }
 
@@ -1212,16 +1121,15 @@ window.__ModuleLoader__.load({
         detail: { zh: '请检查填写的参数后重试。', en: 'Check the values you entered and try again.' },
         nextSteps: [{ zh: '返回表单修正后重试', en: 'Go back to the form, fix it, and retry' }],
       },
-      'blocked-iframe': {
-        code: 'blocked-iframe',
+      'blocked-url': {
+        code: 'blocked-url',
         retryable: false,
-        title: { zh: '已阻止内嵌远端界面', en: 'Blocked embedding the remote UI' },
+        title: { zh: '已阻止打开远端界面', en: 'Blocked opening the remote UI' },
         detail: {
-          zh: '远端地址不是本地回环地址，出于安全考虑已阻止内嵌。',
-          en: 'The remote address is not a loopback address, so embedding was blocked for safety.',
+          zh: '远端地址不是本地回环地址，出于安全考虑已阻止。',
+          en: 'The remote address is not a loopback address, so it was blocked for safety.',
         },
         nextSteps: [
-          { zh: '使用「在新窗口打开」', en: 'Use "Open in new window"' },
           { zh: '重新连接以刷新本地回环地址', en: 'Reconnect to refresh the loopback address' },
           { zh: '运行诊断检查隧道状态', en: 'Run diagnostics to check the tunnel' },
         ],
@@ -1372,14 +1280,14 @@ window.__ModuleLoader__.load({
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
       },
       /**
-       * Fetch the one-time loopback URL for the iframe (contract §1 GET /open).
+       * Fetch the one-time loopback URL for the guest (contract §1 GET /open).
        * The URL stays in memory only — never logged, never stored.
        * @param {string} hostId - host id.
        * @returns {Promise<string>} validated loopback URL.
        */
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
-        if (!isValidIframeUrl(payload.url)) throw apiError(localErrorView('blocked-iframe'))
+        if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
         return payload.url
       },
       /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
@@ -1464,6 +1372,23 @@ window.__ModuleLoader__.load({
         return {
           aliases: Array.isArray(payload.aliases) ? payload.aliases : [],
           knownHosts: payload.knownHosts && typeof payload.knownHosts === 'object' ? payload.knownHosts : null,
+        }
+      },
+      /**
+       * Browse the user's home for a private-key file (contract §1 GET /keyfile/list).
+       * @param {string} [dir] absolute directory to list; empty means the default one.
+       * @returns {Promise<{path: string, parent: string | null, entries: Array<{name: string, path: string, isDirectory: boolean}>, truncated: boolean, defaultKeyPath: string, defaultDir: string}>}
+       */
+      async listKeyFiles(dir) {
+        const query = dir ? '?path=' + encodeURIComponent(dir) : ''
+        const payload = await apiRequest('/keyfile/list' + query)
+        return {
+          path: typeof payload.path === 'string' ? payload.path : '',
+          parent: typeof payload.parent === 'string' ? payload.parent : null,
+          entries: Array.isArray(payload.entries) ? payload.entries : [],
+          truncated: payload.truncated === true,
+          defaultKeyPath: typeof payload.defaultKeyPath === 'string' ? payload.defaultKeyPath : '',
+          defaultDir: typeof payload.defaultDir === 'string' ? payload.defaultDir : '',
         }
       },
     }
@@ -2253,7 +2178,7 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region 9. remote viewport (toolbar + iframe)
+    //#region 9. takeover surface and carrier helpers
 
     /**
      * Staged connect progress: current progress line plus the phase checklist
@@ -2440,152 +2365,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Viewport toolbar (design §4.3): host + status, optional address, and the
-     * reconnect / refresh / switch / external / back actions.
-     * @param {object} props - host, hosts, visibility flags, callbacks.
-     * @returns {object} div element.
-     */
-    function ViewportToolbar(props) {
-      const t = translatorOf(props)
-      const host = props.host || {}
-      const hosts = Array.isArray(props.hosts) ? props.hosts : []
-      const meta = statusMeta(host.status || 'unconfigured')
-      const addressVisible = props.addressVisible !== false
-      const others = hosts.filter((item) => item && item.id !== host.id)
-      return h(
-        'div',
-        { className: 'drg-toolbar', 'data-testid': 'viewport-toolbar' },
-        h(
-          'div',
-          { className: 'drg-toolbar-left' },
-          h(IconButton, {
-            icon: h(IconBack),
-            label: t('viewportBack'),
-            testId: 'viewport-back',
-            onClick: props.onBack,
-          }),
-          h(StatusDot, { status: host.status, title: t(meta.labelKey) }),
-          h('span', { className: 'drg-toolbar-host', title: host.name }, host.name || host.id),
-          h('span', { className: 'drg-toolbar-status', 'data-status': host.status }, t(meta.labelKey)),
-        ),
-        h(
-          'div',
-          { className: 'drg-toolbar-center' },
-          h(
-            'span',
-            { className: 'drg-toolbar-address', title: addressVisible ? displayAddress(host) : undefined },
-            addressVisible ? displayAddress(host) : '••••••',
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'drg-linkbtn',
-              onClick: props.onToggleAddress,
-              title: addressVisible ? t('viewportAddressHide') : t('viewportAddressShow'),
-            },
-            addressVisible ? t('viewportAddressHide') : t('viewportAddressShow'),
-          ),
-        ),
-        h(
-          'div',
-          { className: 'drg-toolbar-right' },
-          others.length > 0
-            ? h(Select, {
-                value: host.id,
-                options: hosts.map((item) => ({ value: item.id, label: item.name || item.id })),
-                onChange: props.onSwitchHost,
-                ariaLabel: t('viewportSwitch'),
-              })
-            : null,
-          h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'viewport-reconnect',
-              onClick: props.onReconnect,
-              disabled: host.status === 'connecting',
-            },
-            t('reconnect'),
-          ),
-          h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'viewport-refresh',
-              onClick: props.onRefreshFrame,
-              disabled: host.status !== 'connected',
-            },
-            t('refreshView'),
-          ),
-          h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'viewport-external',
-              onClick: props.onOpenExternal,
-              disabled: host.status !== 'connected',
-            },
-            h(IconExternal, { size: 14 }),
-            h('span', null, t('viewportExternal')),
-          ),
-          h(IconButton, {
-            icon: h(IconPulse),
-            label: t('diagnose'),
-            testId: 'viewport-diagnose',
-            onClick: props.onDiagnose,
-          }),
-        ),
-      )
-    }
-
-    /**
-     * The panel's whole surface in takeover mode. The carrier is imperative and
-     * covers the window, so the panel is only its host: a status line plus the
-     * two escape hatches (retry / settings). No workspace rail, no host list.
-     * @param {object} props - t, status, callbacks.
-     * @returns {object} div element.
-     */
-    function OverlaySurface(props) {
-      const t = translatorOf(props)
-      const status = typeof props.status === 'string' ? props.status : 'idle'
-      const unsupported = status === 'unsupported'
-      const failed = status === 'failed' || status === 'acquire-failed' || status === 'bad-url'
-      return h(
-        'div',
-        { className: 'drg-overlay-surface', 'data-testid': 'overlay-surface', 'data-state': status },
-        h('div', { className: 'drg-overlay-surface-icon', 'aria-hidden': 'true' }, h(IconExternal, { size: 26 })),
-        h('p', { className: 'drg-overlay-surface-title' }, t('viewportOverlayTitle')),
-        h(
-          'p',
-          { className: 'drg-overlay-surface-status' },
-          unsupported
-            ? t('viewportOverlayUnsupported')
-            : failed
-              ? t('viewportOverlayFailed')
-              : t('viewportOverlayPending'),
-        ),
-        unsupported || failed ? h('p', { className: 'drg-overlay-surface-hint' }, t('viewportOverlayHint')) : null,
-        h(
-          'div',
-          { className: 'drg-row drg-row-wrap' },
-          failed
-            ? h(
-                Button,
-                { variant: 'primary', testId: 'overlay-retry', onClick: props.onRetry },
-                t('viewportOverlayRetry'),
-              )
-            : null,
-          h(
-            Button,
-            { variant: 'secondary', testId: 'overlay-settings', onClick: props.onOpenSettings },
-            t('viewportOverlaySettings'),
-          ),
-        ),
-      )
-    }
-
     //#region 9b. full-window remote carrier (DSH desktop only)
 
     /**
@@ -2593,7 +2372,7 @@ window.__ModuleLoader__.load({
      * `window.dshDesktop` (protocol v1) -> `browser.acquire(workspace)` reserves a
      * Chromium guest in a per-workspace partition, and a `<webview>` whose src is
      * "about:blank#<lease>" attaches it. The guest is a real browser context (own
-     * cookies, real downloads pipeline), not an iframe, and it can be sized to
+     * cookies, real downloads pipeline), never an embedded frame, and it can be sized to
      * cover the whole application page — that is what makes the desktop window
      * show the remote host instead of this UI.
      *
@@ -2601,7 +2380,42 @@ window.__ModuleLoader__.load({
      * survives panel switches; the control strip at the top of the carrier is the
      * only way back, because keyboard focus belongs to the guest while it is up.
      */
-    const overlayCarrier = { hostId: null, lease: null, root: null, view: null, url: null, onExit: null }
+    const overlayCarrier = { hostId: null, lease: null, root: null, view: null, url: null, onExit: null, dispose: null }
+
+    /**
+     * Right edge of the local sidebar column, in CSS pixels.
+     *
+     * The takeover leaves the sidebar outside the carrier so switching stays
+     * symmetric: the same sidebar that enters a remote also leaves it. The column is
+     * measured from our own sidebar entry (we know where that is), climbing to the
+     * ancestor that spans the window height; anything implausible falls back to 0
+     * (full-window takeover), never to a half-covered window.
+     * @returns {number} the column's right edge, or 0 when it cannot be located.
+     */
+    function sidebarEdge() {
+      try {
+        const entry = document.querySelector('[data-dsh-remote-go-entry="true"]')
+        if (!entry || typeof window === 'undefined') return 0
+        const viewportHeight = window.innerHeight || 0
+        const viewportWidth = window.innerWidth || 0
+        let node = entry
+        while (node && node !== document.body) {
+          const rect = node.getBoundingClientRect()
+          if (
+            rect.height >= viewportHeight * 0.8 &&
+            rect.width > 0 &&
+            rect.width <= viewportWidth * 0.5 &&
+            rect.right < viewportWidth - 200
+          ) {
+            return Math.round(rect.right)
+          }
+          node = node.parentElement
+        }
+        return 0
+      } catch (_error) {
+        return 0
+      }
+    }
 
     /** @returns {object | null} the desktop browser bridge, or null outside the desktop app. */
     function desktopBrowserBridge() {
@@ -2613,21 +2427,8 @@ window.__ModuleLoader__.load({
       return browser
     }
 
-    /** @param {string} label @param {Function} onClick @param {string} extra @returns {object} */
-    function overlayButton(label, onClick, extra) {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = label
-      button.style.cssText =
-        'border:1px solid #34343c;background:#232329;color:#e6e6e8;border-radius:6px;padding:4px 10px;font:inherit;cursor:pointer' +
-        (extra || '')
-      button.addEventListener('click', onClick)
-      return button
-    }
-
     /**
-     * Take over the whole window with a live remote-DSH guest.
-     * @param {{ hostId: string, name: string, url: string, t: Function, onExit?: Function }} options
+     * Take over the main column with a live remote-DSH guest.
      * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
      */
     async function openOverlay(options) {
@@ -2635,7 +2436,7 @@ window.__ModuleLoader__.load({
       if (bridge === null) return { ok: false, reason: 'unsupported' }
       const hostId = typeof options.hostId === 'string' ? options.hostId : ''
       const url = typeof options.url === 'string' ? options.url : ''
-      if (!isValidIframeUrl(url)) return { ok: false, reason: 'bad-url' }
+      if (!isValidLoopbackUrl(url)) return { ok: false, reason: 'bad-url' }
       const t = typeof options.t === 'function' ? options.t : (key) => key
       if (overlayCarrier.root !== null) {
         if (overlayCarrier.hostId === hostId) {
@@ -2674,56 +2475,37 @@ window.__ModuleLoader__.load({
       // The desktop window is frameless with a 40px titlebar overlay (Windows
       // caption buttons / macOS traffic lights), so the carrier starts below it:
       // clicks in that band belong to the OS, not to this page.
-      root.style.cssText =
-        'position:fixed;left:0;right:0;bottom:0;top:40px;z-index:2147483000;display:flex;flex-direction:column;background:#0b0b0d;color:#e6e6e8;font:13px system-ui,-apple-system,Segoe UI,sans-serif'
+      //
+      // The chrome is a floating pill instead of a full-width bar: a full-width
+      // strip steals a permanent band of the remote UI, while a small translucent
+      // chip stays legible ("you are on a remote host") and still carries the only
+      // reliable way out, since keyboard focus belongs to the guest while it is up.
+      // The carrier covers the main column only: the local sidebar stays visible and
+      // usable, so entering and leaving a remote use the same control.
+      const left = sidebarEdge()
+      root.style.cssText = `position:fixed;left:${left}px;right:0;bottom:0;top:40px;z-index:2147483000;background:#fff;font:12px system-ui,-apple-system,Segoe UI,sans-serif`
 
-      const strip = document.createElement('div')
-      strip.style.cssText =
-        'display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;flex:none;background:#18181b;border-bottom:1px solid #2a2a2f'
-      const label = document.createElement('div')
-      label.style.cssText = 'display:flex;align-items:center;gap:8px;min-width:0;flex:1'
-      const dot = document.createElement('span')
-      dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:#22a06b;flex:none'
-      const name = document.createElement('span')
-      name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap'
-      name.textContent = t('viewportOverlayBarLabel', { name: options.name || hostId })
-      label.append(dot, name)
-      const status = document.createElement('span')
-      status.style.cssText = 'color:#8a8a92;font-size:12px;white-space:nowrap'
-      status.textContent = t('viewportOverlayLoading')
-      const actions = document.createElement('div')
-      actions.style.cssText = 'display:flex;align-items:center;gap:6px;flex:none'
-
-      // Reload in place: the guest already holds the session cookie, so a rerun of
-      // the one-time token URL is both pointless and risky (the token is spent).
-      const refresh = overlayButton(t('viewportOverlayRefresh'), () => {
-        if (overlayCarrier.view === null) return
-        status.textContent = t('viewportOverlayLoading')
-        try {
-          overlayCarrier.view.reload()
-        } catch (_error) {
-          // a guest that went away reports through did-fail-load
-        }
-      })
-      const exit = overlayButton(
-        t('viewportOverlayExit'),
-        () => {
-          closeOverlay().catch(() => {})
-        },
-        ';background:#2b2b33',
-      )
-      actions.append(refresh, exit)
-      strip.append(label, status, actions)
+      // The carrier has no chrome of its own: the sidebar switches in and out, and
+      // the remote page is the only thing in this column. A failed load is the one
+      // case that needs a message, so a plain centred notice appears instead.
+      const errorLayer = document.createElement('div')
+      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
+      errorLayer.style.cssText = [
+        'position:absolute;inset:0;z-index:2;display:none;align-items:center;justify-content:center',
+        'padding:24px;text-align:center;color:var(--dsw-alias-label-secondary, #6b6b74)',
+        'background:var(--dsw-alias-bg-base, #fff);font:13px system-ui,-apple-system,Segoe UI,sans-serif',
+      ].join(';')
+      errorLayer.textContent = t('viewportOverlayLoadFailed')
 
       const view = document.createElement('webview')
       view.setAttribute('name', String(reservation.lease))
       view.setAttribute('partition', String(reservation.partition))
       view.setAttribute('allowpopups', '')
       view.setAttribute('src', 'about:blank#' + String(reservation.lease))
-      view.style.cssText = 'flex:1;min-height:0;width:100%;border:0;background:#000'
+      view.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff;pointer-events:auto'
       // `dom-ready` fires once per committed navigation, so navigating from it
       // unconditionally would reload the remote page forever (visible as flicker).
-      // The carrier's own refresh button re-navigates explicitly.
       let navigated = false
       view.addEventListener('dom-ready', () => {
         if (overlayCarrier.view !== view || navigated) return
@@ -2731,14 +2513,38 @@ window.__ModuleLoader__.load({
         view.loadURL(overlayCarrier.url).catch(() => {})
       })
       view.addEventListener('did-stop-loading', () => {
-        if (overlayCarrier.view === view) status.textContent = ''
+        if (overlayCarrier.view !== view) return
+        errorLayer.style.display = 'none'
       })
-      view.addEventListener('did-fail-load', () => {
-        if (overlayCarrier.view === view) status.textContent = t('viewportOverlayLoadFailed')
+      view.addEventListener('did-fail-load', (event) => {
+        if (overlayCarrier.view !== view) return
+        // A main-frame failure leaves a blank column, so say so; sub-resource
+        // failures (errorCode -3, aborted) are normal and must stay silent.
+        const isMainFrame = !event || event.isMainFrame !== false
+        const aborted = event && (event.errorCode === -3 || event.errorCode === undefined)
+        if (!isMainFrame || aborted) return
+        errorLayer.style.display = 'flex'
       })
 
-      root.append(strip, view)
+      root.append(view, errorLayer)
       document.body.appendChild(root)
+
+      // Keep the carrier aligned with the sidebar: collapsing/expanding it or
+      // resizing the window moves the column, and the carrier must never cover it.
+      // Leaving the remote needs no listener here: the shell deselects the plugin
+      // panel when the user picks local content, and MainPanel closes the carrier on
+      // unmount — the same sidebar that enters a remote also leaves it.
+      const syncBounds = () => {
+        root.style.left = sidebarEdge() + 'px'
+      }
+      // The column may have been rendered after the carrier was created.
+      syncBounds()
+      const onResize = () => syncBounds()
+      window.addEventListener('resize', onResize)
+      overlayCarrier.dispose = () => {
+        window.removeEventListener('resize', onResize)
+      }
+
       overlayCarrier.hostId = hostId
       overlayCarrier.lease = String(reservation.lease)
       overlayCarrier.root = root
@@ -2771,6 +2577,14 @@ window.__ModuleLoader__.load({
       overlayCarrier.url = null
       overlayCarrier.hostId = null
       overlayCarrier.onExit = null
+      if (typeof overlayCarrier.dispose === 'function') {
+        try {
+          overlayCarrier.dispose()
+        } catch (_error) {
+          // listener cleanup is best-effort
+        }
+        overlayCarrier.dispose = null
+      }
       if (root !== null && root.parentNode !== null) root.parentNode.removeChild(root)
       const bridge = desktopBrowserBridge()
       if (bridge !== null && lease !== null) {
@@ -2785,159 +2599,120 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
+    //#endregion
+
+    //#region 9c. key-file picker
+
     /**
-     * The remote viewport: toolbar on top, then the iframe once the Host has
-     * confirmed the connection. The iframe URL is validated loopback-only
-     * before it is ever assigned (contract §3.5).
-     * @param {object} props - host, iframe state, callbacks.
-     * @returns {object} div element.
+     * Browse the user's home and pick a private-key file.
+     *
+     * DSH ships a directory picker, not a file picker, so the Host lists directories
+     * itself (`GET /keyfile/list`) and this dialog walks them: folders open, files
+     * become selectable. The path is what the SSH layer needs; contents are never read.
+     * @param {object} props - t, locale, initialDir, onPick(path), onClose().
+     * @returns {object} modal element.
      */
-    function RemoteViewport(props) {
+    function KeyFilePicker(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
-      const host = props.host || null
-      const status = host ? host.status : 'unconfigured'
-      const iframeUrl =
-        typeof props.iframeUrl === 'string' && isValidIframeUrl(props.iframeUrl) ? props.iframeUrl : null
-      const invalidIframe = typeof props.iframeUrl === 'string' && props.iframeUrl.length > 0 && iframeUrl === null
-      const iframeError = props.iframeError || null
-      const iframeLoading = props.iframeLoading === true
+      const [listing, setListing] = useState(null)
+      const [loading, setLoading] = useState(true)
+      const [error, setError] = useState(null)
+
+      const load = useCallback((dir) => {
+        let cancelled = false
+        setLoading(true)
+        setError(null)
+        api.listKeyFiles(dir).then(
+          (payload) => {
+            if (cancelled) return
+            setListing(payload)
+            setLoading(false)
+          },
+          (failure) => {
+            if (cancelled) return
+            setError(toErrorView(failure))
+            setLoading(false)
+          },
+        )
+        return () => {
+          cancelled = true
+        }
+      }, [])
+
+      useEffect(() => load(props.initialDir || ''), [props.initialDir])
+
+      const entries = listing && Array.isArray(listing.entries) ? listing.entries : []
+      const directories = entries.filter((entry) => entry && entry.isDirectory)
+      const files = entries.filter((entry) => entry && !entry.isDirectory)
 
       let body
-      if (host === null) {
+      if (loading) {
+        body = h('p', { className: 'drg-field-hint' }, t('keyFile.loading'))
+      } else if (error) {
         body = h(ErrorCard, {
           t,
           locale,
-          error: localErrorView('internal'),
-          onRetry: props.onRefresh,
-          onBack: props.onBack,
+          error,
+          onRetry: () => load(listing ? listing.path : props.initialDir || ''),
         })
-      } else if (status === 'connecting') {
-        body = h(ConnectProgress, { t, host })
-      } else if (status === 'fingerprint-pending') {
-        body = h(FingerprintCard, {
-          t,
-          locale,
-          host,
-          busy: props.fingerprintBusy === true,
-          error: props.fingerprintError,
-          onAccept: props.onAcceptFingerprint,
-          onReject: props.onBack,
-        })
-      } else if (status === 'error' || status === 'limited') {
-        body = h(ErrorCard, {
-          t,
-          locale,
-          error: host.error || localErrorView('internal'),
-          onRetry: () => props.onReconnect && props.onReconnect(host),
-          onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
-          onBack: props.onBack,
-        })
-      } else if (status === 'unconfigured') {
-        body = h(
-          'div',
-          { className: 'drg-connect-prompt' },
-          h('div', { className: 'drg-connect-prompt-icon', 'aria-hidden': 'true' }, h(IconWifi, { size: 28 })),
-          h('h2', null, t('viewportUnconfigured')),
-          h('p', null, t('viewportUnconfiguredBody')),
-          h(Button, { variant: 'primary', onClick: () => props.onConnect && props.onConnect(host) }, t('cardConnect')),
-        )
-      } else if (invalidIframe || iframeError) {
-        body = h(ErrorCard, {
-          t,
-          locale,
-          error: iframeError || localErrorView('blocked-iframe'),
-          onRetry: props.onRetryIframe,
-          onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
-          onBack: props.onBack,
-        })
-      } else if (iframeUrl !== null) {
-        body = h(
-          'div',
-          { className: 'drg-frame-wrap' },
-          iframeLoading
-            ? h(
-                'div',
-                { className: 'drg-frame-loading' },
-                h(Spinner, { size: 20 }),
-                h('span', null, t('viewportLoadingFrame')),
-              )
-            : null,
-          h('iframe', {
-            key: props.iframeKey || 0,
-            className: 'drg-frame',
-            'data-testid': 'remote-iframe',
-            src: iframeUrl,
-            sandbox: IFRAME_SANDBOX,
-            title: host.name || host.id,
-            referrerPolicy: 'no-referrer',
-            onLoad: props.onFrameLoad,
-            onError: props.onFrameError,
-          }),
-        )
+      } else if (entries.length === 0) {
+        body = h('p', { className: 'drg-field-hint' }, t('keyFile.empty'))
       } else {
         body = h(
           'div',
-          { className: 'drg-loading drg-loading-viewport' },
-          h(Spinner, { size: 20 }),
-          h('span', null, t('viewportOpening', { name: host.name || host.id })),
+          { className: 'drg-keyfile-list', 'data-testid': 'keyfile-list' },
+          directories.map((entry) =>
+            h(
+              'button',
+              {
+                key: entry.path,
+                type: 'button',
+                className: 'drg-keyfile-row',
+                'data-kind': 'directory',
+                onClick: () => load(entry.path),
+              },
+              h('span', { className: 'drg-keyfile-name' }, entry.name + '/'),
+            ),
+          ),
+          files.map((entry) =>
+            h(
+              'button',
+              {
+                key: entry.path,
+                type: 'button',
+                className: 'drg-keyfile-row',
+                'data-kind': 'file',
+                title: entry.path,
+                onClick: () => props.onPick(entry.path),
+              },
+              h('span', { className: 'drg-keyfile-name' }, entry.name),
+            ),
+          ),
         )
       }
 
       return h(
-        'div',
-        { className: 'drg-viewport', 'data-status': status },
-        h(ViewportToolbar, {
-          t,
-          host: host || {},
-          hosts: props.hosts,
-          addressVisible: props.addressVisible,
-          onBack: props.onBack,
-          onReconnect: () => props.onReconnect && props.onReconnect(host),
-          onRefreshFrame: props.onRefreshFrame,
-          onSwitchHost: props.onSwitchHost,
-          onToggleAddress: props.onToggleAddress,
-          onOpenExternal: props.onOpenExternal,
-          onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
-        }),
-        props.enterNotice === true
-          ? h(
-              'div',
-              { className: 'drg-viewport-notice' },
-              h(
-                Notice,
-                {
-                  tone: 'info',
-                  title: t('enterNoticeTitle'),
-                  onDismiss: props.onDismissEnterNotice,
-                  dismissLabel: t('dismiss'),
-                },
-                t('enterNoticeBody'),
-              ),
-            )
-          : null,
-        status === 'disconnected'
-          ? h(
-              'div',
-              { className: 'drg-viewport-notice' },
-              h(
-                Notice,
-                { tone: 'warn', title: t('viewportDisconnected') },
-                t('viewportDisconnectedBody'),
-                ' ',
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'drg-linkbtn',
-                    onClick: () => props.onReconnect && props.onReconnect(host),
-                  },
-                  t('reconnectNow'),
-                ),
-              ),
-            )
-          : null,
-        h('div', { className: 'drg-viewport-body' }, body),
+        Modal,
+        {
+          title: t('keyFile.title'),
+          onClose: props.onClose,
+          closeLabel: t('cancel'),
+          testId: 'keyfile-picker',
+          footer: h(
+            Button,
+            {
+              variant: 'ghost',
+              onClick: () => (listing && listing.parent ? load(listing.parent) : undefined),
+              disabled: !listing || !listing.parent,
+              testId: 'keyfile-parent',
+            },
+            t('keyFile.parent'),
+          ),
+        },
+        h('p', { className: 'drg-field-hint' }, t('keyFile.hint')),
+        listing ? h('p', { className: 'drg-keyfile-path' }, listing.path) : null,
+        body,
       )
     }
 
@@ -2983,12 +2758,12 @@ window.__ModuleLoader__.load({
       if (!hostId || draft.jumpHostKnown !== false) host.jumpHost = jumpHost
       if (hostId) host.id = hostId
       if (includeAuth) {
-        if (draft.authType === 'key') {
-          host.auth = { type: 'key', keyPath: String(draft.keyPath || '').trim() }
-        } else if (draft.authType === 'password') {
+        // Key files and one-time passwords are the only accepted methods; anything
+        // else (a stale draft carrying the retired "agent" choice) falls back to a key.
+        if (draft.authType === 'password') {
           host.auth = { type: 'password' }
         } else {
-          host.auth = { type: 'agent' }
+          host.auth = { type: 'key', keyPath: String(draft.keyPath || '').trim() }
         }
       }
       return host
@@ -3025,7 +2800,8 @@ window.__ModuleLoader__.load({
           username: parsed.username,
           jumpHost: typeof host.jumpHost === 'string' ? host.jumpHost : '',
           jumpHostKnown: typeof host.jumpHost === 'string',
-          authType: typeof host.authType === 'string' ? host.authType : defaults.defaultAuth || 'agent',
+          authType: typeof host.authType === 'string' ? host.authType : defaults.defaultAuth || 'key',
+          // Empty means keep the stored path on the Host side.
           keyPath: '',
           keepAlive: host.keepAlive || 'keep',
           idleMinutes: host.idleMinutes || 15,
@@ -3040,8 +2816,8 @@ window.__ModuleLoader__.load({
         username: '',
         jumpHost: '',
         jumpHostKnown: true,
-        authType: defaults.defaultAuth || 'agent',
-        keyPath: '',
+        authType: defaults.defaultAuth || 'key',
+        keyPath: defaults.defaultKeyPath || '~/.ssh/id_ed25519',
         keepAlive: 'keep',
         idleMinutes: 15,
         autoReconnect: auto.enabled !== false,
@@ -3077,6 +2853,8 @@ window.__ModuleLoader__.load({
       const [knownHosts, setKnownHosts] = useState(null)
       const [aliasesLoading, setAliasesLoading] = useState(false)
       const [copied, setCopied] = useState(false)
+      // Key-file picker overlay (browsing lives in the Host; this is only dialog state).
+      const [keyPicker, setKeyPicker] = useState(false)
 
       const hosts = props.state && Array.isArray(props.state.hosts) ? props.state.hosts : []
       const host = hostId ? hosts.find((item) => item && item.id === hostId) || null : null
@@ -3402,7 +3180,6 @@ window.__ModuleLoader__.load({
               ariaLabel: t('wizard.auth'),
               testId: 'wizard-auth',
               options: [
-                { value: 'agent', label: t('wizard.authAgent') },
                 { value: 'key', label: t('wizard.authKey') },
                 { value: 'password', label: t('wizard.authPassword') },
               ],
@@ -3416,16 +3193,29 @@ window.__ModuleLoader__.load({
             ? h(
                 Field,
                 { label: t('wizard.keyPath') },
-                h(TextInput, {
-                  value: draft.keyPath,
-                  placeholder: t('wizard.keyPathPlaceholder'),
-                  ariaLabel: t('wizard.keyPath'),
-                  testId: 'wizard-key-path',
-                  onChange: (value) => {
-                    setAuthDirty(true)
-                    patchDraft({ keyPath: value })
-                  },
-                }),
+                h(
+                  'div',
+                  { className: 'drg-field-inline' },
+                  h(TextInput, {
+                    value: draft.keyPath,
+                    placeholder: t('wizard.keyPathPlaceholder'),
+                    ariaLabel: t('wizard.keyPath'),
+                    testId: 'wizard-key-path',
+                    onChange: (value) => {
+                      setAuthDirty(true)
+                      patchDraft({ keyPath: value })
+                    },
+                  }),
+                  h(
+                    Button,
+                    {
+                      variant: 'secondary',
+                      testId: 'wizard-key-path-pick',
+                      onClick: () => setKeyPicker(true),
+                    },
+                    t('wizard.keyPathPick'),
+                  ),
+                ),
               )
             : null,
           draft.authType === 'password'
@@ -3576,28 +3366,45 @@ window.__ModuleLoader__.load({
       }
 
       return h(
-        Modal,
-        {
-          title: mode === 'edit' ? t('editHostTitle') : t('addHostTitle'),
-          subtitle: t('wizard.stepLabel', { current: step, total }),
-          onClose: handleCancel,
-          closeLabel: t('close'),
-          wide: true,
-          testId: 'host-wizard',
-          footer,
-        },
+        React.Fragment,
+        null,
         h(
-          'ol',
-          { className: 'drg-wizard-steps' },
-          stepBadge(1, t('wizard.step1')),
-          stepBadge(2, t('wizard.step2')),
-          stepBadge(3, t('wizard.step3')),
+          Modal,
+          {
+            title: mode === 'edit' ? t('editHostTitle') : t('addHostTitle'),
+            subtitle: t('wizard.stepLabel', { current: step, total }),
+            onClose: handleCancel,
+            closeLabel: t('close'),
+            wide: true,
+            testId: 'host-wizard',
+            footer,
+          },
+          h(
+            'ol',
+            { className: 'drg-wizard-steps' },
+            stepBadge(1, t('wizard.step1')),
+            stepBadge(2, t('wizard.step2')),
+            stepBadge(3, t('wizard.step3')),
+          ),
+          h(
+            'div',
+            { className: 'drg-wizard-body', 'data-testid': 'wizard-step-' + step, 'data-step': String(step) },
+            body,
+          ),
         ),
-        h(
-          'div',
-          { className: 'drg-wizard-body', 'data-testid': 'wizard-step-' + step, 'data-step': String(step) },
-          body,
-        ),
+        keyPicker
+          ? h(KeyFilePicker, {
+              t,
+              locale,
+              initialDir: '',
+              onPick: (pickedPath) => {
+                setKeyPicker(false)
+                setAuthDirty(true)
+                patchDraft({ keyPath: pickedPath })
+              },
+              onClose: () => setKeyPicker(false),
+            })
+          : null,
       )
     }
 
@@ -3624,7 +3431,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Plain-text diagnostic report for the clipboard. Redacted by contract;
-     * never includes a token or iframe URL.
+     * never includes a token or remote URL.
      */
     function formatDiagnoseText(report, host, t, locale) {
       const lines = ['dsh-remote-go · ' + t('diag.title')]
@@ -3805,7 +3612,8 @@ window.__ModuleLoader__.load({
     function settingsPatchFromDraft(draft) {
       return {
         defaultPort: toInt(draft.defaultPort, 22),
-        defaultAuth: draft.defaultAuth === 'key' || draft.defaultAuth === 'password' ? draft.defaultAuth : 'agent',
+        defaultAuth: draft.defaultAuth === 'password' ? 'password' : 'key',
+        defaultKeyPath: String(draft.defaultKeyPath || '').trim(),
         connectTimeoutSec: Math.max(1, toInt(draft.connectTimeoutSec, 30)),
         autoReconnect: {
           enabled: draft.autoReconnectEnabled === true,
@@ -3815,7 +3623,6 @@ window.__ModuleLoader__.load({
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
         saveTokens: draft.saveTokens === true,
         mirrorToSidebar: draft.mirrorToSidebar === true,
-        windowMode: normalizeWindowMode(draft.windowMode),
         language: draft.language === 'zh' || draft.language === 'en' ? draft.language : 'auto',
         logLevel: ['error', 'warn', 'info', 'debug'].indexOf(draft.logLevel) >= 0 ? draft.logLevel : 'info',
         bootstrap: {
@@ -3827,20 +3634,15 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** @param {unknown} value @returns {'panel' | 'overlay'} */
-    function normalizeWindowMode(value) {
-      return value === 'overlay' ? 'overlay' : 'panel'
-    }
-
     /** Create the editable settings draft from a SettingsView. */
     function settingsDraft(settings) {
       const view = settings && typeof settings === 'object' ? settings : {}
       const auto = view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
       const bootstrap = view.bootstrap && typeof view.bootstrap === 'object' ? view.bootstrap : {}
       return {
-        windowMode: normalizeWindowMode(view.windowMode),
         defaultPort: view.defaultPort === undefined ? 22 : view.defaultPort,
-        defaultAuth: view.defaultAuth || 'agent',
+        defaultAuth: view.defaultAuth === 'password' ? 'password' : 'key',
+        defaultKeyPath: view.defaultKeyPath || '~/.ssh/id_ed25519',
         connectTimeoutSec: view.connectTimeoutSec === undefined ? 30 : view.connectTimeoutSec,
         autoReconnectEnabled: auto.enabled !== false,
         maxAttempts: auto.maxAttempts === undefined ? 3 : auto.maxAttempts,
@@ -3869,6 +3671,8 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(() => settingsDraft(props.settings))
       const [saving, setSaving] = useState(false)
       const [error, setError] = useState(null)
+      // Key-file picker overlay for the default key path.
+      const [keyPicker, setKeyPicker] = useState(false)
       const patch = (patchValue) => setDraft((current) => ({ ...current, ...patchValue }))
       const set = (field) => (value) => patch({ [field]: value })
 
@@ -3897,241 +3701,267 @@ window.__ModuleLoader__.load({
       )
 
       return h(
-        Modal,
-        {
-          title: t('settings.title'),
-          onClose: props.onClose,
-          closeLabel: t('close'),
-          wide: true,
-          testId: 'settings',
-          footer,
-        },
+        React.Fragment,
+        null,
         h(
-          'div',
-          { className: 'drg-settings' },
+          Modal,
+          {
+            title: t('settings.title'),
+            onClose: props.onClose,
+            closeLabel: t('close'),
+            wide: true,
+            testId: 'settings',
+            footer,
+          },
           h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.window')),
+            'div',
+            { className: 'drg-settings' },
             h(
-              Field,
-              { label: t('settings.windowMode'), hint: t('settings.windowModeHint') },
-              h(Select, {
-                value: draft.windowMode,
-                ariaLabel: t('settings.windowMode'),
-                options: [
-                  { value: 'overlay', label: t('settings.windowModeOverlay') },
-                  { value: 'panel', label: t('settings.windowModePanel') },
-                ],
-                onChange: set('windowMode'),
-              }),
-            ),
-            h(
-              Field,
-              { label: t('settings.closeBehavior'), hint: t('settings.closeBehaviorHint') },
-              h(TextInput, {
-                value: t('settings.closeBehaviorValue'),
-                readOnly: true,
-                ariaLabel: t('settings.closeBehavior'),
-              }),
-            ),
-          ),
-          h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.ssh')),
-            h(
-              'div',
-              { className: 'drg-form-grid drg-form-grid-3' },
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.window')),
               h(
                 Field,
-                { label: t('settings.defaultPort') },
+                { label: t('settings.closeBehavior'), hint: t('settings.closeBehaviorHint') },
                 h(TextInput, {
-                  type: 'number',
-                  value: draft.defaultPort,
-                  ariaLabel: t('settings.defaultPort'),
-                  onChange: set('defaultPort'),
+                  value: t('settings.closeBehaviorValue'),
+                  readOnly: true,
+                  ariaLabel: t('settings.closeBehavior'),
                 }),
               ),
+            ),
+            h(
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.ssh')),
+              h(
+                'div',
+                { className: 'drg-form-grid drg-form-grid-3' },
+                h(
+                  Field,
+                  { label: t('settings.defaultPort') },
+                  h(TextInput, {
+                    type: 'number',
+                    value: draft.defaultPort,
+                    ariaLabel: t('settings.defaultPort'),
+                    onChange: set('defaultPort'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.defaultAuth') },
+                  h(Select, {
+                    value: draft.defaultAuth,
+                    ariaLabel: t('settings.defaultAuth'),
+                    options: [
+                      { value: 'key', label: t('settings.defaultAuthKey') },
+                      { value: 'password', label: t('settings.defaultAuthPassword') },
+                    ],
+                    onChange: set('defaultAuth'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.defaultKeyPath'), hint: t('settings.defaultKeyPathHint') },
+                  h(
+                    'div',
+                    { className: 'drg-field-inline' },
+                    h(TextInput, {
+                      value: draft.defaultKeyPath,
+                      placeholder: t('wizard.keyPathPlaceholder'),
+                      ariaLabel: t('settings.defaultKeyPath'),
+                      testId: 'settings-default-key-path',
+                      onChange: set('defaultKeyPath'),
+                    }),
+                    h(
+                      Button,
+                      {
+                        variant: 'secondary',
+                        testId: 'settings-default-key-path-pick',
+                        onClick: () => setKeyPicker(true),
+                      },
+                      t('settings.keyPathPick'),
+                    ),
+                  ),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.connectTimeout') },
+                  h(TextInput, {
+                    type: 'number',
+                    value: draft.connectTimeoutSec,
+                    ariaLabel: t('settings.connectTimeout'),
+                    onChange: set('connectTimeoutSec'),
+                  }),
+                ),
+              ),
+            ),
+            h(
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.security')),
               h(
                 Field,
-                { label: t('settings.defaultAuth') },
+                { label: t('settings.hostKeyPolicy') },
                 h(Select, {
-                  value: draft.defaultAuth,
-                  ariaLabel: t('settings.defaultAuth'),
+                  value: draft.hostKeyPolicy,
+                  ariaLabel: t('settings.hostKeyPolicy'),
                   options: [
-                    { value: 'agent', label: t('settings.defaultAuthAgent') },
-                    { value: 'key', label: t('settings.defaultAuthKey') },
-                    { value: 'password', label: t('settings.defaultAuthPassword') },
+                    { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
+                    { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
                   ],
-                  onChange: set('defaultAuth'),
+                  onChange: set('hostKeyPolicy'),
                 }),
               ),
-              h(
-                Field,
-                { label: t('settings.connectTimeout') },
-                h(TextInput, {
-                  type: 'number',
-                  value: draft.connectTimeoutSec,
-                  ariaLabel: t('settings.connectTimeout'),
-                  onChange: set('connectTimeoutSec'),
-                }),
-              ),
-            ),
-          ),
-          h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.security')),
-            h(
-              Field,
-              { label: t('settings.hostKeyPolicy') },
-              h(Select, {
-                value: draft.hostKeyPolicy,
-                ariaLabel: t('settings.hostKeyPolicy'),
-                options: [
-                  { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                  { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-                ],
-                onChange: set('hostKeyPolicy'),
+              h(CheckRow, {
+                checked: draft.saveTokens === true,
+                label: t('settings.saveTokens'),
+                onChange: set('saveTokens'),
               }),
-            ),
-            h(CheckRow, {
-              checked: draft.saveTokens === true,
-              label: t('settings.saveTokens'),
-              onChange: set('saveTokens'),
-            }),
-            h('p', { className: 'drg-field-hint' }, t('settings.saveTokensHint')),
-            draft.saveTokens === true ? h(Notice, { tone: 'warn', title: t('settings.saveTokensRisk') }) : null,
-            h('div', { className: 'drg-divider' }),
-            h('h3', { className: 'drg-section-title' }, t('settings.reconnect')),
-            h(CheckRow, {
-              checked: draft.autoReconnectEnabled === true,
-              label: t('settings.reconnectEnabled'),
-              onChange: set('autoReconnectEnabled'),
-            }),
-            h(
-              'div',
-              { className: 'drg-form-grid' },
-              h(
-                Field,
-                { label: t('settings.maxAttempts') },
-                h(TextInput, {
-                  type: 'number',
-                  value: draft.maxAttempts,
-                  ariaLabel: t('settings.maxAttempts'),
-                  onChange: set('maxAttempts'),
-                }),
-              ),
-              h(
-                Field,
-                { label: t('settings.baseDelay') },
-                h(TextInput, {
-                  type: 'number',
-                  value: draft.baseDelayMs,
-                  ariaLabel: t('settings.baseDelay'),
-                  onChange: set('baseDelayMs'),
-                }),
-              ),
-            ),
-          ),
-          h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.mirror')),
-            h(CheckRow, {
-              checked: draft.mirrorToSidebar === true,
-              label: t('settings.mirrorToSidebar'),
-              onChange: set('mirrorToSidebar'),
-            }),
-            h('p', { className: 'drg-field-hint' }, t('settings.mirrorToSidebarHint')),
-          ),
-          h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.bootstrap')),
-            h(
-              'div',
-              { className: 'drg-form-grid drg-form-grid-3' },
-              h(
-                Field,
-                { label: t('settings.targetVersion'), hint: t('settings.targetVersionHint') },
-                h(TextInput, {
-                  value: draft.targetVersion,
-                  ariaLabel: t('settings.targetVersion'),
-                  onChange: set('targetVersion'),
-                }),
-              ),
-              h(
-                Field,
-                { label: t('settings.mode') },
-                h(Select, {
-                  value: draft.bootstrapMode,
-                  ariaLabel: t('settings.mode'),
-                  options: [
-                    { value: 'auto', label: t('settings.modeAuto') },
-                    { value: 'reuse', label: t('settings.modeReuse') },
-                    { value: 'npx', label: t('settings.modeNpx') },
-                    { value: 'isolated', label: t('settings.modeIsolated') },
-                  ],
-                  onChange: set('bootstrapMode'),
-                }),
-              ),
-              h(
-                Field,
-                { label: t('settings.nodeVersion') },
-                h(TextInput, {
-                  value: draft.nodeVersion,
-                  ariaLabel: t('settings.nodeVersion'),
-                  onChange: set('nodeVersion'),
-                }),
-              ),
-            ),
-            h(
-              Field,
-              { label: t('settings.remoteDir') },
-              h(TextInput, {
-                value: draft.remoteDir,
-                ariaLabel: t('settings.remoteDir'),
-                onChange: set('remoteDir'),
+              h('p', { className: 'drg-field-hint' }, t('settings.saveTokensHint')),
+              draft.saveTokens === true ? h(Notice, { tone: 'warn', title: t('settings.saveTokensRisk') }) : null,
+              h('div', { className: 'drg-divider' }),
+              h('h3', { className: 'drg-section-title' }, t('settings.reconnect')),
+              h(CheckRow, {
+                checked: draft.autoReconnectEnabled === true,
+                label: t('settings.reconnectEnabled'),
+                onChange: set('autoReconnectEnabled'),
               }),
+              h(
+                'div',
+                { className: 'drg-form-grid' },
+                h(
+                  Field,
+                  { label: t('settings.maxAttempts') },
+                  h(TextInput, {
+                    type: 'number',
+                    value: draft.maxAttempts,
+                    ariaLabel: t('settings.maxAttempts'),
+                    onChange: set('maxAttempts'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.baseDelay') },
+                  h(TextInput, {
+                    type: 'number',
+                    value: draft.baseDelayMs,
+                    ariaLabel: t('settings.baseDelay'),
+                    onChange: set('baseDelayMs'),
+                  }),
+                ),
+              ),
             ),
-          ),
-          h(
-            'section',
-            { className: 'drg-settings-section' },
-            h('h3', { className: 'drg-section-title' }, t('settings.other')),
             h(
-              'div',
-              { className: 'drg-form-grid drg-form-grid-3' },
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.mirror')),
+              h(CheckRow, {
+                checked: draft.mirrorToSidebar === true,
+                label: t('settings.mirrorToSidebar'),
+                onChange: set('mirrorToSidebar'),
+              }),
+              h('p', { className: 'drg-field-hint' }, t('settings.mirrorToSidebarHint')),
+            ),
+            h(
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.bootstrap')),
               h(
-                Field,
-                { label: t('settings.language') },
-                h(Select, {
-                  value: draft.language,
-                  ariaLabel: t('settings.language'),
-                  options: [
-                    { value: 'auto', label: t('settings.languageAuto') },
-                    { value: 'zh', label: t('settings.languageZh') },
-                    { value: 'en', label: t('settings.languageEn') },
-                  ],
-                  onChange: set('language'),
-                }),
+                'div',
+                { className: 'drg-form-grid drg-form-grid-3' },
+                h(
+                  Field,
+                  { label: t('settings.targetVersion'), hint: t('settings.targetVersionHint') },
+                  h(TextInput, {
+                    value: draft.targetVersion,
+                    ariaLabel: t('settings.targetVersion'),
+                    onChange: set('targetVersion'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.mode') },
+                  h(Select, {
+                    value: draft.bootstrapMode,
+                    ariaLabel: t('settings.mode'),
+                    options: [
+                      { value: 'auto', label: t('settings.modeAuto') },
+                      { value: 'reuse', label: t('settings.modeReuse') },
+                      { value: 'npx', label: t('settings.modeNpx') },
+                      { value: 'isolated', label: t('settings.modeIsolated') },
+                    ],
+                    onChange: set('bootstrapMode'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.nodeVersion') },
+                  h(TextInput, {
+                    value: draft.nodeVersion,
+                    ariaLabel: t('settings.nodeVersion'),
+                    onChange: set('nodeVersion'),
+                  }),
+                ),
               ),
               h(
                 Field,
-                { label: t('settings.logLevel') },
-                h(Select, {
-                  value: draft.logLevel,
-                  ariaLabel: t('settings.logLevel'),
-                  options: ['error', 'warn', 'info', 'debug'].map((level) => ({ value: level, label: level })),
-                  onChange: set('logLevel'),
+                { label: t('settings.remoteDir') },
+                h(TextInput, {
+                  value: draft.remoteDir,
+                  ariaLabel: t('settings.remoteDir'),
+                  onChange: set('remoteDir'),
                 }),
               ),
             ),
+            h(
+              'section',
+              { className: 'drg-settings-section' },
+              h('h3', { className: 'drg-section-title' }, t('settings.other')),
+              h(
+                'div',
+                { className: 'drg-form-grid drg-form-grid-3' },
+                h(
+                  Field,
+                  { label: t('settings.language') },
+                  h(Select, {
+                    value: draft.language,
+                    ariaLabel: t('settings.language'),
+                    options: [
+                      { value: 'auto', label: t('settings.languageAuto') },
+                      { value: 'zh', label: t('settings.languageZh') },
+                      { value: 'en', label: t('settings.languageEn') },
+                    ],
+                    onChange: set('language'),
+                  }),
+                ),
+                h(
+                  Field,
+                  { label: t('settings.logLevel') },
+                  h(Select, {
+                    value: draft.logLevel,
+                    ariaLabel: t('settings.logLevel'),
+                    options: ['error', 'warn', 'info', 'debug'].map((level) => ({ value: level, label: level })),
+                    onChange: set('logLevel'),
+                  }),
+                ),
+              ),
+            ),
+            error ? h(Notice, { tone: 'error' }, resolveText(error.detail, locale)) : null,
           ),
-          error ? h(Notice, { tone: 'error' }, resolveText(error.detail, locale)) : null,
         ),
+        keyPicker
+          ? h(KeyFilePicker, {
+              t,
+              locale,
+              initialDir: '',
+              onPick: (pickedPath) => {
+                setKeyPicker(false)
+                patch({ defaultKeyPath: pickedPath })
+              },
+              onClose: () => setKeyPicker(false),
+            })
+          : null,
       )
     }
 
@@ -4140,24 +3970,27 @@ window.__ModuleLoader__.load({
     //#region 13. one-time password prompt
 
     /**
-     * One-time SSH password prompt for hosts whose `authType` is `password`.
-     * The value lives in component state only and is never persisted or put in
-     * a URL; cancelling sends no request.
-     * @param {object} props - host, busy flag, error, submit/cancel callbacks.
+     * SSH password prompt for hosts whose `authType` is `password`. The value stays
+     * in component state unless the user ticks "remember", in which case the Host
+     * stores it in DSH's credential store (never in hosts.json); cancelling sends no
+     * request.
+     * @param {object} props - host, busy flag, error, submit({password, remember})/cancel callbacks.
      * @returns {object} modal element.
      */
     function PasswordPrompt(props) {
       const t = translatorOf(props)
       const host = props.host || {}
       const [password, setPassword] = useState('')
+      const [remember, setRemember] = useState(false)
       const [localError, setLocalError] = useState('')
+      const canRemember = props.storageAvailable === true
       const submit = () => {
         if (String(password).trim() === '') {
           setLocalError(t('passwordPromptRequired'))
           return
         }
         setLocalError('')
-        if (typeof props.onSubmit === 'function') props.onSubmit(password)
+        if (typeof props.onSubmit === 'function') props.onSubmit({ password, remember: canRemember && remember })
       }
       return h(
         Modal,
@@ -4200,6 +4033,18 @@ window.__ModuleLoader__.load({
             },
           }),
         ),
+        canRemember
+          ? h(
+              'label',
+              { className: 'drg-check', 'data-testid': 'password-remember' },
+              h('input', {
+                type: 'checkbox',
+                checked: remember,
+                onChange: (event) => setRemember(event.target.checked === true),
+              }),
+              h('span', null, t('passwordPromptRemember')),
+            )
+          : h('p', { className: 'drg-field-hint' }, t('passwordPromptNoStorage')),
       )
     }
 
@@ -4222,6 +4067,28 @@ window.__ModuleLoader__.load({
     }
 
     //#endregion
+
+    //#region 14b. sidebar panel icon
+
+    /** Main-panel key of the "local" row is not used: host management is one page.
+    /**
+     * Icon for the sidebar's global-panel row.
+     *
+     * The sidebar owns the button and the label; an occupant only draws the glyph,
+     * sized and highlighted by the row it sits in.
+     * @param {object} props - size (square edge in px), active (row is selected).
+     * @returns {object} svg element.
+     */
+    function RemotePanelIcon(props) {
+      const size = typeof props.size === 'number' && props.size > 0 ? props.size : 18
+      // The marker lets the takeover measure the sidebar column, so the carrier can
+      // stop at its right edge and leave the sidebar — the switcher — usable.
+      return h(
+        'span',
+        { className: 'drg-panel-icon', 'data-dsh-remote-go-entry': 'true', style: { display: 'inline-flex' } },
+        h(RemoteIcon, { size, active: props.active === true }),
+      )
+    }
 
     //#region 15. panel container
 
@@ -4303,11 +4170,9 @@ window.__ModuleLoader__.load({
         const initial = props.initialState
         return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
       })
-      const [iframeUrl, setIframeUrl] = useState(null)
-      const [iframeKey, setIframeKey] = useState(0)
-      const [iframeLoading, setIframeLoading] = useState(false)
-      const [iframeError, setIframeError] = useState(null)
-      const [addressVisible, setAddressVisible] = useState(true)
+      // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
+      // one-shot launch token, so it is fetched on demand and never persisted.
+      const [remoteUrl, setRemoteUrl] = useState(null)
       const [busyHostId, setBusyHostId] = useState(null)
       const [wizard, setWizard] = useState(null)
       const [diagnose, setDiagnose] = useState(null)
@@ -4315,9 +4180,6 @@ window.__ModuleLoader__.load({
       const [pendingDelete, setPendingDelete] = useState(null)
       const [deleting, setDeleting] = useState(false)
       const [passwordPrompt, setPasswordPrompt] = useState(null)
-      const [fingerprintBusy, setFingerprintBusy] = useState(false)
-      const [fingerprintError, setFingerprintError] = useState(null)
-      const [showEnterNotice, setShowEnterNotice] = useState(false)
       const [showCloseNotice, setShowCloseNotice] = useState(false)
       const [toast, setToast] = useState(null)
       const toastTimer = useRef(null)
@@ -4343,44 +4205,34 @@ window.__ModuleLoader__.load({
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
       const activeHost = activeHostId ? hosts.find((host) => host && host.id === activeHostId) || null : null
       const activeStatus = activeHost ? activeHost.status : null
-      // `windowMode: 'overlay'` hands the whole window to a live remote-DSH guest
-      // (DSH desktop only); 'panel' keeps the iframe inside this panel.
-      const settingsView = state && state.settings && typeof state.settings === 'object' ? state.settings : {}
-      const viewerMode = normalizeWindowMode(settingsView.windowMode)
+      // The window takeover is the only presentation: the remote DSH renders in a
+      // live Chromium guest owned by the desktop shell, never inside this panel.
       // Mirror of the imperative full-window carrier (it lives outside React).
-      const [overlayStatus, setOverlayStatus] = useState('closed')
       // The user pressed "exit": stay on the local UI, keep the connection, and do
       // not take the window back until they ask for it again.
       const overlayDismissed = useRef(false)
-      const viewerModeRef = useRef(viewerMode)
-      viewerModeRef.current = viewerMode
 
-      // Restore the Host's active host once, on the first state read.
+      // Opening the panel goes straight to the remote: the panel is a switch, not a
+      // landing page. Prefer the Host's active host, then any host that is already
+      // connected, then the only configured host.
       const bootstrapped = useRef(false)
       useEffect(() => {
         if (!state || bootstrapped.current) return
         bootstrapped.current = true
+        const list = Array.isArray(state.hosts) ? state.hosts : []
+        const isRemoteUp = (host) => host && REMOTE_STATUSES.indexOf(host.status) >= 0
         const id = state.activeHostId
-        if (
-          typeof id === 'string' &&
-          Array.isArray(state.hosts) &&
-          state.hosts.some((host) => host && host.id === id && VIEWPORT_STATUSES.indexOf(host.status) >= 0)
-        ) {
-          setActiveHostId(id)
-          setView('viewport')
-          return
-        }
-        // Takeover mode goes straight to the remote: with exactly one host there is
-        // nothing to choose, so opening the panel is the same as opening the far side.
-        const sole = Array.isArray(state.hosts) && state.hosts.length === 1 ? state.hosts[0] : null
-        if (sole && viewerMode === 'overlay') {
-          setActiveHostId(sole.id)
-          setView('viewport')
-          if (sole.status === 'connected' || sole.status === 'disconnected') {
-            api.activate(sole.id).catch(() => {})
-          } else if (sole.status !== 'connecting' && sole.status !== 'fingerprint-pending') {
-            performConnect(sole)
-          }
+        const preferred =
+          list.find((host) => host && host.id === id && isRemoteUp(host)) ||
+          list.find((host) => host && host.status === 'connected') ||
+          (list.length === 1 ? list[0] : null)
+        if (!preferred) return
+        setActiveHostId(preferred.id)
+        setView('viewport')
+        if (isRemoteUp(preferred)) {
+          api.activate(preferred.id).catch(() => {})
+        } else if (preferred.status !== 'connecting' && preferred.status !== 'fingerprint-pending') {
+          performConnect(preferred)
         }
       }, [state])
 
@@ -4393,51 +4245,33 @@ window.__ModuleLoader__.load({
         }
       }, [view, state, activeHostId])
 
-      // Forget the one-time iframe URL when the host changes or re-connects.
+      // Forget the loopback URL when the host changes or re-connects.
       useEffect(() => {
-        setIframeUrl(null)
-        setIframeError(null)
-        setIframeKey(0)
-        setIframeLoading(false)
+        setRemoteUrl(null)
       }, [activeHostId])
       useEffect(() => {
-        if (activeStatus === 'connecting') {
-          setIframeUrl(null)
-          setIframeError(null)
-          setIframeKey(0)
-        }
+        if (activeStatus === 'connecting') setRemoteUrl(null)
       }, [activeStatus])
 
-      // Fetch `GET /hosts/:id/open` only for a connected host, and only once.
+      // Fetch `GET /hosts/:id/open` only for a connected host, and only once: the
+      // guest needs the launch-token URL, and a spent URL is never reused.
       useEffect(() => {
-        if (view !== 'viewport' || activeHostId === null || activeStatus !== 'connected' || iframeUrl !== null)
+        if (view !== 'viewport' || activeHostId === null || activeStatus !== 'connected' || remoteUrl !== null)
           return undefined
         let cancelled = false
-        setIframeLoading(true)
-        setIframeError(null)
         api.openHost(activeHostId).then(
           (url) => {
-            if (cancelled) return
-            setIframeUrl(url)
-            setIframeLoading(false)
+            if (!cancelled) setRemoteUrl(url)
           },
           (error) => {
             if (cancelled) return
-            setIframeError(toErrorView(error))
-            setIframeLoading(false)
+            notify(errorMessage(error), 'error')
           },
         )
         return () => {
           cancelled = true
         }
-      }, [view, activeHostId, activeStatus, iframeUrl])
-
-      // One-time "you are operating a remote server" hint per browser.
-      useEffect(() => {
-        if (view !== 'viewport') return
-        if (readFlag(ENTER_HINT_KEY)) return
-        setShowEnterNotice(true)
-      }, [view])
+      }, [view, activeHostId, activeStatus, remoteUrl])
 
       // The settings page asks the panel to open one host, then switches to it.
       useEffect(() => {
@@ -4514,10 +4348,11 @@ window.__ModuleLoader__.load({
       }
 
       /** Submit the one-time password for the pending open/connect/reconnect. */
-      const submitPassword = (password) => {
+      const submitPassword = (submitted) => {
         const pending = passwordPrompt
         if (!pending || !pending.host) return
-        const value = typeof password === 'string' ? password : ''
+        const value = submitted && typeof submitted.password === 'string' ? submitted.password : ''
+        const remember = submitted && submitted.remember === true
         if (value.trim() === '') {
           setPasswordPrompt({ ...pending, error: t('passwordPromptRequired') })
           return
@@ -4529,11 +4364,7 @@ window.__ModuleLoader__.load({
           setView('viewport')
           openPanel()
         }
-        if (intent === 'reconnect') {
-          setIframeUrl(null)
-          setIframeError(null)
-          setIframeLoading(true)
-        }
+        if (intent === 'reconnect') setRemoteUrl(null)
         setPasswordPrompt({ ...pending, busy: true, error: null })
         setBusyHostId(host.id)
         const connect =
@@ -4541,8 +4372,8 @@ window.__ModuleLoader__.load({
             ? api
                 .disconnect(host.id, false)
                 .catch(() => {})
-                .then(() => api.connect(host.id, { password: value }))
-            : api.connect(host.id, { password: value })
+                .then(() => api.connect(host.id, { password: value, rememberPassword: remember }))
+            : api.connect(host.id, { password: value, rememberPassword: remember })
         connect
           .then(
             () => {
@@ -4577,9 +4408,7 @@ window.__ModuleLoader__.load({
           setPasswordPrompt({ host, intent: 'reconnect', error: null, busy: false })
           return
         }
-        setIframeUrl(null)
-        setIframeError(null)
-        setIframeLoading(true)
+        setRemoteUrl(null)
         setBusyHostId(host.id)
         api
           .reconnect(host.id)
@@ -4590,139 +4419,66 @@ window.__ModuleLoader__.load({
           .finally(() => setBusyHostId(null))
       }
 
-      const backToHosts = () => {
-        setView('hosts')
-        if (!readFlag(CLOSE_HINT_KEY)) {
-          setShowCloseNotice(true)
-          writeFlag(CLOSE_HINT_KEY)
-        }
-      }
       const dismissCloseNotice = () => {
         writeFlag(CLOSE_HINT_KEY)
         setShowCloseNotice(false)
       }
-      const dismissEnterNotice = () => {
-        writeFlag(ENTER_HINT_KEY)
-        setShowEnterNotice(false)
-      }
 
-      const switchHost = (hostId) => {
-        setActiveHostId(hostId)
-        setView('viewport')
-      }
-      const toggleAddress = () => setAddressVisible((visible) => !visible)
       /** Start the carrier, or — when it is already up — reload it in place. */
       const takeOverOverlay = () => {
-        if (iframeUrl === null) return
-        if (overlayDismissed.current === false && reloadOverlay()) {
-          setOverlayStatus('open')
-          return
-        }
+        if (remoteUrl === null) return
+        if (overlayDismissed.current === false && reloadOverlay()) return
         overlayDismissed.current = false
-        setOverlayStatus('opening')
         openOverlay({
           hostId: activeHostId || '',
           name: activeHost ? activeHost.name || '' : '',
-          url: iframeUrl,
+          url: remoteUrl,
           t,
-          onExit: () => setOverlayStatus('closed'),
-        }).then((result) => {
-          setOverlayStatus(result.ok ? 'open' : result.reason || 'failed')
+          onExit: () => {
+            overlayDismissed.current = true
+          },
         })
       }
-      const releaseOverlay = () => {
-        // Leaving the carrier is a view change, not a disconnect: the SSH link,
-        // the tunnel and the remote DSH all stay up. The panel has nothing left
-        // to show in this mode, so it hands the window back to the local UI.
-        overlayDismissed.current = true
-        setOverlayStatus('closing')
-        closeOverlay().catch(() => {})
-        setOverlayStatus('closed')
-        if (typeof props.closePanel === 'function') {
-          try {
-            props.closePanel()
-            return
-          } catch (_error) {
-            // falling back to the panel body is still usable
-          }
-        }
-        setView('viewport')
-      }
-      const refreshFrame = () => {
-        if (viewerMode === 'overlay') {
-          if (!reloadOverlay()) takeOverOverlay()
-          return
-        }
-        setIframeKey((key) => key + 1)
-        setIframeLoading(true)
-      }
-      const retryIframe = () => {
-        setIframeError(null)
-        setIframeUrl(null)
-      }
-      const openExternal = () => {
-        const openWith = (url) => {
-          if (!isValidIframeUrl(url)) {
-            notify(t('viewportFrameBlocked'), 'error')
-            return
-          }
-          if (typeof window !== 'undefined' && typeof window.open === 'function') {
-            window.open(url, '_blank', 'noopener,noreferrer')
-          }
-        }
-        if (iframeUrl !== null) {
-          openWith(iframeUrl)
-          return
-        }
-        if (!activeHost) return
-        api.openHost(activeHost.id).then(openWith, (error) => notify(errorMessage(error), 'error'))
-      }
-
       // Full-window takeover: create the carrier once a loopback URL exists, and
       // drop it on a host switch or when the panel goes away. The carrier itself
-      // survives panel switches (it lives on document.body), which is the point
-      // of the mode: the window belongs to the remote host until the user exits.
+      // survives panel switches (it lives on document.body), which is the point:
+      // the window belongs to the remote host until the user exits.
       useEffect(() => {
-        if (viewerMode !== 'overlay' || overlayDismissed.current) return
-        if (view !== 'viewport' || activeStatus !== 'connected' || iframeUrl === null) return
+        if (overlayDismissed.current) return
+        if (view !== 'viewport' || activeStatus !== 'connected' || remoteUrl === null) return
         let cancelled = false
         openOverlay({
           hostId: activeHostId || '',
           name: activeHost ? activeHost.name || '' : '',
-          url: iframeUrl,
+          url: remoteUrl,
           t,
-          onExit: () => setOverlayStatus('closed'),
-        }).then((result) => {
-          if (!cancelled) setOverlayStatus(result.ok ? 'open' : result.reason || 'failed')
+          onExit: () => {
+            // The user left the carrier: hand the window back until they ask
+            // again, instead of immediately taking it over.
+            overlayDismissed.current = true
+          },
         })
         return () => {
           cancelled = true
         }
-      }, [viewerMode, view, activeStatus, iframeUrl, activeHostId])
+      }, [view, activeStatus, remoteUrl, activeHostId])
 
       useEffect(() => {
         return () => {
-          if (viewerModeRef.current === 'overlay') closeOverlay().catch(() => {})
+          closeOverlay().catch(() => {})
           overlayDismissed.current = false
         }
       }, [activeHostId])
 
-      const acceptFingerprint = (remember) => {
-        if (!activeHost) return
-        const sha256 =
-          activeHost.fingerprint && typeof activeHost.fingerprint.sha256 === 'string'
-            ? activeHost.fingerprint.sha256
-            : ''
-        setFingerprintBusy(true)
-        setFingerprintError(null)
-        api
-          .acceptFingerprint(activeHost.id, true, remember === true, sha256)
-          .then(
-            () => remote.refresh(),
-            (error) => setFingerprintError(toErrorView(error)),
-          )
-          .finally(() => setFingerprintBusy(false))
-      }
+      // The sidebar is the switch in both directions: selecting local content
+      // deselects this panel, and unmounting is what ends the takeover. Doing it
+      // here (instead of watching sidebar clicks) keeps the rule exact — the remote
+      // is up exactly while this panel is the selected one.
+      useEffect(() => {
+        return () => {
+          closeOverlay().catch(() => {})
+        }
+      }, [])
 
       const runDiagnose = (host) => {
         if (!host || !host.id) return
@@ -4782,95 +4538,32 @@ window.__ModuleLoader__.load({
         remote.refresh()
       }
 
-      const content =
-        view === 'viewport'
-          ? h(RemoteViewport, {
-              t,
-              locale,
-              host: activeHost,
-              hosts,
-              iframeUrl,
-              iframeKey,
-              iframeLoading,
-              iframeError,
-              addressVisible,
-              enterNotice: showEnterNotice,
-              fingerprintBusy,
-              fingerprintError,
-              onBack: backToHosts,
-              onReconnect: reconnectHost,
-              onRefreshFrame: refreshFrame,
-              onRetryIframe: retryIframe,
-              onSwitchHost: switchHost,
-              onToggleAddress: toggleAddress,
-              onOpenExternal: openExternal,
-              onDiagnose: runDiagnose,
-              onAcceptFingerprint: acceptFingerprint,
-              onConnect: (host) => {
-                if (host) connectHost(host)
-              },
-              onRefresh: remote.refresh,
-              onFrameLoad: () => setIframeLoading(false),
-              onFrameError: () => setIframeLoading(false),
-              onDismissEnterNotice: dismissEnterNotice,
-            })
-          : h(HostListView, {
-              t,
-              locale,
-              state,
-              loading: remote.loading,
-              error: remote.error,
-              busyHostId,
-              closeNotice: showCloseNotice,
-              onDismissCloseNotice: dismissCloseNotice,
-              onAdd: () => setWizard({ mode: 'add', host: null }),
-              onRefresh: remote.refresh,
-              onOpenSettings: () => setSettingsOpen(true),
-              onOpenHost: openHost,
-              onConnectHost: connectHost,
-              onDisconnectHost: disconnectHost,
-              onReconnectHost: reconnectHost,
-              onEditHost: (host) => setWizard({ mode: 'edit', host }),
-              onDeleteHost: (host) => setPendingDelete(host),
-              onDiagnoseHost: runDiagnose,
-            })
-
-      // In takeover mode the carrier owns the window, so the panel itself is
-      // only a host for it: no rail, no host list, no wizards. Without a chosen
-      // host (several hosts configured) the normal panel stays, because that is
-      // the only way to pick one.
-      const panelBody =
-        viewerMode === 'overlay' && activeHostId !== null
-          ? h(OverlaySurface, {
-              t,
-              status: overlayStatus,
-              onRetry: takeOverOverlay,
-              onOpenSettings: () => setSettingsOpen(true),
-            })
-          : h(
-              'div',
-              { className: 'drg-panel-layout' },
-              h(WorkspaceRail, {
-                t,
-                locale,
-                localeId: locale,
-                hosts,
-                activeHostId,
-                onOpenHost: openHost,
-                onConnectHost: connectHost,
-                onDiagnoseHost: runDiagnose,
-                onOpenLocalWorkspace: (workspaceId) => {
-                  if (typeof props.openLocalWorkspace === 'function') {
-                    try {
-                      props.openLocalWorkspace(workspaceId)
-                    } catch (_error) {
-                      // switching local workspaces is optional; the panel still closes
-                    }
-                  }
-                },
-              }),
-              h('div', { className: 'drg-panel-main' }, content),
-            )
+      // The panel is the host page, nothing else: no workspace rail competing with the
+      // sidebar, no status surface between the local UI and the remote one.
+      const panelBody = h(
+        'div',
+        { className: 'drg-panel-main' },
+        h(HostListView, {
+          t,
+          locale,
+          state,
+          loading: remote.loading,
+          error: remote.error,
+          busyHostId,
+          closeNotice: showCloseNotice,
+          onDismissCloseNotice: dismissCloseNotice,
+          onAdd: () => setWizard({ mode: 'add', host: null }),
+          onRefresh: remote.refresh,
+          onOpenSettings: () => setSettingsOpen(true),
+          onOpenHost: openHost,
+          onConnectHost: connectHost,
+          onDisconnectHost: disconnectHost,
+          onReconnectHost: reconnectHost,
+          onEditHost: (host) => setWizard({ mode: 'edit', host }),
+          onDeleteHost: (host) => setPendingDelete(host),
+          onDiagnoseHost: runDiagnose,
+        }),
+      )
 
       return h(
         'div',
@@ -4931,6 +4624,7 @@ window.__ModuleLoader__.load({
               host: passwordPrompt.host,
               busy: passwordPrompt.busy === true,
               error: passwordPrompt.error,
+              storageAvailable: passwordPrompt.host ? passwordPrompt.host.passwordStorageAvailable === true : false,
               onSubmit: submitPassword,
               onCancel: cancelPassword,
             })
@@ -4977,401 +4671,6 @@ window.__ModuleLoader__.load({
       return !mirrors.some((mirror) => mirror && mirror.level === 'L2')
     }
 
-    /**
-     * Workspace data for the rail: the local DSH registry plus one workspace
-     * list per configured host. Refreshes on mount, whenever host ids/statuses
-     * change (SSE `/state` pushes), and on demand from the refresh button.
-     * @param {object[]} hosts - HostView list.
-     * @param {{local?: object, remotes?: object}|undefined} initialData - test/preview seam.
-     * @returns {{local: object, remotes: object, refresh: Function}} workspace data handle.
-     */
-    function useWorkspaceData(hosts, initialData) {
-      const [local, setLocal] = useState(() =>
-        initialData && initialData.local ? initialData.local : { ...EMPTY_LOCAL_WORKSPACES },
-      )
-      const [remotes, setRemotes] = useState(() => (initialData && initialData.remotes ? initialData.remotes : {}))
-      const generation = useRef(0)
-      const alive = useRef(true)
-      const hostsRef = useRef(hosts)
-      hostsRef.current = hosts
-
-      useEffect(
-        () => () => {
-          alive.current = false
-        },
-        [],
-      )
-
-      const refresh = useCallback(() => {
-        const token = ++generation.current
-        const list = Array.isArray(hostsRef.current) ? hostsRef.current : []
-        setLocal((current) => ({ ...current, status: 'loading', error: null }))
-        api.getLocalWorkspaces().then(
-          (payload) => {
-            if (!alive.current || token !== generation.current) return
-            setLocal({
-              status: 'ready',
-              workspaces: payload.workspaces,
-              defaultWorkspaceId: payload.defaultWorkspaceId,
-              error: null,
-            })
-          },
-          (error) => {
-            if (!alive.current || token !== generation.current) return
-            setLocal((current) => ({ ...current, status: 'error', error: toErrorView(error) }))
-          },
-        )
-        const nextRemotes = {}
-        for (const host of list) {
-          if (!host || !host.id) continue
-          nextRemotes[host.id] = {
-            status: host.status === 'connected' ? 'loading' : 'disconnected',
-            connected: host.status === 'connected',
-            workspaces: [],
-            mirrors: [],
-            error: null,
-            hostName: host.name || host.id,
-          }
-        }
-        setRemotes(nextRemotes)
-        for (const host of list) {
-          if (!host || !host.id || host.status !== 'connected') continue
-          api.getHostWorkspaces(host.id).then(
-            (payload) => {
-              if (!alive.current || token !== generation.current) return
-              setRemotes((current) => ({
-                ...current,
-                [host.id]: {
-                  ...(current[host.id] || {}),
-                  status: 'ready',
-                  connected: payload.connected,
-                  workspaces: payload.workspaces,
-                  error: null,
-                  hostName: payload.hostName || host.name || host.id,
-                },
-              }))
-            },
-            (error) => {
-              if (!alive.current || token !== generation.current) return
-              setRemotes((current) => ({
-                ...current,
-                [host.id]: {
-                  ...(current[host.id] || {}),
-                  status: 'error',
-                  connected: true,
-                  workspaces: [],
-                  error: toErrorView(error),
-                  hostName: host.name || host.id,
-                },
-              }))
-            },
-          )
-          // Read-only markers come from the mirror list the Host already exposes.
-          // Poll until the list settles (see `mirrorsSettled`) with a hard deadline:
-          // a fixed attempt budget missed the badge whenever replay was slower than
-          // it, and polling forever would leak requests on a host that never
-          // replays. A failed read clears the list, so no stale badge survives.
-          const loadMirrors = () => {
-            const startedAt = Date.now()
-            const step = () => {
-              api.getHostMirrors(host.id).then(
-                (payload) => {
-                  if (!alive.current || token !== generation.current) return
-                  setRemotes((current) => ({
-                    ...current,
-                    [host.id]: { ...(current[host.id] || {}), mirrors: payload.mirrors },
-                  }))
-                  if (mirrorsSettled(payload.mirrors)) return
-                  if (Date.now() - startedAt >= MIRROR_POLL_DEADLINE_MS) return
-                  setTimeout(() => {
-                    if (!alive.current || token !== generation.current) return
-                    step()
-                  }, MIRROR_POLL_INTERVAL_MS)
-                },
-                () => {
-                  // Never keep a stale list: an unreadable mirror list shows no badge.
-                  if (!alive.current || token !== generation.current) return
-                  setRemotes((current) => ({
-                    ...current,
-                    [host.id]: { ...(current[host.id] || {}), mirrors: [] },
-                  }))
-                },
-              )
-            }
-            step()
-          }
-          loadMirrors()
-        }
-      }, [])
-
-      const signature = (Array.isArray(hosts) ? hosts : [])
-        .map((host) => (host && host.id ? host.id : '') + ':' + (host && host.status ? host.status : ''))
-        .join('|')
-      useEffect(() => {
-        refresh()
-      }, [signature, refresh])
-
-      return { local, remotes, refresh }
-    }
-
-    /**
-     * Left rail of the remote panel: local workspaces on top, then one group
-     * per configured host. The rail is the panel's own surface; the app's
-     * `sidebar.workspaces` slot stays untouched (contract §1 note).
-     * @param {object} props - hosts, activeHostId, callbacks, test seams.
-     * @returns {object} aside element.
-     */
-    function WorkspaceRail(props) {
-      const t = translatorOf(props)
-      const hosts = Array.isArray(props.hosts) ? props.hosts : []
-      const [collapsed, setCollapsed] = useState(() =>
-        props.initialCollapsed === undefined ? readRailCollapsed() : props.initialCollapsed === true,
-      )
-      const data = useWorkspaceData(hosts, props.initialWorkspaceData)
-      const toggle = () => {
-        const next = !collapsed
-        setCollapsed(next)
-        writeRailCollapsed(next)
-      }
-      const refresh = () => data.refresh()
-      const workspaceTitle = (workspace) =>
-        typeof workspace.title === 'string' && workspace.title.length > 0
-          ? workspace.title
-          : typeof workspace.path === 'string' && workspace.path.length > 0
-            ? workspace.path
-            : String(workspace.id || '')
-      const sessionsLabel = (workspace) =>
-        t('workspaceRailSessions', { count: typeof workspace.sessionCount === 'number' ? workspace.sessionCount : 0 })
-      /** Read-only mirrors of one remote workspace (empty for local rows). */
-      const readOnlyMirrors = (workspace, kind, host) => {
-        if (kind !== 'remote' || !host) return []
-        const info = data.remotes[host.id]
-        const mirrors = Array.isArray(info && info.mirrors) ? info.mirrors : []
-        return mirrors.filter((mirror) => mirror && mirror.readOnly === true && mirror.workspaceId === workspace.id)
-      }
-      /**
-       * Visible read-only marker (design §10 P1): the rail row covering a
-       * replayed remote session says so, with the level and reason in its tooltip.
-       * Returns `null` when no mirror of the row is read-only, so a host whose
-       * history is unavailable never gets a misleading badge.
-       */
-      const readOnlyBadge = (workspace, kind, host) => {
-        const mirrors = readOnlyMirrors(workspace, kind, host)
-        if (mirrors.length === 0) return null
-        const first = mirrors[0]
-        const level = typeof first.level === 'string' ? first.level : ''
-        // `locale` is derived here rather than read from `props` directly: the rail's own
-        // `locale` binding was dropped as an unused local (it only served this badge), so
-        // resolving it at the point of use keeps the badge working without reintroducing a
-        // binding that only one call site needs.
-        const reason = resolveText(first.reason && first.reason.message, localeOf(props))
-        return h(
-          Badge,
-          {
-            tone: 'idle',
-            testId: 'mirror-readonly-badge',
-            title: t('mirrorReadOnlyTitle', { level, reason: reason || t('mirrorReadOnlyReasonDefault') }),
-          },
-          t('mirrorReadOnlyBadge'),
-        )
-      }
-      const workspaceRow = (workspace, kind, host) =>
-        h(
-          'button',
-          {
-            key: (host ? host.id + ':' : '') + String(workspace.id || workspaceTitle(workspace)),
-            type: 'button',
-            className: 'drg-rail-item',
-            'data-testid': kind === 'local' ? 'workspace-local-item' : 'workspace-remote-item',
-            'data-workspace-id': workspace.id,
-            'data-host-id': host ? host.id : undefined,
-            title: workspace.path || workspaceTitle(workspace),
-            onClick: () => {
-              if (kind === 'local') {
-                if (typeof props.onOpenLocalWorkspace === 'function') props.onOpenLocalWorkspace(workspace.id)
-              } else if (typeof props.onOpenHost === 'function') {
-                props.onOpenHost(host)
-              }
-            },
-          },
-          h('span', { className: 'drg-rail-item-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 14 })),
-          h('span', { className: 'drg-rail-item-title' }, workspaceTitle(workspace)),
-          workspace.isDefault === true ? h(Badge, { tone: 'idle' }, t('workspaceDefault')) : null,
-          readOnlyBadge(workspace, kind, host),
-          h('span', { className: 'drg-rail-item-meta' }, sessionsLabel(workspace)),
-        )
-
-      const retryButton = h('button', { type: 'button', className: 'drg-linkbtn', onClick: refresh }, t('retry'))
-
-      let localGroup
-      if (data.local.status === 'loading') {
-        localGroup = h(
-          'div',
-          { className: 'drg-rail-muted' },
-          h(Spinner, { size: 12 }),
-          h('span', null, t('workspaceRailLoading')),
-        )
-      } else if (data.local.status === 'error') {
-        localGroup = h(
-          'div',
-          { className: 'drg-rail-error', 'data-testid': 'workspace-rail-error' },
-          h('span', null, t('workspaceRailLocalError')),
-          retryButton,
-        )
-      } else if (data.local.workspaces.length === 0) {
-        localGroup = h('div', { className: 'drg-rail-muted' }, t('workspaceLocalEmpty'))
-      } else {
-        localGroup = h(
-          'div',
-          { className: 'drg-rail-items' },
-          data.local.workspaces.map((workspace) => workspaceRow(workspace, 'local', null)),
-        )
-      }
-
-      const renderRemoteGroup = (host) => {
-        const info = data.remotes[host.id] || {
-          status: host.status === 'connected' ? 'loading' : 'disconnected',
-          workspaces: [],
-          error: null,
-        }
-        let body
-        if (host.status !== 'connected') {
-          body = h(
-            'div',
-            { className: 'drg-rail-muted drg-rail-row' },
-            h('span', null, host.status === 'connecting' ? t('progress.default') : t('workspaceRailDisconnected')),
-            host.status === 'connecting'
-              ? null
-              : h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'drg-linkbtn',
-                    'data-testid': 'workspace-remote-connect',
-                    onClick: () => {
-                      if (typeof props.onConnectHost === 'function') props.onConnectHost(host)
-                    },
-                  },
-                  t('cardConnect'),
-                ),
-          )
-        } else if (info.status === 'loading') {
-          body = h(
-            'div',
-            { className: 'drg-rail-muted' },
-            h(Spinner, { size: 12 }),
-            h('span', null, t('workspaceRailLoading')),
-          )
-        } else if (info.status === 'error') {
-          body = h(
-            'div',
-            { className: 'drg-rail-error', 'data-testid': 'workspace-rail-error' },
-            h('span', null, t('workspaceRailRemoteError')),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'drg-linkbtn',
-                onClick: () => {
-                  if (typeof props.onDiagnoseHost === 'function') props.onDiagnoseHost(host)
-                },
-              },
-              t('diagnose'),
-            ),
-          )
-        } else if (Array.isArray(info.workspaces) && info.workspaces.length === 0) {
-          body = h('div', { className: 'drg-rail-muted' }, t('workspaceRemoteEmpty'))
-        } else {
-          body = h(
-            'div',
-            { className: 'drg-rail-items' },
-            info.workspaces.map((workspace) => workspaceRow(workspace, 'remote', host)),
-          )
-        }
-        return h(
-          'div',
-          {
-            key: host.id,
-            className: 'drg-rail-group',
-            'data-testid': 'workspace-remote-group',
-            'data-host-id': host.id,
-            'data-status': host.status,
-          },
-          h(
-            'div',
-            { className: 'drg-rail-group-head' },
-            h(StatusDot, { status: host.status, title: t(statusMeta(host.status || 'unconfigured').labelKey) }),
-            h('span', { className: 'drg-rail-group-title', title: host.name }, host.name || host.id),
-            h('span', { className: 'drg-rail-group-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 12 })),
-          ),
-          body,
-        )
-      }
-
-      return h(
-        'aside',
-        {
-          className: 'drg-rail',
-          'data-collapsed': collapsed ? 'true' : 'false',
-          'data-testid': 'workspace-rail',
-          'aria-label': t('workspaceRailTitle'),
-        },
-        h(
-          'div',
-          { className: 'drg-rail-head' },
-          collapsed ? null : h('span', { className: 'drg-rail-title' }, t('workspaceRailTitle')),
-          h(IconButton, {
-            icon: collapsed ? h(IconChevronRight) : h(IconChevronLeft),
-            label: collapsed ? t('workspaceRailToggleExpand') : t('workspaceRailToggleCollapse'),
-            testId: 'workspace-rail-toggle',
-            onClick: toggle,
-          }),
-          collapsed
-            ? null
-            : h(IconButton, {
-                icon: h(IconRefresh),
-                label: t('workspaceRailRefresh'),
-                testId: 'workspace-rail-refresh',
-                onClick: refresh,
-              }),
-        ),
-        collapsed
-          ? null
-          : h(
-              'div',
-              { className: 'drg-rail-body' },
-              h(
-                'div',
-                { className: 'drg-rail-group', 'data-testid': 'workspace-local-group' },
-                h(
-                  'div',
-                  { className: 'drg-rail-group-head' },
-                  h('span', { className: 'drg-rail-group-icon', 'aria-hidden': 'true' }, h(IconFolder, { size: 12 })),
-                  h('span', { className: 'drg-rail-group-title' }, t('workspaceLocalGroup')),
-                  h('span', { className: 'drg-rail-group-count' }, String(data.local.workspaces.length)),
-                ),
-                localGroup,
-              ),
-              hosts.length === 0
-                ? h(
-                    'div',
-                    { className: 'drg-rail-empty', 'data-testid': 'workspace-rail-empty' },
-                    h(RemoteIcon, { size: 20 }),
-                    h('p', null, t('workspaceRailEmpty')),
-                  )
-                : hosts.map(renderRemoteGroup),
-              h('p', { className: 'drg-rail-hint' }, t('workspaceRailHint')),
-            ),
-      )
-    }
-
-    /**
-     * The Settings → "Remote hosts" section: full host management (list, add,
-     * connect/disconnect, edit, delete, diagnostics, open remote UI) plus the
-     * plugin settings modal. Data comes from the same `/state` stream.
-     * @param {object} props - injected openPanel/panelStore/getLocaleId, slot `t`.
-     * @returns {object} section element.
-     */
     function SettingsSection(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -5456,10 +4755,11 @@ window.__ModuleLoader__.load({
         }
         performConnect(host, opts.password)
       }
-      const submitPassword = (password) => {
+      const submitPassword = (submitted) => {
         const pending = passwordPrompt
         if (!pending || !pending.host) return
-        const value = typeof password === 'string' ? password : ''
+        const value = submitted && typeof submitted.password === 'string' ? submitted.password : ''
+        const remember = submitted && submitted.remember === true
         if (value.trim() === '') {
           setPasswordPrompt({ ...pending, error: t('passwordPromptRequired') })
           return
@@ -5472,8 +4772,8 @@ window.__ModuleLoader__.load({
             ? api
                 .disconnect(host.id, false)
                 .catch(() => {})
-                .then(() => api.connect(host.id, { password: value }))
-            : api.connect(host.id, { password: value })
+                .then(() => api.connect(host.id, { password: value, rememberPassword: remember }))
+            : api.connect(host.id, { password: value, rememberPassword: remember })
         connect
           .then(
             () => {
@@ -5649,6 +4949,7 @@ window.__ModuleLoader__.load({
               host: passwordPrompt.host,
               busy: passwordPrompt.busy === true,
               error: passwordPrompt.error,
+              storageAvailable: passwordPrompt.host ? passwordPrompt.host.passwordStorageAvailable === true : false,
               onSubmit: submitPassword,
               onCancel: cancelPassword,
             })
@@ -5807,11 +5108,6 @@ window.__ModuleLoader__.load({
 .drg-connect-prompt { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 420px; padding: 32px 16px; color: var(--drg-label-2); }
 .drg-connect-prompt h2 { font-size: 16px; color: var(--drg-label); }
 .drg-connect-prompt-icon { color: var(--drg-label-3); }
-.drg-overlay-surface { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 460px; padding: 32px 16px; color: var(--drg-label-2); }
-.drg-overlay-surface-icon { color: var(--drg-label-3); }
-.drg-overlay-surface-title { font-size: 15px; font-weight: 600; color: var(--drg-label); }
-.drg-overlay-surface-status { font-size: 13px; color: var(--drg-label-2); }
-.drg-overlay-surface-hint { font-size: 12px; color: var(--drg-label-3); }
 
 .drg-progress { margin: auto; width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 24px 8px; }
 .drg-progress-head { display: flex; align-items: center; gap: 10px; }
@@ -5859,6 +5155,21 @@ window.__ModuleLoader__.load({
 .drg-input, .drg-select { width: 100%; padding: 7px 10px; border-radius: var(--drg-radius-sm); border: 1px solid var(--drg-border); background: var(--drg-surface); color: var(--drg-label); font: inherit; font-size: 13px; outline: none; }
 .drg-input:focus, .drg-select:focus { border-color: var(--dsw-alias-state-business-primary, #3b82f6); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #3b82f6) 22%, transparent); }
 .drg-input::placeholder { color: var(--drg-label-3); }
+/* The SSH-address input carries a <datalist> so aliases autocomplete while typing.
+   Chromium then paints a native picker arrow that does not match the host's field
+   chrome and duplicates the alias chips below, so the indicator is hidden. */
+.drg-input::-webkit-calendar-picker-indicator { display: none; opacity: 0; }
+/* Key-file picker: a scrollable list of folders (open on click) and files (pick on
+   click), with the current directory shown above it. */
+.drg-field-inline { display: flex; align-items: center; gap: 8px; }\n.drg-field-inline > :first-child { flex: 1; min-width: 0; }\n.drg-keyfile-path { margin: 4px 0 8px; font-size: 12px; color: var(--drg-label-3); word-break: break-all; }
+.drg-keyfile-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--drg-border); border-radius: var(--drg-radius-sm); }
+.drg-keyfile-row { display: flex; width: 100%; gap: 8px; padding: 7px 10px; border: 0; border-bottom: 1px solid var(--drg-border); background: transparent; color: var(--drg-label); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.drg-keyfile-row:last-child { border-bottom: 0; }
+.drg-keyfile-row:hover { background: color-mix(in srgb, var(--drg-primary, #3b82f6) 10%, transparent); }
+.drg-keyfile-row[data-kind='directory'] .drg-keyfile-name { font-weight: 600; }
+.drg-keyfile-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Sidebar-foot "remote" action: the persistent way back to a remote after the local
+   UI was restored. Wide it reads like the other footer rows; in the 56px rail only
 .drg-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
 .drg-check input { accent-color: var(--drg-primary); }
 .drg-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0 14px; }
@@ -5905,35 +5216,9 @@ window.__ModuleLoader__.load({
 .drg-divider { height: 1px; background: var(--drg-border-soft); margin: 8px 0; }
 
 /* main-panel layout + workspace rail */
-.drg-panel-layout { display: flex; flex: 1; min-height: 0; min-width: 0; }
 .drg-panel-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
-.drg-rail { display: flex; flex-direction: column; flex: none; width: 220px; min-height: 0; border-right: 1px solid var(--drg-border); background: var(--drg-surface); transition: width 120ms ease; }
-.drg-rail[data-collapsed="true"] { width: 44px; }
-.drg-rail-head { display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 12px; border-bottom: 1px solid var(--drg-border-soft); min-height: 42px; }
-.drg-rail[data-collapsed="true"] .drg-rail-head { padding: 6px; justify-content: center; }
-.drg-rail-title { flex: 1; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--drg-label-3); overflow: hidden; white-space: nowrap; }
-.drg-rail-body { flex: 1; min-height: 0; overflow: auto; padding: 8px 8px 12px; display: flex; flex-direction: column; gap: 10px; }
-.drg-rail-group { display: flex; flex-direction: column; gap: 2px; }
-.drg-rail-group-head { display: flex; align-items: center; gap: 5px; padding: 4px 6px; color: var(--drg-label-3); font-size: 11px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; }
-.drg-rail-group-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drg-rail-group-icon { flex: none; display: inline-flex; }
-.drg-rail-group-count { flex: none; font-size: 10px; padding: 0 5px; border-radius: 999px; background: var(--drg-surface-2); color: var(--drg-label-3); }
-.drg-rail-items { display: flex; flex-direction: column; gap: 1px; }
-.drg-rail-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; border: none; border-radius: var(--drg-radius-sm); background: transparent; color: var(--drg-label-2); text-align: left; cursor: pointer; font-size: 13px; }
-.drg-rail-item:hover { background: var(--drg-hover); color: var(--drg-label); }
-.drg-rail-item-icon { flex: none; display: inline-flex; color: var(--drg-label-3); }
-.drg-rail-item-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drg-rail-item-meta { flex: none; font-size: 10px; color: var(--drg-label-3); }
-.drg-rail-item .drg-badge { flex: none; font-size: 10px; padding: 0 5px; line-height: 16px; }
-.drg-rail-muted { display: flex; align-items: center; gap: 6px; padding: 4px 8px; color: var(--drg-label-3); font-size: 12px; }
-.drg-rail-row { justify-content: space-between; }
-.drg-rail-error { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; color: var(--dsw-alias-state-error-primary, #d64545); font-size: 12px; }
-.drg-rail-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 16px 8px; text-align: center; color: var(--drg-label-3); border: 1px dashed var(--drg-border); border-radius: var(--drg-radius-sm); }
-.drg-rail-empty p { font-size: 12px; line-height: 1.5; }
-.drg-rail-hint { padding: 4px 6px 0; color: var(--drg-label-3); font-size: 11px; line-height: 1.5; }
 .drg-settings-remote { display: flex; flex-direction: column; height: auto; min-height: 0; background: transparent; }
 .drg-settings-remote .drg-page { padding: 0; overflow: visible; }
-@media (max-width: 900px) { .drg-rail { width: 190px; } }
 
 .drg-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: min(560px, calc(100vw - 32px)); padding: 9px 16px; border-radius: var(--drg-radius-sm); background: var(--dsw-alias-toast-bg, CanvasText); color: var(--dsw-alias-toast-label, Canvas); font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
 .drg-toast[data-tone="error"] { background: var(--dsw-alias-state-error-primary, #d64545); color: #fff; }
@@ -6044,24 +5329,40 @@ window.__ModuleLoader__.load({
           SettingsSection,
         ),
       )
+
+      // One sidebar row opens host management: the panel lists hosts, switches the
+      // takeover on with "Open", and keeps add/edit/diagnose/delete in the same place.
+      // Selecting any other sidebar item leaves the remote, so the sidebar is still
+      // the only switcher — there is no floating control anywhere.
+      ctx.slots.inject('sidebar.panellist', () =>
+        ctx.slots.register(
+          {
+            name: 'sidebar.panellist',
+            id: PANEL_ID,
+            order: 20,
+            label: () => t('settingsNav'),
+            locale: NS,
+            inject: sharedInject,
+          },
+          RemotePanelIcon,
+        ),
+      )
     }
 
     /** Components exported for tests and host-side tooling. */
     const components = {
       RemoteIcon,
+      RemotePanelIcon,
       MainPanel,
-      WorkspaceRail,
       SettingsSection,
       HostListView,
       HostCard,
       EmptyHosts,
-      RemoteViewport,
-      ViewportToolbar,
-      OverlaySurface,
       ConnectProgress,
       ErrorCard,
       FingerprintCard,
       PasswordPrompt,
+      KeyFilePicker,
       WizardDialog,
       DiagnoseDrawer,
       SettingsModal,

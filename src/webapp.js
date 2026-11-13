@@ -336,7 +336,7 @@ export async function waitForRemoteUi(ssh, port, options = {}) {
 /**
  * Exchange the launch token for the authority-bound signing cookie through the
  * local tunnel, then fetch the clean root with that cookie. This proves the
- * loopback same-site path the iframe will use (design §7.0 / §9.2).
+ * loopback same-site path the guest will use (design §7.0 / §9.2).
  * @param {number} localPort
  * @param {string} token
  * @param {{ timeoutMs?: number, path?: string }} [options]

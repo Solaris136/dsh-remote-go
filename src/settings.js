@@ -3,13 +3,20 @@
  * fields fall back to defaults instead of failing activation (a malformed saved
  * setting must never brick the plugin).
  */
-import { DEFAULT_IDLE_MINUTES, DEFAULT_NODE_VERSION, DEFAULT_REMOTE_DIR, SSH_READY_TIMEOUT_MS } from './constants.js'
+import {
+  DEFAULT_IDLE_MINUTES,
+  DEFAULT_KEY_PATH,
+  DEFAULT_NODE_VERSION,
+  DEFAULT_REMOTE_DIR,
+  SSH_READY_TIMEOUT_MS,
+} from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
 
 /**
  * @typedef {{
  *   defaultPort: number,
- *   defaultAuth: 'agent' | 'key' | 'password',
+ *   defaultAuth: 'key' | 'password',
+ *   defaultKeyPath: string,
  *   connectTimeoutSec: number,
  *   autoReconnect: { enabled: boolean, maxAttempts: number, baseDelayMs: number },
  *   hostKeyPolicy: 'first-use' | 'strict',
@@ -18,7 +25,6 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   mirrorMaxSessions: number,
  *   mirrorMaxEvents: number,
  *   mirrorHistory: boolean,
- *   windowMode: 'panel' | 'overlay',
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
  *   bootstrap: { targetVersion: string, mode: 'auto' | 'reuse' | 'npx' | 'isolated', remoteDir: string, nodeVersion: string },
@@ -29,7 +35,10 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
 export function defaultSettings() {
   return {
     defaultPort: 22,
-    defaultAuth: 'agent',
+    // Only a key file (or a one-time password) is supported: there is no SSH
+    // agent path any more, so the default is the key file the wizard pre-fills.
+    defaultAuth: 'key',
+    defaultKeyPath: DEFAULT_KEY_PATH,
     connectTimeoutSec: Math.round(SSH_READY_TIMEOUT_MS / 1000),
     autoReconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 800 },
     hostKeyPolicy: 'first-use',
@@ -50,7 +59,6 @@ export function defaultSettings() {
     // L3 polled follower (design §6.4). **Off by default**: with it false the plugin behaves
     // exactly as it did before the follower existed, so a regression cannot break anyone.
     mirrorStream: false,
-    windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
     bootstrap: {
@@ -96,7 +104,14 @@ export function sanitizeSettings(raw) {
       : defaults.bootstrap.targetVersion
   return {
     defaultPort: numberIn(input.defaultPort, 1, 65535, defaults.defaultPort),
-    defaultAuth: oneOf(input.defaultAuth, ['agent', 'key', 'password'], defaults.defaultAuth),
+    // The retired "agent" choice migrates to key-file auth instead of silently
+    // resetting, because key files are the only non-interactive option left.
+    defaultAuth:
+      input.defaultAuth === 'agent' ? 'key' : oneOf(input.defaultAuth, ['key', 'password'], defaults.defaultAuth),
+    defaultKeyPath:
+      typeof input.defaultKeyPath === 'string' && input.defaultKeyPath.trim() !== ''
+        ? input.defaultKeyPath.trim()
+        : defaults.defaultKeyPath,
     connectTimeoutSec: numberIn(input.connectTimeoutSec, 5, 300, defaults.connectTimeoutSec),
     autoReconnect: {
       enabled: boolean(autoReconnect.enabled, defaults.autoReconnect.enabled),
@@ -119,10 +134,6 @@ export function sanitizeSettings(raw) {
         : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
     mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
     mirrorStream: boolean(input.mirrorStream, defaults.mirrorStream),
-    // The removed 'external' (local browser window) mode migrates to the
-    // window takeover, which covers the same intent inside the desktop app.
-    windowMode:
-      input.windowMode === 'external' ? 'overlay' : oneOf(input.windowMode, ['panel', 'overlay'], defaults.windowMode),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
     bootstrap: {
@@ -159,12 +170,13 @@ export function sanitizeHostEntry(raw, options = {}) {
   const username = userInput || existing?.username || destination.user || ''
   const authType =
     raw.auth && isPlainObject(raw.auth)
-      ? oneOf(raw.auth.type, ['agent', 'key', 'password'], settings.defaultAuth)
+      ? raw.auth.type === 'agent'
+        ? 'key'
+        : oneOf(raw.auth.type, ['key', 'password'], settings.defaultAuth)
       : (existing?.auth?.type ?? settings.defaultAuth)
-  const keyPath =
-    raw.auth && isPlainObject(raw.auth) && typeof raw.auth.keyPath === 'string'
-      ? raw.auth.keyPath.trim()
-      : (existing?.auth?.keyPath ?? '')
+  const keyPathInput =
+    raw.auth && isPlainObject(raw.auth) && typeof raw.auth.keyPath === 'string' ? raw.auth.keyPath.trim() : ''
+  const keyPath = keyPathInput || existing?.auth?.keyPath || (authType === 'key' ? settings.defaultKeyPath : '')
   const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {}
   const bootstrapExisting = existing?.bootstrap ?? {}
   const keepAlive = oneOf(raw.keepAlive, ['keep', 'stop', 'idle'], existing?.keepAlive ?? 'keep')
