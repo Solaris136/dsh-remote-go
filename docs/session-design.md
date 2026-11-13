@@ -422,7 +422,7 @@ epoch 检查、切片与 JSON 组帧从未跑过；被验证的是**模拟端对
 | 阶段 | 交付 | 验收标准 |
 |---|---|---|
 | P0 ✅ | 目录镜像（L1）+ 本地模拟远端主机 | 用 `e2e/sim` 的模拟主机跑通：侧边栏出现远端会话、状态正确；不连真实主机也能验 |
-| P1 ✅（宿主限制：标识在面板工作区栏） | 历史回放（L2）+ 可见只读标识 | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 在 Host/契约层提供（`test/unit/history.test.js` + `test/integration/history.e2e.js`）。**可见标识已交付**：插件面板的工作区栏在对应远端工作区行渲染「只读镜像 / Read-only mirror」徽标（`data-testid="mirror-readonly-badge"`），tooltip 带级别与原因，中英双语并有两个 locale 的断言；真实 `dsh web` + 含历史的模拟远端在 `DSH_E2E_LANG=en-US` 与 `zh-CN` 下都断言了它。**仍是宿主限制**：DSH 未向插件暴露「会话头/标题」slot（插件只能注册 `main` 与 `settings.section`），所以 Conversation UI 内部仍没有徽标，见 §11 #8 |
+| P1 ✅（仅数据层；无可见标识） | 历史回放（L2）+ 只读标识 | 远端会话日志经 SSH 读入 → 本地镜像会话里可读；`cursor` 持久化、重复同步不重复消息、缺口按 §6 重置重拉；`readOnly` 与 `mirror/read-only` 在 Host/契约层提供（`test/unit/history.test.js` + `test/integration/history.e2e.js`）。**可见标识没有交付**：曾经渲染徽标的面板工作区栏已整体移除，DSH 也未向插件暴露「会话头/标题」slot（插件只能注册 `main`、`settings.section` 与 `sidebar.panellist`），因此侧边栏工作区行与 Conversation UI 内部都没有只读标记，见 §11 #8 |
 | P2 🟢 | 事件流（L3 第一阶段） | **已落地，默认关闭**（`mirrorStream`）。轮询跟随：远端助手在远端侧拒绝过期 epoch，本地按偏移取帧、复用 L2 的 `planHistoryWindow` 落库，`cursor` 是唯一持久真相、`offset` 只存内存且仅在持久化 cursor 前进后才推进。端到端验证见 §6.4 与 `test/integration/stream.e2e.js`。**仍未做**：真正的推送通道（`ws-mux`）、L3 输入转发、审批桥 |
 | P3 | 审批桥 + 归档语义 | 远端正问 → 本地弹审批；本地归档不触碰远端 |
 
@@ -444,14 +444,12 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
    应补一个夹具，并把发现策略收敛到确定的一种。
 7. 远端日志的**增量读取**：L2 每次都读全量日志再用 `cursor` 过滤。日志很大时这是带宽浪费（虽有 `maxBytes` 上限），
    后续应按字节偏移或尾部读取来优化，并把 `cursor` 与远端日志的物理位置关联起来。
-8. ~~**P1 的「只读标识清晰」只完成了数据层**~~ **已解决（L2 收尾）**：客户端在插件面板的工作区栏渲染
-   「只读镜像 / Read-only mirror」徽标（`data-testid="mirror-readonly-badge"`），tooltip 写明级别与原因
-   （L2 回放 → 默认原因文案；有 `reason.code` 时用其双语 `message`），只在 `readOnly === true` 的镜像上出现；
-   数据来自已有的 `GET /hosts/:id/mirrors`，没有第二套数据源。真实 `dsh web` + 含历史的模拟远端在 `en-US`
-   与 `zh-CN` 下都断言了徽标文本与 tooltip。
-   **仍未做的部分**：徽标不在 DSH 的 Conversation UI 内——宿主未向插件暴露会话头/标题 slot，需要宿主先提供。
-   **粒度注意**：徽标按 `mirror.workspaceId === workspace.id` 过滤，所以是**按工作区行**的类别标签而非按会话；
-   当前 `readOnly` 是主机级统一值，看不出差别，但 **L3 部分会话可输入后必须改为按会话**。
+8. ~~**P1 的「只读标识清晰」只完成了数据层**~~ **仍停在数据层**：曾经在插件面板工作区栏渲染的
+   `mirror-readonly-badge` 已随该栏一起移除，现在没有可见的只读徽标；`readOnly` 与 `mirror/read-only`
+   仍在 Host/契约层提供（数据来自 `GET /hosts/:id/mirrors`，没有第二套数据源）。要恢复可见标识，
+   需要宿主先提供可注入的 slot（会话头/标题或工作区行）。
+   **粒度注意**：只读判定数据本身是主机级的（`mirror.readOnly` 由该主机的回放状态决定），不是逐会话；
+   将来 **L3 允许部分会话可输入后必须改为按会话**——否则整个主机都会被标成只读。
    （根因备注：在徽标可被渲染之前，还发现并修复了一个真实缺陷——`sessions.create` 对 `isSeeded` 会话强制要求
    显式 `seed` 与 `inheritedEventCount`，而适配器只在 `seed` 非空时才传，导致**每个镜像会话创建都失败**、L2
    在真实壳里从未回放过。见 §4.1。）

@@ -111,7 +111,7 @@ interface SettingsView {
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
   saveTokens: boolean            // 默认 false（token 仅内存）
-  /** v1.1：把远端镜像会话注册到本地侧边栏（默认 false；接管整窗后一般不需要） */
+  /** v1.1：把远端镜像会话注册到本地侧边栏（默认 false；接管主内容区后一般不需要） */
   mirrorToSidebar: boolean
   /** v1.1：每次同步最多新建多少个镜像会话（默认 200，0 = 不限；只限制创建） */
   mirrorMaxSessions: number
@@ -305,9 +305,9 @@ data: {}
 }
 ```
 
-> 说明：面板内不再有任何工作区列表——切换由本地侧边栏完成（`sidebar.panellist` 一行「远程主机」进入主机管理页，`main` 面板承载接管）。
+> 说明：面板内不再有任何工作区列表——切换由本地侧边栏完成（`sidebar.panellist` 一行「远程主机」进入主机管理页，`main` 面板只承载这个管理页；远端界面由桌面端 guest 铺在主内容区，不在面板里）。
 >
-> v1.1 补充：宿主另有一个可选的 `workspaceRegistry` 服务（`create`/`resolveByPath`/`list`/`delete`），插件**可以**通过它在本地侧边栏注册工作区。自该能力接入后，连接主机会额外注册一个 `Remote: <主机名>` 工作区承载镜像会话；面板内的工作区栏与它**并存**，不是替代关系。见 `docs/session-design.md` §4.3。
+> v1.1 补充：宿主另有一个可选的 `workspaceRegistry` 服务（`create`/`resolveByPath`/`list`/`delete`），插件**可以**通过它在本地侧边栏注册工作区。自该能力接入后，连接主机会额外注册一个 `Remote: <主机名>` 工作区承载镜像会话；面板内的工作区栏后来整体移除，侧边栏工作区是唯一位置。见 `docs/session-design.md` §4.3。
 
 ### `POST /hosts/:id/diagnose`
 执行完整检查表（可能需要数秒）。
@@ -538,13 +538,9 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
   游标停在缺口前的最后一个连续事件——不会跳过缺口，也不会永远重试同一段不可达区间。
 - **只读标识**：回放过历史的镜像会话在 `MirrorView` 上带 `readOnly: true`，并在会话里写一条一次性的
   `mirror/read-only` 非 surface 事件（带 `capabilities: { input:false, stream:false, approve:false }`），
-  客户端据此标注「只读」；重复同步不会重复写入该通知。客户端的可见标识在**插件面板的工作区栏**：远端工作区行
-  渲染 `只读镜像` / `Read-only mirror` 徽标（`data-testid="mirror-readonly-badge"`），tooltip 为
-  `<级别> 只读镜像：<原因>`（无 `reason` 时用「远端历史以只读方式回放…」的默认文案），只在 `readOnly === true`
-  时出现。徽标以**工作区行**为粒度（`mirror.workspaceId === workspace.id`）：同一工作区里只要有只读镜像就标注，
-  所以它是这一组镜像的类目标签，而不是逐会话标签。镜像列表读取失败时**不显示**徽标（首次读取与重新读取都一样，
-  失败会清空缓存列表，避免残留旧徽标）。DSH 尚未向插件暴露会话头 slot，因此 Conversation UI 内部没有该徽标
-  （见 session-design.md §10 P1 / §11 #8）。
+  客户端据此把镜像当作只读；重复同步不会重复写入该通知。**当前没有可见徽标**：曾经在面板工作区栏渲染的
+  `mirror-readonly-badge` 已随该栏一起移除，宿主也没有向插件暴露会话头/标题 slot，所以侧边栏工作区行与
+  Conversation UI 内部都没有只读标记（见 session-design.md §10 P1 / §11 #8）。
 - **保留上限**：`mirrorMaxEvents`（默认 200，`0` = 不限；默认值在 `src/settings.js:46`，生效值在
   `src/service.js:740`）限制单次回放的事件窗口。超限时保留**最新**的 N 条并在会话里先写一条
   `mirror/history-folded`（非 surface 事件，带真实的 `folded` / `from` / `to` / `retained`，

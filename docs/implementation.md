@@ -174,11 +174,10 @@ connect(id)
 | HTTP | `api` | 鉴权（头/Origin/cross-site）、全部端点、SSE 首帧、错误码 |
 | 浏览器 | `client.test.js`（VM + react-dom/server） | 模块格式、slot 注册、双语字典对齐、安全不变量、关键组件渲染、data-testid 覆盖、密码弹窗 |
 | 模拟远端集成 | `test/integration/*.e2e.js`（sim） | 模拟远端 → SSH → 探针/隧道、L1 目录镜像、L2 历史回放与缺口恢复、租约围栏（两个客户端只有一个能写） |
-| 浏览器集成 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 真实桌面端 → 设置页与面板 → 浅色/深色对比度、只读徽标断言 |
+| 浏览器集成 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 真实桌面端 → 设置页与面板 → 浅色/深色对比度 |
 | 结构性守卫 | `swallow-guard` / `predicate-guard` / `e2e-child-process` | 吞错扫描（默认违规）、等待谓词覆盖断言、`windowsHide` 全覆盖 |
-| 真实端到端 | 插件本地 API | 真实 SSH → 真实远端 DSH → 隧道 → `/open` 回环 URL + `versionParity=same`；浏览器侧仅保留设置页与打包产物验收 |
 
-E2E 判定点：Host 入口在 client-module 图中且 bundle 可读；连接达到 `connected` 且 `versionParity=same`；`/open` 返回 loopback URL 且该 URL 经隧道返回 200；清理停止远端并删除主机。
+E2E 判定点：tarball 装进干净 profile 后 Host API 可访问、client-module 行从安装目录解析，报告写入 `e2e/artifacts/publish-e2e-report.json`。
 
 ## 6. 设计取舍记录
 

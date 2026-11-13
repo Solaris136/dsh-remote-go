@@ -127,8 +127,8 @@ async function main() {
       en: 'dsh remote go',
     },
     description: {
-      zh: '通过 SSH 在本地 DSH 的全局面板里整页使用远端 DSH：主机清单、接入向导、连接诊断、远端运行时自举与版本一致。',
-      en: 'Open a remote DSH inside a local full-page panel over SSH, with host list, connection wizard, diagnostics, remote runtime bootstrap and exact version parity.',
+      zh: '通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端接管主内容区，侧边栏保留作切换器；含主机清单、接入向导、连接诊断、远端运行时自举与版本一致。',
+      en: 'Use a remote DSH over SSH inside the local DSH: the desktop client hands it the main content area while the sidebar stays as the switcher, with host list, connection wizard, diagnostics, remote runtime bootstrap and exact version parity.',
     },
     author: typeof pkg.author === 'string' ? pkg.author : (pkg.author?.name ?? 'Solaris136'),
     homepage: pkg.homepage,
