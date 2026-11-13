@@ -118,7 +118,7 @@ interface SettingsView {
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
   saveTokens: boolean            // 默认 false（token 仅内存）
-  /** v1.1：把远端镜像会话注册到本地侧边栏（默认 false；接管整窗后一般不需要） */
+  /** v1.1：把远端镜像会话注册到本地侧边栏（已无界面开关；字段保留用于旧配置兼容） */
   mirrorToSidebar: boolean
   /** v1.1：每次同步最多新建多少个镜像会话（默认 200，0 = 不限；只限制创建） */
   mirrorMaxSessions: number
