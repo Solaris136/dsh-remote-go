@@ -34,7 +34,7 @@
 - [ ] 没有提交凭据、token、私钥或含具体主机信息的 E2E 产物（`e2e/remote/evidence` 等）
 - [ ] 没有新增运行时依赖（`dependencies` 保持为空；新工具只能进 `devDependencies`）
 - [ ] 没有把用户输入拼接进 shell 命令（一律通过参数或 `env:` 传递）
-- [ ] 面板 iframe 的 URL 校验逻辑未被削弱（只允许本机回环地址）
+- [ ] 回环 URL 校验逻辑未被削弱（只允许本机回环地址才交给桌面端 guest）
 
 ## 文档与发布
 

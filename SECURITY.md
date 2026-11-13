@@ -59,7 +59,7 @@
 5. **远端自举命令注入**：白名单模板之外的命令拼接、版本号/路径/架构等参数注入、Node 下载包的 SHA-256 校验被跳过。
 6. **本地 HTTP API 的 CSRF / Origin 校验**：`x-dsh-remote-go` 请求头、同源 `Origin`、`sec-fetch-site` 栅栏与 `/events` 的
    EventSource 例外处理被绕过，导致任意站点可驱动本地 API。
-7. **iframe URL 校验**：面板只接受 `http://127.0.0.1:<port>` 的 URL；绕过该校验导致任意 URL 被嵌入或令牌被带出。
+7. **回环 URL 校验**：`/open` 返回的 URL 必须是 `http://127.0.0.1:<port>` 才交给桌面端 guest；绕过该校验会让任意地址被加载或令牌被带出。
 8. **诊断/日志脱敏绕过**：`src/redact.js` 的脱敏被绕过，导致「一键复制诊断」或导出的日志泄露 token、密码、私钥或家目录。
 
 ### 不在范围内

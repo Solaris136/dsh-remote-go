@@ -7,6 +7,8 @@
  * with fakes (no real SSH, no timers).
  */
 import { EventEmitter } from 'node:events'
+import path from 'node:path'
+import { homedir } from 'node:os'
 import {
   DEFAULT_IDLE_MINUTES,
   REMOTE_START_TIMEOUT_MS,
@@ -80,6 +82,7 @@ import {
 } from './mirror-stream.js'
 import { mergeDescriptorDeltas, withMirrorQueue, withMirrorWriter } from './mirror-writer.js'
 import { readLocalWorkspaces, readRemoteWorkspaces } from './workspaces.js'
+import { listKeyFiles as listKeyFilesInHome } from './key-files.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
 export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
@@ -174,6 +177,9 @@ export class RemoteGoService extends EventEmitter {
     // Optional: registers one sidebar workspace per host so the mirrored local
     // sessions are grouped where DSH's sidebar actually lists them.
     this.workspaceAdapter = options.workspaceAdapter ?? null
+    // Optional: keeps a remembered SSH password in DSH's credential store so it
+    // never reaches hosts.json. Absent ⇒ passwords stay in memory for one session.
+    this.secrets = options.secrets ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     // Log verbosity override: set it to `debug` to see the §6.4 poll trace in full. Unset means the
     // configured `logLevel` decides.
@@ -347,7 +353,12 @@ export class RemoteGoService extends EventEmitter {
       address: entry.address,
       addressMasked: maskAddress(entry),
       /** Never the secret itself; lets the Client ask for a one-time password. */
-      authType: entry.auth?.type ?? 'agent',
+      authType: entry.auth?.type ?? 'key',
+      /** Whether a remembered password exists in the credential store (never the value). */
+      passwordSaved:
+        entry.auth?.type === 'password' ? runtime.passwordSaved === true || runtime.password != null : false,
+      /** Whether this composition can persist a password at all. */
+      passwordStorageAvailable: this.secrets ? this.secrets.available() === true : false,
       jumpHost: entry.jumpHost ?? null,
       status: runtime.status,
       phase: runtime.phase,
@@ -459,6 +470,21 @@ export class RemoteGoService extends EventEmitter {
     const settings = await this.store.saveSettings(patch)
     this.#emitState()
     return settings
+  }
+
+  /**
+   * Browse directories inside the user's home so the client can pick a private-key
+   * file instead of typing an absolute path. Read-only and home-confined.
+   * @param {string} [dir]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async listKeyFiles(dir) {
+    // The picker is rooted at the OS user home, not DSH_HOME: private keys live in
+    // `~/.ssh` of the account, while this service's `home` is the DSH state root.
+    const userHome = homedir()
+    const listing = await listKeyFilesInHome({ home: userHome, dir: typeof dir === 'string' ? dir : '' })
+    const settings = this.store.getSettings()
+    return { ...listing, defaultKeyPath: settings.defaultKeyPath, defaultDir: path.join(userHome, '.ssh') }
   }
 
   /**
@@ -1523,7 +1549,7 @@ export class RemoteGoService extends EventEmitter {
    * Start the connect pipeline. Returns immediately; progress travels on the
    * `state` event (see docs/api.md /events).
    * @param {string} id
-   * @param {{ password?: string, rememberFingerprint?: boolean, overrideVersion?: boolean }} [options]
+   * @param {{ password?: string, rememberPassword?: boolean, rememberFingerprint?: boolean, overrideVersion?: boolean }} [options]
    */
   async connect(id, options = {}) {
     await this.init()
@@ -1532,6 +1558,11 @@ export class RemoteGoService extends EventEmitter {
     if (runtime.status === 'connected' && runtime.ssh?.connected)
       return { accepted: false, reason: 'already-connected' }
     runtime.password = options.password ?? runtime.password
+    // A password the user asked to remember is written to the credential store the
+    // moment it is known, so a failed first attempt still leaves it available.
+    if (options.rememberPassword === true && typeof runtime.password === 'string' && runtime.password !== '') {
+      runtime.savePassword = true
+    }
     runtime.rememberFingerprint = options.rememberFingerprint !== false
     runtime.overrideVersion = options.overrideVersion === true
     runtime.desired = 'connected'
@@ -1540,6 +1571,41 @@ export class RemoteGoService extends EventEmitter {
       runtime.connectPromise = null
     })
     return { accepted: true }
+  }
+
+  /**
+   * Store or forget the remembered SSH password for one host. Returns whether the
+   * credential store accepted it (`available:false` means nothing can be persisted).
+   * @param {string} id
+   * @param {{ password?: string, clear?: boolean }} [options]
+   */
+  async saveHostPassword(id, options = {}) {
+    await this.init()
+    const runtime = this.#runtime(id)
+    if (!this.secrets) return { available: false, saved: false }
+    const available = this.secrets.available() === true
+    if (options.clear === true) {
+      await this.secrets.remove(id)
+      runtime.passwordSaved = false
+      runtime.password = null
+      this.#set(runtime, {})
+      return { available, saved: false }
+    }
+    const password = typeof options.password === 'string' ? options.password : ''
+    if (password === '') {
+      throw errors.invalidInput('password', { zh: '密码不能为空。', en: 'The password must not be empty.' })
+    }
+    const saved = await this.secrets.set(id, password)
+    runtime.password = password
+    runtime.passwordSaved = saved
+    this.#set(runtime, {})
+    return { available, saved }
+  }
+
+  /** @returns {Promise<boolean>} whether a remembered password exists for the host. */
+  async hasSavedPassword(id) {
+    if (!this.secrets) return false
+    return (await this.secrets.get(id)) !== null
   }
 
   /** @param {string} id @param {{ stopRemote?: boolean }} [options] */
@@ -1608,7 +1674,7 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
-   * Open info for the iframe: a loopback URL carrying the one-shot launch token.
+   * Open info for the guest: a loopback URL carrying the one-shot launch token.
    * The token stays in memory (design §9.3).
    * @param {string} id
    */
@@ -1638,6 +1704,15 @@ export class RemoteGoService extends EventEmitter {
     let remoteStarted = false
     try {
       const target = await this.#resolveTargetForRuntime(runtime)
+      // A password-auth host may have one remembered: load it before the transport
+      // is opened, so reconnect and background retries work without a prompt.
+      if (runtime.entry.auth?.type === 'password' && !runtime.password && this.secrets) {
+        const remembered = await this.secrets.get(runtime.id)
+        if (remembered) {
+          runtime.password = remembered
+          runtime.passwordSaved = true
+        }
+      }
       this.#phase(runtime, 'ssh', 'ssh-connecting', { host: runtime.entry.name })
       await this.#openTransport(runtime, target)
       this.#log(
@@ -1759,16 +1834,17 @@ export class RemoteGoService extends EventEmitter {
           en: `The tunnel exchanged the token but the remote UI answered HTTP ${exchange.status} (first ${exchange.firstStatus}).`,
         })
       }
-      if (exchange.frameBlocked) {
-        runtime.warning = {
-          zh: `远端页面带有禁止嵌入的响应头（X-Frame-Options=${exchange.xFrameOptions ?? '-'}），请使用「在新窗口打开」。`,
-          en: `The remote page blocks embedding (X-Frame-Options=${exchange.xFrameOptions ?? '-'}); use "Open in new window".`,
-        }
-      }
+      // X-Frame-Options / CSP no longer matter: the remote UI is rendered by the
+      // desktop guest, not embedded in a frame, so a page that refuses framing is
+      // still a perfectly usable remote host.
       runtime.remote.uiReady = true
       await this.store.patchHost(runtime.id, { lastOpenedAt: nowIso() })
       runtime.entry = this.store.getHost(runtime.id) ?? runtime.entry
       if (this.store.getSettings().saveTokens) await this.store.saveToken(runtime.id, webInfo.token)
+      // Remember the password now that it is proven, if the user asked for that.
+      if (runtime.savePassword === true && typeof runtime.password === 'string' && this.secrets) {
+        runtime.passwordSaved = await this.secrets.set(runtime.id, runtime.password)
+      }
       runtime.status = 'connected'
       runtime.phase = 'ready'
       runtime.progress = { code: 'ready' }
@@ -1862,8 +1938,11 @@ export class RemoteGoService extends EventEmitter {
       host: resolved.host,
       port: resolved.port ?? 22,
       username: resolved.username ?? resolved.user ?? null,
+      // The key path is expanded against the *user* home (`~/.ssh/...`), never
+      // against DSH_HOME, so the SSH layer needs to know which one that is.
+      home: this.userHome(),
       auth: {
-        type: runtime.entry.auth?.type ?? 'agent',
+        type: runtime.entry.auth?.type ?? 'key',
         keyPath: runtime.entry.auth?.keyPath ?? null,
         password: runtime.password ?? null,
       },
@@ -2522,17 +2601,12 @@ export class RemoteGoService extends EventEmitter {
     push(
       'remote-ui',
       { zh: '远端界面可达性', en: 'Remote UI reachability' },
-      runtime.exchange?.ok ? (runtime.exchange.frameBlocked ? 'fail' : 'pass') : sshLive ? 'fail' : 'unknown',
+      runtime.exchange?.ok ? 'pass' : sshLive ? 'fail' : 'unknown',
       runtime.exchange?.ok
-        ? runtime.exchange.frameBlocked
-          ? {
-              zh: `可以打开，但禁止 iframe 嵌入（X-Frame-Options: ${runtime.exchange.xFrameOptions ?? '未知'}）。`,
-              en: `Opens, but iframe embedding is blocked (X-Frame-Options: ${runtime.exchange.xFrameOptions ?? 'unknown'}).`,
-            }
-          : {
-              zh: `页面标题：${runtime.exchange.title ?? '（无）'}`,
-              en: `Page title: ${runtime.exchange.title ?? '(none)'}`,
-            }
+        ? {
+            zh: `页面标题：${runtime.exchange.title ?? '（无）'}`,
+            en: `Page title: ${runtime.exchange.title ?? '(none)'}`,
+          }
         : { zh: '尚未完成远端界面的鉴权握手。', en: 'The remote UI authentication handshake has not completed.' },
     )
 

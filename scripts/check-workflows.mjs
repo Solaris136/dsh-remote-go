@@ -17,7 +17,6 @@ import process from 'node:process'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const files = [
   '.github/workflows/ci.yml',
-  '.github/workflows/e2e.yml',
   '.github/workflows/codeql.yml',
   '.github/workflows/release.yml',
   '.github/workflows/acceptance.yml',

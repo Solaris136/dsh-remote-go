@@ -211,6 +211,12 @@ export function createApi(options) {
         sendJson(res, 200, { ok: true, ...(await service.discoverSshAliases()) })
         return
       }
+      // Read-only directory browsing so the client can pick a private-key file
+      // instead of typing an absolute path (contract: key-file picker).
+      if (method === 'GET' && path === '/keyfile/list') {
+        sendJson(res, 200, { ok: true, ...(await service.listKeyFiles(url.searchParams.get('path') ?? '')) })
+        return
+      }
       if (method === 'GET' && path === '/local/workspaces') {
         sendJson(res, 200, { ok: true, ...(await service.listLocalWorkspaces()) })
         return
@@ -271,8 +277,20 @@ export function createApi(options) {
           const body = await readJson(req)
           const result = await service.connect(id, {
             password: typeof body.password === 'string' ? body.password : undefined,
+            rememberPassword: body.rememberPassword === true,
             rememberFingerprint: body.rememberFingerprint !== false,
             overrideVersion: body.overrideVersion === true,
+          })
+          sendJson(res, 200, { ok: true, ...result })
+          return
+        }
+        // Remember (or forget) the SSH password in the credential store. The value
+        // never enters hosts.json; `available:false` means nothing can be persisted.
+        if (method === 'POST' && action === 'password') {
+          const body = await readJson(req)
+          const result = await service.saveHostPassword(id, {
+            password: typeof body.password === 'string' ? body.password : undefined,
+            clear: body.clear === true,
           })
           sendJson(res, 200, { ok: true, ...result })
           return

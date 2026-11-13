@@ -167,6 +167,28 @@ function render(element) {
 }
 
 /**
+ * Every `data-testid="…"` value in static markup.
+ * @param {string} markup
+ * @returns {string[]}
+ */
+function testIdsOf(markup) {
+  /** @type {string[]} */
+  const ids = []
+  const marker = 'data-testid="'
+  let from = 0
+  for (;;) {
+    const start = markup.indexOf(marker, from)
+    if (start === -1) break
+    const valueStart = start + marker.length
+    const end = markup.indexOf('"', valueStart)
+    if (end === -1) break
+    ids.push(markup.slice(valueStart, end))
+    from = end + 1
+  }
+  return ids
+}
+
+/**
  * Every `src="…"` attribute value in static markup.
  *
  * Structural extraction (no pattern matching on the URL itself): the assertions
@@ -254,13 +276,11 @@ test('components export is a non-empty map of renderable functions', () => {
   }
   assert.equal(typeof plugin.components.MainPanel, 'function')
   assert.equal(typeof plugin.components.HostListView, 'function')
-  assert.equal(typeof plugin.components.RemoteViewport, 'function')
   assert.equal(typeof plugin.components.WizardDialog, 'function')
   assert.equal(typeof plugin.components.DiagnoseDrawer, 'function')
   assert.equal(typeof plugin.components.SettingsModal, 'function')
   assert.equal(typeof plugin.components.PasswordPrompt, 'function')
   assert.equal(typeof plugin.components.SettingsSection, 'function')
-  assert.equal(typeof plugin.components.WorkspaceRail, 'function')
   assert.equal(typeof plugin.components.RemoteIcon, 'function')
 })
 
@@ -292,11 +312,14 @@ test('dictionaries are bilingual and balanced', () => {
   }
 })
 
-test('apply registers the main panel and the settings section, never a sidebar entry', () => {
+test('apply registers the main panel, the settings section and the sidebar panel icon', () => {
   const { calls } = runApply(plugin)
-  assert.deepEqual(calls.injects, ['main', 'settings.section'])
-  assert.equal(calls.registers.length, 2)
-  assert.ok(!calls.injects.includes('sidebar.panellist'), 'the sidebar entry must be gone')
+  assert.deepEqual(calls.injects, ['main', 'settings.section', 'sidebar.panellist'])
+  assert.equal(calls.registers.length, 3)
+  // The sidebar gains exactly one global-panel icon (the way back to a remote);
+  // host management stays in Settings and no workspace-list entry is registered.
+  assert.ok(!calls.injects.includes('sidebar.workspaces'), 'no sidebar workspace entry may be registered')
+  assert.ok(!calls.injects.includes('sidebar.footer.action'), 'no footer action may be registered')
 
   const main = calls.registers.find((entry) => entry.options.name === 'main')
   assert.ok(main, 'main slot entry must be registered')
@@ -312,6 +335,13 @@ test('apply registers the main panel and the settings section, never a sidebar e
   assert.equal(section.component, plugin.components.SettingsSection)
   assert.equal(typeof section.options.label, 'function')
   assert.equal(section.options.label(), '远程主机')
+
+  const entry = calls.registers.find((registerCall) => registerCall.options.name === 'sidebar.panellist')
+  assert.ok(entry, 'the sidebar panel icon must be registered')
+  assert.equal(entry.options.id, PANEL_ID, 'the icon id must address the main panel')
+  assert.equal(entry.component, plugin.components.RemotePanelIcon)
+  // The row opens host management, so its label names that page, not the mode.
+  assert.equal(entry.options.label(), '远程主机')
 })
 
 test('shared inject face opens the panel, the local workspace and the panel request store', () => {
@@ -343,7 +373,7 @@ test('shared inject face opens the panel, the local workspace and the panel requ
 // 3. security invariants
 // ---------------------------------------------------------------------------
 
-test('client code never logs and never persists iframe URLs / tokens', () => {
+test('client code never logs and never persists remote URLs / tokens', () => {
   assert.doesNotMatch(SOURCE, /console\.(log|debug|info|warn|error)\s*\(/)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*token/i)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*url/i)
@@ -354,31 +384,24 @@ test('client code never logs and never persists iframe URLs / tokens', () => {
   assert.match(SOURCE, /url\.startsWith\(LOOPBACK_PREFIX\)/)
 })
 
-test('iframe URL guard blocks non-loopback addresses', () => {
-  const blocked = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      t,
-      host: hostView(),
-      hosts: [hostView()],
-      iframeUrl: 'https://evil.example.com/?token=secret',
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      addressVisible: true,
-      enterNotice: false,
-    }),
-  )
-  // Structural, not textual: if the guard were bypassed the refused URL would
-  // become an iframe `src`, and that is what this reads.
-  assert.deepEqual(srcAttributes(blocked), [], 'a non-loopback URL must not reach an iframe src')
-  assert.match(blocked, /已阻止内嵌远端界面/)
+test('the client embeds no remote page and opens no extra window', () => {
+  // The embedded-panel presentation is gone: the remote UI only ever reaches the
+  // desktop browser guest, so no iframe element, sandbox attribute or
+  // window.open call may survive in the client half.
+  assert.doesNotMatch(SOURCE, /h\(\s*'iframe'/, 'no iframe element may be rendered')
+  assert.doesNotMatch(SOURCE, /IFRAME_SANDBOX/, 'no iframe sandbox may be configured')
+  assert.doesNotMatch(SOURCE, /window\.open\s*\(/, 'the client must not open an external window')
+  assert.doesNotMatch(SOURCE, /sandbox:?\s*['"]allow-scripts/, 'no iframe sandbox attribute may remain')
+  assert.doesNotMatch(SOURCE, /RemoteViewport/, 'the embedded viewport component must be gone')
+  // The loopback guard itself is still enforced before a URL reaches the guest.
+  assert.match(SOURCE, /function isValidLoopbackUrl\(url\)/)
 })
 
 // ---------------------------------------------------------------------------
 // 4. key component renders (react-dom/server)
 // ---------------------------------------------------------------------------
 
-test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () => {
+test('openHost rejects a non-loopback remote URL (API-layer guard)', async () => {
   // Drive the real `api.openHost` through a stubbed transport. The positive
   // control matters: a test that only checks rejection would also pass if the
   // method rejected everything.
@@ -411,65 +434,13 @@ test('openHost rejects a non-loopback iframe URL (API-layer guard)', async () =>
   ]) {
     answer = refusedUrl
     await assert.rejects(client.api.openHost('h_test'), (error) => {
-      assert.equal(error?.view?.code, 'blocked-iframe', `unexpected error view for ${refusedUrl}`)
+      assert.equal(error?.view?.code, 'blocked-url', `unexpected error view for ${refusedUrl}`)
       // The refused URL must not be echoed back: compare the whole message with
       // the documented localized detail instead of searching for host text.
-      assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止内嵌。')
+      assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止。')
       return true
     })
   }
-})
-
-test('RemoteViewport embeds a loopback iframeUrl and refuses a non-loopback one', () => {
-  const host = hostView()
-  const viewportProps = {
-    t,
-    host,
-    hosts: [host],
-    iframeKey: 0,
-    iframeLoading: false,
-    iframeError: null,
-    addressVisible: true,
-    enterNotice: false,
-    onBack: () => {},
-    onReconnect: () => {},
-    onRefreshFrame: () => {},
-    onSwitchHost: () => {},
-    onToggleAddress: () => {},
-    onOpenExternal: () => {},
-    onDiagnose: () => {},
-  }
-
-  // Positive control: a validated loopback URL really becomes the iframe src.
-  const embedded = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      ...viewportProps,
-      iframeUrl: 'http://127.0.0.1:54321/?token=abc123',
-    }),
-  )
-  assert.ok(testIdsOf(embedded).includes('remote-iframe'), 'a loopback URL must render the remote iframe')
-  const embeddedSrcs = srcAttributes(embedded)
-  assert.equal(embeddedSrcs.length, 1, 'the viewport must render exactly one iframe src')
-  const embeddedUrl = new URL(embeddedSrcs[0])
-  assert.equal(embeddedUrl.protocol, 'http:')
-  assert.equal(embeddedUrl.hostname, '127.0.0.1')
-  assert.equal(embeddedUrl.port, '54321')
-  assert.equal(embeddedUrl.pathname, '/')
-  assert.equal(embeddedUrl.searchParams.get('token'), 'abc123')
-
-  // Render-layer guard: without it this URL would become the iframe src.
-  const refused = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      ...viewportProps,
-      iframeUrl: 'https://evil.example.com/?token=secret',
-    }),
-  )
-  assert.equal(testIdsOf(refused).includes('remote-iframe'), false, 'a non-loopback URL must not render an iframe')
-  // Structural: any surviving src would be parsed here, so a bypass cannot hide
-  // behind a hostname that merely looks similar.
-  assert.deepEqual(srcAttributes(refused), [], 'a non-loopback URL must not reach an iframe src')
-  assert.match(refused, /已阻止内嵌远端界面/)
-  assert.match(refused, /远端地址不是本地回环地址/)
 })
 
 test('empty host list renders the empty state and the first-server action', () => {
@@ -529,34 +500,6 @@ test('host list renders a connected host card with remote version and actions', 
   assert.match(html, /共 1/)
   assert.match(html, /断开/)
   assert.match(html, /诊断/)
-})
-
-test('viewport shows the one-time "operating a remote server" notice when flagged', () => {
-  const host = hostView()
-  const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      t,
-      host,
-      hosts: [host],
-      iframeUrl: 'http://127.0.0.1:54321/',
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      addressVisible: true,
-      enterNotice: true,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onDiagnose: () => {},
-      onDismissEnterNotice: () => {},
-    }),
-  )
-  assert.match(html, /你正在操作远端服务器/)
-  assert.match(html, /关闭本机视窗不会结束远端任务/)
-  assert.match(html, /知道了/)
 })
 
 test('host list shows the one-time "remote tasks keep running" notice when flagged', () => {
@@ -661,42 +604,7 @@ test('error card resolves English text when the locale is en', () => {
   assert.match(html, /Test the jump host first/)
 })
 
-test('viewport toolbar renders host, status, address and the tool actions', () => {
-  const host = hostView()
-  const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      t,
-      host,
-      hosts: [host, hostView({ id: 'h_second', name: '第二台' })],
-      iframeUrl: 'http://127.0.0.1:54321/?token=one-time',
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      addressVisible: true,
-      enterNotice: false,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onDiagnose: () => {},
-    }),
-  )
-  assert.match(html, /测试机/)
-  assert.match(html, /已连接/)
-  assert.match(html, /ubuntu@10\.0\.0\.5:22/)
-  assert.match(html, /重连/)
-  assert.match(html, /刷新界面/)
-  assert.match(html, /在新窗口打开/)
-  assert.match(html, /返回主机清单/)
-  assert.match(html, /切换主机|<select/)
-  // The validated loopback URL becomes the iframe src.
-  assert.match(html, /src="http:\/\/127\.0\.0\.1:54321\/\?token=one-time"/)
-  assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"/)
-})
-
-test('takeover mode keeps only a status surface: no rail, no host list, no iframe', () => {
+test('the panel stays a host manager: no separate takeover surface, no remote page', () => {
   const host = hostView()
   const html = render(
     React.createElement(plugin.components.MainPanel, {
@@ -708,112 +616,18 @@ test('takeover mode keeps only a status surface: no rail, no host list, no ifram
         hostVersion: '0.2.2-rc.1',
         targetVersion: '0.2.2-rc.1',
         hosts: [host],
-        settings: { windowMode: 'overlay' },
+        settings: {},
         activeHostId: host.id,
         firstRun: false,
       },
     }),
   )
-  assert.match(html, /data-testid="overlay-surface"/)
-  assert.match(html, /接管整个窗口/)
-  assert.match(html, /正在接管远端窗口/)
-  // The carrier is the UI; the panel must not compete with it.
+  // Connecting takes the window over as a side effect; the panel itself is the host
+  // page only and never renders the remote page.
+  assert.match(html, /data-testid="host-list"/)
   assert.doesNotMatch(html, /data-testid="workspace-rail"/)
-  assert.doesNotMatch(html, /data-testid="host-list"/)
+  assert.doesNotMatch(html, /data-testid="overlay-surface"/)
   assert.doesNotMatch(html, /<iframe/)
-})
-
-test('the takeover surface explains a missing desktop bridge and offers a way out', () => {
-  const html = render(
-    React.createElement(plugin.components.OverlaySurface, {
-      t,
-      status: 'unsupported',
-      onRetry: () => {},
-      onOpenSettings: () => {},
-    }),
-  )
-  assert.match(html, /data-testid="overlay-surface"/)
-  assert.match(html, /只在 DSH 桌面端可用/)
-  assert.match(html, /data-testid="overlay-settings"/)
-  // Nothing to retry when the bridge simply does not exist.
-  assert.doesNotMatch(html, /data-testid="overlay-retry"/)
-})
-
-test('a failed takeover offers a retry next to the settings escape hatch', () => {
-  const html = render(
-    React.createElement(plugin.components.OverlaySurface, {
-      t,
-      status: 'failed',
-      onRetry: () => {},
-      onOpenSettings: () => {},
-    }),
-  )
-  assert.match(html, /接管窗口失败/)
-  assert.match(html, /data-testid="overlay-retry"/)
-  assert.match(html, /data-testid="overlay-settings"/)
-})
-
-test('disconnected viewport shows the yellow banner and reconnect action', () => {
-  const host = hostView({ status: 'disconnected' })
-  const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      t,
-      host,
-      hosts: [host],
-      iframeUrl: 'http://127.0.0.1:54321/',
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      addressVisible: true,
-      enterNotice: false,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onDiagnose: () => {},
-    }),
-  )
-  assert.match(html, /连接断开，远端任务可能仍在运行/)
-  assert.match(html, /立即重连/)
-})
-
-test('viewport with an errored host renders the error card, never a blank frame', () => {
-  const host = hostView({
-    status: 'error',
-    error: {
-      code: 'network',
-      title: { zh: '连不上这台服务器', en: 'Cannot reach this server' },
-      detail: { zh: '检查地址/端口/网络。', en: 'Check the address, port and network.' },
-      nextSteps: [{ zh: '确认服务器在线', en: 'Make sure the server is online' }],
-      retryable: true,
-    },
-  })
-  const html = render(
-    React.createElement(plugin.components.RemoteViewport, {
-      t,
-      host,
-      hosts: [host],
-      iframeUrl: null,
-      iframeKey: 0,
-      iframeLoading: false,
-      iframeError: null,
-      addressVisible: false,
-      enterNotice: false,
-      onBack: () => {},
-      onReconnect: () => {},
-      onRefreshFrame: () => {},
-      onSwitchHost: () => {},
-      onToggleAddress: () => {},
-      onOpenExternal: () => {},
-      onDiagnose: () => {},
-    }),
-  )
-  assert.match(html, /连不上这台服务器/)
-  assert.match(html, /确认服务器在线/)
-  assert.doesNotMatch(html, /<iframe/)
-  assert.match(html, /••••••/)
 })
 
 test('fingerprint card shows SHA256 and accept / remember actions', () => {
@@ -835,7 +649,7 @@ test('wizard step 1 renders the SSH form', () => {
   const state = {
     hostVersion: '0.2.2-rc.1',
     hosts: [],
-    settings: { defaultPort: 22, defaultAuth: 'agent', hostKeyPolicy: 'first-use', autoReconnect: { enabled: true } },
+    settings: { defaultPort: 22, defaultAuth: 'key', hostKeyPolicy: 'first-use', autoReconnect: { enabled: true } },
     activeHostId: null,
     firstRun: true,
   }
@@ -852,8 +666,13 @@ test('wizard step 1 renders the SSH form', () => {
   assert.match(html, /显示名/)
   assert.match(html, /SSH 地址或别名/)
   assert.match(html, /保存并测试/)
-  assert.match(html, /使用 SSH Agent/)
+  // Key files and passwords are the only methods; the agent choice is gone.
+  assert.match(html, /密钥文件/)
+  assert.doesNotMatch(html, /SSH Agent/)
   assert.match(html, /远端存活策略/)
+  // The key path starts at the documented default and can be picked from disk.
+  assert.match(html, /value="~\/\.ssh\/id_ed25519"/)
+  assert.match(html, /data-testid="wizard-key-path-pick"/)
   // The address field is wired to the SSH alias datalist loaded from /ssh/aliases.
   assert.match(html, /list="drg-ssh-alias-list"/)
   assert.match(html, /<datalist[^>]*id="drg-ssh-alias-list"/)
@@ -915,7 +734,6 @@ test('settings modal renders contract fields and the save action', () => {
     hostKeyPolicy: 'first-use',
     saveTokens: false,
     mirrorToSidebar: true,
-    windowMode: 'panel',
     language: 'auto',
     logLevel: 'info',
     bootstrap: { targetVersion: 'local', mode: 'auto', remoteDir: '~/.dsh/remote-go', nodeVersion: '22.14.0' },
@@ -929,10 +747,11 @@ test('settings modal renders contract fields and the save action', () => {
     }),
   )
   assert.match(html, /设置/)
-  assert.match(html, /呈现形态/)
-  // The presentation mode must advertise both real options, not "external browser".
-  assert.match(html, /面板内嵌/)
-  assert.match(html, /接管整个窗口/)
+  // The embedded-panel presentation choice is gone: the window takeover is the
+  // only way a remote UI is shown, so no mode selector may be offered.
+  assert.doesNotMatch(html, /呈现形态/)
+  assert.doesNotMatch(html, /面板内嵌/)
+  assert.match(html, /关闭视窗行为/)
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)
@@ -942,7 +761,7 @@ test('settings modal renders contract fields and the save action', () => {
   assert.match(html, /保存设置/)
 })
 
-test('main panel renders its loading state inside the DSH theme root and the workspace rail', () => {
+test('main panel renders its loading state inside the DSH theme root', () => {
   const html = render(
     React.createElement(plugin.components.MainPanel, {
       t,
@@ -954,8 +773,6 @@ test('main panel renders its loading state inside the DSH theme root and the wor
   assert.match(html, /data-testid="dsh-remote-go-panel"/)
   assert.match(html, /远程主机/)
   assert.match(html, /加载中/)
-  assert.match(html, /data-testid="workspace-rail"/)
-  assert.match(html, /data-testid="workspace-rail-toggle"/)
   assert.match(html, /data-dsh-remote-go="styles"/)
   assert.match(html, /--dsw-alias-label-primary/)
 })
@@ -1014,64 +831,6 @@ test('settings section offers open/connect actions per host', () => {
   assert.match(html, /data-host-id="h_offline"/)
 })
 
-test('workspace rail renders local and per-host workspace groups', () => {
-  const hosts = [
-    hostView({ id: 'h_one', name: '主机一', status: 'connected' }),
-    hostView({ id: 'h_two', name: '主机二', status: 'disconnected' }),
-  ]
-  const initialWorkspaceData = {
-    local: {
-      status: 'ready',
-      workspaces: [
-        { id: 'ws_local_1', title: 'proj', path: 'C:\\Work\\proj', sessionCount: 3, isDefault: true, origin: 'local' },
-      ],
-      defaultWorkspaceId: 'ws_local_1',
-      error: null,
-    },
-    remotes: {
-      h_one: {
-        status: 'ready',
-        connected: true,
-        hostName: '主机一',
-        error: null,
-        workspaces: [
-          {
-            id: 'r_ws_1',
-            title: 'remote-proj',
-            path: '/home/ubuntu/proj',
-            sessionCount: 2,
-            origin: 'remote',
-            hostId: 'h_one',
-          },
-        ],
-      },
-      h_two: { status: 'disconnected', connected: false, hostName: '主机二', workspaces: [], error: null },
-    },
-  }
-  const html = render(React.createElement(plugin.components.WorkspaceRail, { t, hosts, initialWorkspaceData }))
-  assert.match(html, /data-testid="workspace-rail"/)
-  assert.match(html, /data-testid="workspace-local-group"/)
-  assert.match(html, /data-testid="workspace-local-item"/)
-  assert.match(html, /data-workspace-id="ws_local_1"/)
-  assert.match(html, /proj/)
-  assert.match(html, /3 个会话/)
-  assert.match(html, /默认/)
-  assert.match(html, /data-testid="workspace-remote-group"/)
-  assert.match(html, /data-host-id="h_one"/)
-  assert.match(html, /data-testid="workspace-remote-item"/)
-  assert.match(html, /data-workspace-id="r_ws_1"/)
-  assert.match(html, /未连接/)
-  assert.match(html, /data-testid="workspace-rail-toggle"/)
-  assert.match(html, /data-testid="workspace-rail-refresh"/)
-  assert.match(html, /本地工作区仍可在左侧边栏切换/)
-})
-
-/** Fold whitespace on **both** sides of a comparison; locale text is wrapped by the shell. */
-const squash = (value) =>
-  String(value === undefined || value === null ? '' : value)
-    .replace(/\s+/g, ' ')
-    .trim()
-
 test('mirror polling settles on a real signal and is bounded', () => {
   const policy = plugin.mirrorPolling
   assert.equal(typeof policy.settled, 'function')
@@ -1095,130 +854,6 @@ test('mirror polling settles on a real signal and is bounded', () => {
   assert.ok(policy.intervalMs >= 500, `the poll interval is too aggressive: ${policy.intervalMs}`)
 })
 
-test('workspace rail marks read-only mirrors in both locales, and only when read-only', () => {
-  const workspace = {
-    id: 'r_ws_1',
-    title: 'remote-proj',
-    path: '/home/u/proj',
-    sessionCount: 1,
-    origin: 'remote',
-    hostId: 'h_ro',
-  }
-  const mirror = {
-    localSessionId: 'mirror_h_ro_r1',
-    hostId: 'h_ro',
-    remoteSessionId: 'r1',
-    workspaceId: 'r_ws_1',
-    title: 'remote-proj · r1',
-    level: 'L2',
-    readOnly: true,
-    reason: null,
-    status: 'active',
-  }
-  const hosts = [hostView({ id: 'h_ro', name: '只读机', status: 'connected' })]
-  /** @param {object[]} mirrors @param {object} tFn @param {string} [localeId] */
-  const rail = (mirrors, tFn, localeId) =>
-    render(
-      React.createElement(plugin.components.WorkspaceRail, {
-        t: tFn,
-        localeId,
-        hosts,
-        initialWorkspaceData: {
-          local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
-          remotes: {
-            h_ro: {
-              status: 'ready',
-              connected: true,
-              hostName: '只读机',
-              workspaces: [workspace],
-              mirrors,
-              error: null,
-            },
-          },
-        },
-      }),
-    )
-
-  // zh: badge text and the default reason (a replayed L2 session has no reason code).
-  const zhMarkup = rail([mirror], t)
-  assert.match(zhMarkup, /data-testid="mirror-readonly-badge"/)
-  assert.match(squash(zhMarkup), new RegExp(squash('只读镜像')))
-  // The tooltip carries the level and why nothing can be typed into the session.
-  assert.ok(
-    zhMarkup.includes('title="L2 只读镜像：远端历史以只读方式回放，本地暂不支持输入"'),
-    'the zh badge tooltip must explain the level and reason',
-  )
-
-  // en: same data, English dictionary and locale.
-  const enMarkup = rail([mirror], enT, 'en')
-  assert.match(enMarkup, /data-testid="mirror-readonly-badge"/)
-  assert.match(squash(enMarkup), new RegExp(squash('Read-only mirror')))
-  assert.ok(
-    enMarkup.includes(
-      'title="Read-only L2 mirror: Remote history is replayed read-only; local input is not supported yet"',
-    ),
-    'the en badge tooltip must explain the level and reason',
-  )
-
-  // A descriptor reason (version mismatch) is carried into the tooltip in the active locale.
-  const mismatch = {
-    ...mirror,
-    reason: {
-      code: 'version-mismatch',
-      message: { zh: '版本不一致，只做目录镜像', en: 'Version mismatch: directory only' },
-    },
-  }
-  assert.match(squash(rail([mismatch], t)), new RegExp(squash('版本不一致，只做目录镜像')))
-  assert.match(squash(rail([mismatch], enT, 'en')), new RegExp(squash('Version mismatch: directory only')))
-
-  // Not read-only (history unavailable): no badge in either locale.
-  const plain = rail([{ ...mirror, readOnly: false, level: 'L1' }], t)
-  assert.doesNotMatch(plain, /data-testid="mirror-readonly-badge"/)
-  assert.doesNotMatch(rail([{ ...mirror, readOnly: false, level: 'L1' }], enT, 'en'), /mirror-readonly-badge/)
-})
-
-test('workspace rail renders empty, error and collapsed states', () => {
-  const empty = render(
-    React.createElement(plugin.components.WorkspaceRail, {
-      t,
-      hosts: [],
-      initialWorkspaceData: {
-        local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
-        remotes: {},
-      },
-    }),
-  )
-  assert.match(empty, /data-testid="workspace-rail-empty"/)
-  assert.match(empty, /还没有远程主机。添加一台后，这里会显示它的工作区。/)
-
-  const failed = render(
-    React.createElement(plugin.components.WorkspaceRail, {
-      t,
-      hosts: [hostView({ id: 'h_err', name: '故障主机', status: 'connected' })],
-      initialWorkspaceData: {
-        local: { status: 'error', workspaces: [], defaultWorkspaceId: null, error: { code: 'network' } },
-        remotes: {
-          h_err: { status: 'error', connected: true, hostName: '故障主机', workspaces: [], error: { code: 'network' } },
-        },
-      },
-    }),
-  )
-  assert.match(failed, /data-testid="workspace-rail-error"/)
-  assert.match(failed, /无法读取远端工作区|无法读取本地工作区/)
-
-  const collapsed = render(
-    React.createElement(plugin.components.WorkspaceRail, { t, hosts: [], initialCollapsed: true }),
-  )
-  assert.match(collapsed, /data-collapsed="true"/)
-  assert.match(collapsed, /data-testid="workspace-rail-toggle"/)
-  assert.doesNotMatch(collapsed, /data-testid="workspace-local-group"/)
-})
-
-/** All `data-testid` values contained in one rendered markup string. */
-function testIdsOf(html) {
-  return [...html.matchAll(/data-testid="([^"]+)"/g)].map((match) => match[1])
-}
-
 test('every automation data-testid required by acceptance is rendered', () => {
   const host = hostView({ authType: 'password' })
   const baseState = {
@@ -1241,61 +876,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
         openPanel: () => {},
         panelStore: { request: () => {} },
         getLocaleId: () => 'zh',
-      }),
-    ),
-    workspaceRail: render(
-      React.createElement(plugin.components.WorkspaceRail, {
-        t,
-        hosts: [
-          hostView({ id: 'h_ws', name: '工作区主机', status: 'connected' }),
-          hostView({ id: 'h_ws_off', name: '离线主机', status: 'disconnected' }),
-        ],
-        initialWorkspaceData: {
-          local: {
-            status: 'ready',
-            workspaces: [{ id: 'ws_local', title: 'local-proj', sessionCount: 1, isDefault: true }],
-            defaultWorkspaceId: 'ws_local',
-            error: null,
-          },
-          remotes: {
-            h_ws: {
-              status: 'ready',
-              connected: true,
-              hostName: '工作区主机',
-              error: null,
-              workspaces: [{ id: 'ws_remote', title: 'remote-proj', sessionCount: 2 }],
-            },
-            h_ws_off: { status: 'disconnected', connected: false, hostName: '离线主机', workspaces: [], error: null },
-          },
-        },
-      }),
-    ),
-    workspaceRailError: render(
-      React.createElement(plugin.components.WorkspaceRail, {
-        t,
-        hosts: [hostView({ id: 'h_err', name: '故障主机' })],
-        initialWorkspaceData: {
-          local: { status: 'error', workspaces: [], defaultWorkspaceId: null, error: { code: 'network' } },
-          remotes: {
-            h_err: {
-              status: 'error',
-              connected: true,
-              hostName: '故障主机',
-              workspaces: [],
-              error: { code: 'network' },
-            },
-          },
-        },
-      }),
-    ),
-    workspaceRailEmpty: render(
-      React.createElement(plugin.components.WorkspaceRail, {
-        t,
-        hosts: [],
-        initialWorkspaceData: {
-          local: { status: 'ready', workspaces: [], defaultWorkspaceId: null, error: null },
-          remotes: {},
-        },
       }),
     ),
     empty: render(
@@ -1322,26 +902,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
         onEditHost: () => {},
         onDeleteHost: () => {},
         onDiagnoseHost: () => {},
-      }),
-    ),
-    viewport: render(
-      React.createElement(plugin.components.RemoteViewport, {
-        t,
-        host: hostView(),
-        hosts: [hostView()],
-        iframeUrl: 'http://127.0.0.1:54321/',
-        iframeKey: 0,
-        iframeLoading: false,
-        iframeError: null,
-        addressVisible: true,
-        enterNotice: false,
-        onBack: () => {},
-        onReconnect: () => {},
-        onRefreshFrame: () => {},
-        onSwitchHost: () => {},
-        onToggleAddress: () => {},
-        onOpenExternal: () => {},
-        onDiagnose: () => {},
       }),
     ),
     wizard: render(
@@ -1433,10 +993,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
     'host-diagnose',
     'host-edit',
     'host-delete',
-    'remote-iframe',
-    'viewport-toolbar',
-    'viewport-reconnect',
-    'viewport-back',
     'host-wizard',
     'wizard-step-1',
     'wizard-next',
@@ -1450,19 +1006,14 @@ test('every automation data-testid required by acceptance is rendered', () => {
     'diagnose-copy',
     'settings',
     'settings-save',
+    // Key-file authentication: the default path field and its picker buttons.
+    'settings-default-key-path',
+    'settings-default-key-path-pick',
+    'wizard-key-path-pick',
     'settings-remote-section',
     'settings-host-add',
     'settings-host-open',
     'settings-settings-open',
-    'workspace-rail',
-    'workspace-rail-toggle',
-    'workspace-rail-refresh',
-    'workspace-local-group',
-    'workspace-local-item',
-    'workspace-remote-group',
-    'workspace-remote-item',
-    'workspace-rail-empty',
-    'workspace-rail-error',
     'error-card',
     'error-retry',
     'fingerprint-card',
@@ -1472,11 +1023,21 @@ test('every automation data-testid required by acceptance is rendered', () => {
   const ids = new Set(Object.values(markup).flatMap(testIdsOf))
   for (const id of required) assert.ok(ids.has(id), 'missing data-testid="' + id + '"')
   assert.match(markup.list, /data-host-id="h_test"/)
-  assert.match(markup.workspaceRail, /data-workspace-id="ws_local"/)
-  assert.match(markup.workspaceRail, /data-workspace-id="ws_remote"/)
   assert.match(markup.password, /type="password"/)
-  assert.match(markup.password, /只用于本次连接，不会保存/)
+  // With no credential store in the test composition, the prompt says so instead of
+  // promising a save it cannot perform.
+  assert.match(markup.password, /没有可用的凭据存储|凭据存储/)
   assert.doesNotMatch(JSON.stringify(markup), /dsh-remote-go-sidebar/)
+})
+
+test('the sidebar panel icon draws the remote glyph at the row size', () => {
+  const plain = render(React.createElement(plugin.components.RemotePanelIcon, { size: 22, active: false }))
+  assert.match(plain, /<svg[^>]*width="22"[^>]*height="22"/)
+  const active = render(React.createElement(plugin.components.RemotePanelIcon, { size: 16, active: true }))
+  assert.match(active, /<svg[^>]*width="16"[^>]*height="16"/)
+  // A missing size must not render a zero-width glyph.
+  const fallback = render(React.createElement(plugin.components.RemotePanelIcon, {}))
+  assert.match(fallback, /<svg[^>]*width="18"[^>]*height="18"/)
 })
 
 test('remote icon is original, currentColor SVG that respects size', () => {

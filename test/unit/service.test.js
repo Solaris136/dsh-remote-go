@@ -110,7 +110,7 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   assert.ok(persisted.lastOpenedAt, 'lastOpenedAt must be persisted')
   assert.equal(service.snapshot().activeHostId, host.id)
   const hostView = service.snapshot().hosts[0]
-  assert.equal(hostView.authType, 'agent')
+  assert.equal(hostView.authType, 'key')
   assert.equal(hostView.jumpHost, null)
   assert.equal(hostView.warning, null)
   assert.equal(hostView.versionParity.status, 'same')
@@ -204,7 +204,10 @@ test('an unreachable remote UI fails with a coded error and cleans the tunnel', 
   await service.shutdown()
 })
 
-test('a blocked iframe is reported as a warning but keeps the connection', async () => {
+test('a page that refuses framing still connects cleanly and reports no warning', async () => {
+  // The remote UI is rendered by the desktop guest, never embedded in a frame, so
+  // X-Frame-Options / CSP are irrelevant: such a host must connect exactly like any
+  // other, with no "blocked embedding" warning left over from the iframe era.
   const { service } = await makeTestService({
     exchange: async () => ({
       ok: true,
@@ -222,7 +225,12 @@ test('a blocked iframe is reported as a warning but keeps the connection', async
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
-  assert.match(service.snapshot().hosts[0].warning.zh, /在新窗口打开/)
+  const view = service.snapshot().hosts[0]
+  assert.equal(view.warning, null, 'framing headers must not produce a warning any more')
+  assert.equal(view.remote.uiReady, true)
+  const report = await service.diagnose(host.id)
+  const remoteUi = report.checks.find((check) => check.id === 'remote-ui')
+  assert.equal(remoteUi.status, 'pass', 'a framing-refusing page is still a reachable remote UI')
   await service.shutdown()
 })
 

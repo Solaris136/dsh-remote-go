@@ -1,6 +1,6 @@
 /**
  * Local loopback TCP listener that pipes every connection through the SSH
- * transport (`ssh -L host:port`). The browser iframe points at this listener,
+ * transport (`ssh -L host:port`). The desktop guest points at this listener,
  * so cookies stay scoped to a `127.0.0.1:<port>` authority and never mix with
  * the local DSH GUI cookie (design §7.0, §9.2).
  */

@@ -67,15 +67,19 @@ interface HostView {
   address: string
   /** 脱敏展示：user@host:port（密码永远不会出现） */
   addressMasked: string
-  /** 认证方式类型；password 时客户端应在连接前弹一次性密码框（密码不落盘） */
-  authType: 'agent' | 'key' | 'password'
+  /** 认证方式类型；password 时客户端在连接前弹密码框（密码默认只用于本次连接） */
+  authType: 'key' | 'password'
+  /** password 认证：凭据存储里是否已有记住的密码（只报有无，永不返回值） */
+  passwordSaved: boolean
+  /** 当前组合是否提供凭据存储；false 表示密码无法安全保存，只能本次使用 */
+  passwordStorageAvailable: boolean
   /** 可选跳板机（原样展示，未配置为 null） */
   jumpHost: string | null
   status: HostStatus
   phase: ConnectPhase | null
   progress: Progress | null
   error: ErrorView | null
-  /** 非致命提示（如版本不一致已沿用、iframe 被禁止嵌入）：连接仍可用 */
+  /** 非致命提示（如版本不一致已沿用）：连接仍可用 */
   warning: I18nText | null
   fingerprint: FingerprintView | null
   remote: RemoteView
@@ -99,7 +103,10 @@ interface HostView {
 
 interface SettingsView {
   defaultPort: number
-  defaultAuth: 'agent' | 'key' | 'password'
+  /** 默认认证方式：只支持私钥文件或一次性密码 */
+  defaultAuth: 'key' | 'password'
+  /** v1.1：新增主机时预填的私钥路径（默认 ~/.ssh/id_ed25519） */
+  defaultKeyPath: string
   connectTimeoutSec: number
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
@@ -112,8 +119,6 @@ interface SettingsView {
   mirrorHistory: boolean
   /** v1.1（L2）：单个镜像会话保留/回放的事件上限（默认 200，0 = 不限；超出保留最新 N 条） */
   mirrorMaxEvents: number
-  /** 呈现形态：'panel' = 面板内嵌（iframe）；'overlay' = 接管整个窗口（DSH 桌面端用 Chromium guest 铺满窗口，顶部窄条可刷新/退出） */
-  windowMode: 'panel' | 'overlay'
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
   /** 自举：目标版本取 'local' = 跟随本机 DSH 版本 */
@@ -188,8 +193,29 @@ data: {}
 }
 ```
 
+### `GET /keyfile/list?path=<dir>`
+只读目录浏览，供客户端选择私钥文件（DSH 只提供目录选择器，没有选文件能力，所以 Host 自己列）。范围限制在用户主目录内，`..` 与符号链接逃逸都会被拒绝。
+
+响应：
+```json
+{
+  "ok": true,
+  "path": "C:\\Users\\me\\.ssh",
+  "parent": "C:\\Users\\me",
+  "entries": [{ "name": "id_ed25519", "path": "C:\\Users\\me\\.ssh\\id_ed25519", "isDirectory": false }],
+  "truncated": false,
+  "defaultKeyPath": "~/.ssh/id_ed25519",
+  "defaultDir": "C:\\Users\\me\\.ssh"
+}
+```
+
+### `POST /hosts/:id/password`
+记住或忘记该主机的 SSH 密码。值存进 DSH 的凭据存储（插件自有记录空间，`dsh-remote-go:ssh-password:<hostId>`），**不写 `hosts.json`**。
+
+请求 `{ "password": "..." }` 或 `{ "clear": true }`。响应 `{ "ok": true, "available": boolean, "saved": boolean }`；`available:false` 表示当前组合没有凭据存储，什么都没保存。
+
 ### `POST /hosts`
-新增或更新主机（带 `id` 为更新）。密码字段仅用于「本次连接」，永不落盘。
+新增或更新主机（带 `id` 为更新）。认证只有私钥文件或密码两种；`auth.type="key"` 省略 `keyPath` 时用 `SettingsView.defaultKeyPath` 补齐。密码不经此接口传输，见下方 `/hosts/:id/password`。
 
 请求：
 ```json
@@ -200,7 +226,7 @@ data: {}
     "address": "my-server",
     "port": 22,
     "username": "ubuntu",
-    "auth": { "type": "agent" } | { "type": "key", "keyPath": "~/.ssh/id_rsa" } | { "type": "password" },
+    "auth": { "type": "key", "keyPath": "~/.ssh/id_ed25519" } | { "type": "password" },
     "jumpHost": null,
     "keepAlive": "keep",
     "idleMinutes": 15,
@@ -219,7 +245,8 @@ data: {}
 请求（均可选）：
 ```json
 {
-  "password": "仅本次连接使用，不保存",
+  "password": "仅本次连接使用；rememberPassword=true 时连接成功后存入凭据存储",
+  "rememberPassword": false,
   "rememberFingerprint": true,
   "acceptHostKey": "SHA256:xxx",
   "overrideVersion": false        // true = 允许远端版本不一致时继续
@@ -236,11 +263,11 @@ data: {}
 响应用户的指纹确认。请求 `{ "accept": true, "remember": true, "sha256": "SHA256:xxx" }`。
 
 ### `GET /hosts/:id/open`
-仅在 `status === 'connected'` 时可用。返回带一次性 token 的本地回环 URL（同源 iframe 用，绝不出现在日志）：
+仅在 `status === 'connected'` 时可用。返回带一次性 token 的本地回环 URL（交给桌面端 guest，绝不出现在日志）：
 ```json
 { "ok": true, "url": "http://127.0.0.1:54321/?token=...", "localPort": 54321 }
 ```
-每个主机每次连接只返回同一 URL；`?token=` 只用一次完成 cookie 种入，之后 iframe 由远端自己重定向到干净地址。
+每个主机每次连接只返回同一 URL；`?token=` 只用一次完成 cookie 种入，之后由远端自己重定向到干净地址。
 
 ### `POST /hosts/:id/activate`
 设置面板当前展示的主机（客户端打开面板前调用；失败可忽略）。无请求体，返回 `{ "ok": true }`。
@@ -278,7 +305,7 @@ data: {}
 }
 ```
 
-> 说明：DSH 的侧边栏工作区列表是 `sidebar.workspaces` 单位单占槽位，第三方插件无法向**该槽位**追加分组（由 `dsh-client-ui-workspace` 独占）。因此本插件把「本地工作区 + 按远端分组的工作区」放在远程面板自己的左侧工作区栏里，并在设置页提供「远程主机」管理。
+> 说明：面板内不再有任何工作区列表——切换由本地侧边栏完成（`sidebar.panellist` 一行「远程主机」进入主机管理页，`main` 面板承载接管）。
 >
 > v1.1 补充：宿主另有一个可选的 `workspaceRegistry` 服务（`create`/`resolveByPath`/`list`/`delete`），插件**可以**通过它在本地侧边栏注册工作区。自该能力接入后，连接主机会额外注册一个 `Remote: <主机名>` 工作区承载镜像会话；面板内的工作区栏与它**并存**，不是替代关系。见 `docs/session-design.md` §4.3。
 
@@ -329,7 +356,7 @@ data: {}
 ## 3. 安全约束（客户端必须遵守）
 
 1. 密码只在 `connect` 请求体里出现一次，不写入任何客户端存储；不放到 URL。
-2. `token`/带 token 的 URL 只在内存中传递：`GET /open` 拿到的 URL 直接赋给 `iframe.src`，不写 localStorage、不打印日志。
+2. `token`/带 token 的 URL 只在内存中传递：`GET /open` 拿到的 URL 直接交给桌面端 guest，不写 localStorage、不打印日志。
 3. `saveTokens` 默认 false；为 true 时由 Host 在 `$DSH_HOME` 下以 0600 保存，客户端不接触。
 4. 所有 `fetch` 用 `credentials: 'same-origin'`，并带 `x-dsh-remote-go: 1`。
 5. iframe 只允许 `http://127.0.0.1:<port>`（Host 保证）；客户端必须校验 `url.startsWith('http://127.0.0.1:')` 再赋值。
