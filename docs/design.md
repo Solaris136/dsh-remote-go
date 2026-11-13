@@ -4,7 +4,7 @@
 > 项目：`dsh-remote-go`（中文名「DSH 远程入口」）· 仓库：https://github.com/Solaris136/dsh-remote-go
 > 范围：**只定义插件提供什么内容、长什么样、怎么用**；不含架构、接口、代码、部署。
 > 替代关系：本版取代 v0.2「全控制台」方案（历史稿不随仓库保留）。
-> 关联调研：同类项目与需求/注意点汇总见 `docs/research-competitors.md`；最接近项目 `dsh-remote-window` 的专项调研见 `docs/research-dsh-remote-window.md`。
+> 关联调研：同类项目与需求/注意点的汇总结论见 §15（早期调研报告已不再随仓库保留，可从 git 历史取回）。
 
 ---
 
@@ -330,7 +330,7 @@ guest 是独立浏览器上下文（自己的 cookie），不是 iframe；它只
 
 | 版本 | 内容 | 退出标准 |
 |---|---|---|
-| V0（历史） | 可行性闸门：最小全局面板 + 回环 iframe；该呈现方式后来被移除 | 5 项 V0 检查全绿（见调研文档 §5） |
+| V0（历史） | 可行性闸门：最小全局面板 + 回环 iframe；该呈现方式后来被移除 | 5 项 V0 检查全绿 |
 | V1.0 | L1–L7、L13–L15（自举、版本一致、存活策略）+ 主机详情「DSH 管理」骨架、设置基础项 | 单机走通「添加（无环境也可）→打开→使用→断线恢复→关闭后远端按策略存活」 |
 | V1.1 | L8–L11（设置完善、沉浸模式、最近打开、多主机）、通知提醒、一键启动/安装/升级远端 DSH | 日常替代"手动 SSH + 浏览器"，多机可用 |
 | V1.2 | 批量诊断、快捷入口、体验打磨（接管整个窗口已随 0.1.0 交付） | 多台机器长期使用稳定 |
@@ -382,13 +382,12 @@ guest 是独立浏览器上下文（自己的 cookie），不是 iframe；它只
 - 本文件在仓库中的位置：`docs/design.md`
 - 命名备选（均查过 npm 与 GitHub 无同名项目）：`dsh-remote-frame`、`dsh-remote-embed`、`dsh-remote-lens`
 - 已排除：`dsh-remote-window`（npm 已被占用，GitHub 上 graydovee/dsh-remote-window 就是同类完整实现，2026-11-10 调研确认）、`dsh-remote-portal`（GitHub 已有同名项目）、`dsh-remote-console`（已有同名插件）
-- 调研文档（历史，结论仍可参考）：`docs/research-competitors.md`（回环规则、cookie 种入、token 发现、远端桌面功能等坑）
 
 ---
 
 ## 15. 同类项目调研结论（2026-11-10）
 
-调研了 8 个 DSH 远程类项目（dsh-remote-dsh、dsh-remote-gui、dsh-remote-tunnel、dsh-remote-explorer、dsh-remote-local-plugin、dsh-zen-remote、dsh-ssh-desktop、dsh-multi-instance）与 3 个邻近产品。完整报告与证据见 `docs/research-competitors.md`。
+调研了 8 个 DSH 远程类项目（dsh-remote-dsh、dsh-remote-gui、dsh-remote-tunnel、dsh-remote-explorer、dsh-remote-local-plugin、dsh-zen-remote、dsh-ssh-desktop、dsh-multi-instance）与 3 个邻近产品。调研结论见本节；原始调研报告已不再随仓库保留（可从 git 历史取回）。
 
 ### 15.1 对需求的增补（进入 V1）
 
@@ -416,7 +415,7 @@ guest 是独立浏览器上下文（自己的 cookie），不是 iframe；它只
 ### 15.3 结论
 
 - 方向成立：dsh-remote-dsh 证明「回环 + 整页嵌入远端 GUI」可行；dsh-remote-gui 证明「本地只管隧道/凭据、界面交给远端或重写」两条路都存在。
-- **最接近的现成实现是 `graydovee/dsh-remote-window`（alpha.6）**：已用**同源 portal 反代**解决 iframe cookie，主区全屏显示远端官方 UI，支持本机模型自动代理 / server 模型、host key pin、per-client profile 与 runtime；代价是远端更重（常驻 profile + 专属插件 + 独立 runtime）。详见 `docs/research-dsh-remote-window.md`。
+- **最接近的现成实现是 `graydovee/dsh-remote-window`（alpha.6）**：已用**同源 portal 反代**解决 iframe cookie，主区全屏显示远端官方 UI，支持本机模型自动代理 / server 模型、host key pin、per-client profile 与 runtime；代价是远端更重（常驻 profile + 专属插件 + 独立 runtime）。
 - 因此自研只剩两条路：**轻量差异化**（零远端专属组件、只用远端已有 dsh web + SSH，自己做 portal 或接受外部窗口降级）或 **fork/采用**该实现。
 - 最大风险仍是 **iframe 的 cookie 种入/持久化**：必须 V0 先验；已有 portal 正解可参考。
 

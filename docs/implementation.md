@@ -43,7 +43,7 @@ dsh-remote-go（一个 bundle 包，Host + Client 两半）
 ├─ locale/{zh,en}.json      插件市场显示元数据（meta.title/description）
 ├─ test/unit/*.test.js      node:test 单元测试（纯逻辑 + fake SSH/HTTP 服务 + 三个结构性守卫）
 ├─ test/integration/        模拟远端集成/E2E（sim 主机、历史回放、租约、镜像、web/desktop 浏览器）
-├─ test/e2e/plugin.e2e.js   真实端到端验收（真实 SSH 主机）
+├─ test/e2e/publish.e2e.js  发布路径验收（tarball → 干净 profile）
 └─ e2e/control/             隔离 control DSH（0.2.2-rc.1）运行时 + 启停脚本
 ```
 
@@ -153,7 +153,7 @@ connect(id)
 
 ## 4. Client 半端
 
-- 注册：`settings.section`「远程主机」（id `dsh-remote-go`，order 45）承载主机清单/添加/编辑/删除/连接/诊断/打开面板；`main` 面板（key `dsh-remote-go`）承载远端视窗与左侧「工作区」栏；**不注册 `sidebar.panellist`**（产品要求不占侧边栏入口）。`ctx.layout.selectPanel('dsh-remote-go')` 切换面板。
+- 注册：`settings.section`「远程主机」（id `dsh-remote-go`，order 45）承载主机清单/添加/编辑/删除/连接/诊断；`sidebar.panellist`（order 20）是唯一的侧边栏入口，打开同一个主机管理页；`main` 面板（key `dsh-remote-go`）只承载主机管理页，点「打开」后由桌面端把远端 DSH 以 Chromium guest 接管侧边栏右侧的主内容区。`ctx.layout.selectPanel('dsh-remote-go')` 切换面板。
 - 工作区接口：`GET /local/workspaces` + 每台主机 `GET /hosts/:id/workspaces`（Host 读取本机/远端 DSH 的 `storages/workspace.json`）。它们原本服务于面板内的工作区栏，该栏已移除；接口保留供镜像/诊断使用，面板不再渲染工作区列表。
 - 市场显示名：`dsh remote go`（locale meta.title）；设置页栏目名「远程主机」（Remote hosts）。
 - 状态：`GET /state` 为唯一真相；`EventSource /events` 实时推送，失败退化 3s 轮询。
@@ -177,13 +177,12 @@ connect(id)
 | 浏览器集成 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 真实桌面端 → 设置页与面板 → 浅色/深色对比度、只读徽标断言 |
 | 结构性守卫 | `swallow-guard` / `predicate-guard` / `e2e-child-process` | 吞错扫描（默认违规）、等待谓词覆盖断言、`windowsHide` 全覆盖 |
 | 真实端到端 | 插件本地 API | 真实 SSH → 真实远端 DSH → 隧道 → `/open` 回环 URL + `versionParity=same`；浏览器侧仅保留设置页与打包产物验收 |
-| 远端专项 | `e2e/remote/v0-report.md` | iframe 可行性闸门：cookie/XFO/CSP/WS/API 栅栏/断连存活 |
 
 E2E 判定点：Host 入口在 client-module 图中且 bundle 可读；连接达到 `connected` 且 `versionParity=same`；`/open` 返回 loopback URL 且该 URL 经隧道返回 200；清理停止远端并删除主机。
 
 ## 6. 设计取舍记录
 
-1. **桌面 guest 而非本地反代**：远端 DSH 由桌面端以 Chromium guest 铺在主内容区，避免 dsh-remote-window 式 portal 的 3–4 倍工作量，也没有 iframe 的剪贴板/下载限制（代价是 guest 自己禁用下载、拒绝权限请求）。早期同站 loopback iframe 的结论保留在 `e2e/remote/v0-report.md` 作为历史。
+1. **桌面 guest 而非本地反代**：远端 DSH 由桌面端以 Chromium guest 铺在主内容区，避免 dsh-remote-window 式 portal 的 3–4 倍工作量，也没有 iframe 的剪贴板/下载限制（代价是 guest 自己禁用下载、拒绝权限请求）。
 2. **本地 HTTP API 而非 typert Remote**：Host↔Client 只需少量端点；HTTP+SSE 无生成步骤、易测试，避免为 V1 引入 typert 生成链路。
 3. **ssh2 而非系统 ssh**：需要程序化 host key（首次确认/变化中止）、密码认证、forwardOut 通道；系统 ssh 在 Windows 上无法安全地做一次性密码认证。
 4. **自举不装系统级组件**：全部在用户目录，T5 明确失败不假装成功；白名单模板命令，不接受用户拼接 shell。
