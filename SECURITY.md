@@ -1,7 +1,7 @@
 # 安全策略（Security Policy）
 
 > **English abstract.** This plugin gives a local DSH full-page access to a remote DSH over SSH, so the surface is
-> the SSH hop, the launch token, host-key verification, the loopback tunnel, the remote bootstrap templates and the
+> the SSH hop, the launch token, host-key verification, the loopback tunnel, the remote npx launch/preflight and the
 > local HTTP API. Report vulnerabilities privately through GitHub Security Advisories
 > (<https://github.com/Solaris136/dsh-remote-go/security/advisories/new>); please do not open a public issue.
 > Targets: acknowledge within 72 hours, triage within 7 days, coordinated disclosure within 90 days. Only 1.x is
@@ -56,7 +56,7 @@
 2. **访问令牌处理**：远端 `dsh web` 启动令牌的获取、内存保存、日志出现与 `saveTokens` 可选落盘路径。
 3. **主机指纹校验绕过**：`hostVerifier`、`known_hosts` 只读解析、首次确认与指纹变化的阻断、strict 策略被绕过。
 4. **隧道对外暴露**：本地隧道监听非回环地址（应为 `127.0.0.1`）；远端服务被绑到非回环地址或可被局域网/公网直连。
-5. **远端自举命令注入**：白名单模板之外的命令拼接、版本号/路径/架构等参数注入、Node 下载包的 SHA-256 校验被跳过。
+5. **远端 npx 启动命令注入**：白名单模板之外的命令拼接；版本号、profile、路径等参数注入；npx 解析到非本机版本或预检被绕过。
 6. **本地 HTTP API 的 CSRF / Origin 校验**：`x-dsh-remote-go` 请求头、同源 `Origin`、`sec-fetch-site` 栅栏与 `/events` 的
    EventSource 例外处理被绕过，导致任意站点可驱动本地 API。
 7. **回环 URL 校验**：`/open` 返回的 URL 必须是 `http://127.0.0.1:<port>` 才交给桌面端 guest；绕过该校验会让任意地址被加载或令牌被带出。
@@ -79,7 +79,7 @@
 - 本地 HTTP API 要求自定义请求头 + 同源 `Origin`，跨站请求被拒绝。
 - 访问令牌默认只在内存；`saveTokens=true` 时才以 0600 写入本地文件；密码永不落盘。
 - 主机指纹首次显式确认，变化时阻断并强提示；`strict` 策略下未记录指纹直接拒绝。
-- 远端自举只执行固定白名单模板命令，不接受用户拼接的任意 shell；Node 下载校验 SHA-256。
+- 远端运行时只执行固定白名单模板的 `npx` 命令，不接受用户拼接的任意 shell；版本号与 profile 经校验和 shell 引用，预检回读的版本必须与本机一致。
 
 ## 依赖与已知告警（Dependabot）
 

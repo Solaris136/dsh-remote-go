@@ -3,12 +3,16 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import {
   adoptRemoteWeb,
+  buildForeignDshCommand,
   buildStartCommand,
   buildStartScript,
   exchangeTokenOverTunnel,
+  findForeignDshProcesses,
+  parseForeignDshOutput,
   parseWebLine,
   readWebLineFromLog,
   startRemoteWeb,
+  stopForeignDshProcesses,
   stopRemoteWeb,
   remoteHttpStatus,
 } from '../../src/webapp.js'
@@ -16,9 +20,22 @@ import { remoteLayout } from '../../src/layout.js'
 
 const LAYOUT = remoteLayout('~/.dsh-remote-go', '/home/ubuntu')
 
-/** @param {import('../../src/bootstrap.js').BootstrapPlan['start']} start */
-function planWith(start) {
-  return { level: 'T2', reason: { zh: '', en: '' }, steps: [], start, layout: LAYOUT }
+/** @returns {import('../../src/bootstrap.js').RuntimePlan} */
+function npxPlan(overrides = {}) {
+  return {
+    level: 'npx',
+    profile: 'web',
+    targetVersion: '0.2.2-rc.1',
+    reason: { zh: '', en: '' },
+    start: {
+      kind: 'npx',
+      npxPath: '/usr/bin/npx',
+      nodePath: '/usr/bin/node',
+      nodeBinDir: '/usr/bin',
+      targetVersion: '0.2.2-rc.1',
+      ...overrides,
+    },
+  }
 }
 
 test('parseWebLine extracts loopback port and token', () => {
@@ -31,34 +48,26 @@ test('parseWebLine extracts loopback port and token', () => {
   assert.equal(parseWebLine('dsh web: http://[::1]:4444/?token=x').host, '::1')
 })
 
-test('buildStartCommand produces pinned, loopback-only launch commands', () => {
-  const nodeBin = buildStartCommand(
-    planWith({ kind: 'node-bin', nodePath: '/n/bin/node', dshBinPath: '/d/lib/bin.js', targetVersion: '0.2.2-rc.1' }),
-    LAYOUT,
-  )
-  assert.ok(nodeBin.includes("DSH_HOME='/home/ubuntu/.dsh-remote-go/home'"), nodeBin)
-  assert.match(nodeBin, /--profile web --no-open --port 0/)
-
-  const dsh = buildStartCommand(
-    planWith({ kind: 'dsh', dshPath: '/usr/local/bin/dsh', targetVersion: '0.2.2-rc.1' }),
-    LAYOUT,
-  )
-  assert.match(dsh, /'\/usr\/local\/bin\/dsh' --profile web/)
-
-  const npx = buildStartCommand(
-    planWith({ kind: 'npx', npxPath: '/usr/bin/npx', nodeBinDir: '/usr/bin', targetVersion: '0.2.2-rc.1' }),
-    LAYOUT,
-  )
-  assert.match(npx, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
+test('buildStartCommand produces the pinned npx launch command against ~/.dsh', () => {
+  const command = buildStartCommand(npxPlan(), LAYOUT)
+  assert.ok(command.includes("DSH_HOME='/home/ubuntu/.dsh'"), command)
+  assert.match(command, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
+  assert.match(command, /--profile 'web' --no-open --port 0/)
+  assert.match(command, /PATH='\/usr\/bin':"\$PATH"/)
 })
 
 test('buildStartScript detaches, waits for the readiness line and records the run registry', () => {
-  const script = buildStartScript('env A=1 /bin/true', LAYOUT, { waitSeconds: 7, version: '0.2.2-rc.1' })
+  const script = buildStartScript('env A=1 /bin/true', LAYOUT, {
+    waitSeconds: 7,
+    version: '0.2.2-rc.1',
+    profile: 'web',
+  })
   assert.match(script, /setsid nohup bash -lc/)
   assert.match(script, /grep -q 'dsh web:'/)
   assert.match(script, /DONE:\$PID:\$PORT/)
-  assert.match(script, /"version":"%s"/)
   assert.match(script, /"0\.2\.2-rc\.1"/)
+  assert.match(script, /"dshHome":%s/)
+  assert.ok(script.includes('"/home/ubuntu/.dsh"'))
   assert.match(script, /-lt 7/)
 })
 
@@ -70,13 +79,12 @@ test('startRemoteWeb parses the combined stdout and returns pid/port/token', asy
       return { code: 0, stdout: 'LINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n', stderr: '' }
     },
   }
-  const info = await startRemoteWeb(ssh, {
-    plan: planWith({ kind: 'node-bin', nodePath: '/n', dshBinPath: '/d', targetVersion: '0.2.2-rc.1' }),
-    layout: LAYOUT,
-  })
+  const info = await startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT })
   assert.equal(info.pid, 999)
   assert.equal(info.port, 41234)
   assert.equal(info.token, 'tok')
+  assert.equal(info.profile, 'web')
+  assert.equal(info.dshHome, '/home/ubuntu/.dsh')
 })
 
 test('startRemoteWeb fails with coded errors when the remote dies or times out', async () => {
@@ -86,11 +94,7 @@ test('startRemoteWeb fails with coded errors when the remote dies or times out',
     },
   }
   await assert.rejects(
-    () =>
-      startRemoteWeb(dead, {
-        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
-        layout: LAYOUT,
-      }),
+    () => startRemoteWeb(dead, { plan: npxPlan(), layout: LAYOUT }),
     (error) => error.code === 'remote-dsh-start-failed' && /crash/.test(error.technical ?? ''),
   )
   const timeout = {
@@ -99,11 +103,7 @@ test('startRemoteWeb fails with coded errors when the remote dies or times out',
     },
   }
   await assert.rejects(
-    () =>
-      startRemoteWeb(timeout, {
-        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
-        layout: LAYOUT,
-      }),
+    () => startRemoteWeb(timeout, { plan: npxPlan(), layout: LAYOUT }),
     (error) => error.code === 'remote-dsh-start-failed',
   )
 })
@@ -115,11 +115,7 @@ test('startRemoteWeb refuses a non-loopback advertised URL', async () => {
     },
   }
   await assert.rejects(
-    () =>
-      startRemoteWeb(ssh, {
-        plan: planWith({ kind: 'dsh', dshPath: '/dsh', targetVersion: '0.2.2-rc.1' }),
-        layout: LAYOUT,
-      }),
+    () => startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT }),
     (error) => error.code === 'remote-ui-unreachable',
   )
 })
@@ -140,9 +136,13 @@ test('stopRemoteWeb and remoteHttpStatus use tightly scoped shell commands', asy
   assert.ok(calls.some((command) => command.includes('kill -TERM')))
 })
 
-test('adoptRemoteWeb requires a live pid, a logged URL and a responsive server', async () => {
+test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL and a responsive server', async () => {
   const responses = [
-    { code: 0, stdout: '{"pid":4242,"port":38123,"version":"0.2.2-rc.1"}', stderr: '' }, // cat registry
+    {
+      code: 0,
+      stdout: '{"pid":4242,"port":38123,"version":"0.2.2-rc.1","profile":"web","dshHome":"/home/ubuntu/.dsh"}',
+      stderr: '',
+    }, // cat registry
     { code: 0, stdout: 'alive', stderr: '' }, // kill -0
     { code: 0, stdout: 'dsh web: http://127.0.0.1:38123/?token=adopted\n', stderr: '' }, // grep log
     { code: 0, stdout: '200', stderr: '' }, // curl
@@ -152,17 +152,86 @@ test('adoptRemoteWeb requires a live pid, a logged URL and a responsive server',
       return responses.shift() ?? { code: 1, stdout: '', stderr: '' }
     },
   }
-  const adopted = await adoptRemoteWeb(ssh, LAYOUT)
+  const adopted = await adoptRemoteWeb(ssh, LAYOUT, { profile: 'web' })
   assert.equal(adopted.pid, 4242)
   assert.equal(adopted.token, 'adopted')
   assert.equal(adopted.version, '0.2.2-rc.1')
+  assert.equal(adopted.dshHome, '/home/ubuntu/.dsh')
 
   const dead = {
     async exec() {
       return { code: 1, stdout: '', stderr: '' }
     },
   }
-  assert.equal(await adoptRemoteWeb(dead, LAYOUT), null)
+  assert.equal(await adoptRemoteWeb(dead, LAYOUT, { profile: 'web' }), null)
+})
+
+test('adoptRemoteWeb refuses a registry from another home or profile', async () => {
+  for (const registry of [
+    { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh-remote-go/home' },
+    { pid: 1, port: 2, profile: 'headless', dshHome: '/home/ubuntu/.dsh' },
+    { pid: 1, port: 2, version: '0.2.2-rc.1' },
+  ]) {
+    const ssh = {
+      async exec() {
+        return { code: 0, stdout: JSON.stringify(registry), stderr: '' }
+      },
+    }
+    assert.equal(await adoptRemoteWeb(ssh, LAYOUT, { profile: 'web' }), null)
+  }
+})
+
+test('foreign DSH detection scans ps, ignores pids and respects DSH_HOME', async () => {
+  const command = buildForeignDshCommand([111, 222])
+  assert.match(command, /ps -eww -o pid=,comm=,args=/)
+  assert.match(command, /IGNORE=" 111 222 "/)
+  assert.match(command, /node\|dsh\|npm\|npx/)
+  assert.match(command, /DSH_HOME/)
+
+  const stdout = '4242\t/bin/node /home/u/.npm/_npx/x/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web\n'
+  const ssh = {
+    async exec(got) {
+      assert.match(got, /IGNORE=" 111 "/)
+      return { code: 0, stdout, stderr: '' }
+    },
+  }
+  const found = await findForeignDshProcesses(ssh, { ignorePids: [111] })
+  assert.equal(found.ok, true)
+  assert.deepEqual(found.processes, [
+    { pid: 4242, command: '/bin/node /home/u/.npm/_npx/x/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web' },
+  ])
+  assert.deepEqual(parseForeignDshOutput('nope\n0\tx\n9\t\n'), [])
+  const broken = {
+    async exec() {
+      throw new Error('no ps')
+    },
+  }
+  assert.equal((await findForeignDshProcesses(broken)).ok, false)
+})
+
+test('stopForeignDshProcesses sends TERM/KILL and reports survivors', async () => {
+  const calls = []
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      return { code: 0, stdout: 'STOPPED\n', stderr: '' }
+    },
+  }
+  const stopped = await stopForeignDshProcesses(ssh, [{ pid: 42 }, { pid: 42 }, { pid: 0 }])
+  assert.equal(stopped.ok, true)
+  assert.match(calls[0], /PIDS="42"/)
+  assert.match(calls[0], /kill -TERM/)
+  assert.match(calls[0], /kill -KILL/)
+
+  const survivor = {
+    async exec() {
+      return { code: 0, stdout: 'ALIVE:42\nSTOPPED\n', stderr: '' }
+    },
+  }
+  const failed = await stopForeignDshProcesses(survivor, [{ pid: 42 }])
+  assert.equal(failed.ok, false)
+  assert.deepEqual(failed.alive, [42])
+  assert.equal((await stopForeignDshProcesses(ssh, [])).ok, true)
 })
 
 test('readWebLineFromLog reads the last readiness line', async () => {

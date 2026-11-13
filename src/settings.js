@@ -6,8 +6,8 @@
 import {
   DEFAULT_IDLE_MINUTES,
   DEFAULT_KEY_PATH,
-  DEFAULT_NODE_VERSION,
   DEFAULT_REMOTE_DIR,
+  DEFAULT_REMOTE_PROFILE,
   SSH_READY_TIMEOUT_MS,
 } from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
@@ -27,7 +27,7 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   mirrorHistory: boolean,
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
- *   bootstrap: { targetVersion: string, mode: 'auto' | 'reuse' | 'npx' | 'isolated', remoteDir: string, nodeVersion: string },
+ *   bootstrap: { remoteDir: string, profile: string },
  * }} Settings
  */
 
@@ -62,12 +62,23 @@ export function defaultSettings() {
     language: 'auto',
     logLevel: 'info',
     bootstrap: {
-      targetVersion: 'local',
-      mode: 'auto',
       remoteDir: DEFAULT_REMOTE_DIR,
-      nodeVersion: DEFAULT_NODE_VERSION,
+      profile: DEFAULT_REMOTE_PROFILE,
     },
   }
+}
+
+/**
+ * A profile name DSH can boot: one safe path segment, and never `desktop`
+ * (the Electron app reserves that profile and the CLI refuses it).
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+export function normalizeProfileName(value) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(text)) return null
+  if (text.toLowerCase() === 'desktop') return null
+  return text
 }
 
 /** @param {unknown} value @param {unknown[]} allowed @param {any} fallback */
@@ -98,10 +109,7 @@ export function sanitizeSettings(raw) {
   const input = deepMerge(defaults, raw)
   const autoReconnect = isPlainObject(input.autoReconnect) ? input.autoReconnect : defaults.autoReconnect
   const bootstrap = isPlainObject(input.bootstrap) ? input.bootstrap : defaults.bootstrap
-  const targetVersion =
-    typeof bootstrap.targetVersion === 'string' && bootstrap.targetVersion.trim() !== ''
-      ? bootstrap.targetVersion.trim()
-      : defaults.bootstrap.targetVersion
+  const profile = normalizeProfileName(bootstrap.profile) ?? defaults.bootstrap.profile
   return {
     defaultPort: numberIn(input.defaultPort, 1, 65535, defaults.defaultPort),
     // The retired "agent" choice migrates to key-file auth instead of silently
@@ -137,16 +145,11 @@ export function sanitizeSettings(raw) {
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
     bootstrap: {
-      targetVersion,
-      mode: oneOf(bootstrap.mode, ['auto', 'reuse', 'npx', 'isolated'], defaults.bootstrap.mode),
       remoteDir:
         typeof bootstrap.remoteDir === 'string' && bootstrap.remoteDir.trim() !== ''
           ? bootstrap.remoteDir.trim()
           : defaults.bootstrap.remoteDir,
-      nodeVersion:
-        typeof bootstrap.nodeVersion === 'string' && /^v?\d+\.\d+\.\d+$/.test(bootstrap.nodeVersion.trim())
-          ? bootstrap.nodeVersion.trim()
-          : defaults.bootstrap.nodeVersion,
+      profile,
     },
   }
 }
@@ -177,8 +180,6 @@ export function sanitizeHostEntry(raw, options = {}) {
   const keyPathInput =
     raw.auth && isPlainObject(raw.auth) && typeof raw.auth.keyPath === 'string' ? raw.auth.keyPath.trim() : ''
   const keyPath = keyPathInput || existing?.auth?.keyPath || (authType === 'key' ? settings.defaultKeyPath : '')
-  const bootstrapRaw = isPlainObject(raw.bootstrap) ? raw.bootstrap : {}
-  const bootstrapExisting = existing?.bootstrap ?? {}
   const keepAlive = oneOf(raw.keepAlive, ['keep', 'stop', 'idle'], existing?.keepAlive ?? 'keep')
   const hostKeyPolicy = oneOf(
     raw.hostKeyPolicy,
@@ -206,25 +207,6 @@ export function sanitizeHostEntry(raw, options = {}) {
       typeof raw.pinnedFingerprint === 'string' && raw.pinnedFingerprint.startsWith('SHA256:')
         ? raw.pinnedFingerprint
         : (existing?.pinnedFingerprint ?? null),
-    bootstrap: {
-      mode: oneOf(
-        bootstrapRaw.mode,
-        ['auto', 'reuse', 'npx', 'isolated'],
-        bootstrapExisting.mode ?? settings.bootstrap.mode,
-      ),
-      targetVersion:
-        typeof bootstrapRaw.targetVersion === 'string' && bootstrapRaw.targetVersion.trim() !== ''
-          ? bootstrapRaw.targetVersion.trim()
-          : (bootstrapExisting.targetVersion ?? settings.bootstrap.targetVersion),
-      remoteDir:
-        typeof bootstrapRaw.remoteDir === 'string' && bootstrapRaw.remoteDir.trim() !== ''
-          ? bootstrapRaw.remoteDir.trim()
-          : (bootstrapExisting.remoteDir ?? settings.bootstrap.remoteDir),
-      nodeVersion:
-        typeof bootstrapRaw.nodeVersion === 'string' && /^v?\d+\.\d+\.\d+$/.test(bootstrapRaw.nodeVersion.trim())
-          ? bootstrapRaw.nodeVersion.trim()
-          : (bootstrapExisting.nodeVersion ?? settings.bootstrap.nodeVersion),
-    },
     createdAt: existing?.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastOpenedAt: existing?.lastOpenedAt ?? null,

@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-go",
   "version": "0.1.0",
-  "description": "DSH 插件：通过 SSH 在本地 DSH 的主内容区使用远端 DSH（薄客户端，侧边栏即切换器）| DSH plugin: use a remote DSH in the local main content area over SSH (the sidebar stays the switcher)",
+  "description": "DSH 插件：通过 SSH 在本机 DSH 的整窗里使用远端 DSH；远端 DSH 用 npx 固定本机版本启动，数据在远端 ~/.dsh | DSH plugin: use a remote DSH over SSH in the whole window; it runs via npx pinned to the local version with data in the remote ~/.dsh",
   "keywords": [
     "deepseek",
     "harness",

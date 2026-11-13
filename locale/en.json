@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "dsh remote go",
-    "description": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the main content area while the sidebar stays as the switcher. Hosts live in Settings → Remote hosts."
+    "description": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 32px bar under the title bar names the host and remote session, switches hosts, reloads and leaves). Hosts live in Settings → Remote hosts."
   }
 }

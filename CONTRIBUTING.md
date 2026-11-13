@@ -1,7 +1,7 @@
 # 贡献指南
 
 > **English abstract.** `dsh-remote-go` is a DSH plugin that opens a remote DSH inside a full-page local
-> panel over SSH, with host management, connection diagnostics, remote bootstrap and version parity. This
+> panel over SSH, with host management, connection diagnostics, the remote npx runtime and exact version parity. This
 > guide covers local setup (Node 24 + pnpm 11, install with `--ignore-scripts`), the canonical checks
 > (`pnpm run verify`), Conventional Commits, the PR flow (fork → branch → PR against `main`, squash merge),
 > review expectations, code style, and private security reporting. The rest is written in Chinese.
@@ -258,7 +258,7 @@ ES 尾逗号、LF）；提交前跑 `pnpm run format`，不要手工调格式，
 - 安全漏洞请**私下**报告，不要开公开 issue；渠道、时限与范围见 [SECURITY.md](SECURITY.md)。
 - 讨论安全问题时（哪怕只是怀疑）也不要贴真实凭据，用占位值复述现象。
 - 诊断导出默认脱敏（token / 密码 / 私钥 / 家目录），但仍可能包含主机名与路径，转贴前请自行复核。
-- 改动 SSH 认证、主机指纹策略、隧道监听地址、本地 HTTP API 鉴权、回环 URL 校验、远端自举命令模板时，
+- 改动 SSH 认证、主机指纹策略、隧道监听地址、本地 HTTP API 鉴权、回环 URL 校验、远端 npx 启动/预检命令模板时，
   请在 PR 描述里写明威胁模型与验证方式。
 
 ## 11. 行为准则与许可

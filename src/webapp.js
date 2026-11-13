@@ -1,10 +1,14 @@
 /**
- * Remote DSH web lifecycle: start (detached, log in the user's remote dir),
+ * Remote DSH web lifecycle: start (detached, log in the plugin's remote directory),
  * parse the `dsh web:` URL line, stop, and verify reachability through the
  * loopback tunnel. The launch token stays in memory (design §16.8).
+ *
+ * The remote runtime is always npx pinned to the local DSH version and always
+ * uses the remote user's real DSH home (`~/.dsh`); this module no longer knows
+ * about isolated installs.
  */
 import http from 'node:http'
-import { REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS, TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
+import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS, TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
 import { errors } from './errors.js'
 import { remoteLayout } from './layout.js'
 import { headTail, isLoopbackHost, shellQuote } from './util.js'
@@ -47,41 +51,33 @@ export function parseWebLine(text) {
 }
 
 /**
- * @param {import('./bootstrap.js').BootstrapPlan} plan
+ * @param {import('./bootstrap.js').RuntimePlan} plan
  * @param {ReturnType<typeof remoteLayout>} layout
  * @param {{ profile?: string }} [options]
  */
 export function buildStartCommand(plan, layout, options = {}) {
-  const profile = options.profile ?? REMOTE_PROFILE
-  const args = `--profile ${profile} --no-open --port 0`
-  if (plan.start.kind === 'dsh') {
-    return `env DSH_HOME=${shellQuote(layout.home)} ${shellQuote(plan.start.dshPath ?? 'dsh')} ${args}`
-  }
-  if (plan.start.kind === 'node-bin') {
-    return `env DSH_HOME=${shellQuote(layout.home)} ${shellQuote(plan.start.nodePath ?? layout.nodeBin)} ${shellQuote(plan.start.dshBinPath ?? layout.dshBin)} ${args}`
-  }
-  if (plan.start.kind === 'npx') {
-    const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
-    return `env DSH_HOME=${shellQuote(layout.home)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} ${args}`
-  }
-  throw errors.internal(`unknown start plan kind: ${plan.start.kind}`)
+  const profile = options.profile ?? plan.profile ?? DEFAULT_REMOTE_PROFILE
+  const args = `--profile ${shellQuote(profile)} --no-open --port 0`
+  const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
+  return `env DSH_HOME=${shellQuote(layout.dshHome)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} ${args}`
 }
 
 /**
  * Detached start script: setsid + nohup, waits for the readiness line, logs to
- * the plugin's remote log directory, and records a pid/port registry file.
+ * the plugin's remote log directory, and records a pid/port/profile registry file.
  * @param {string} startCommand
  * @param {ReturnType<typeof remoteLayout>} layout
- * @param {{ waitSeconds?: number }} [options]
+ * @param {{ waitSeconds?: number, version?: string, profile?: string }} [options]
  */
 export function buildStartScript(startCommand, layout, options = {}) {
   const waitSeconds = options.waitSeconds ?? Math.ceil(REMOTE_START_TIMEOUT_MS / 1000)
   const version = normalizeVersion(options.version ?? '')
+  const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
   const logFile = shellQuote(layout.logFile)
   const runFile = shellQuote(layout.runFile)
   const startedAtPlaceholder = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
   return `set -eu
-mkdir -p ${shellQuote(layout.logsDir)} ${shellQuote(layout.runDir)} ${shellQuote(layout.home)} ${shellQuote(layout.dshHome)}
+mkdir -p ${shellQuote(layout.logsDir)} ${shellQuote(layout.runDir)} ${shellQuote(layout.stateHome)}
 LOG=${logFile}
 : > "$LOG"
 cd "$HOME"
@@ -110,7 +106,7 @@ fi
 echo "LINE:$LINE"
 PORT=$(printf '%s' "$LINE" | sed -n 's#.*127\\.0\\.0\\.1:\\([0-9][0-9]*\\)/.*#\\1#p')
 if [ -z "$PORT" ]; then PORT=$(printf '%s' "$LINE" | sed -n 's#.*:\\([0-9][0-9]*\\)/.*#\\1#p'); fi
-printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":"%s","version":"%s"}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${JSON.stringify(REMOTE_PROFILE)} ${JSON.stringify(version)} > ${runFile}
+printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":%s,"version":%s,"dshHome":%s}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${shellQuote(JSON.stringify(profile))} ${shellQuote(JSON.stringify(version))} ${shellQuote(JSON.stringify(layout.dshHome))} > ${runFile}
 echo "DONE:$PID:$PORT"
 `
 }
@@ -124,21 +120,25 @@ echo "DONE:$PID:$PORT"
  *   logPath: string,
  *   startedAt: string,
  *   rawLine: string,
+ *   profile: string,
+ *   dshHome: string,
  * }} RemoteWebInfo
  */
 
 /**
  * Start the remote web app and parse its readiness line.
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ plan: import('./bootstrap.js').BootstrapPlan, layout?: ReturnType<typeof remoteLayout>, timeoutMs?: number, onLine?: (line: string) => void }} options
+ * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout?: ReturnType<typeof remoteLayout>, profile?: string, timeoutMs?: number, onLine?: (line: string) => void }} options
  * @returns {Promise<RemoteWebInfo>}
  */
 export async function startRemoteWeb(ssh, options) {
-  const layout = options.layout ?? remoteLayout(options.plan.layout.root)
-  const startCommand = buildStartCommand(options.plan, layout)
+  const layout = options.layout ?? remoteLayout(options.remoteDir ?? '~/.dsh-remote-go')
+  const profile = options.profile ?? options.plan.profile ?? DEFAULT_REMOTE_PROFILE
+  const startCommand = buildStartCommand(options.plan, layout, { profile })
   const script = buildStartScript(startCommand, layout, {
     waitSeconds: Math.ceil((options.timeoutMs ?? REMOTE_START_TIMEOUT_MS) / 1000),
     version: options.plan.start.targetVersion,
+    profile,
   })
   /** @type {string[]} */
   const lines = []
@@ -162,8 +162,8 @@ export async function startRemoteWeb(ssh, options) {
   if (!parsed) throw errors.remoteDshStartFailed(headTail(combined, 1500))
   if (!isLoopbackHost(parsed.host)) {
     throw errors.remoteUiUnreachable({
-      zh: `远端 DSH 宣布的地址不是回环地址（${parsed.host}），无法安全地经 SSH 隧道嵌入。`,
-      en: `The remote DSH advertised a non-loopback host (${parsed.host}); it cannot be embedded safely over SSH.`,
+      zh: `远端 DSH 宣布的地址不是回环地址（${parsed.host}），无法安全地经 SSH 隧道访问。`,
+      en: `The remote DSH advertised a non-loopback host (${parsed.host}); it cannot be reached safely through the SSH tunnel.`,
     })
   }
   const pidMatch = /DONE:(\d+):(\d+)/.exec(combined)
@@ -177,6 +177,8 @@ export async function startRemoteWeb(ssh, options) {
     logPath: layout.logFile,
     startedAt,
     rawLine: parsed.rawLine,
+    profile,
+    dshHome: layout.dshHome,
   }
 }
 
@@ -265,12 +267,25 @@ export async function remotePidAlive(ssh, pid) {
 /**
  * Try to adopt a still-running remote web instance from a previous local
  * process: registry pid alive + last log line parseable + loopback HTTP alive.
+ *
+ * The registry must name the same DSH home and profile this connection is about
+ * to use. A process left over from the old isolated home (or another profile) is
+ * not adopted: it would show a different DSH state than the user asked for.
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
  * @param {ReturnType<typeof remoteLayout>} layout
- * @returns {Promise<{ pid: number, port: number, token: string, url: string, adopted: true } | null>}
+ * @param {{ profile?: string }} [options]
+ * @returns {Promise<{
+ *   pid: number, port: number, token: string, url: string, version: string | null,
+ *   profile: string, dshHome: string, adopted: true,
+ * } | null>}
  */
-export async function adoptRemoteWeb(ssh, layout) {
+export async function adoptRemoteWeb(ssh, layout, options = {}) {
+  const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
   const registry = await readRunRegistry(ssh, layout)
+  // The old isolated-home process wrote a registry without (or with another)
+  // dshHome; adopting it would silently ignore the `~/.dsh` switch.
+  if (registry?.dshHome !== layout.dshHome) return null
+  if (registry?.profile !== profile) return null
   const pid = Number(registry?.pid ?? 0)
   if (!(await remotePidAlive(ssh, pid))) return null
   const line = await readWebLineFromLog(ssh, layout)
@@ -279,7 +294,156 @@ export async function adoptRemoteWeb(ssh, layout) {
   if (!(status === 200 || status === 302 || status === 401)) return null
   const version =
     typeof registry?.version === 'string' && registry.version !== '' ? normalizeVersion(registry.version) : null
-  return { pid, port: line.port, token: line.token, url: line.url, version, adopted: true }
+  return {
+    pid,
+    port: line.port,
+    token: line.token,
+    url: line.url,
+    version,
+    profile,
+    dshHome: layout.dshHome,
+    adopted: true,
+  }
+}
+
+/**
+ * The shell probe for DSH processes the plugin did not start.
+ *
+ * It deliberately scans `ps` instead of `pgrep`: the command string itself lives
+ * in the `bash -lc` process, and a naive `pgrep -f` would match its own shell.
+ * Only real runtime executables (`node`, `dsh`, `npm`, `npx`) are considered,
+ * and a process whose `DSH_HOME` points somewhere other than `~/.dsh` is not a
+ * conflict for this connection.
+ * @param {number[]} [ignorePids]
+ * @returns {string}
+ */
+export function buildForeignDshCommand(ignorePids = []) {
+  const ignore = (Array.isArray(ignorePids) ? ignorePids : [])
+    .map((pid) => Number(pid))
+    .filter((pid) => Number.isInteger(pid) && pid > 0)
+    .join(' ')
+  return `set -u
+IGNORE=" ${ignore} "
+PS_OUT=$(ps -eww -o pid=,comm=,args= 2>/dev/null || ps -eo pid=,comm=,args= 2>/dev/null || true)
+printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
+  [ -z "$LINE" ] && continue
+  set -- $LINE
+  PID=$1
+  COMM=$2
+  shift 2
+  ARGS="$*"
+  [ -z "$PID" ] && continue
+  case "$IGNORE" in *" $PID "*) continue ;; esac
+  case "$COMM" in node|dsh|npm|npx) ;; *) continue ;; esac
+  case "$ARGS" in
+    *"@deepseek-ai/dsh"*|*"/bin/dsh "*|*" dsh "*) ;;
+    *) continue ;;
+  esac
+  case "$ARGS" in
+    *"ps -eww"*|*"PS_OUT"*|*"IGNORE"*) continue ;;
+  esac
+  ENV_HOME=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
+  if [ -n "\${ENV_HOME:-}" ] && [ "$ENV_HOME" != "$HOME/.dsh" ]; then continue; fi
+  printf '%s\\t%s\\n' "$PID" "$ARGS"
+done`
+}
+
+/**
+ * @param {string} stdout
+ * @returns {{ pid: number, command: string }[]}
+ */
+export function parseForeignDshOutput(stdout) {
+  /** @type {{ pid: number, command: string }[]} */
+  const processes = []
+  for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
+    const tab = rawLine.indexOf('\t')
+    if (tab <= 0) continue
+    const pid = Number(rawLine.slice(0, tab).trim())
+    const command = rawLine.slice(tab + 1).trim()
+    if (!Number.isInteger(pid) || pid <= 0 || command === '') continue
+    processes.push({ pid, command })
+  }
+  return processes
+}
+
+/**
+ * Find DSH processes on the remote that this plugin did not start.
+ *
+ * Never throws: a failed scan is reported as `{ ok: false }`, and the caller
+ * proceeds without a conflict prompt (a broken scan must not block connecting).
+ * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
+ * @param {{ ignorePids?: number[], timeoutMs?: number }} [options]
+ * @returns {Promise<{ ok: boolean, processes: { pid: number, command: string }[], reason?: string, technical?: string }>}
+ */
+export async function findForeignDshProcesses(ssh, options = {}) {
+  try {
+    const result = await ssh.exec(buildForeignDshCommand(options.ignorePids ?? []), {
+      timeoutMs: options.timeoutMs ?? 20_000,
+      maxBytes: 200_000,
+    })
+    if (result.code !== 0) {
+      return { ok: false, processes: [], reason: 'exec-failed', technical: String(result.stderr ?? '').slice(0, 500) }
+    }
+    return { ok: true, processes: parseForeignDshOutput(result.stdout) }
+  } catch (error) {
+    // swallow-ok: a scan failure is surfaced as ok:false and the caller proceeds without a prompt
+    return {
+      ok: false,
+      processes: [],
+      reason: 'exec-failed',
+      technical: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+/**
+ * Stop the processes the user explicitly approved. Numeric pids only, SIGTERM
+ * first, SIGKILL after a bounded wait, then confirm they are gone.
+ * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
+ * @param {{ pid: number }[]} processes
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<{ ok: boolean, alive: number[], output: string }>}
+ */
+export async function stopForeignDshProcesses(ssh, processes, options = {}) {
+  const pids = [
+    ...new Set(
+      (Array.isArray(processes) ? processes : [])
+        .map((process) => Number(process?.pid))
+        .filter((pid) => Number.isInteger(pid) && pid > 0),
+    ),
+  ]
+  if (pids.length === 0) return { ok: true, alive: [], output: '' }
+  const script = `set -u
+PIDS="${pids.join(' ')}"
+for PID in $PIDS; do kill -TERM "$PID" 2>/dev/null || true; done
+i=0
+while [ "$i" -lt 20 ]; do
+  ALIVE=0
+  for PID in $PIDS; do
+    if kill -0 "$PID" 2>/dev/null; then ALIVE=1; fi
+  done
+  if [ "$ALIVE" -eq 0 ]; then break; fi
+  i=$((i+1))
+  sleep 0.5
+done
+for PID in $PIDS; do
+  if kill -0 "$PID" 2>/dev/null; then kill -KILL "$PID" 2>/dev/null || true; fi
+done
+sleep 0.2
+for PID in $PIDS; do
+  if kill -0 "$PID" 2>/dev/null; then echo "ALIVE:$PID"; fi
+done
+echo "STOPPED"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 30_000 })
+    const output = String(result.stdout ?? '')
+    const alive = [...output.matchAll(/ALIVE:(\d+)/g)].map((match) => Number(match[1]))
+    return { ok: result.code === 0 && alive.length === 0, alive, output }
+  } catch (error) {
+    // swallow-ok: a stop failure is returned to the caller with the original message
+    return { ok: false, alive: pids, output: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**

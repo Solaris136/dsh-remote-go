@@ -98,7 +98,9 @@ export function apply(ctx, config = {}) {
         const detected = await detectLocalVersion({ ctx })
         if (detected.version) service.setLocalVersion(detected.version, detected.source)
         if (!detected.version)
-          logger.warn('could not detect the local DSH version; set an explicit bootstrap target version in settings')
+          logger.warn(
+            'could not detect the local DSH version; the remote npx runtime cannot be pinned to this machine, so connections will fail until the version is readable',
+          )
       } catch (error) {
         logger.error('initialization failed:', error)
       }

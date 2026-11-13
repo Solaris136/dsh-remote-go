@@ -3,9 +3,9 @@
  *
  * A single-file browser plugin (no build step) that contributes the
  * Settings → "Remote hosts" section and a global main panel. The panel lists
- * SSH hosts, runs the connect wizard, and hands the whole window to the remote
- * DSH Web UI — reached through a local loopback tunnel — as a live browser
- * guest. A left rail in the panel groups local and per-host workspaces.
+ * SSH hosts and hands the whole window to the remote DSH Web UI — reached
+ * through a local loopback tunnel — as a live browser guest. A 32px bar below the
+ * title bar names the current host and remote session, and switches hosts.
  *
  * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
  * source of truth; this file renders that state and sends user intents back.
@@ -60,8 +60,6 @@ window.__ModuleLoader__.load({
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /** Ordered connect phases (contract ConnectPhase). */
     const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'ready']
-    /** Statuses that keep the carrier up for one host. */
-    const REMOTE_STATUSES = ['connected', 'disconnected']
     /** Known diagnostic check ids, in the contract's fixed order. */
     const DIAGNOSE_IDS = [
       'ssh-reachable',
@@ -87,6 +85,7 @@ window.__ModuleLoader__.load({
       unconfigured: 'idle',
       connecting: 'info',
       'fingerprint-pending': 'warn',
+      'conflict-pending': 'warn',
       connected: 'success',
       disconnected: 'warn',
       error: 'error',
@@ -165,6 +164,7 @@ window.__ModuleLoader__.load({
       statusUnconfigured: '未配置',
       statusConnecting: '连接中',
       statusFingerprintPending: '指纹待确认',
+      statusConflictPending: '远端冲突待确认',
       statusConnected: '已连接',
       statusDisconnected: '断线',
       statusError: '错误',
@@ -172,6 +172,7 @@ window.__ModuleLoader__.load({
       statusHintUnconfigured: '尚未连接过',
       statusHintConnecting: '正在建立连接',
       statusHintFingerprintPending: '需要确认主机指纹',
+      statusHintConflictPending: '远端已有手工启动的 DSH，需要你选择如何处理',
       statusHintConnected: '远端界面可用',
       statusHintDisconnected: '连接断开，可重连',
       statusHintError: '连接失败',
@@ -198,9 +199,14 @@ window.__ModuleLoader__.load({
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
       remoteEntryLabel: '远端',
-      viewportOverlayLoadFailed: '远端界面加载失败，请从侧栏切换后重试。',
+      viewportOverlayLoadFailed: '远端界面加载失败，请刷新后重试，或从左侧主机栏回到主机管理。',
+      // -- carrier bar (injected into the full-window takeover) ----------------
+      carrierBarLabel: '远端接管控制条',
+      carrierSwitchHost: '切换远端主机',
+      carrierRefresh: '刷新远端界面',
+      carrierExit: '离开远端，回到主机管理',
       closeNoticeTitle: '远端任务会继续运行',
-      closeNoticeBody: '已返回主机清单。远端 DSH 与正在运行的任务不会停止，下次打开会直接回到该主机。',
+      closeNoticeBody: '已返回主机清单。远端 DSH 与正在运行的任务不会停止，再次打开会回到该主机。',
 
       // -- connect progress (contract §2) -------------------------------------
       'progress.ssh-connecting': '正在连接 SSH…',
@@ -208,6 +214,7 @@ window.__ModuleLoader__.load({
       'progress.host-key-confirm': '等待确认主机指纹…',
       'progress.auth-checking': '正在认证…',
       'progress.probing': '正在探测远端环境…',
+      'progress.remote-dsh-running': '远端已有手工启动的 DSH，等待你的选择…',
       'progress.bootstrapping': '正在准备远端运行时…',
       'progress.bootstrap-progress': '自举进度：{detail}',
       'progress.starting-remote': '正在启动远端 DSH…',
@@ -219,7 +226,7 @@ window.__ModuleLoader__.load({
       'progress.default': '正在连接…',
       'phase.ssh': 'SSH',
       'phase.probe': '探测',
-      'phase.bootstrap': '自举',
+      'phase.bootstrap': '准备运行时',
       'phase.start': '启动',
       'phase.tunnel': '隧道',
       'phase.ready': '就绪',
@@ -244,6 +251,14 @@ window.__ModuleLoader__.load({
       passwordPromptLabel: '密码',
       passwordPromptSubmit: '连接',
       passwordPromptRequired: '请输入密码',
+      conflictTitle: '远端已有手工启动的 DSH',
+      conflictBody:
+        '「{name}」的远端检测到不是本插件启动的 DSH 进程（共 {count} 个）。它们与插件共用 ~/.dsh，同时运行可能争用同一会话或凭据文件。请选择如何处理：',
+      conflictHint: '「停止」会向这些进程发送 SIGTERM / SIGKILL；「并存」会另起一个受管实例并保留它们。',
+      conflictStop: '停止它并启动受管实例',
+      conflictAlongside: '保留它，另起一个',
+      conflictCancel: '取消连接',
+      conflictBusy: '正在提交选择…',
 
       // -- wizard --------------------------------------------------------------
       'wizard.stepLabel': '第 {current} 步，共 {total} 步',
@@ -292,7 +307,7 @@ window.__ModuleLoader__.load({
       'wizard.versionRemote': '远端 DSH',
       'wizard.versionMatch': '版本一致',
       'wizard.versionMismatch': '版本不一致，远端界面可能与本机不同',
-      'wizard.bootstrapLevel': '自举等级',
+      'wizard.bootstrapLevel': '启动方式',
       'wizard.uiReady': '远端界面',
       'wizard.uiReadyYes': '就绪',
       'wizard.uiReadyNo': '未就绪',
@@ -329,10 +344,6 @@ window.__ModuleLoader__.load({
 
       // -- settings ------------------------------------------------------------
       'settings.title': '设置',
-      'settings.window': '窗口',
-      'settings.closeBehavior': '关闭视窗行为',
-      'settings.closeBehaviorValue': '保留远端会话（V1 固定）',
-      'settings.closeBehaviorHint': '关闭本地视窗不会结束远端任务。',
       'settings.ssh': 'SSH 默认值',
       'settings.defaultPort': '默认端口',
       'settings.defaultAuth': '默认认证方式',
@@ -358,10 +369,6 @@ window.__ModuleLoader__.load({
       'settings.saveTokensHint':
         '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
       'settings.saveTokensRisk': '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
-      'settings.mirror': '镜像会话',
-      'settings.mirrorToSidebar': '把远端镜像会话显示在本地侧边栏',
-      'settings.mirrorToSidebarHint':
-        '默认关闭。开启后每台远端主机在本地侧边栏注册一个「Remote: 主机名」工作区；关闭会移除已注册的分组，重新开启并在下次同步（连接或刷新镜像）时恢复。',
       'settings.reconnect': '自动重连',
       'settings.reconnectEnabled': '断线后自动重连',
       'settings.maxAttempts': '最大重试次数',
@@ -372,16 +379,12 @@ window.__ModuleLoader__.load({
       'settings.languageZh': '中文',
       'settings.languageEn': 'English',
       'settings.logLevel': '日志级别',
-      'settings.bootstrap': '自举',
-      'settings.targetVersion': '目标版本',
-      'settings.targetVersionHint': 'local = 跟随本机 DSH 版本',
-      'settings.mode': '自举方式',
-      'settings.modeAuto': '自动（推荐）',
-      'settings.modeReuse': '仅复用已安装',
-      'settings.modeNpx': '使用 npx',
-      'settings.modeIsolated': '隔离目录安装',
-      'settings.remoteDir': '远端隔离目录',
-      'settings.nodeVersion': 'Node 版本',
+      'settings.bootstrap': '远端运行时',
+      'settings.profile': 'DSH profile',
+      'settings.profileHint': '默认 web；profile 配置在 ~/.dsh/profiles/<profile>',
+      'settings.bootstrapHint': '用 npx 固定本机 DSH 版本启动，不再安装到远端目录',
+      'settings.remoteDir': '插件远端目录',
+      'settings.remoteDirHint': '只放日志、run 注册表和租约文件',
       'settings.saveSettings': '保存设置',
       'settings.saved': '设置已保存。',
       'settings.saveFailed': '保存设置失败',
@@ -456,6 +459,7 @@ window.__ModuleLoader__.load({
       statusUnconfigured: 'Not configured',
       statusConnecting: 'Connecting',
       statusFingerprintPending: 'Fingerprint pending',
+      statusConflictPending: 'Remote conflict',
       statusConnected: 'Connected',
       statusDisconnected: 'Disconnected',
       statusError: 'Error',
@@ -463,6 +467,7 @@ window.__ModuleLoader__.load({
       statusHintUnconfigured: 'Never connected',
       statusHintConnecting: 'Establishing the connection',
       statusHintFingerprintPending: 'Confirm the host fingerprint',
+      statusHintConflictPending: 'A manually started DSH is already running; choose how to proceed',
       statusHintConnected: 'The remote UI is available',
       statusHintDisconnected: 'Connection lost — reconnect available',
       statusHintError: 'Connection failed',
@@ -488,16 +493,23 @@ window.__ModuleLoader__.load({
 
       viewportConnecting: 'Connecting to "{name}"…',
       remoteEntryLabel: 'Remote',
-      viewportOverlayLoadFailed: 'The remote UI failed to load. Switch away in the sidebar and try again.',
+      viewportOverlayLoadFailed:
+        'The remote UI failed to load. Reload it, or use the bar to return to host management.',
+      // -- carrier bar (injected into the full-window takeover) ----------------
+      carrierBarLabel: 'Remote takeover bar',
+      carrierSwitchHost: 'Switch remote host',
+      carrierRefresh: 'Reload the remote UI',
+      carrierExit: 'Leave the remote and return to host management',
       closeNoticeTitle: 'Remote tasks keep running',
       closeNoticeBody:
-        'Back to the host list. The remote DSH and its running tasks keep running; reopen to return to this host.',
+        'Back to the host list. The remote DSH and its running tasks keep running; open the host again to return to it.',
 
       'progress.ssh-connecting': 'Connecting over SSH…',
       'progress.host-key-checking': 'Verifying the host key…',
       'progress.host-key-confirm': 'Waiting for you to confirm the host key…',
       'progress.auth-checking': 'Authenticating…',
       'progress.probing': 'Probing the remote environment…',
+      'progress.remote-dsh-running': 'A manually started DSH is running; waiting for your choice…',
       'progress.bootstrapping': 'Preparing the remote runtime…',
       'progress.bootstrap-progress': 'Bootstrap: {detail}',
       'progress.starting-remote': 'Starting the remote DSH…',
@@ -509,7 +521,7 @@ window.__ModuleLoader__.load({
       'progress.default': 'Connecting…',
       'phase.ssh': 'SSH',
       'phase.probe': 'Probe',
-      'phase.bootstrap': 'Bootstrap',
+      'phase.bootstrap': 'Preparing runtime',
       'phase.start': 'Start',
       'phase.tunnel': 'Tunnel',
       'phase.ready': 'Ready',
@@ -536,6 +548,15 @@ window.__ModuleLoader__.load({
       passwordPromptLabel: 'Password',
       passwordPromptSubmit: 'Connect',
       passwordPromptRequired: 'Enter the password',
+      conflictTitle: 'A DSH is already running on the remote host',
+      conflictBody:
+        'The remote for "{name}" has {count} DSH process(es) this plugin did not start. They share ~/.dsh with the plugin, so running both may contend over the same session or credential files. Choose how to proceed:',
+      conflictHint:
+        '"Stop" sends SIGTERM / SIGKILL to those processes; "Keep alongside" starts a managed instance and leaves them running.',
+      conflictStop: 'Stop it and start the managed instance',
+      conflictAlongside: 'Keep it and start alongside',
+      conflictCancel: 'Cancel connection',
+      conflictBusy: 'Submitting…',
 
       'wizard.stepLabel': 'Step {current} of {total}',
       'wizard.step1': '1 · SSH details',
@@ -583,7 +604,7 @@ window.__ModuleLoader__.load({
       'wizard.versionRemote': 'Remote DSH',
       'wizard.versionMatch': 'Versions match',
       'wizard.versionMismatch': 'Versions differ; the remote UI may look different',
-      'wizard.bootstrapLevel': 'Bootstrap level',
+      'wizard.bootstrapLevel': 'Launch mode',
       'wizard.uiReady': 'Remote UI',
       'wizard.uiReadyYes': 'Ready',
       'wizard.uiReadyNo': 'Not ready',
@@ -618,10 +639,6 @@ window.__ModuleLoader__.load({
       'diag.close': 'Close',
 
       'settings.title': 'Settings',
-      'settings.window': 'Window',
-      'settings.closeBehavior': 'Closing behavior',
-      'settings.closeBehaviorValue': 'Keep the remote session (fixed in V1)',
-      'settings.closeBehaviorHint': 'Closing the local view never stops remote tasks.',
       'settings.ssh': 'SSH defaults',
       'settings.defaultPort': 'Default port',
       'settings.defaultAuth': 'Default authentication',
@@ -648,10 +665,6 @@ window.__ModuleLoader__.load({
       'settings.saveTokensHint':
         'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
       'settings.saveTokensRisk': 'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
-      'settings.mirror': 'Mirrored sessions',
-      'settings.mirrorToSidebar': 'Show mirrored remote sessions in the local sidebar',
-      'settings.mirrorToSidebarHint':
-        'On by default. Each remote host registers one "Remote: <host>" workspace in the local sidebar; turning it off removes the registered groups, and turning it back on restores them on the next sync (connect or mirror refresh).',
       'settings.reconnect': 'Auto reconnect',
       'settings.reconnectEnabled': 'Reconnect after a drop',
       'settings.maxAttempts': 'Max attempts',
@@ -662,16 +675,12 @@ window.__ModuleLoader__.load({
       'settings.languageZh': '中文',
       'settings.languageEn': 'English',
       'settings.logLevel': 'Log level',
-      'settings.bootstrap': 'Bootstrap',
-      'settings.targetVersion': 'Target version',
-      'settings.targetVersionHint': 'local = follow the local DSH version',
-      'settings.mode': 'Bootstrap mode',
-      'settings.modeAuto': 'Auto (recommended)',
-      'settings.modeReuse': 'Reuse only',
-      'settings.modeNpx': 'Use npx',
-      'settings.modeIsolated': 'Install into an isolated directory',
-      'settings.remoteDir': 'Remote isolated directory',
-      'settings.nodeVersion': 'Node version',
+      'settings.bootstrap': 'Remote runtime',
+      'settings.profile': 'DSH profile',
+      'settings.profileHint': 'Defaults to web; profile config lives in ~/.dsh/profiles/<profile>',
+      'settings.bootstrapHint': 'Launched with npx pinned to the local DSH version; nothing is installed remotely',
+      'settings.remoteDir': 'Plugin remote directory',
+      'settings.remoteDirHint': 'Holds only logs, the run registry and lease files',
       'settings.saveSettings': 'Save settings',
       'settings.saved': 'Settings saved.',
       'settings.saveFailed': 'Failed to save settings',
@@ -975,6 +984,7 @@ window.__ModuleLoader__.load({
       unconfigured: { label: 'statusUnconfigured', hint: 'statusHintUnconfigured' },
       connecting: { label: 'statusConnecting', hint: 'statusHintConnecting' },
       'fingerprint-pending': { label: 'statusFingerprintPending', hint: 'statusHintFingerprintPending' },
+      'conflict-pending': { label: 'statusConflictPending', hint: 'statusHintConflictPending' },
       connected: { label: 'statusConnected', hint: 'statusHintConnected' },
       disconnected: { label: 'statusDisconnected', hint: 'statusHintDisconnected' },
       error: { label: 'statusError', hint: 'statusHintError' },
@@ -1266,6 +1276,13 @@ window.__ModuleLoader__.load({
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/connect', {
           method: 'POST',
           body: options || {},
+        })
+      },
+      /** Answer the "manual DSH already running" prompt: stop | alongside | cancel. */
+      async confirmConflict(hostId, action) {
+        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/conflict', {
+          method: 'POST',
+          body: { action },
         })
       },
       /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
@@ -1931,32 +1948,47 @@ window.__ModuleLoader__.load({
           ? t('cardOpen')
           : host.status === 'fingerprint-pending'
             ? t('confirmFingerprint')
-            : host.status === 'connecting'
-              ? t('connecting')
-              : t('cardConnect')
+            : host.status === 'conflict-pending'
+              ? t('statusConflictPending')
+              : host.status === 'connecting'
+                ? t('connecting')
+                : t('cardConnect')
       const primaryTestId = settingsMode ? 'settings-host-open' : 'host-open'
-      const primaryDisabled = settingsMode ? busy || host.status !== 'connected' : busy || host.status === 'connecting'
+      const primaryDisabled = settingsMode
+        ? busy || host.status !== 'connected'
+        : busy || host.status === 'connecting' || host.status === 'conflict-pending'
 
       return h(
         'li',
         { className: 'drg-host-card', 'data-status': host.status, 'data-testid': 'host-card', 'data-host-id': host.id },
-        failing
+        host.status === 'conflict-pending'
           ? h(
               'div',
-              { className: 'drg-card-strip', role: 'alert' },
+              { className: 'drg-card-strip', role: 'status' },
               h(IconAlert, { size: 14 }),
-              h('span', { className: 'drg-card-strip-text' }, t('errorReason', { detail: reason || t(meta.hintKey) })),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'drg-linkbtn',
-                  onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
-                },
-                t('cardDiagnose'),
-              ),
+              h('span', { className: 'drg-card-strip-text' }, t('statusHintConflictPending')),
             )
-          : null,
+          : failing
+            ? h(
+                'div',
+                { className: 'drg-card-strip', role: 'alert' },
+                h(IconAlert, { size: 14 }),
+                h(
+                  'span',
+                  { className: 'drg-card-strip-text' },
+                  t('errorReason', { detail: reason || t(meta.hintKey) }),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'drg-linkbtn',
+                    onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
+                  },
+                  t('cardDiagnose'),
+                ),
+              )
+            : null,
         h(
           'div',
           { className: 'drg-card-head' },
@@ -2367,54 +2399,41 @@ window.__ModuleLoader__.load({
 
     //#region 9b. full-window remote carrier (DSH desktop only)
 
+    /** Height of the injected chrome bar at the top of the carrier, in CSS pixels. */
+    const CARRIER_BAR_HEIGHT = 44
+
     /**
      * The DSH desktop shell exposes a browser-guest bridge on the page:
      * `window.dshDesktop` (protocol v1) -> `browser.acquire(workspace)` reserves a
      * Chromium guest in a per-workspace partition, and a `<webview>` whose src is
      * "about:blank#<lease>" attaches it. The guest is a real browser context (own
-     * cookies, real downloads pipeline), never an embedded frame, and it can be sized to
-     * cover the whole application page — that is what makes the desktop window
-     * show the remote host instead of this UI.
+     * cookies, real downloads pipeline), never an embedded frame.
      *
-     * The carrier element lives on `document.body` outside the React tree so it
-     * survives panel switches; the control strip at the top of the carrier is the
-     * only way back, because keyboard focus belongs to the guest while it is up.
-     */
-    const overlayCarrier = { hostId: null, lease: null, root: null, view: null, url: null, onExit: null, dispose: null }
-
-    /**
-     * Right edge of the local sidebar column, in CSS pixels.
+     * The carrier takes the whole window. Leaving the local sidebar visible next to
+     * the main column put two DSH sidebars of the same app side by side, so the window
+     * read as two applications glued together. Everything local is therefore reduced
+     * to a 32px bar pinned right below the window's title bar: it names the current
+     * host (full name, switchable when there is more than one), echoes the remote
+     * page's own title (the open session), and carries reload and leave. No vertical
+     * column is stolen from the remote UI.
      *
-     * The takeover leaves the sidebar outside the carrier so switching stays
-     * symmetric: the same sidebar that enters a remote also leaves it. The column is
-     * measured from our own sidebar entry (we know where that is), climbing to the
-     * ancestor that spans the window height; anything implausible falls back to 0
-     * (full-window takeover), never to a half-covered window.
-     * @returns {number} the column's right edge, or 0 when it cannot be located.
+     * The carrier lives on `document.body` outside the React tree so a panel
+     * re-render never tears the guest down. Keyboard focus belongs to the guest while
+     * it is up, which is why leaving goes through the bar, not a shortcut.
      */
-    function sidebarEdge() {
-      try {
-        const entry = document.querySelector('[data-dsh-remote-go-entry="true"]')
-        if (!entry || typeof window === 'undefined') return 0
-        const viewportHeight = window.innerHeight || 0
-        const viewportWidth = window.innerWidth || 0
-        let node = entry
-        while (node && node !== document.body) {
-          const rect = node.getBoundingClientRect()
-          if (
-            rect.height >= viewportHeight * 0.8 &&
-            rect.width > 0 &&
-            rect.width <= viewportWidth * 0.5 &&
-            rect.right < viewportWidth - 200
-          ) {
-            return Math.round(rect.right)
-          }
-          node = node.parentElement
-        }
-        return 0
-      } catch (_error) {
-        return 0
-      }
+    const overlayCarrier = {
+      hostId: null,
+      lease: null,
+      root: null,
+      view: null,
+      activeHostId: null,
+      title: '',
+      labels: { switchHost: '', refresh: '', exit: '' },
+      rowInstalled: false,
+      rowPoll: null,
+      hosts: [],
+      callbacks: { onPick: null, onRefresh: null, onExit: null },
+      url: null,
     }
 
     /** @returns {object | null} the desktop browser bridge, or null outside the desktop app. */
@@ -2428,7 +2447,264 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Take over the main column with a live remote-DSH guest.
+     * The carrier's own CSS. There is no local chrome left to style: the host switcher
+     * is injected into the remote page itself (see HOST_ROW_SCRIPT), so this only
+     * sizes the guest surface and the main-frame load error line.
+     */
+    const CARRIER_CSS = `
+      .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:#fff;pointer-events:auto}
+      .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary,#6b6b74);background:var(--dsw-alias-bg-base,#fff);font:13px system-ui,-apple-system,Segoe UI,sans-serif}
+    `
+
+    /**
+     * The host switcher, drawn inside the remote page itself.
+     *
+     * A local overlay always reads as an add-on: it sits above the guest, so a modal
+     * inside the remote page dims everything except our strip, and the guest's own
+     * surface ends where ours begins. Injecting the row into the remote DOM instead
+     * gives it the remote page's theme variables, its fonts, its dimming and its
+     * layout: the row is inserted as the second child of the sidebar column (right
+     * under the brand row), so the sidebar itself makes room for it and nothing is
+     * covered. There is deliberately no local fallback UI: a fallback is what looks
+     * like an add-on, and it also hides the fact that the injection broke.
+     *
+     * The anchor is geometric (a left-docked, full-height column), not a class name,
+     * because the remote page is the product UI we do not own the markup of. The
+     * script is self-contained (no interpolation, no backticks) and idempotent. It
+     * returns 'installed' | 'no-anchor' | 'error'; the bridge back to the host is
+     * `window.__drgBridge`, polled by `startHostRowPoll`.
+     */
+    const HOST_ROW_SCRIPT = `
+(function () {
+  try {
+    if (window.__drgHostRow) return 'installed'
+    var sidebar = null
+    var all = document.querySelectorAll('div,aside,nav,section')
+    for (var i = 0; i < all.length; i += 1) {
+      var el = all[i]
+      var rect = el.getBoundingClientRect()
+      if (rect.left > 2) continue
+      if (rect.width < 200 || rect.width > 480) continue
+      if (rect.height < window.innerHeight * 0.6) continue
+      sidebar = el
+    }
+    if (!sidebar) return 'no-anchor'
+    var style = document.createElement('style')
+    style.id = 'drg-host-row-style'
+    style.textContent = [
+      '#drg-host-row{position:relative;display:flex;align-items:center;gap:8px;margin:4px 8px 6px;padding:6px 8px;border-radius:8px;cursor:pointer;font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--dsw-alias-label-secondary,#5c5c66)}',
+      '#drg-host-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
+      '#drg-host-row .drg-hr-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:var(--dsw-alias-state-idle,#8a8a93)}',
+      '#drg-host-row .drg-hr-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}',
+      '#drg-host-row .drg-hr-name{font-weight:500;color:var(--dsw-alias-label-primary,#202027);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#drg-host-row .drg-hr-title{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a93);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+      '#drg-host-row .drg-hr-chev{display:flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8a93)}',
+      '#drg-host-row .drg-hr-menu{display:none;position:absolute;left:0;right:0;top:100%;margin-top:4px;z-index:60;padding:4px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.16));background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 12px 32px rgba(0,0,0,.16);font-size:13px;color:var(--dsw-alias-label-primary,#202027)}',
+      '#drg-host-row.drg-open .drg-hr-menu{display:block}',
+      '#drg-host-row .drg-hr-item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden}',
+      '#drg-host-row .drg-hr-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
+      '#drg-host-row .drg-hr-item[data-active="1"]{background:var(--dsw-specific-sidebar-nav-item-active,var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14)))}',
+      '#drg-host-row .drg-hr-sep{height:1px;margin:4px 6px;background:var(--dsw-alias-border-l1,rgba(128,128,128,.16))}',
+      '#drg-host-row .drg-hr-addr{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8a8a93);font-size:12px}',
+    ].join('')
+    document.head.appendChild(style)
+    var row = document.createElement('div')
+    row.id = 'drg-host-row'
+    row.setAttribute('role', 'button')
+    row.innerHTML =
+      '<span class="drg-hr-dot"></span>' +
+      '<span class="drg-hr-text"><span class="drg-hr-name"></span><span class="drg-hr-title"></span></span>' +
+      '<span class="drg-hr-chev"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 6.4 8 10.2l3.8-3.8"></path></svg></span>' +
+      '<span class="drg-hr-menu"></span>'
+    var state = { hosts: [], activeHostId: null, title: '', labels: { switchHost: 'Switch remote host', refresh: 'Reload', exit: 'Leave remote' } }
+    var nameNode = row.querySelector('.drg-hr-name')
+    var titleNode = row.querySelector('.drg-hr-title')
+    var dotNode = row.querySelector('.drg-hr-dot')
+    var menuNode = row.querySelector('.drg-hr-menu')
+    var tones = { idle: 'var(--dsw-alias-state-idle,#8a8a93)', success: 'var(--dsw-alias-state-success,#22a06b)', warn: 'var(--dsw-alias-state-warn,#e0a100)', error: 'var(--dsw-alias-state-error,#d64545)', busy: 'var(--dsw-alias-state-business-primary,#3b82f6)' }
+    var escape = function (value) { return String(value == null ? '' : value).replace(/[<>&"]/g, '') }
+    var render = function () {
+      var active = null
+      for (var j = 0; j < state.hosts.length; j += 1) {
+        if (state.hosts[j] && state.hosts[j].id === state.activeHostId) { active = state.hosts[j]; break }
+      }
+      nameNode.textContent = active ? active.name || active.address || active.id : ''
+      row.title = state.labels.switchHost
+      titleNode.textContent = state.title || ''
+      dotNode.style.background = tones[active && active.status] || tones.idle
+      var html = ''
+      for (var k = 0; k < state.hosts.length; k += 1) {
+        var host = state.hosts[k]
+        if (!host || typeof host.id !== 'string') continue
+        var activeAttr = host.id === state.activeHostId ? ' data-active="1"' : ''
+        var address = host.address && host.address !== (host.name || '') ? '<span class="drg-hr-addr">' + escape(host.address) + '</span>' : ''
+        html += '<span class="drg-hr-item" role="menuitem" data-host="' + escape(host.id) + '"' + activeAttr + '>' +
+          '<span class="drg-hr-dot" style="background:' + (tones[host.status] || tones.idle) + '"></span>' +
+          '<span class="drg-hr-item-name">' + escape(host.name || host.address || host.id) + '</span>' + address + '</span>'
+      }
+      html += '<span class="drg-hr-sep"></span>' +
+        '<span class="drg-hr-item" data-action="refresh">' + escape(state.labels.refresh) + '</span>' +
+        '<span class="drg-hr-item" data-action="exit">' + escape(state.labels.exit) + '</span>'
+      menuNode.innerHTML = html
+    }
+    row.addEventListener('click', function (event) {
+      var target = event.target
+      while (target && target !== row && !(target.classList && target.classList.contains('drg-hr-item'))) {
+        target = target.parentNode
+      }
+      if (target && target !== row && target.classList && target.classList.contains('drg-hr-item')) {
+        var host = target.getAttribute('data-host')
+        var action = target.getAttribute('data-action')
+        window.__drgBridge = host ? { action: 'pick', hostId: host } : { action: action || 'refresh' }
+        row.classList.remove('drg-open')
+        return
+      }
+      row.classList.toggle('drg-open')
+    })
+    document.addEventListener('click', function (event) {
+      if (!row.contains(event.target)) row.classList.remove('drg-open')
+    })
+    var next = sidebar.children.length > 1 ? sidebar.children[1] : null
+    sidebar.insertBefore(row, next)
+    window.__drgHostRow = {
+      update: function (payload) {
+        state.hosts = Array.isArray(payload && payload.hosts) ? payload.hosts : []
+        state.activeHostId = payload && payload.activeHostId ? payload.activeHostId : null
+        state.title = payload && payload.title ? String(payload.title) : ''
+        if (payload && payload.labels) state.labels = payload.labels
+        render()
+      },
+      destroy: function () {
+        if (row.parentNode) row.parentNode.removeChild(row)
+        if (style.parentNode) style.parentNode.removeChild(style)
+        window.__drgHostRow = null
+      },
+    }
+    return 'installed'
+  } catch (error) {
+    return 'error'
+  }
+})()
+`
+
+    /**
+     * Install the injected row.
+     * @returns {Promise<boolean>} whether the injected row is live.
+     */
+    async function installHostRow() {
+      const view = overlayCarrier.view
+      if (view === null || typeof view.executeJavaScript !== 'function') return false
+      let ok = false
+      try {
+        ok = (await view.executeJavaScript(HOST_ROW_SCRIPT)) === 'installed'
+      } catch (_error) {
+        ok = false
+      }
+      overlayCarrier.rowInstalled = ok
+      if (ok) pushHostRowState()
+      return ok
+    }
+
+    /**
+     * Push the host list, the active host, the remote title and the menu labels into
+     * the injected row.
+     * @returns {void}
+     */
+    function pushHostRowState() {
+      const view = overlayCarrier.view
+      if (overlayCarrier.rowInstalled !== true || view === null) return
+      const hosts = overlayCarrier.hosts.map((host) => ({
+        id: host.id,
+        name: host.name || '',
+        address: host.address || '',
+        status: host.status || 'idle',
+      }))
+      const payload = JSON.stringify({
+        hosts,
+        activeHostId: overlayCarrier.activeHostId,
+        title: overlayCarrier.title,
+        labels: overlayCarrier.labels,
+      })
+      try {
+        view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.update(' + payload + ')')
+      } catch (_error) {
+        // the guest may still be navigating
+      }
+    }
+
+    /**
+     * Poll the injected row's bridge. A plain polling loop is the only channel a
+     * renderer-side <webview> has without a preload script; it is cheap (one tiny
+     * evaluation per 400ms) and only runs while the carrier is up.
+     * @returns {void}
+     */
+    function startHostRowPoll() {
+      stopHostRowPoll()
+      const view = overlayCarrier.view
+      if (view === null || typeof view.executeJavaScript !== 'function') return
+      overlayCarrier.rowPoll = setInterval(() => {
+        if (overlayCarrier.view !== view || overlayCarrier.rowInstalled !== true) return
+        let pending = null
+        try {
+          pending = view.executeJavaScript('window.__drgBridge || null')
+        } catch (_error) {
+          return
+        }
+        if (pending === null || typeof pending.then !== 'function') return
+        pending
+          .then((value) => {
+            if (!value || typeof value !== 'object' || overlayCarrier.view !== view) return
+            try {
+              view.executeJavaScript('window.__drgBridge = null')
+            } catch (_error) {
+              // ignore
+            }
+            const callbacks = overlayCarrier.callbacks
+            if (value.action === 'pick' && typeof value.hostId === 'string') {
+              const host = overlayCarrier.hosts.find((item) => item && item.id === value.hostId)
+              if (host && typeof callbacks.onPick === 'function') callbacks.onPick(host)
+              return
+            }
+            if (value.action === 'refresh' && typeof callbacks.onRefresh === 'function') callbacks.onRefresh()
+            if (value.action === 'exit' && typeof callbacks.onExit === 'function') callbacks.onExit()
+          })
+          .catch(() => {})
+      }, 400)
+    }
+
+    /** @returns {void} */
+    function stopHostRowPoll() {
+      if (overlayCarrier.rowPoll !== null) {
+        clearInterval(overlayCarrier.rowPoll)
+        overlayCarrier.rowPoll = null
+      }
+    }
+
+    /**
+     * Keep the injected row in step with /state. A no-op while no carrier is up, so
+     * the panel may call it on every state change.
+     * @param {{ t: Function, hosts: object[], activeHostId: string|null, onPick: Function, onRefresh: Function, onExit: Function }} options
+     * @returns {void}
+     */
+    function updateOverlayBar(options) {
+      const hosts = Array.isArray(options.hosts) ? options.hosts : []
+      overlayCarrier.hosts = hosts
+      overlayCarrier.activeHostId = typeof options.activeHostId === 'string' ? options.activeHostId : null
+      overlayCarrier.labels = {
+        switchHost: typeof options.t === 'function' ? options.t('carrierSwitchHost') : '',
+        refresh: typeof options.t === 'function' ? options.t('carrierRefresh') : '',
+        exit: typeof options.t === 'function' ? options.t('carrierExit') : '',
+      }
+      overlayCarrier.callbacks = {
+        onPick: typeof options.onPick === 'function' ? options.onPick : null,
+        onRefresh: typeof options.onRefresh === 'function' ? options.onRefresh : null,
+        onExit: typeof options.onExit === 'function' ? options.onExit : null,
+      }
+      pushHostRowState()
+    }
+
+    /**
+     * Take the whole window over with a live remote-DSH guest plus the injected bar.
      * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
      */
     async function openOverlay(options) {
@@ -2442,7 +2718,6 @@ window.__ModuleLoader__.load({
         if (overlayCarrier.hostId === hostId) {
           const changed = overlayCarrier.url !== url
           overlayCarrier.url = url
-          overlayCarrier.onExit = typeof options.onExit === 'function' ? options.onExit : overlayCarrier.onExit
           if (changed && overlayCarrier.view !== null) {
             try {
               await overlayCarrier.view.loadURL(url)
@@ -2450,8 +2725,10 @@ window.__ModuleLoader__.load({
               // the guest reports navigation failures through did-fail-load
             }
           }
+          updateOverlayBar(options)
           return { ok: true, reused: true }
         }
+        // A different host means a different partition: start the carrier over.
         await closeOverlay()
       }
       let reservation = null
@@ -2472,38 +2749,30 @@ window.__ModuleLoader__.load({
       const root = document.createElement('div')
       root.id = OVERLAY_ROOT_ID
       root.setAttribute('data-testid', 'remote-overlay')
-      // The desktop window is frameless with a 40px titlebar overlay (Windows
-      // caption buttons / macOS traffic lights), so the carrier starts below it:
-      // clicks in that band belong to the OS, not to this page.
-      //
-      // The chrome is a floating pill instead of a full-width bar: a full-width
-      // strip steals a permanent band of the remote UI, while a small translucent
-      // chip stays legible ("you are on a remote host") and still carries the only
-      // reliable way out, since keyboard focus belongs to the guest while it is up.
-      // The carrier covers the main column only: the local sidebar stays visible and
-      // usable, so entering and leaving a remote use the same control.
-      const left = sidebarEdge()
-      root.style.cssText = `position:fixed;left:${left}px;right:0;bottom:0;top:40px;z-index:2147483000;background:#fff;font:12px system-ui,-apple-system,Segoe UI,sans-serif`
-
-      // The carrier has no chrome of its own: the sidebar switches in and out, and
-      // the remote page is the only thing in this column. A failed load is the one
-      // case that needs a message, so a plain centred notice appears instead.
-      const errorLayer = document.createElement('div')
-      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
-      errorLayer.style.cssText = [
-        'position:absolute;inset:0;z-index:2;display:none;align-items:center;justify-content:center',
-        'padding:24px;text-align:center;color:var(--dsw-alias-label-secondary, #6b6b74)',
-        'background:var(--dsw-alias-bg-base, #fff);font:13px system-ui,-apple-system,Segoe UI,sans-serif',
+      // The desktop window is frameless with a 40px titlebar overlay (Windows caption
+      // buttons / macOS traffic lights), so the carrier starts below it: clicks in
+      // that band belong to the OS, not to this page.
+      root.style.cssText = [
+        'position:fixed;left:0;right:0;bottom:0;top:40px;z-index:2147483000',
+        'overflow:hidden;background:var(--dsw-alias-bg-base,#fff)',
       ].join(';')
+
+      const style = document.createElement('style')
+      style.textContent = CARRIER_CSS
+
+      // A failed main-frame load leaves a blank window; say so instead of showing
+      // nothing. Sub-resource failures stay silent (see did-fail-load below).
+      const errorLayer = document.createElement('div')
+      errorLayer.className = 'drg-carrier-error'
+      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
       errorLayer.textContent = t('viewportOverlayLoadFailed')
 
       const view = document.createElement('webview')
+      view.className = 'drg-carrier-view'
       view.setAttribute('name', String(reservation.lease))
       view.setAttribute('partition', String(reservation.partition))
       view.setAttribute('allowpopups', '')
       view.setAttribute('src', 'about:blank#' + String(reservation.lease))
-      view.style.cssText =
-        'position:absolute;inset:0;width:100%;height:100%;border:0;background:#fff;pointer-events:auto'
       // `dom-ready` fires once per committed navigation, so navigating from it
       // unconditionally would reload the remote page forever (visible as flicker).
       let navigated = false
@@ -2515,10 +2784,26 @@ window.__ModuleLoader__.load({
       view.addEventListener('did-stop-loading', () => {
         if (overlayCarrier.view !== view) return
         errorLayer.style.display = 'none'
+        // Re-install after *every* load stop: a guest reload (the row's own refresh, or
+        // the remote page navigating) wipes the injected DOM, and a one-shot install
+        // would leave the window without any control. The script is idempotent inside
+        // the page, so a normal load simply reports 'installed'.
+        installHostRow().then((live) => {
+          if (overlayCarrier.view !== view || !live) return
+          startHostRowPoll()
+        })
+      })
+      // The guest's own document.title is the remote DSH's current session title
+      // (its layout derives the title from the open session), so the bar can show
+      // which remote session the window is on without touching the remote page.
+      view.addEventListener('page-title-updated', (event) => {
+        if (overlayCarrier.view !== view) return
+        overlayCarrier.title = event && typeof event.title === 'string' ? event.title.trim() : ''
+        pushHostRowState()
       })
       view.addEventListener('did-fail-load', (event) => {
         if (overlayCarrier.view !== view) return
-        // A main-frame failure leaves a blank column, so say so; sub-resource
+        // A main-frame failure leaves a blank window, so say so; sub-resource
         // failures (errorCode -3, aborted) are normal and must stay silent.
         const isMainFrame = !event || event.isMainFrame !== false
         const aborted = event && (event.errorCode === -3 || event.errorCode === undefined)
@@ -2526,31 +2811,15 @@ window.__ModuleLoader__.load({
         errorLayer.style.display = 'flex'
       })
 
-      root.append(view, errorLayer)
+      root.append(style, view, errorLayer)
       document.body.appendChild(root)
-
-      // Keep the carrier aligned with the sidebar: collapsing/expanding it or
-      // resizing the window moves the column, and the carrier must never cover it.
-      // Leaving the remote needs no listener here: the shell deselects the plugin
-      // panel when the user picks local content, and MainPanel closes the carrier on
-      // unmount — the same sidebar that enters a remote also leaves it.
-      const syncBounds = () => {
-        root.style.left = sidebarEdge() + 'px'
-      }
-      // The column may have been rendered after the carrier was created.
-      syncBounds()
-      const onResize = () => syncBounds()
-      window.addEventListener('resize', onResize)
-      overlayCarrier.dispose = () => {
-        window.removeEventListener('resize', onResize)
-      }
 
       overlayCarrier.hostId = hostId
       overlayCarrier.lease = String(reservation.lease)
       overlayCarrier.root = root
       overlayCarrier.view = view
       overlayCarrier.url = url
-      overlayCarrier.onExit = typeof options.onExit === 'function' ? options.onExit : null
+      updateOverlayBar(options)
       return { ok: true, reused: false }
     }
 
@@ -2566,25 +2835,33 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Remove the carrier, release its lease, and notify the panel. */
+    /**
+     * Remove the carrier and release its lease. The SSH link, the tunnel and the
+     * remote DSH keep running: leaving only ends the window takeover.
+     * @returns {Promise<void>}
+     */
     async function closeOverlay() {
       const root = overlayCarrier.root
       const lease = overlayCarrier.lease
-      const onExit = overlayCarrier.onExit
+      const view = overlayCarrier.view
+      stopHostRowPoll()
+      if (view !== null && overlayCarrier.rowInstalled === true) {
+        try {
+          view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
+        } catch (_error) {
+          // the guest may already be gone
+        }
+      }
+      overlayCarrier.rowInstalled = false
       overlayCarrier.root = null
       overlayCarrier.view = null
+      overlayCarrier.hosts = []
+      overlayCarrier.activeHostId = null
+      overlayCarrier.title = ''
+      overlayCarrier.callbacks = { onPick: null, onRefresh: null, onExit: null }
       overlayCarrier.lease = null
       overlayCarrier.url = null
       overlayCarrier.hostId = null
-      overlayCarrier.onExit = null
-      if (typeof overlayCarrier.dispose === 'function') {
-        try {
-          overlayCarrier.dispose()
-        } catch (_error) {
-          // listener cleanup is best-effort
-        }
-        overlayCarrier.dispose = null
-      }
       if (root !== null && root.parentNode !== null) root.parentNode.removeChild(root)
       const bridge = desktopBrowserBridge()
       if (bridge !== null && lease !== null) {
@@ -2594,7 +2871,6 @@ window.__ModuleLoader__.load({
           // a lease the shell already dropped is a no-op
         }
       }
-      if (typeof onExit === 'function') onExit()
     }
 
     //#endregion
@@ -3622,14 +3898,11 @@ window.__ModuleLoader__.load({
         },
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
         saveTokens: draft.saveTokens === true,
-        mirrorToSidebar: draft.mirrorToSidebar === true,
         language: draft.language === 'zh' || draft.language === 'en' ? draft.language : 'auto',
         logLevel: ['error', 'warn', 'info', 'debug'].indexOf(draft.logLevel) >= 0 ? draft.logLevel : 'info',
         bootstrap: {
-          targetVersion: String(draft.targetVersion || 'local').trim() || 'local',
-          mode: ['auto', 'reuse', 'npx', 'isolated'].indexOf(draft.bootstrapMode) >= 0 ? draft.bootstrapMode : 'auto',
           remoteDir: String(draft.remoteDir || '').trim(),
-          nodeVersion: String(draft.nodeVersion || '').trim(),
+          profile: String(draft.profile || 'web').trim() || 'web',
         },
       }
     }
@@ -3649,14 +3922,10 @@ window.__ModuleLoader__.load({
         baseDelayMs: auto.baseDelayMs === undefined ? 1000 : auto.baseDelayMs,
         hostKeyPolicy: view.hostKeyPolicy || 'first-use',
         saveTokens: view.saveTokens === true,
-        // Default on: only an explicit `false` opts a user out.
-        mirrorToSidebar: view.mirrorToSidebar !== false,
         language: view.language || 'auto',
         logLevel: view.logLevel || 'info',
-        targetVersion: bootstrap.targetVersion || 'local',
-        bootstrapMode: bootstrap.mode || 'auto',
+        profile: bootstrap.profile || 'web',
         remoteDir: bootstrap.remoteDir || '',
-        nodeVersion: bootstrap.nodeVersion || '',
       }
     }
 
@@ -3716,20 +3985,6 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'drg-settings' },
-            h(
-              'section',
-              { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.window')),
-              h(
-                Field,
-                { label: t('settings.closeBehavior'), hint: t('settings.closeBehaviorHint') },
-                h(TextInput, {
-                  value: t('settings.closeBehaviorValue'),
-                  readOnly: true,
-                  ariaLabel: t('settings.closeBehavior'),
-                }),
-              ),
-            ),
             h(
               'section',
               { className: 'drg-settings-section' },
@@ -3855,63 +4110,29 @@ window.__ModuleLoader__.load({
             h(
               'section',
               { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.mirror')),
-              h(CheckRow, {
-                checked: draft.mirrorToSidebar === true,
-                label: t('settings.mirrorToSidebar'),
-                onChange: set('mirrorToSidebar'),
-              }),
-              h('p', { className: 'drg-field-hint' }, t('settings.mirrorToSidebarHint')),
-            ),
-            h(
-              'section',
-              { className: 'drg-settings-section' },
               h('h3', { className: 'drg-section-title' }, t('settings.bootstrap')),
+              h('p', { className: 'drg-field-hint' }, t('settings.bootstrapHint')),
               h(
                 'div',
-                { className: 'drg-form-grid drg-form-grid-3' },
+                { className: 'drg-form-grid' },
                 h(
                   Field,
-                  { label: t('settings.targetVersion'), hint: t('settings.targetVersionHint') },
+                  { label: t('settings.profile'), hint: t('settings.profileHint') },
                   h(TextInput, {
-                    value: draft.targetVersion,
-                    ariaLabel: t('settings.targetVersion'),
-                    onChange: set('targetVersion'),
+                    value: draft.profile,
+                    ariaLabel: t('settings.profile'),
+                    onChange: set('profile'),
                   }),
                 ),
                 h(
                   Field,
-                  { label: t('settings.mode') },
-                  h(Select, {
-                    value: draft.bootstrapMode,
-                    ariaLabel: t('settings.mode'),
-                    options: [
-                      { value: 'auto', label: t('settings.modeAuto') },
-                      { value: 'reuse', label: t('settings.modeReuse') },
-                      { value: 'npx', label: t('settings.modeNpx') },
-                      { value: 'isolated', label: t('settings.modeIsolated') },
-                    ],
-                    onChange: set('bootstrapMode'),
-                  }),
-                ),
-                h(
-                  Field,
-                  { label: t('settings.nodeVersion') },
+                  { label: t('settings.remoteDir'), hint: t('settings.remoteDirHint') },
                   h(TextInput, {
-                    value: draft.nodeVersion,
-                    ariaLabel: t('settings.nodeVersion'),
-                    onChange: set('nodeVersion'),
+                    value: draft.remoteDir,
+                    ariaLabel: t('settings.remoteDir'),
+                    onChange: set('remoteDir'),
                   }),
                 ),
-              ),
-              h(
-                Field,
-                { label: t('settings.remoteDir') },
-                h(TextInput, {
-                  value: draft.remoteDir,
-                  ariaLabel: t('settings.remoteDir'),
-                  onChange: set('remoteDir'),
-                }),
               ),
             ),
             h(
@@ -4048,6 +4269,73 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * Prompt shown when the remote already runs a DSH this plugin did not start.
+     * The user must choose explicitly; the pipeline is paused meanwhile.
+     * @param {{ t: Function, host: object, busy?: boolean, error?: string, onResolve: (host: object, action: string) => void }} props
+     */
+    function RemoteConflictPrompt(props) {
+      const t = translatorOf(props)
+      const host = props.host || {}
+      const conflict = host.conflict && typeof host.conflict === 'object' ? host.conflict : {}
+      const processes = Array.isArray(conflict.processes) ? conflict.processes : []
+      const busy = props.busy === true
+      const resolve = (action) => {
+        if (busy) return
+        if (typeof props.onResolve === 'function') props.onResolve(host, action)
+      }
+      return h(
+        Modal,
+        {
+          title: t('conflictTitle'),
+          onClose: () => resolve('cancel'),
+          closeLabel: t('cancel'),
+          testId: 'remote-conflict-prompt',
+          wide: true,
+          footer: h(
+            'div',
+            { className: 'drg-row drg-row-end' },
+            h(
+              Button,
+              { variant: 'ghost', onClick: () => resolve('cancel'), disabled: busy, testId: 'conflict-cancel' },
+              t('conflictCancel'),
+            ),
+            h(
+              Button,
+              { variant: 'danger', onClick: () => resolve('stop'), busy, testId: 'conflict-stop' },
+              t('conflictStop'),
+            ),
+            h(
+              Button,
+              { variant: 'primary', onClick: () => resolve('alongside'), busy, testId: 'conflict-alongside' },
+              t('conflictAlongside'),
+            ),
+          ),
+        },
+        h(
+          'p',
+          { className: 'drg-paragraph' },
+          t('conflictBody', { name: host.name || host.id || '', count: processes.length }),
+        ),
+        h(
+          'ul',
+          { className: 'drg-conflict-processes' },
+          processes.map((process) =>
+            h(
+              'li',
+              { key: String(process.pid) },
+              h('code', null, `pid ${process.pid}`),
+              ' ',
+              h('span', null, process.command || ''),
+            ),
+          ),
+        ),
+        h('p', { className: 'drg-field-hint' }, t('conflictHint')),
+        props.error ? h(Notice, { tone: 'error' }, props.error) : null,
+        busy ? h('p', { className: 'drg-field-hint' }, t('conflictBusy')) : null,
+      )
+    }
+
     //#endregion
 
     //#region 14. toast
@@ -4070,7 +4358,6 @@ window.__ModuleLoader__.load({
 
     //#region 14b. sidebar panel icon
 
-    /** Main-panel key of the "local" row is not used: host management is one page.
     /**
      * Icon for the sidebar's global-panel row.
      *
@@ -4081,11 +4368,9 @@ window.__ModuleLoader__.load({
      */
     function RemotePanelIcon(props) {
       const size = typeof props.size === 'number' && props.size > 0 ? props.size : 18
-      // The marker lets the takeover measure the sidebar column, so the carrier can
-      // stop at its right edge and leave the sidebar — the switcher — usable.
       return h(
         'span',
-        { className: 'drg-panel-icon', 'data-dsh-remote-go-entry': 'true', style: { display: 'inline-flex' } },
+        { className: 'drg-panel-icon', style: { display: 'inline-flex' } },
         h(RemoteIcon, { size, active: props.active === true }),
       )
     }
@@ -4180,6 +4465,7 @@ window.__ModuleLoader__.load({
       const [pendingDelete, setPendingDelete] = useState(null)
       const [deleting, setDeleting] = useState(false)
       const [passwordPrompt, setPasswordPrompt] = useState(null)
+      const [conflictBusy, setConflictBusy] = useState(false)
       const [showCloseNotice, setShowCloseNotice] = useState(false)
       const [toast, setToast] = useState(null)
       const toastTimer = useRef(null)
@@ -4203,38 +4489,15 @@ window.__ModuleLoader__.load({
       }
 
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
+      const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
       const activeHost = activeHostId ? hosts.find((host) => host && host.id === activeHostId) || null : null
       const activeStatus = activeHost ? activeHost.status : null
-      // The window takeover is the only presentation: the remote DSH renders in a
-      // live Chromium guest owned by the desktop shell, never inside this panel.
-      // Mirror of the imperative full-window carrier (it lives outside React).
-      // The user pressed "exit": stay on the local UI, keep the connection, and do
-      // not take the window back until they ask for it again.
-      const overlayDismissed = useRef(false)
 
-      // Opening the panel goes straight to the remote: the panel is a switch, not a
-      // landing page. Prefer the Host's active host, then any host that is already
-      // connected, then the only configured host.
-      const bootstrapped = useRef(false)
-      useEffect(() => {
-        if (!state || bootstrapped.current) return
-        bootstrapped.current = true
-        const list = Array.isArray(state.hosts) ? state.hosts : []
-        const isRemoteUp = (host) => host && REMOTE_STATUSES.indexOf(host.status) >= 0
-        const id = state.activeHostId
-        const preferred =
-          list.find((host) => host && host.id === id && isRemoteUp(host)) ||
-          list.find((host) => host && host.status === 'connected') ||
-          (list.length === 1 ? list[0] : null)
-        if (!preferred) return
-        setActiveHostId(preferred.id)
-        setView('viewport')
-        if (isRemoteUp(preferred)) {
-          api.activate(preferred.id).catch(() => {})
-        } else if (preferred.status !== 'connecting' && preferred.status !== 'fingerprint-pending') {
-          performConnect(preferred)
-        }
-      }, [state])
+      // The panel always lands on host management (docs/design.md §4.3): the sidebar
+      // row opens the host page, and "Open" on a host is the only action that hands
+      // the window to a remote. V1.0 auto-opened the preferred host here; that covered
+      // this page on mount, so adding, switching, diagnosing or deleting a host had
+      // nowhere to happen and the takeover could not be left from the row.
 
       // A host removed elsewhere closes the viewport instead of showing a blank page.
       useEffect(() => {
@@ -4419,61 +4682,69 @@ window.__ModuleLoader__.load({
           .finally(() => setBusyHostId(null))
       }
 
+      const resolveConflict = (host, action) => {
+        if (!host || !host.id) return
+        setConflictBusy(true)
+        api
+          .confirmConflict(host.id, action)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setConflictBusy(false))
+      }
+
       const dismissCloseNotice = () => {
         writeFlag(CLOSE_HINT_KEY)
         setShowCloseNotice(false)
       }
 
-      /** Start the carrier, or — when it is already up — reload it in place. */
-      const takeOverOverlay = () => {
-        if (remoteUrl === null) return
-        if (overlayDismissed.current === false && reloadOverlay()) return
-        overlayDismissed.current = false
-        openOverlay({
-          hostId: activeHostId || '',
-          name: activeHost ? activeHost.name || '' : '',
-          url: remoteUrl,
-          t,
-          onExit: () => {
-            overlayDismissed.current = true
-          },
-        })
+      /**
+       * Leave the remote: drop the carrier, keep the SSH link and the remote task,
+       * and hand the window back to the host page (where another host can be opened
+       * and the disconnected one reconnected).
+       */
+      const leaveCarrier = () => {
+        closeOverlay().catch(() => {})
+        setView('hosts')
+        // The launch URL is one-shot: throw it away so reopening fetches a fresh one.
+        setRemoteUrl(null)
       }
-      // Full-window takeover: create the carrier once a loopback URL exists, and
-      // drop it on a host switch or when the panel goes away. The carrier itself
-      // survives panel switches (it lives on document.body), which is the point:
-      // the window belongs to the remote host until the user exits.
+
+      // Take the whole window over once a loopback URL exists. The carrier lives on
+      // `document.body`, so a panel re-render never tears the guest down; a different
+      // host makes `openOverlay` start a new partition; the panel unmounting (local
+      // content selected) closes it. A host that is not up yet hands the window back:
+      // its connect progress belongs to the host page, not to a dead carrier.
       useEffect(() => {
-        if (overlayDismissed.current) return
-        if (view !== 'viewport' || activeStatus !== 'connected' || remoteUrl === null) return
-        let cancelled = false
+        if (view !== 'viewport' || activeHostId === null) return
+        if (activeStatus !== 'connected') {
+          if (overlayCarrier.root !== null) closeOverlay().catch(() => {})
+          return
+        }
+        // A fresh launch URL is being fetched (first open, or after switching hosts):
+        // keep the current guest up so switching does not flash the local UI.
+        if (remoteUrl === null) return
         openOverlay({
-          hostId: activeHostId || '',
-          name: activeHost ? activeHost.name || '' : '',
+          hostId: activeHostId,
           url: remoteUrl,
           t,
-          onExit: () => {
-            // The user left the carrier: hand the window back until they ask
-            // again, instead of immediately taking it over.
-            overlayDismissed.current = true
-          },
+          hosts,
+          activeHostId,
+          onPick: openHost,
+          onRefresh: reloadOverlay,
+          onExit: leaveCarrier,
         })
-        return () => {
-          cancelled = true
-        }
       }, [view, activeStatus, remoteUrl, activeHostId])
 
+      // Keep the injected bar in step with /state: host list, status dot and the
+      // active host all live in `state`, and the bar is plain DOM outside React.
       useEffect(() => {
-        return () => {
-          closeOverlay().catch(() => {})
-          overlayDismissed.current = false
-        }
-      }, [activeHostId])
+        updateOverlayBar({ t, hosts, activeHostId, onPick: openHost, onRefresh: reloadOverlay, onExit: leaveCarrier })
+      }, [state, activeHostId])
 
-      // The sidebar is the switch in both directions: selecting local content
-      // deselects this panel, and unmounting is what ends the takeover. Doing it
-      // here (instead of watching sidebar clicks) keeps the rule exact — the remote
-      // is up exactly while this panel is the selected one.
+      // Unmounting the panel ends the takeover: the shell deselects this panel when
+      // local content is selected, and the remote must not keep the window.
       useEffect(() => {
         return () => {
           closeOverlay().catch(() => {})
@@ -4616,6 +4887,15 @@ window.__ModuleLoader__.load({
               onCancel: () => setPendingDelete(null),
             })
           : null,
+        conflictHost
+          ? h(RemoteConflictPrompt, {
+              key: conflictHost.id,
+              t,
+              host: conflictHost,
+              busy: conflictBusy,
+              onResolve: resolveConflict,
+            })
+          : null,
         passwordPrompt
           ? h(PasswordPrompt, {
               key: passwordPrompt.host && passwordPrompt.host.id ? passwordPrompt.host.id : 'password',
@@ -4683,6 +4963,7 @@ window.__ModuleLoader__.load({
       const [deleting, setDeleting] = useState(false)
       const [busyHostId, setBusyHostId] = useState(null)
       const [passwordPrompt, setPasswordPrompt] = useState(null)
+      const [conflictBusy, setConflictBusy] = useState(false)
       const [toast, setToast] = useState(null)
       const toastTimer = useRef(null)
 
@@ -4703,6 +4984,9 @@ window.__ModuleLoader__.load({
         const detail = resolveText(view.detail, locale)
         return detail ? title + ' ' + detail : title
       }
+
+      const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
+      const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
 
       const openPanel = () => {
         if (typeof props.openPanel === 'function') {
@@ -4815,6 +5099,18 @@ window.__ModuleLoader__.load({
             (error) => notify(errorMessage(error), 'error'),
           )
           .finally(() => setBusyHostId(null))
+      }
+
+      const resolveConflict = (host, action) => {
+        if (!host || !host.id) return
+        setConflictBusy(true)
+        api
+          .confirmConflict(host.id, action)
+          .then(
+            () => remote.refresh(),
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setConflictBusy(false))
       }
 
       const runDiagnose = (host) => {
@@ -4939,6 +5235,15 @@ window.__ModuleLoader__.load({
               busy: deleting,
               onConfirm: confirmDeleteHost,
               onCancel: () => setPendingDelete(null),
+            })
+          : null,
+        conflictHost
+          ? h(RemoteConflictPrompt, {
+              key: conflictHost.id,
+              t,
+              host: conflictHost,
+              busy: conflictBusy,
+              onResolve: resolveConflict,
             })
           : null,
         passwordPrompt
@@ -5362,6 +5667,7 @@ window.__ModuleLoader__.load({
       ErrorCard,
       FingerprintCard,
       PasswordPrompt,
+      RemoteConflictPrompt,
       KeyFilePicker,
       WizardDialog,
       DiagnoseDrawer,
@@ -5393,6 +5699,18 @@ window.__ModuleLoader__.load({
         settled: mirrorsSettled,
         intervalMs: MIRROR_POLL_INTERVAL_MS,
         deadlineMs: MIRROR_POLL_DEADLINE_MS,
+      },
+      /**
+       * The takeover carrier's seams, exposed for unit tests: the injected DOM is
+       * imperative (it lives outside React), but it can be built against a minimal
+       * fake document. Inert at runtime: the loader consumes only
+       * `inject`/`apply`/`components`.
+       */
+      carrier: {
+        barHeight: CARRIER_BAR_HEIGHT,
+        open: openOverlay,
+        close: closeOverlay,
+        updateBar: updateOverlayBar,
       },
     }
 

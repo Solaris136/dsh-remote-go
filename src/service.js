@@ -11,6 +11,8 @@ import path from 'node:path'
 import { homedir } from 'node:os'
 import {
   DEFAULT_IDLE_MINUTES,
+  REMOTE_CONFLICT_TIMEOUT_MS,
+  REMOTE_PREFLIGHT_TIMEOUT_MS,
   REMOTE_START_TIMEOUT_MS,
   SSH_READY_TIMEOUT_MS,
   TUNNEL_PROBE_TIMEOUT_MS,
@@ -19,8 +21,8 @@ import { errors, toErrorView } from './errors.js'
 import { remoteLayout } from './layout.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { findKnownHostEntries, parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
-import { probeRemote, describeProbeCapabilities } from './probe.js'
-import { executeBootstrap, planBootstrap, verifyInstalledVersion } from './bootstrap.js'
+import { probeRemote } from './probe.js'
+import { planNpx, verifyNpxVersion } from './bootstrap.js'
 import { discoverSshAliases as discoverAliasesFromConfig, resolveDestination } from './ssh-config.js'
 import { parseSshConfig } from './ssh-config.js'
 import { SshConnection } from './ssh.js'
@@ -28,15 +30,17 @@ import { createTunnel } from './tunnel.js'
 import {
   adoptRemoteWeb,
   exchangeTokenOverTunnel,
+  findForeignDshProcesses,
+  readRunRegistry,
   remoteHttpStatus,
   startRemoteWeb,
+  stopForeignDshProcesses,
   stopRemoteWeb,
   waitForRemoteUi,
 } from './webapp.js'
 import { randomBytes } from 'node:crypto'
 import { nowIso, randomDelay } from './util.js'
 import { normalizeVersion, versionParity, versionsEqual } from './version.js'
-import { resolveTargetVersion } from './local-version.js'
 import {
   DEFAULT_EPOCH_JUMP_LIMIT,
   MIRROR_LEASE_TTL_MS,
@@ -96,7 +100,7 @@ export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
  */
 const DELETE_WAIT_MS = 5_000
 
-/** @typedef {'unconfigured'|'connecting'|'fingerprint-pending'|'connected'|'disconnected'|'error'|'limited'} HostStatus */
+/** @typedef {'unconfigured'|'connecting'|'fingerprint-pending'|'conflict-pending'|'connected'|'disconnected'|'error'|'limited'} HostStatus */
 /** @typedef {'ssh'|'probe'|'bootstrap'|'start'|'tunnel'|'ready'} ConnectPhase */
 
 /**
@@ -108,15 +112,17 @@ const DELETE_WAIT_MS = 5_000
  *   sshFactory?: (options: any) => any,
  *   tunnelFactory?: (options: any) => Promise<any>,
  *   probe?: typeof probeRemote,
- *   plan?: typeof planBootstrap,
- *   execute?: typeof executeBootstrap,
+ *   plan?: typeof planNpx,
+ *   preflight?: typeof verifyNpxVersion,
  *   startWeb?: typeof startRemoteWeb,
  *   stopWeb?: typeof stopRemoteWeb,
  *   waitUi?: typeof waitForRemoteUi,
  *   exchange?: typeof exchangeTokenOverTunnel,
  *   adopt?: typeof adoptRemoteWeb,
+ *   findForeign?: typeof findForeignDshProcesses,
+ *   stopForeign?: typeof stopForeignDshProcesses,
+ *   readRegistry?: typeof readRunRegistry,
  *   loadSshMaterial?: typeof loadLocalSshMaterial,
- *   resolveTarget?: typeof resolveTargetVersion,
  *   mirrorStore?: import('./mirror-store.js').MirrorStore,
  *   sessionAdapter?: {
  *     ensureMirrorSession: (descriptor: any) => any,
@@ -129,6 +135,7 @@ const DELETE_WAIT_MS = 5_000
  *     removeHostWorkspace?: (request: any) => Promise<any>,
  *   } | null,
  *   hostKeyConfirmTimeoutMs?: number,
+ *   conflictConfirmTimeoutMs?: number,
  *   clock?: () => number,
  * }} ServiceOptions
  */
@@ -144,6 +151,7 @@ function emptyRemote() {
     port: null,
     pid: null,
     dshHome: null,
+    profile: null,
     bootstrapLevel: null,
     nodeVersion: null,
     startedAt: null,
@@ -163,15 +171,17 @@ export class RemoteGoService extends EventEmitter {
     this.sshFactory = options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions))
     this.tunnelFactory = options.tunnelFactory ?? createTunnel
     this.probe = options.probe ?? probeRemote
-    this.plan = options.plan ?? planBootstrap
-    this.execute = options.execute ?? executeBootstrap
+    this.plan = options.plan ?? planNpx
+    this.preflight = options.preflight ?? verifyNpxVersion
     this.startWeb = options.startWeb ?? startRemoteWeb
     this.stopWeb = options.stopWeb ?? stopRemoteWeb
     this.waitUi = options.waitUi ?? waitForRemoteUi
     this.exchange = options.exchange ?? exchangeTokenOverTunnel
     this.adopt = options.adopt ?? adoptRemoteWeb
+    this.findForeign = options.findForeign ?? findForeignDshProcesses
+    this.stopForeign = options.stopForeign ?? stopForeignDshProcesses
+    this.readRegistry = options.readRegistry ?? readRunRegistry
     this.loadSshMaterial = options.loadSshMaterial ?? loadLocalSshMaterial
-    this.resolveTarget = options.resolveTarget ?? resolveTargetVersion
     this.mirrorStore = options.mirrorStore ?? new MirrorStore({ dir: options.store.dir, logger: this.logger })
     this.sessionAdapter = options.sessionAdapter ?? null
     // Optional: registers one sidebar workspace per host so the mirrored local
@@ -181,6 +191,7 @@ export class RemoteGoService extends EventEmitter {
     // never reaches hosts.json. Absent ⇒ passwords stay in memory for one session.
     this.secrets = options.secrets ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
+    this.conflictConfirmTimeoutMs = options.conflictConfirmTimeoutMs ?? REMOTE_CONFLICT_TIMEOUT_MS
     // Log verbosity override: set it to `debug` to see the §6.4 poll trace in full. Unset means the
     // configured `logLevel` decides.
     this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
@@ -246,6 +257,8 @@ export class RemoteGoService extends EventEmitter {
       plan: null,
       exchange: null,
       pendingHostKey: null,
+      pendingConflict: null,
+      conflict: null,
       desired: 'idle',
       reconnectAttempts: 0,
       reconnectTimer: null,
@@ -318,19 +331,14 @@ export class RemoteGoService extends EventEmitter {
     this.#emitState()
   }
 
-  #progress(runtime, code, params) {
-    runtime.progress = { code, ...(params ? { params } : {}) }
-    this.#emitState()
-  }
-
   /** Build the client-facing state snapshot (contract: docs/api.md). */
   snapshot() {
     const settings = this.store.getSettings()
     const localVersion = this.localVersion
-    const hosts = [...this.runtimes.values()].map((runtime) => this.#hostView(runtime, settings))
+    const hosts = [...this.runtimes.values()].map((runtime) => this.#hostView(runtime))
     return {
       hostVersion: localVersion,
-      targetVersion: this.#targetVersionForSnapshot(settings, localVersion).targetVersion,
+      targetVersion: localVersion,
       hosts,
       settings,
       activeHostId: this.activeHostId,
@@ -338,15 +346,9 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
-  /** @param {import('./settings.js').Settings} settings @param {string | null} localVersion */
-  #targetVersionForSnapshot(settings, localVersion) {
-    return this.resolveTarget({ configured: settings.bootstrap.targetVersion, localVersion })
-  }
-
-  /** @param {any} runtime @param {import('./settings.js').Settings} settings */
-  #hostView(runtime, settings) {
+  /** @param {any} runtime */
+  #hostView(runtime) {
     const entry = runtime.entry
-    const target = this.#targetVersionForSnapshot(settings, this.localVersion)
     return {
       id: runtime.id,
       name: entry.name,
@@ -365,10 +367,11 @@ export class RemoteGoService extends EventEmitter {
       progress: runtime.progress,
       error: runtime.error,
       warning: runtime.warning,
+      conflict: runtime.conflict,
       fingerprint: runtime.fingerprint,
       remote: {
         ...runtime.remote,
-        version: runtime.remote.version ?? runtime.facts?.dshVersion ?? null,
+        version: runtime.remote.version ?? null,
       },
       keepAlive: entry.keepAlive,
       idleMinutes: entry.idleMinutes,
@@ -377,8 +380,8 @@ export class RemoteGoService extends EventEmitter {
       lastOpenedAt: entry.lastOpenedAt,
       createdAt: entry.createdAt,
       updatedAt: entry.updatedAt,
-      targetVersion: target.targetVersion,
-      versionParity: versionParity(target.targetVersion, runtime.remote.version ?? runtime.facts?.dshVersion ?? null),
+      targetVersion: this.localVersion,
+      versionParity: versionParity(this.localVersion, runtime.remote.version ?? null),
     }
   }
 
@@ -408,7 +411,7 @@ export class RemoteGoService extends EventEmitter {
     }
     this.#ensureRuntime(entry)
     this.#emitState()
-    return this.#hostView(this.#runtime(entry.id), this.store.getSettings())
+    return this.#hostView(this.#runtime(entry.id))
   }
 
   /** @param {string} id */
@@ -520,13 +523,13 @@ export class RemoteGoService extends EventEmitter {
         defaultWorkspaceId: null,
       }
     }
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
-    const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const result = await readRemoteWorkspaces(runtime.ssh, layout.dshHome)
     return {
       hostId: id,
       hostName: runtime.entry.name,
       connected: true,
-      dshHome: layout.home,
+      dshHome: layout.dshHome,
       ok: result.ok,
       reason: result.reason ?? null,
       initialized: result.initialized,
@@ -620,7 +623,7 @@ export class RemoteGoService extends EventEmitter {
     // descriptors keep their directory-level annotation.
     const historyEnabled = this.store.getSettings()?.mirrorHistory !== false && Boolean(this.sessionAdapter)
     return decideLevel({
-      hostVersion: runtime.remote.version ?? runtime.facts?.dshVersion ?? null,
+      hostVersion: runtime.remote.version ?? null,
       localVersion: this.localVersion,
       probe: { ...l1Capabilities(), history: historyEnabled },
     })
@@ -628,8 +631,8 @@ export class RemoteGoService extends EventEmitter {
 
   /** @param {any} runtime */
   async #syncMirrors(runtime) {
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
-    const result = await readRemoteWorkspaces(runtime.ssh, layout.home)
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const result = await readRemoteWorkspaces(runtime.ssh, layout.dshHome)
     const existing = this.mirrorStore.listMirrors({ hostId: runtime.id })
     const decision = this.#mirrorDecision(runtime)
     if (!result.ok) {
@@ -834,7 +837,7 @@ export class RemoteGoService extends EventEmitter {
         .filter((entry) => entry?.ok === true)
         .map((entry) => entry.localSessionId),
     )
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
     /** @type {import('./mirror.js').MirrorDescriptor[]} */
     const updated = []
     let appliedAny = false
@@ -864,7 +867,7 @@ export class RemoteGoService extends EventEmitter {
         // Ask the remote whether someone else holds a newer grant. An absent authority is
         // normal (no L3 channel yet); a malformed one is reported, never read as "free".
         const authority = await fetchRemoteLease(runtime.ssh, {
-          remoteDshHome: layout.home,
+          remoteDshHome: layout.stateHome,
           remoteSessionId: descriptor.remoteSessionId,
         })
         if (authority.ok && authority.report) {
@@ -966,7 +969,7 @@ export class RemoteGoService extends EventEmitter {
         const sessionKey = runtime.leaseSessionKey ?? null
         if (sessionKey !== null) {
           const published = await publishRemoteLease(runtime.ssh, {
-            remoteDshHome: layout.home,
+            remoteDshHome: layout.stateHome,
             remoteSessionId: descriptor.remoteSessionId,
             record: buildLeaseRecord({
               writer,
@@ -1010,7 +1013,7 @@ export class RemoteGoService extends EventEmitter {
         }
 
         const remote = await fetchRemoteHistory(runtime.ssh, {
-          remoteDshHome: layout.home,
+          remoteDshHome: layout.dshHome,
           remoteSessionId: descriptor.remoteSessionId,
           maxEvents: HISTORY_LIMITS.maxEvents,
         })
@@ -1104,7 +1107,7 @@ export class RemoteGoService extends EventEmitter {
           )
           cursor = 0
           const full = await fetchRemoteHistory(runtime.ssh, {
-            remoteDshHome: layout.home,
+            remoteDshHome: layout.dshHome,
             remoteSessionId: descriptor.remoteSessionId,
             maxEvents: HISTORY_LIMITS.maxEvents,
           })
@@ -1540,7 +1543,7 @@ export class RemoteGoService extends EventEmitter {
     const entry = await this.store.patchHost(id, patch)
     if (entry) runtime.entry = entry
     this.#emitState()
-    return this.#hostView(runtime, this.store.getSettings())
+    return this.#hostView(runtime)
   }
 
   // -------------------------------------------------------------- connect
@@ -1549,7 +1552,7 @@ export class RemoteGoService extends EventEmitter {
    * Start the connect pipeline. Returns immediately; progress travels on the
    * `state` event (see docs/api.md /events).
    * @param {string} id
-   * @param {{ password?: string, rememberPassword?: boolean, rememberFingerprint?: boolean, overrideVersion?: boolean }} [options]
+   * @param {{ password?: string, rememberPassword?: boolean, rememberFingerprint?: boolean }} [options]
    */
   async connect(id, options = {}) {
     await this.init()
@@ -1564,7 +1567,6 @@ export class RemoteGoService extends EventEmitter {
       runtime.savePassword = true
     }
     runtime.rememberFingerprint = options.rememberFingerprint !== false
-    runtime.overrideVersion = options.overrideVersion === true
     runtime.desired = 'connected'
     this.#cancelReconnect(runtime)
     runtime.connectPromise = this.#connectPipeline(runtime).finally(() => {
@@ -1674,6 +1676,30 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
+   * Answer the "a manually started DSH is already running" prompt.
+   * @param {string} id
+   * @param {{ action: 'stop'|'alongside'|'cancel' }} decision
+   */
+  async confirmConflict(id, decision) {
+    const runtime = this.#runtime(id)
+    const pending = runtime.pendingConflict
+    if (!pending)
+      throw errors.invalidInput('conflict', {
+        zh: '没有待确认的远端 DSH 冲突。',
+        en: 'No remote DSH conflict is pending confirmation.',
+      })
+    const action = decision?.action
+    if (action !== 'stop' && action !== 'alongside' && action !== 'cancel') {
+      throw errors.invalidInput('conflict', {
+        zh: '请选择停止手工实例、与它并存，或取消连接。',
+        en: 'Choose whether to stop the manual instance, keep it alongside, or cancel.',
+      })
+    }
+    pending.resolve({ action })
+    return { ok: true }
+  }
+
+  /**
    * Open info for the guest: a loopback URL carrying the one-shot launch token.
    * The token stays in memory (design §9.3).
    * @param {string} id
@@ -1722,66 +1748,61 @@ export class RemoteGoService extends EventEmitter {
       )
 
       this.#phase(runtime, 'probe', 'probing')
-      const facts = await this.probe(runtime.ssh, { remoteDir: runtime.entry.bootstrap.remoteDir })
+      const facts = await this.probe(runtime.ssh, { remoteDir: this.store.getSettings().bootstrap.remoteDir })
       runtime.facts = facts
-      const capabilities = describeProbeCapabilities(facts)
-      if (!capabilities.system.supported) throw errors.unsupportedOs(capabilities.system.name)
-
-      const targetVersion = await this.#pickTargetVersion(runtime, facts)
-      const plan = this.plan({
-        facts,
-        targetVersion,
-        remoteDir: runtime.entry.bootstrap.remoteDir,
-        mode: runtime.entry.bootstrap.mode,
-        nodeVersion: runtime.entry.bootstrap.nodeVersion,
-      })
-      runtime.plan = plan
-      this.#log(runtime, 'info', `bootstrap plan ${plan.level}: ${plan.reason.en}`)
-
-      if (plan.steps.length > 0) {
-        this.#phase(runtime, 'bootstrap', 'bootstrapping', { level: plan.level })
-        await this.execute(runtime.ssh, plan, {
-          onProgress: (progress) => {
-            if (progress.state === 'running' && !progress.output) {
-              this.#progress(runtime, 'bootstrap-progress', {
-                template: progress.step.id,
-                index: progress.index + 1,
-                total: plan.steps.length,
-                level: plan.level,
-              })
-            }
-          },
+      const targetVersion = this.localVersion
+      if (!targetVersion) {
+        throw errors.invalidInput('version', {
+          zh: '无法确定本机 DSH 版本，无法用 npx 固定同版本启动远端。请从 DSH 界面启动本插件，让 Host 读到本机版本。',
+          en: 'The local DSH version is unknown, so the remote cannot be pinned to the same version. Start the plugin from the DSH UI so the Host can read the local version.',
         })
-        await verifyInstalledVersion(runtime.ssh, plan)
       }
+      const profile = this.store.getSettings().bootstrap.profile
+      const plan = this.plan({ facts, targetVersion, profile })
+      runtime.plan = plan
+      this.#log(runtime, 'info', `runtime plan ${plan.level}: ${plan.reason.en}`)
 
       this.#phase(runtime, 'start', 'starting-remote', { level: plan.level })
-      const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
+      const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
       let webInfo = null
       // Adopt an instance left running by a previous local process (keep-alive).
+      // This is checked before the npx preflight: an adoptable instance should not
+      // require registry access just to reconnect.
       try {
-        const adopted = await this.adopt(runtime.ssh, layout)
+        const adopted = await this.adopt(runtime.ssh, layout, { profile })
         const adoptedVersion = adopted?.version ? normalizeVersion(adopted.version) : null
-        const expectVersion =
-          plan.level === 'T0' || plan.level === 'T0-local' || plan.level === 'T1'
-            ? plan.start.targetVersion
-            : plan.start.targetVersion
-        if (adopted && (!adoptedVersion || versionsEqual(adoptedVersion, expectVersion))) {
+        if (adopted && (!adoptedVersion || versionsEqual(adoptedVersion, targetVersion))) {
           webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
           this.#log(runtime, 'info', `adopted running remote web pid=${adopted.pid} port=${adopted.port}`)
         } else if (adopted) {
           this.#log(
             runtime,
             'info',
-            `running remote web version ${adoptedVersion} != ${expectVersion}; starting a matching instance`,
+            `running remote web version ${adoptedVersion} != ${targetVersion}; stopping it and starting a matching instance`,
           )
+          // The old process owns the same `~/.dsh` profile; leaving it running
+          // next to the new one would share session files with a stale version.
+          try {
+            await this.stopWeb(runtime.ssh, layout, { pid: adopted.pid })
+          } catch (error) {
+            this.#log(runtime, 'warn', 'could not stop the stale remote web:', String(error?.message ?? error))
+          }
         }
       } catch (error) {
         this.#log(runtime, 'debug', 'adopt check failed:', error instanceof Error ? error.message : String(error))
       }
       if (!webInfo) {
+        await this.#resolveForeignConflict(runtime, layout, profile)
+        this.#phase(runtime, 'bootstrap', 'bootstrapping', { level: plan.level })
+        // Resolve the exact package in the foreground first: a cold npx download
+        // belongs in the connect error, not in a detached process that only leaves
+        // a log behind. This also warms the cache for the real start below.
+        await this.preflight(runtime.ssh, plan, { timeoutMs: REMOTE_PREFLIGHT_TIMEOUT_MS })
+        this.#phase(runtime, 'start', 'starting-remote', { level: plan.level })
         webInfo = await this.startWeb(runtime.ssh, {
           plan,
+          layout,
+          profile,
           timeoutMs: REMOTE_START_TIMEOUT_MS,
           onLine: (line) => this.#log(runtime, 'debug', `remote: ${line}`),
         })
@@ -1789,27 +1810,16 @@ export class RemoteGoService extends EventEmitter {
       remoteStarted = true
       runtime.token = webInfo.token
       runtime.remote = {
-        version: plan.start.targetVersion,
+        version: targetVersion,
         uiReady: false,
         localPort: null,
         port: webInfo.port,
         pid: webInfo.pid ?? null,
-        dshHome: layout.home,
+        dshHome: layout.dshHome,
+        profile,
         bootstrapLevel: plan.level,
-        nodeVersion: facts.isolatedNodeVersion ?? facts.nodeVersion,
+        nodeVersion: facts.nodeVersion,
         startedAt: webInfo.startedAt ?? nowIso(),
-      }
-      if (plan.level === 'T0' || plan.level === 'T0-local' || plan.level === 'T1') {
-        const parity = versionParity(this.localVersion, runtime.remote.version)
-        if (!parity.same && !runtime.overrideVersion) {
-          throw errors.versionMismatch(parity.local ?? 'unknown', parity.remote ?? 'unknown')
-        }
-        if (!parity.same) {
-          runtime.warning = {
-            zh: '正在沿用远端版本，界面可能与本地不一致。',
-            en: 'Continuing with the remote version; the UI may differ from this machine.',
-          }
-        }
       }
 
       this.#phase(runtime, 'tunnel', 'tunneling')
@@ -1859,13 +1869,29 @@ export class RemoteGoService extends EventEmitter {
       this.#startMirrorSync(runtime)
     } catch (error) {
       const view = toErrorView(error)
-      runtime.error = view
-      runtime.status = 'error'
-      runtime.phase = null
-      runtime.progress = null
+      const cancelled = runtime.desired !== 'connected'
+      if (cancelled) {
+        // A user-initiated disconnect/teardown resolved a pending prompt (or closed
+        // the window) while the pipeline was in flight: this is not a failure.
+        runtime.error = null
+        runtime.status = 'disconnected'
+        runtime.phase = null
+        runtime.progress = null
+        this.#log(runtime, 'info', 'connect cancelled by disconnect')
+      } else {
+        runtime.error = view
+        runtime.status = 'error'
+        runtime.phase = null
+        runtime.progress = null
+        this.#log(
+          runtime,
+          'warn',
+          `connect failed: ${view.code}`,
+          error instanceof Error ? error.message : String(error),
+        )
+      }
       runtime.remote.uiReady = false
       runtime.remote.localPort = null
-      this.#log(runtime, 'warn', `connect failed: ${view.code}`, error instanceof Error ? error.message : String(error))
       await this.#teardownRuntime(runtime, {
         stopRemote: remoteStarted && runtime.entry.keepAlive === 'stop',
         keepRemote: remoteStarted && runtime.entry.keepAlive !== 'stop',
@@ -1877,27 +1903,93 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /**
+   * Warn when the remote already runs a DSH this plugin did not start, and let
+   * the user decide: stop it, keep it alongside, or cancel.
    * @param {any} runtime
-   * @param {import('./probe.js').ProbeFacts} facts
+   * @param {ReturnType<typeof remoteLayout>} layout
+   * @param {string} profile
    */
-  async #pickTargetVersion(runtime, facts) {
-    const resolved = this.resolveTarget({
-      configured: runtime.entry.bootstrap.targetVersion,
-      localVersion: this.localVersion,
+  async #resolveForeignConflict(runtime, layout, profile) {
+    /** @type {number[]} */
+    const ignorePids = []
+    try {
+      const registry = await this.readRegistry(runtime.ssh, layout)
+      const pid = Number(registry?.pid)
+      if (Number.isInteger(pid) && pid > 0 && registry?.dshHome === layout.dshHome && registry?.profile === profile) {
+        ignorePids.push(pid)
+      }
+    } catch (error) {
+      // swallow-ok: registry absence is normal; the scan below still finds foreign processes
+      this.#log(runtime, 'debug', 'foreign DSH: registry read failed:', String(error?.message ?? error))
+    }
+    const found = await this.findForeign(runtime.ssh, { ignorePids })
+    if (found.ok !== true) {
+      this.#log(runtime, 'debug', 'foreign DSH: scan failed:', found.reason ?? found.technical ?? 'unknown')
+      return
+    }
+    if (found.processes.length === 0) return
+
+    const decision = await this.#askConflict(runtime, found.processes)
+    if (decision.action === 'cancel') throw errors.remoteDshRunning()
+    if (decision.action === 'alongside') {
+      runtime.warning = {
+        zh: '远端已有手工启动的 DSH；已按你的选择并存运行，两者共享 ~/.dsh，请避免同时操作同一会话。',
+        en: 'A manually started DSH is already running; it was kept as you chose. Both share ~/.dsh, so avoid editing the same session in both.',
+      }
+      return
+    }
+    const stopped = await this.stopForeign(runtime.ssh, found.processes)
+    if (stopped.ok !== true) {
+      throw errors.remoteDshRunning(
+        {
+          zh: '远端的手工 DSH 进程没有停下来，连接已中止。',
+          en: 'The manual remote DSH process did not stop, so the connection was aborted.',
+        },
+        {
+          technical: `alive=${stopped.alive.join(',') || 'unknown'} output=${String(stopped.output ?? '').slice(0, 800)}`,
+        },
+      )
+    }
+    this.#log(runtime, 'info', `stopped ${found.processes.length} manual remote DSH process(es)`)
+  }
+
+  /**
+   * Pause the pipeline for a user decision about foreign remote processes.
+   * Mirrors the host-key prompt: a state, a promise, and a bounded timeout.
+   * @param {any} runtime
+   * @param {{ pid: number, command: string }[]} processes
+   * @returns {Promise<{ action: 'stop'|'alongside'|'cancel', timedOut?: boolean }>}
+   */
+  #askConflict(runtime, processes) {
+    runtime.status = 'conflict-pending'
+    runtime.progress = { code: 'remote-dsh-running', params: { count: processes.length } }
+    runtime.conflict = {
+      detectedAt: nowIso(),
+      processes: processes.slice(0, 20).map((process) => ({
+        pid: process.pid,
+        command: String(process.command ?? '').slice(0, 400),
+      })),
+    }
+    this.#emitState()
+    return new Promise((resolve) => {
+      let settled = false
+      let timer = null
+      const finish = (/** @type {{ action: 'stop'|'alongside'|'cancel', timedOut?: boolean }} */ decision) => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        if (runtime.pendingConflict?.resolve === finish) runtime.pendingConflict = null
+        runtime.conflict = null
+        if (runtime.desired === 'connected') {
+          runtime.status = 'connecting'
+          runtime.progress = { code: 'probing' }
+        }
+        this.#emitState()
+        resolve(decision)
+      }
+      timer = setTimeout(() => finish({ action: 'cancel', timedOut: true }), this.conflictConfirmTimeoutMs)
+      runtime.pendingConflict = { processes, resolve: finish }
     })
-    let targetVersion = resolved.targetVersion
-    if (!targetVersion) {
-      throw errors.invalidInput('targetVersion', {
-        zh: '无法确定本机 DSH 版本：本机版本探测失败，请安装设置里显式填写目标版本，或在远端界面里告诉插件版本。',
-        en: 'Cannot determine the local DSH version. Set an explicit target version in settings or let the client report its version.',
-      })
-    }
-    const existing = facts.dshVersion ?? facts.isolatedDshVersion ?? null
-    if (runtime.entry.bootstrap.mode === 'reuse' && existing && !versionsEqual(existing, targetVersion)) {
-      if (!runtime.overrideVersion) throw errors.versionMismatch(targetVersion, existing)
-    }
-    if (runtime.overrideVersion && existing) targetVersion = existing
-    return targetVersion
   }
 
   /**
@@ -1978,6 +2070,7 @@ export class RemoteGoService extends EventEmitter {
     const stream = await runtime.jumpSsh.forwardOut(target.host, target.port ?? 22)
     runtime.ssh = this.sshFactory(buildOptions(target, stream))
     this.#captureFingerprint(runtime, await runtime.ssh.connect())
+    this.#startLeaseSession(runtime)
   }
 
   /**
@@ -2107,6 +2200,14 @@ export class RemoteGoService extends EventEmitter {
   }
 
   /** @param {any} runtime */
+  #cancelConflict(runtime) {
+    const pending = runtime.pendingConflict
+    runtime.pendingConflict = null
+    runtime.conflict = null
+    if (pending) pending.resolve({ action: 'cancel' })
+  }
+
+  /** @param {any} runtime */
   #cancelIdleStop(runtime) {
     if (runtime.idleTimer) {
       clearTimeout(runtime.idleTimer)
@@ -2128,9 +2229,13 @@ export class RemoteGoService extends EventEmitter {
   async #stopRemoteQuietly(runtime) {
     try {
       if (runtime.ssh?.connected) {
-        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), {
-          pid: runtime.remote.pid ?? undefined,
-        })
+        await this.stopWeb(
+          runtime.ssh,
+          remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null),
+          {
+            pid: runtime.remote.pid ?? undefined,
+          },
+        )
       }
     } catch (error) {
       this.#log(runtime, 'warn', 'idle stop failed:', error instanceof Error ? error.message : String(error))
@@ -2162,9 +2267,9 @@ export class RemoteGoService extends EventEmitter {
    */
   async #ensureStreamHelper(runtime) {
     if (typeof runtime.streamHelperPath === 'string' && runtime.streamHelperPath !== '') return true
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
-    if (!layout?.home) return false
-    const scriptPath = remoteStreamScript(layout.home)
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.stateHome) return false
+    const scriptPath = remoteStreamScript(layout.stateHome)
     try {
       const result = await runtime.ssh.exec(buildInstallStreamScriptCommand(scriptPath), {
         timeoutMs: STREAM_LIMITS.timeoutMs,
@@ -2246,8 +2351,8 @@ export class RemoteGoService extends EventEmitter {
       this.#log(runtime, 'info', 'mirror stream: trace { guard: no-helper }')
       return
     }
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
-    if (!layout?.home) return
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.stateHome) return
     const descriptors = this.mirrorStore.listMirrors({ hostId: runtime.id })
     /** @type {any[]} */
     const deltas = []
@@ -2264,7 +2369,7 @@ export class RemoteGoService extends EventEmitter {
         continue
       }
       const offsetBefore = runtime.streamOffsets.get(descriptor.remoteSessionId) ?? 0
-      const raw = await this.#execFollow(runtime, layout.home, descriptor, logPath, offsetBefore)
+      const raw = await this.#execFollow(runtime, layout.stateHome, descriptor, logPath, offsetBefore)
       const frame = parseFrame(raw)
       if (frame.ok !== true) {
         this.#log(
@@ -2444,11 +2549,11 @@ export class RemoteGoService extends EventEmitter {
     runtime.leaseSessionKey = null
     runtime.leasePublished = null
     if (key === null || published === null || !runtime.ssh?.connected) return
-    const layout = remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null)
-    if (!layout?.home) return
+    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    if (!layout?.stateHome) return
     try {
       await runtime.ssh.exec(
-        buildLeaseReleaseCommand(remoteLeaseFile(layout.home, published.sessionId ?? null), {
+        buildLeaseReleaseCommand(remoteLeaseFile(layout.stateHome, published.sessionId ?? null), {
           writer: published.writer,
           epoch: published.epoch,
           sessionKey: key,
@@ -2489,6 +2594,7 @@ export class RemoteGoService extends EventEmitter {
    */
   async #teardownRuntime(runtime, options = {}) {
     this.#stopMirrorStream(runtime)
+    this.#cancelConflict(runtime)
     // Publish the tombstone while the transport still exists: a released lease lets another
     // client take over immediately instead of waiting out the TTL, and it is the honest
     // "I am gone" signal a single-writer protocol needs.
@@ -2497,9 +2603,13 @@ export class RemoteGoService extends EventEmitter {
     this.#cancelIdleStop(runtime)
     if (options.stopRemote && runtime.ssh?.connected) {
       try {
-        await this.stopWeb(runtime.ssh, remoteLayout(runtime.entry.bootstrap.remoteDir, runtime.facts?.home ?? null), {
-          pid: runtime.remote.pid ?? undefined,
-        })
+        await this.stopWeb(
+          runtime.ssh,
+          remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null),
+          {
+            pid: runtime.remote.pid ?? undefined,
+          },
+        )
       } catch (error) {
         this.#log(runtime, 'warn', 'stop remote failed:', error instanceof Error ? error.message : String(error))
       }
@@ -2522,7 +2632,6 @@ export class RemoteGoService extends EventEmitter {
   async diagnose(id) {
     await this.init()
     const runtime = this.#runtime(id)
-    const settings = this.store.getSettings()
     /** @type {{ id: string, title: { zh: string, en: string }, status: 'pass'|'fail'|'unknown', detail: { zh: string, en: string } }[]} */
     const checks = []
     const push = (checkId, title, status, detail) => checks.push({ id: checkId, title, status, detail })
@@ -2574,8 +2683,8 @@ export class RemoteGoService extends EventEmitter {
       tunnel ? 'pass' : 'fail',
       tunnel
         ? {
-            zh: `127.0.0.1:${tunnel.localPort} → 远端 127.0.0.1:${runtime.remote.pid ? runtime.remote.pid : ''}`,
-            en: `127.0.0.1:${tunnel.localPort} → remote loopback`,
+            zh: `127.0.0.1:${tunnel.localPort} → 远端 127.0.0.1:${runtime.remote.port ?? '未知'}`,
+            en: `127.0.0.1:${tunnel.localPort} → remote 127.0.0.1:${runtime.remote.port ?? 'unknown'}`,
           }
         : {
             zh: '隧道未建立（连接断开或尚未连接）。',
@@ -2610,9 +2719,9 @@ export class RemoteGoService extends EventEmitter {
         : { zh: '尚未完成远端界面的鉴权握手。', en: 'The remote UI authentication handshake has not completed.' },
     )
 
-    const target = this.#targetVersionForSnapshot(settings, this.localVersion)
-    const remoteVersion = runtime.remote.version ?? runtime.facts?.dshVersion ?? null
-    const parity = versionParity(target.targetVersion, remoteVersion)
+    const target = this.localVersion
+    const remoteVersion = runtime.remote.version ?? null
+    const parity = versionParity(target, remoteVersion)
     push(
       'remote-version',
       { zh: '远端 DSH 版本', en: 'Remote DSH version' },

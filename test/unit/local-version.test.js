@@ -3,30 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { candidatePackageJsons, detectLocalVersion, resolveTargetVersion } from '../../src/local-version.js'
-
-test('resolveTargetVersion uses explicit exact versions, else the local version', () => {
-  assert.deepEqual(resolveTargetVersion({ configured: '0.2.2-rc.1', localVersion: '0.2.2-rc.1' }), {
-    targetVersion: '0.2.2-rc.1',
-    source: 'explicit',
-  })
-  assert.deepEqual(resolveTargetVersion({ configured: 'local', localVersion: '0.2.2-rc.1' }), {
-    targetVersion: '0.2.2-rc.1',
-    source: 'local',
-  })
-  assert.deepEqual(resolveTargetVersion({ configured: 'auto', localVersion: '0.2.2-rc.1' }), {
-    targetVersion: '0.2.2-rc.1',
-    source: 'local',
-  })
-  assert.deepEqual(resolveTargetVersion({ configured: 'local', localVersion: null }), {
-    targetVersion: null,
-    source: 'unknown',
-  })
-  assert.deepEqual(resolveTargetVersion({ configured: 'nonsense', localVersion: '0.2.2-rc.1' }), {
-    targetVersion: null,
-    source: 'unknown',
-  })
-})
+import { candidatePackageJsons, detectLocalVersion } from '../../src/local-version.js'
 
 test('candidatePackageJsons derives paths from argv and resourcesPath', () => {
   const argv1 = path.join('/opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js')

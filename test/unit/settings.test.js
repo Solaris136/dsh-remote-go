@@ -23,8 +23,8 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.mirrorToSidebar, false)
   assert.equal(settings.mirrorMaxSessions, 200)
   assert.equal(settings.autoReconnect.enabled, true)
-  assert.equal(settings.bootstrap.targetVersion, 'local')
-  assert.equal(settings.bootstrap.mode, 'auto')
+  assert.equal(settings.bootstrap.profile, 'web')
+  assert.equal(settings.bootstrap.remoteDir, '~/.dsh-remote-go')
 })
 
 test('the retired presentation mode is gone from settings entirely', () => {
@@ -43,7 +43,7 @@ test('sanitizeSettings recovers from malformed input', () => {
     defaultAuth: 'bogus',
     autoReconnect: { enabled: 'yes', maxAttempts: -3, baseDelayMs: 1 },
     language: 'fr',
-    bootstrap: { mode: 'nope', nodeVersion: 'not-a-version', targetVersion: '' },
+    bootstrap: { mode: 'nope', nodeVersion: 'not-a-version', targetVersion: '', profile: 'desktop' },
   })
   assert.equal(settings.defaultPort, 65535)
   assert.equal(settings.defaultAuth, 'key')
@@ -52,9 +52,8 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal(settings.autoReconnect.maxAttempts, 0)
   assert.equal(settings.autoReconnect.baseDelayMs, 100)
   assert.equal(settings.language, 'auto')
-  assert.equal(settings.bootstrap.mode, 'auto')
-  assert.equal(settings.bootstrap.nodeVersion, defaultSettings().bootstrap.nodeVersion)
-  assert.equal(settings.bootstrap.targetVersion, 'local')
+  assert.equal(settings.bootstrap.profile, 'web')
+  assert.equal(settings.bootstrap.remoteDir, defaultSettings().bootstrap.remoteDir)
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
   // A malformed value falls back to the documented default (off since 0.1.0).
   assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, false)
@@ -118,4 +117,13 @@ test('sanitizeHostEntry fills defaults from settings and existing values', () =>
   assert.equal(entry.auth.type, 'password')
   assert.equal(entry.keepAlive, 'keep')
   assert.equal(entry.autoReconnect, true)
+  // Runtime configuration is global settings, not per host.
+  assert.equal('bootstrap' in entry, false)
+})
+
+test('the remote profile setting accepts safe names and rejects desktop', () => {
+  assert.equal(sanitizeSettings({ bootstrap: { profile: 'headless' } }).bootstrap.profile, 'headless')
+  assert.equal(sanitizeSettings({ bootstrap: { profile: 'team.1' } }).bootstrap.profile, 'team.1')
+  assert.equal(sanitizeSettings({ bootstrap: { profile: 'desktop' } }).bootstrap.profile, 'web')
+  assert.equal(sanitizeSettings({ bootstrap: { profile: '../escape' } }).bootstrap.profile, 'web')
 })

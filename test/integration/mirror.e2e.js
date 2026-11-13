@@ -252,12 +252,10 @@ async function startApi(service, logs) {
 }
 
 /**
- * Build one service over the test's temporary state home. Two inputs are stubbed:
- * the local `~/.ssh` discovery (so the developer's real config cannot change the
- * destination) and the target-version resolver (so no network/target lookup is
- * needed). Everything else — SSH transport, probe, remote start and tunnel — is
- * real. Because `resolveTarget` returns the probed remote version, version parity
- * is true by construction and is therefore NOT asserted anywhere below.
+ * Build one service over the test's temporary state home. The only stubbed input
+ * is the local `~/.ssh` discovery (so the developer's real config cannot change
+ * the destination). Everything else — SSH transport, probe, npx preflight, remote
+ * start and tunnel — is real.
  * @param {{ stateDir: string, home: string, localVersion: string, logs: string[], adapter?: any, workspaceAdapter?: any }} options
  */
 function createService(options) {
@@ -268,7 +266,6 @@ function createService(options) {
     localVersion: options.localVersion,
     logger,
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
-    resolveTarget: () => ({ targetVersion: options.localVersion, source: 'test' }),
     sessionAdapter: options.adapter ?? null,
     workspaceAdapter: options.workspaceAdapter ?? null,
   })
@@ -449,16 +446,16 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       const facts = await probeRemote(ssh, { remoteDir: DEFAULT_REMOTE_DIR, timeoutMs: 30_000 })
       assert.equal(facts.os, 'Linux')
       assert.equal(facts.sshConnection, true)
-      assert.ok(facts.dshVersion, 'the probe reported no remote DSH version')
-      ctx.remoteVersion = facts.dshVersion
+      assert.ok(facts.npxPath, 'the probe reported no remote npx')
+      ctx.remoteVersion = simulator.state.dshVersion
 
       // The plugin reads `<remote DSH home>/storages/workspace.json`; prove the
       // answer is the fixture this test asked for, not the built-in registry.
       assert.equal(simulator.state.workspaceFixture, FIXTURE_FILE)
       const layout = remoteLayout(DEFAULT_REMOTE_DIR, facts.home)
-      const workspaces = await readRemoteWorkspaces(ssh, layout.home)
+      const workspaces = await readRemoteWorkspaces(ssh, layout.dshHome)
       assert.equal(workspaces.ok, true, `workspace read failed: ${workspaces.reason ?? 'unknown'}`)
-      assert.equal(workspaces.file, remoteWorkspaceStoragePath(layout.home))
+      assert.equal(workspaces.file, remoteWorkspaceStoragePath(layout.dshHome))
       assert.equal(workspaces.initialized, true)
       assert.equal(workspaces.defaultWorkspaceId, 'ws-sim-alpha')
       assert.deepEqual(
@@ -494,7 +491,6 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       ctx.hostId = host.id
 
@@ -507,8 +503,8 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       assert.equal(view.remote.port, simulator.state.remotePort)
       assert.equal(view.remote.uiReady, true)
       assert.ok(Number(view.remote.localPort) > 0, 'the loopback tunnel exposed no local port')
-      // `resolveTarget` is stubbed (see createService), so version parity would be
-      // true by construction: the real check is the probed remote version above.
+      // The npx pin makes the remote version equal to the local version by
+      // construction; the real check is the probed/started remote version above.
       assert.equal(view.fingerprint.sha256, simulator.state.fingerprint)
     })
 
@@ -698,7 +694,6 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       try {
         await connectHost(withAdapter, host.id, CREDENTIALS.password, serviceLogs)
@@ -771,7 +766,6 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       try {
         await connectHost(withSidebar, host.id, CREDENTIALS.password, serviceLogs)

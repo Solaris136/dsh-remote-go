@@ -22,25 +22,13 @@ export function makeFacts(overrides = {}) {
     nodePath: '/usr/bin/node',
     nodeVersion: '24.22.2',
     npmPath: '/usr/bin/npm',
-    npmVersion: '11.19.1',
     npxPath: '/usr/bin/npx',
-    dshPath: null,
-    dshVersion: null,
     curlPath: '/usr/bin/curl',
-    tarPath: '/usr/bin/tar',
-    sha256Path: '/usr/bin/sha256sum',
     diskFreeKb: 35_000_000,
     sshConnection: true,
-    isolatedNodePath: null,
-    isolatedNodeVersion: null,
-    isolatedDshVersion: null,
-    isolatedDshBinPath: null,
     credentialsFile: true,
     deepseekKeyEnv: true,
     providerEnvKeys: ['DEEPSEEK'],
-    runRegistry: null,
-    remoteDirExists: false,
-    homeExists: true,
     ...overrides,
   }
 }
@@ -113,6 +101,9 @@ export class FakeTunnel {
  *   waitUi?: any,
  *   exchange?: any,
  *   adopt?: any,
+ *   findForeign?: any,
+ *   stopForeign?: any,
+ *   readRegistry?: any,
  *   localVersion?: string | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   sessionAdapter?: any,
@@ -123,16 +114,7 @@ export async function makeTestService(overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-'))
   const store = new HostStore({ dir, logger: { warn() {}, info() {}, debug() {}, error() {} } })
   const events = []
-  const facts =
-    overrides.facts ??
-    makeFacts({
-      isolatedNodePath: '/home/ubuntu/.dsh/remote-go/node/bin/node',
-      isolatedNodeVersion: '24.22.2',
-      isolatedDshVersion: '0.2.2-rc.1',
-      isolatedDshBinPath: '/home/ubuntu/.dsh/remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js',
-      nodeVersion: '22.19.0',
-      npxPath: null,
-    })
+  const facts = overrides.facts ?? makeFacts()
   const sshFactory =
     overrides.sshFactory ??
     ((options) => {
@@ -149,8 +131,11 @@ export async function makeTestService(overrides = {}) {
     sshFactory,
     tunnelFactory,
     probe: async () => facts,
-    plan: (await import('../../src/bootstrap.js')).planBootstrap,
-    execute: async () => ({}),
+    plan: (await import('../../src/bootstrap.js')).planNpx,
+    preflight: overrides.preflight ?? (async (_ssh, plan) => plan.targetVersion),
+    findForeign: overrides.findForeign ?? (async () => ({ ok: true, processes: [] })),
+    stopForeign: overrides.stopForeign ?? (async () => ({ ok: true, alive: [], output: 'STOPPED' })),
+    readRegistry: overrides.readRegistry ?? (async () => null),
     startWeb:
       overrides.startWeb ??
       (async () => ({
@@ -161,6 +146,8 @@ export async function makeTestService(overrides = {}) {
         logPath: '/tmp/web.log',
         startedAt: new Date().toISOString(),
         rawLine: '',
+        profile: 'web',
+        dshHome: '/home/ubuntu/.dsh',
       })),
     stopWeb: overrides.stopWeb ?? (async () => ({ ok: true, output: 'STOPPED' })),
     waitUi: overrides.waitUi ?? (async () => ({ ok: true, status: 200 })),

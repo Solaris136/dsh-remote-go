@@ -139,7 +139,6 @@ function createService(options) {
     localVersion: options.localVersion,
     logger,
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
-    resolveTarget: () => ({ targetVersion: options.localVersion, source: 'test' }),
     sessionAdapter: options.adapter,
     workspaceAdapter: null,
     ...(options.clock === undefined ? {} : { clock: options.clock }),
@@ -267,7 +266,6 @@ test(
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       await connectHost(service, host.id, logs)
 
@@ -349,7 +347,6 @@ test('a mirror that is not fenced keeps writing and holds its own epoch', { time
       username: CREDENTIALS.username,
       auth: { type: 'password' },
       keepAlive: 'keep',
-      bootstrap: { mode: 'reuse' },
     })
     await connectHost(service, host.id, logs)
 
@@ -425,7 +422,6 @@ test('a fenced mirror resumes once it can re-acquire a newer epoch', { timeout: 
       username: CREDENTIALS.username,
       auth: { type: 'password' },
       keepAlive: 'keep',
-      bootstrap: { mode: 'reuse' },
     })
     await connectHost(service, host.id, logs)
     const fenced = await waitForMirrors(service, host.id, (list) =>
@@ -549,7 +545,6 @@ test('a lease that expires during a slow sync refuses the write batch', { timeou
       username: CREDENTIALS.username,
       auth: { type: 'password' },
       keepAlive: 'keep',
-      bootstrap: { mode: 'reuse' },
     })
     await connectHost(service, host.id, logs)
     await service.syncHostMirrors(host.id).catch(() => null)
@@ -620,7 +615,6 @@ test(
           username: CREDENTIALS.username,
           auth: { type: 'password' },
           keepAlive: 'keep',
-          bootstrap: { mode: 'reuse' },
         })
         await connectHost(service, host.id, logs)
         return { service, host, appends, logs, stateDir }
@@ -719,7 +713,6 @@ test('a writer that cannot see the authority is still refused by the remote', { 
       username: CREDENTIALS.username,
       auth: { type: 'password' },
       keepAlive: 'keep',
-      bootstrap: { mode: 'reuse' },
     })
     await connectHost(service, host.id, logs)
     await service.syncHostMirrors(host.id).catch(() => null)
