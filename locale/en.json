@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "dsh remote go",
-    "description": "Open a remote DSH inside a full-page panel over SSH. Hosts live in Settings → Remote hosts; the panel groups workspaces by remote next to your local workspaces."
+    "description": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the main content area while the sidebar stays as the switcher. Hosts live in Settings → Remote hosts."
   }
 }

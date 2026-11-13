@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-go",
   "version": "0.1.0",
-  "description": "DSH 插件：通过 SSH 在本地 DSH 全局面板里整页使用远端 DSH（薄客户端）| DSH plugin: open a remote DSH in a full-page panel over SSH",
+  "description": "DSH 插件：通过 SSH 在本地 DSH 的主内容区使用远端 DSH（薄客户端，侧边栏即切换器）| DSH plugin: use a remote DSH in the local main content area over SSH (the sidebar stays the switcher)",
   "keywords": [
     "deepseek",
     "harness",

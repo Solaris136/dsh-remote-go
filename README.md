@@ -1,6 +1,6 @@
 # dsh-remote-go
 
-> 在本地 DeepSeek Harness（DSH）里，通过 SSH 整页使用服务器上的 DSH。本地只负责连接、入口与状态。
+> 在本地 DeepSeek Harness（DSH）里，通过 SSH 使用服务器上的 DSH：远端界面接管主内容区，侧边栏保留作切换器。本地只负责连接、入口与状态。
 
 [![CI](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml)
@@ -9,10 +9,11 @@
 [![DSH](https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1-blueviolet.svg)](#版本与兼容)
 
 **English** — `dsh-remote-go` is a [DeepSeek Harness](https://github.com/deepseek-ai) plugin that opens a **remote** DSH
-from your local DSH over SSH. The remote DSH web UI is rendered by the desktop shell as a live browser guest that takes
-over the window — nothing is embedded in a frame and no second browser window is opened; hosts are managed in
+from your local DSH over SSH. The remote DSH web UI is rendered by the desktop shell as a live browser guest over the **main content
+area** while the local sidebar stays usable as the switcher — nothing is embedded in a frame and no second
+browser window is opened; hosts are managed in
 **Settings → Remote hosts**. The local half only does four things:
-host inventory, SSH connection plus tunnel, window takeover, and connection status/diagnostics. Current version:
+host inventory, SSH connection plus tunnel, main-content takeover, and connection status/diagnostics. Current version:
 **0.1.0** (a **thin client**, not yet published to npm; no remote-side components are installed beyond vanilla DSH).
 
 ## 目录
@@ -47,7 +48,7 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 
 - 一个 DSH 插件：主机在 **设置 → 远程主机**（或侧边栏的「远程主机」入口）里配置，点「打开」后远端 DSH 接管**主内容区**。
 - 接管后看到的是**远端 DSH 自己的 Web 界面**：桌面端用 Chromium guest 把它铺在**主内容区**，本地侧边栏一直留在左侧。没有 iframe、不开第二个浏览器窗口、也没有任何浮层控件。会话、审批、文件、终端、插件、凭据、日志都由远端 DSH 提供。
-- 本地只做四件事：**主机清单、SSH 连接与隧道、整窗接管承载、连接状态与诊断**。
+- 本地只做四件事：**主机清单、SSH 连接与隧道、主内容区接管、连接状态与诊断**。
 - 远端只需原版 DSH（`@deepseek-ai/dsh`）。没有环境时由插件自举（无 root，装到用户目录）。
 
 ## 切换方式（本地 ↔ 远端）
@@ -65,9 +66,8 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 
 | 证据 | 结果 |
 |---|---|
-| 单元测试（Host + Client） | `pnpm run test:unit` → **365** 用例全部通过；集成/E2E `pnpm run test:integration` → 42 用例（模拟远端 + `Web E2E` + `Desktop E2E`；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
-| 覆盖率门禁 | `pnpm run test:coverage` → 行 **92.01%** / 分支 **78.37%** / 函数 **91.01%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
-| 端到端（真实 SSH + 真实远端 DSH） | 由插件本地 API 验证：`POST /hosts/:id/connect` → `connected`、隧道 `/open` 返回回环 URL、`versionParity.same`；浏览器侧只保留设置页与打包产物验收（`e2e/artifacts/publish-e2e-report.json`） |
+| 单元测试（Host + Client） | `pnpm run test:unit` → **373** 用例全部通过；集成/E2E `pnpm run test:integration` → 42 用例（模拟远端 + `Web E2E` + `Desktop E2E`；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
+| 覆盖率门禁 | `pnpm run test:coverage` → 行 **90.56%** / 分支 **78.12%** / 函数 **89.35%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现由 `Acceptance E2E` 的 Web 作业（夜间定时 + 手动）复核 |
 | 持续集成 | GitHub Actions 共 **3 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Verify (ubuntu-latest)`（仓库规范 + Prettier 格式 + PR 标题 + 覆盖率门禁 + 模拟远端集成/E2E + tarball 校验）、`Tests (windows-latest, Node 24)`（单元 + 模拟远端集成/E2E）、`Analyze (javascript-typescript)`（CodeQL）；真实浏览器验收（Web/Desktop E2E）与真实主机 E2E 都不在门禁里，见「CI 与发布」 |
 
@@ -75,7 +75,7 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 
 真实验收截图（历史版本：远端 DSH 在旧的面板内呈现；当前版本改为主内容区接管 + 侧边栏切换）：
 
-![远端 DSH 在本地全局面板中整页打开](e2e/artifacts/panel-remote-dsh.png)
+![历史版本：远端 DSH 曾在本地面板中整页打开](e2e/artifacts/panel-remote-dsh.png)
 
 ## 功能
 
@@ -83,10 +83,9 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 |---|---|
 | **设置页「远程主机」**：主机清单 / 添加 / 编辑 / 删除 / 多主机切换 | ✅ 0.1.0 |
 | ~~面板左侧「工作区」栏~~ **已移除**：面板只保留主机管理页，切换统一交给本地侧边栏 | 🗑 0.1.0 移除 |
-| **镜像会话（L1 目录镜像）**：每台远端一个 `Remote: <主机名>` 侧边栏工作区，远端会话以本地镜像会话出现；远端已删除的会话标记 `remote-deleted`，不删除本地记录 | ✅ 0.1.0 |
+| **镜像会话（L1 目录镜像）**：开启 `mirrorToSidebar` 后每台远端一个 `Remote: <主机名>` 侧边栏工作区，远端会话以本地镜像会话出现；远端已删除的会话标记 `remote-deleted`，不删除本地记录 | ✅ 0.1.0 |
 | **历史回放（L2）**：经 SSH 读远端会话日志，投影进本地镜像会话；`cursor` 持久化、重复同步不重复消息、缺口按「重置游标 + 全量重拉」恢复一次 | ✅ 0.1.0 |
-| **只读标识**：回放过历史的镜像在侧边栏镜像工作区上标记只读（按工作区粒度，不按会话） | ✅ 0.1.0 |
-| **镜像设置**：`mirrorToSidebar`（默认关，接管整窗后不再需要侧边栏镜像分组）、`mirrorHistory`（默认开）、`mirrorMaxSessions`（默认 200）、`mirrorMaxEvents`（默认 200，0 = 不限） | ✅ 0.1.0 |
+| **镜像设置**：`mirrorToSidebar`（默认关；接管主内容区后一般不需要侧边栏镜像分组）、`mirrorHistory`（默认开）、`mirrorMaxSessions`（默认 200）、`mirrorMaxEvents`（默认 200，0 = 不限） | ✅ 0.1.0 |
 | 事件流 / 输入转发 / 审批桥（L3） | ⏳ 未实现：传输尝试已移除，状态是**未验证**而非已证伪（见 `docs/session-design.md` §6.4 / §11） |
 | 侧边栏**只有一个**「远程主机」入口（主机管理页；不按主机拆行、无浮层控件） | ✅ 0.1.0 |
 | 接入向导 3 步（SSH 信息 → 连接测试 → 远端探测/完成） | ✅ 0.1.0 |
@@ -97,7 +96,6 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 | 跳板机（跳板 SSH → forwardOut → 目标 SSH） | ✅ 0.1.0 |
 | **主内容区接管**：远端 DSH 以真正的 Chromium guest 铺在侧边栏右侧的主内容区（无 iframe、无浮层控件、无第二个浏览器窗口；下载与权限受桌面端限制） | ✅ 0.1.0 |
 | **侧边栏即切换器**：一个「远程主机」入口打开主机管理页；选侧边栏其他项即离开远端，两个方向同一个动作 | ✅ 0.1.0 |
-| 接管状态面：连接状态、失败重试、直达设置（面板不再承载远端界面） | ✅ 0.1.0 |
 | 连接状态 / 分阶段进度 / 断线自动重连 | ✅ 0.1.0 |
 | 诊断检查表（9 项）+ 复制脱敏诊断信息 | ✅ 0.1.0 |
 | 远端环境自举 T0/T0-local/T1/T2/T3（T4 离线包为 V1.1 预留） | ✅ 0.1.0 |
@@ -168,10 +166,10 @@ dsh plugin --profile web add dsh-remote-go
 └─ 本地回环 TCP 隧道  127.0.0.1:<localPort> ──SSH──▶ 远端 127.0.0.1:<remotePort>
                                                       │
 远端服务器：原版 DSH（`dsh --profile web --no-open --port 0`）
-└─ 远端 DSH Web 界面 ──Chromium guest（桌面端整窗接管）──▶ 本地窗口
+└─ 远端 DSH Web 界面 ──Chromium guest（桌面端主内容区接管）──▶ 本地窗口
                      └─ 主内容区接管：Chromium guest 覆盖侧边栏右侧，侧边栏保持可用（即切换器）
 
-本地 DSH 左侧边栏（原生能力，PR #8 起额外提供，与上面并存）：
+本地 DSH 左侧边栏（原生能力；开启 `mirrorToSidebar` 后才注册，默认关）：
 └─ 每台远端主机一个工作区（标题 `Remote: <主机名>`），远端会话以镜像会话出现在其中
 ```
 
@@ -225,8 +223,8 @@ pnpm run verify                                   # 一条命令跑完下面全�
 | `pnpm run check:workflows` | 用真实 YAML 解析器校验 `.github/workflows/*.yml`（当前 6 个工作流） |
 | `pnpm run market:check` | 用官方 `dsh-plugin-market-index` 校验市场条目（当前 30 个运行时文件） |
 | `pnpm run pack:check` | 校验 `files[]` 覆盖与打包内容 |
-| `pnpm run test:unit` | 单元测试（355 用例，Host + Client，无需网络/SSH） |
-| `pnpm run test:integration` | 集成/E2E（60 用例）：模拟远端 + `Web E2E` + `Desktop E2E`，缺 harness/浏览器时跳过 |
+| `pnpm run test:unit` | 单元测试（373 用例，Host + Client，无需网络/SSH） |
+| `pnpm run test:integration` | 集成/E2E（42 用例）：模拟远端 + `Web E2E` + `Desktop E2E`，缺 harness/浏览器时跳过 |
 
 覆盖率门禁（`pnpm run test:coverage`，阈值 85 / 70 / 80）**不在** `verify` 里：它由 CI 的
 `Repository conventions` 作业执行，本地可单独跑。
@@ -339,14 +337,11 @@ E2E 环境变量：`E2E_NODE`（Node 可执行文件，默认取 PATH 中的 `no
 - 多台远端在同一时刻只能呈现一台：在主机管理页点另一台的「打开」即切换。
 - 刷新本地页面需要重新打开视窗（远端任务不受影响）。
 - 修改 Host 插件代码需重启本地 DSH 生效（Client 半端随页面刷新加载）。
-- 端到端测试需要一台真实可达的 SSH 主机，无法在普通 CI 上无条件复现（因此单独设为手动工作流）。
 - **镜像会话只到 L2（回放，不流式）**：`stream` / `input` / `approve` 三个能力仍为 `false`，实时性没有承诺。
   事件流（L3）曾在别的传输上尝试过，在**修复两个真实缺陷之后没有重新验证**就为收敛范围移除——所以它是
   「未验证」，不是「已证明不可用」（`docs/session-design.md` §6.4 / §11）。
 - **写入租约的远端校验目前只由模拟远端实现**（`e2e/sim`）：未改造的真实 DSH 没有这段校验，因此
   「两个客户端只有一个能写」只在模拟远端下成立（`docs/session-design.md` §11）。
-- 只读徽标以**工作区行**为粒度（`mirror.workspaceId === workspace.id`），不是逐会话标签；DSH 未向插件暴露会话头
-  slot，所以 Conversation UI 内部没有徽标。
 
 ## 参与贡献
 
