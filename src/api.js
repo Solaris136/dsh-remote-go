@@ -279,8 +279,13 @@ export function createApi(options) {
             password: typeof body.password === 'string' ? body.password : undefined,
             rememberPassword: body.rememberPassword === true,
             rememberFingerprint: body.rememberFingerprint !== false,
-            overrideVersion: body.overrideVersion === true,
           })
+          sendJson(res, 200, { ok: true, ...result })
+          return
+        }
+        if (method === 'POST' && action === 'conflict') {
+          const body = await readJson(req)
+          const result = await service.confirmConflict(id, { action: body.action })
           sendJson(res, 200, { ok: true, ...result })
           return
         }

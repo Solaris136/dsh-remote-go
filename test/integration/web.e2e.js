@@ -88,6 +88,13 @@ const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account
 const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
 const SETTINGS_LABELS = ['设置', 'Settings']
 const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
+/**
+ * The settings surface is the only place a settings row may be located. The plugin
+ * also registers a **sidebar** entry labelled "Remote hosts" (`sidebar.panellist`,
+ * `t('settingsNav')`), so a global text match finds that entry first and reports the
+ * dialog's backdrop as an overlay. Scoping to the open dialog keeps the two apart.
+ */
+const SETTINGS_SURFACE = '[role="dialog"]'
 /** First-run dialog buttons: any of these dismisses the overlay (both sides normalised). */
 const DIALOG_DISMISS_LABELS = [
   '继续',
@@ -152,9 +159,33 @@ async function waitForSelector(page, selector, timeout = 60_000) {
  */
 
 /**
- * Dismiss the first-run overlays (preview notice, sign-in prompt). They can arrive in
- * either order and a later one may appear after an earlier dismissal, so this is
- * re-run before each navigation attempt.
+ * How long the page must stay free of dialogs before the first-run sequence counts as
+ * finished. A fresh profile shows **two** overlays back to back (Preview Notice, then
+ * the Get-started sign-in prompt); the second mounts a moment after the first closes,
+ * so an instant "no dialog" check lets it land after the caller has already moved on.
+ */
+const FIRST_RUN_SETTLE_MS = 800
+
+/**
+ * Is the first-run sequence over? Only after a quiet window, so a queued follow-up
+ * overlay has time to mount and be dismissed by the next loop iteration.
+ * @param {import('puppeteer-core').Page} page
+ * @param {number} [settleMs]
+ * @returns {Promise<boolean>}
+ */
+async function firstRunSettled(page, settleMs = FIRST_RUN_SETTLE_MS) {
+  const deadline = Date.now() + settleMs
+  do {
+    if (await page.$('[role="dialog"]')) return false
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  } while (Date.now() < deadline)
+  return true
+}
+
+/**
+ * Dismiss the first-run overlays (preview notice, sign-in prompt). They arrive in
+ * sequence and a later one may appear after an earlier dismissal, so this only
+ * returns once the page has been dialog-free for a settle window.
  *
  * Every dismissal is a DOM click **inside the dialog** and counts only once the dialog
  * is actually gone (`dismissOpenDialog`): no coordinate click (an overlay swallows
@@ -166,7 +197,7 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 async function dismissFirstRunDialogs(page) {
   let dismissed = 0
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (!(await page.$('[role="dialog"]'))) return dismissed
+    if (await firstRunSettled(page)) return dismissed
     dismissed += 1
     const closed = await dismissOpenDialog(page, { labels: DIALOG_DISMISS_LABELS })
     if (!closed) {
@@ -193,7 +224,8 @@ async function openAccountMenu(page) {
     await dismissFirstRunDialogs(page)
     // Only an *open* menu/dialog can already contain the entry; a stray "Settings"
     // label elsewhere must not short-circuit the navigation.
-    if ((await page.$('[role="dialog"]')) && (await rowPresent(page, SETTINGS_LABELS))) return
+    if ((await page.$('[role="dialog"]')) && (await rowPresent(page, SETTINGS_LABELS, { within: SETTINGS_SURFACE })))
+      return
     const clicked = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
     if (clicked.clicked) {
       if (await waitForRow(page, SETTINGS_LABELS, { timeoutMs: 15_000 })) return
@@ -225,6 +257,8 @@ async function openRemoteHostsSection(page) {
   await openAccountMenu(page)
   // The menu is open with a Settings entry; activate it and verify the settings
   // surface actually took over before looking for the Remote-hosts row inside it.
+  // Both lookups are scoped to the dialog: the plugin's sidebar entry shares the
+  // label, and an unscoped match would select that entry behind the backdrop.
   const settings = await activateRow(page, SETTINGS_LABELS)
   if (!settings.clicked) {
     throw new Error(`the Settings entry could not be activated: ${JSON.stringify(settings)}`)
@@ -234,6 +268,7 @@ async function openRemoteHostsSection(page) {
     selector: '[data-testid="settings-remote-section"]',
     label: 'the Remote-hosts section',
     describe: () => describePanel(page),
+    within: SETTINGS_SURFACE,
   })
 }
 

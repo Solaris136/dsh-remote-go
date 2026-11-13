@@ -471,11 +471,8 @@ export async function pluginCall(page, method, route, body) {
 
 /**
  * Create the simulated host and connect it through the plugin's API, answering the
- * host-key prompt the way the panel does.
- *
- * `overrideVersion` is deliberate: it lets the suite run against a harness build
- * whose DSH version differs from the one the simulator advertises, which is a
- * version-warning path, not a mirror/panel defect.
+ * host-key prompt the way the panel does. The npx preflight pins the simulated
+ * DSH version, so the control harness and the simulator must agree.
  * @param {import('puppeteer-core').Page} page
  * @param {{ hostName: string, sshPort: number, logs?: string[] | null, timeoutMs?: number }} options
  * @returns {Promise<{ hostId: string, host: any }>}
@@ -494,7 +491,6 @@ export async function connectSimulatedHost(page, options) {
       username: SIM_CREDENTIALS.username,
       auth: { type: 'password' },
       keepAlive: 'keep',
-      bootstrap: { mode: 'reuse' },
     },
   })
   const hostId = created.payload?.host?.id
@@ -506,7 +502,6 @@ export async function connectSimulatedHost(page, options) {
   const connect = await pluginCall(page, 'POST', `/hosts/${encodeURIComponent(hostId)}/connect`, {
     password: SIM_CREDENTIALS.password,
     rememberFingerprint: false,
-    overrideVersion: true,
   })
   assert.equal(connect.status, 200, `connect was refused: ${connect.text.slice(0, 400)}${simTail()}`)
 

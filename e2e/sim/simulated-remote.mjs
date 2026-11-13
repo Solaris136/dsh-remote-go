@@ -48,7 +48,6 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import ssh2 from 'ssh2'
 import { buildProbeScript, parseProbeOutput, toProbeFacts } from '../../src/probe.js'
-import { assertSupportedRemote } from '../../src/bootstrap.js'
 import { createHostKey } from './host-key.mjs'
 
 const { Server: SshServer, Client: SshClient } = ssh2
@@ -120,13 +119,10 @@ const SIM = {
   home: '/home/sim',
   shell: '/bin/bash',
   nodeVersion: 'v24.21.0',
-  npmVersion: '11.28.9',
   nodePath: '/home/sim/.nvm/versions/node/v24.21.0/bin/node',
   dshVersion: '0.2.2-rc.1',
-  dshPath: '/home/sim/.local/bin/dsh',
+  dshHome: '/home/sim/.dsh',
   curlPath: '/usr/bin/curl',
-  tarPath: '/usr/bin/tar',
-  sha256Path: '/usr/bin/sha256sum',
   diskFreeKb: '35000000',
   /** Launch token printed in the simulated `dsh web:` readiness line. */
   token: 'sim-token-0123456789abcdef',
@@ -181,25 +177,13 @@ function probeOutput() {
     ['node_path', SIM.nodePath],
     ['node_version', SIM.nodeVersion],
     ['npm_path', '/home/sim/.nvm/versions/node/v24.21.0/bin/npm'],
-    ['npm_version', SIM.npmVersion],
     ['npx_path', '/home/sim/.nvm/versions/node/v24.21.0/bin/npx'],
-    ['dsh_path', SIM.dshPath],
-    ['dsh_version', SIM.dshVersion],
     ['curl_path', SIM.curlPath],
-    ['tar_path', SIM.tarPath],
-    ['sha256_path', SIM.sha256Path],
     ['disk_free_kb', SIM.diskFreeKb],
     ['ssh_connection', 'yes'],
-    ['isolated_node_path', ''],
-    ['isolated_node_version', ''],
-    ['isolated_dsh_bin_path', ''],
-    ['isolated_dsh_version', ''],
-    ['remote_dir_exists', 'no'],
-    ['home_exists', 'yes'],
     ['credentials_file', 'no'],
     ['deepseek_key_env', 'no'],
     ['provider_env_keys', ''],
-    ['run_registry', ''],
   ]
   return lines.map(([key, value]) => `${key}\t${value}\n`).join('')
 }
@@ -549,6 +533,7 @@ function runRegistry(sim) {
     startedAt: '2026-11-11T00:00:00Z',
     profile: 'web',
     version: SIM.dshVersion,
+    dshHome: SIM.dshHome,
   })
 }
 
@@ -637,8 +622,14 @@ function respond(command, sim) {
 
   // 1. The one compound probe (src/probe.js buildProbeScript): its first line
   //    is `set -u` and the first assignment is DIR=.
-  if (cmd.startsWith('set -u\nDIR=') || (cmd.startsWith('set -u\n') && cmd.includes('\ndsh_path\t'))) {
+  if (cmd.startsWith('set -u\nDIR=') || (cmd.startsWith('set -u\n') && cmd.includes('\nnpx_path\t'))) {
     return ok(probeOutput())
+  }
+
+  // 2a. npx preflight (src/bootstrap.js buildPreflightCommand): running the
+  //     exact package in the foreground must report the same version.
+  if (/npx.*-y @deepseek-ai\/dsh@[0-9][^\s]* --version/.test(cmd)) {
+    return ok(`${SIM.dshVersion}\n`)
   }
 
   // 2. Detached remote web start (src/webapp.js buildStartScript).
@@ -763,9 +754,9 @@ function respond(command, sim) {
   }
   const tool = /^command -v ([\w-]+)$/.exec(cmd)
   if (tool) return ok(`/usr/local/bin/${tool[1]}\n`)
-  const version = /^(node|npm|npx|dsh) --version$/.exec(cmd)
+  const version = /^(node|npm|npx) --version$/.exec(cmd)
   if (version) {
-    const value = version[1] === 'node' ? SIM.nodeVersion : version[1] === 'dsh' ? SIM.dshVersion : SIM.npmVersion
+    const value = version[1] === 'node' ? SIM.nodeVersion : '11.28.9'
     return ok(`${value}\n`)
   }
 
@@ -1116,7 +1107,7 @@ async function runSelfTest(host) {
   expect(facts.sshConnection === true, 'probe did not report an SSH session')
   expect(facts.home === SIM.home, `probe home = ${JSON.stringify(facts.home)}`)
   expect(facts.nodePath === SIM.nodePath, `probe node_path = ${JSON.stringify(facts.nodePath)}`)
-  assertSupportedRemote(facts)
+  expect(Boolean(facts.npxPath), 'probe npx_path was empty')
 
   // 2. The tunnel must reach the simulated remote web.
   const stream = await forwardOver(client, host.remotePort)
@@ -1145,7 +1136,7 @@ if (serve || selfTest) {
   mkdirSync(path.dirname(STATE_FILE), { recursive: true })
   writeFileSync(
     STATE_FILE,
-    `${JSON.stringify({ simulated: true, sshHost: '127.0.0.1', sshPort: host.sshPort, remotePort: host.remotePort, fingerprint: host.fingerprint, pid: process.pid, workspaceFixture: WORKSPACE.fixturePath }, null, 2)}\n`,
+    `${JSON.stringify({ simulated: true, sshHost: '127.0.0.1', sshPort: host.sshPort, remotePort: host.remotePort, fingerprint: host.fingerprint, pid: process.pid, workspaceFixture: WORKSPACE.fixturePath, dshVersion: SIM.dshVersion }, null, 2)}\n`,
     'utf8',
   )
   console.log('[sim] SIMULATED remote host — not a real machine; touches only its state file and the workspace fixture')

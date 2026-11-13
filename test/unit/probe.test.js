@@ -10,18 +10,19 @@ import {
 import { makeFacts } from '../helpers/fake-remote.js'
 
 test('buildProbeScript emits every fact line and quotes the remote dir', () => {
-  const script = buildProbeScript("~/.dsh/it's")
+  const script = buildProbeScript("~/.dsh-remote-go/it's")
   for (const marker of [
     'os\t',
     'arch\t',
+    'node_path\t',
     'node_version\t',
     'npm_path\t',
     'npx_path\t',
-    'dsh_version\t',
     'curl_path\t',
     'disk_free_kb\t',
     'ssh_connection\t',
-    'run_registry\t',
+    'credentials_file\t',
+    'provider_env_keys\t',
   ]) {
     assert.ok(script.includes(marker), `missing marker ${marker}`)
   }
@@ -37,35 +38,35 @@ test('parseProbeOutput keeps values containing spaces and tabs', () => {
   assert.equal(values['malformed-no-tab'], undefined)
 })
 
-test('toProbeFacts normalizes versions and parses the run registry', () => {
+test('toProbeFacts normalizes versions and reads the runtime facts', () => {
   const facts = toProbeFacts({
     os: 'Linux',
     arch: 'x86_64',
+    node_path: '/usr/bin/node',
     node_version: 'v24.22.2',
-    npm_version: '11.19.1',
-    isolated_node_version: 'v24.22.2',
-    isolated_dsh_version: '0.2.2-rc.1',
+    npm_path: '/usr/bin/npm',
+    npx_path: '/usr/bin/npx',
+    curl_path: '/usr/bin/curl',
     disk_free_kb: '35000000',
     ssh_connection: 'yes',
     credentials_file: 'yes',
     provider_env_keys: 'DEEPSEEK,OPENCODE_GO',
-    run_registry: '{"pid":42,"port":38123}',
   })
+  assert.equal(facts.nodePath, '/usr/bin/node')
   assert.equal(facts.nodeVersion, '24.22.2')
-  assert.equal(facts.npmVersion, '11.19.1')
-  assert.equal(facts.isolatedDshVersion, '0.2.2-rc.1')
+  assert.equal(facts.npxPath, '/usr/bin/npx')
+  assert.equal(facts.curlPath, '/usr/bin/curl')
   assert.equal(facts.diskFreeKb, 35_000_000)
   assert.equal(facts.sshConnection, true)
   assert.equal(facts.credentialsFile, true)
   assert.deepEqual(facts.providerEnvKeys, ['DEEPSEEK', 'OPENCODE_GO'])
-  assert.deepEqual(facts.runRegistry, { pid: 42, port: 38123 })
 })
 
 test('toProbeFacts tolerates missing/invalid fields', () => {
-  const facts = toProbeFacts({ os: 'Linux', disk_free_kb: 'nope', run_registry: 'not-json' })
+  const facts = toProbeFacts({ os: 'Linux', disk_free_kb: 'nope' })
   assert.equal(facts.diskFreeKb, null)
-  assert.equal(facts.runRegistry, null)
   assert.equal(facts.nodeVersion, null)
+  assert.equal(facts.npxPath, null)
   assert.deepEqual(facts.providerEnvKeys, [])
 })
 
@@ -97,7 +98,7 @@ test('describeProbeCapabilities reports support and credentials', () => {
   const capabilities = describeProbeCapabilities(
     makeFacts({
       nodeVersion: '22.19.0',
-      dshVersion: '0.2.2-rc.1',
+      npxPath: null,
       credentialsFile: false,
       deepseekKeyEnv: false,
       providerEnvKeys: [],
@@ -105,6 +106,6 @@ test('describeProbeCapabilities reports support and credentials', () => {
   )
   assert.equal(capabilities.system.supported, true)
   assert.equal(capabilities.node.supported, false)
-  assert.equal(capabilities.dsh.version, '0.2.2-rc.1')
+  assert.equal(capabilities.npx.available, false)
   assert.equal(capabilities.modelCredentials.credentialsFile, false)
 })

@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1 冻结 + v1.1 增补）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1 冻结 + v1.1 / v1.2 增补）
 
 > 本文件是 Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议。两侧都不得依赖对方的内部实现。
 > 基地址：`/dsh-remote-go/api`（挂在本地 DSH Web 服务同源路由下）。
@@ -27,6 +27,7 @@ type HostStatus =
   | 'unconfigured'        // 灰点：未连接过
   | 'connecting'          // 蓝点：连接中（配合 phase/progress）
   | 'fingerprint-pending' // 黄点：等待用户确认主机指纹
+  | 'conflict-pending'    // 黄点：远端已有手工启动的 DSH，等待用户选择
   | 'connected'           // 绿点：远端界面可用
   | 'disconnected'        // 黄点：断线，可重连
   | 'error'               // 红点：连接/认证/服务失败
@@ -50,13 +51,14 @@ interface FingerprintView {
 }
 
 interface RemoteView {
-  version: string | null        // 远端 DSH 版本
+  version: string | null        // 远端 DSH 版本（= 本机版本，npx 固定）
   uiReady: boolean              // 远端 Web 界面是否可达
   localPort: number | null      // 本地回环隧道端口
   pid: number | null            // 远端 web 进程 pid
-  dshHome: string | null        // 远端 DSH_HOME
-  bootstrapLevel: string | null // T0 / T0-local / T1 / T2 / T3（实际使用）
-  nodeVersion: string | null
+  dshHome: string | null        // 远端 DSH_HOME（真实用户主目录下的 ~/.dsh）
+  profile: string | null        // 远端 DSH profile（默认 web）
+  bootstrapLevel: string | null // 运行时形态；v1.2 起恒为 'npx'（保留字段以兼容旧客户端）
+  nodeVersion: string | null    // 远端用于运行 npx 的 Node 版本
   startedAt: string | null      // ISO
 }
 
@@ -79,15 +81,20 @@ interface HostView {
   phase: ConnectPhase | null
   progress: Progress | null
   error: ErrorView | null
-  /** 非致命提示（如版本不一致已沿用）：连接仍可用 */
+  /** 非致命提示（如手工实例并存）：连接仍可用 */
   warning: I18nText | null
   fingerprint: FingerprintView | null
+  /** 仅在 status === 'conflict-pending' 时非空：检测到的手工 DSH 进程 */
+  conflict: {
+    detectedAt: string
+    processes: { pid: number, command: string }[]
+  } | null
   remote: RemoteView
   keepAlive: 'keep' | 'stop' | 'idle'
   idleMinutes: number
   autoReconnect: boolean
   hostKeyPolicy: 'first-use' | 'strict'
-  /** 该主机的远端目标版本与版本一致性（连接后有意义） */
+  /** 远端目标版本（v1.2 起恒等于本机 DSH 版本） */
   targetVersion: string | null
   versionParity: {
     status: 'same' | 'different' | 'unknown'
@@ -111,7 +118,7 @@ interface SettingsView {
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
   saveTokens: boolean            // 默认 false（token 仅内存）
-  /** v1.1：把远端镜像会话注册到本地侧边栏（默认 false；接管主内容区后一般不需要） */
+  /** v1.1：把远端镜像会话注册到本地侧边栏（已无界面开关；字段保留用于旧配置兼容） */
   mirrorToSidebar: boolean
   /** v1.1：每次同步最多新建多少个镜像会话（默认 200，0 = 不限；只限制创建） */
   mirrorMaxSessions: number
@@ -119,20 +126,20 @@ interface SettingsView {
   mirrorHistory: boolean
   /** v1.1（L2）：单个镜像会话保留/回放的事件上限（默认 200，0 = 不限；超出保留最新 N 条） */
   mirrorMaxEvents: number
+  /** v1.1（L3 前置）：轮询远端日志把新事件追进本地镜像（默认 false，实验性） */
+  mirrorStream: boolean
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
-  /** 自举：目标版本取 'local' = 跟随本机 DSH 版本 */
+  /** 远端运行时（v1.2）：只有 npx 固定本机版本一条路径；不再有 targetVersion/mode/nodeVersion */
   bootstrap: {
-    targetVersion: string        // 'local' 或精确版本
-    mode: 'auto' | 'reuse' | 'npx' | 'isolated'
-    remoteDir: string            // 远端隔离目录（默认 ~/.dsh-remote-go）
-    nodeVersion: string          // 下载 Node 的精确版本（T3 用）
+    remoteDir: string            // 插件远端状态目录（默认 ~/.dsh-remote-go；只放 logs/run/租约）
+    profile: string              // 远端 DSH profile（默认 web；不能是 desktop）
   }
 }
 
 interface StateView {
   hostVersion: string | null     // 本机 DSH 版本
-  targetVersion: string | null   // 远端目标版本（解析后）
+  targetVersion: string | null   // 远端目标版本 = 本机 DSH 版本（v1.2）
   hosts: HostView[]
   settings: SettingsView
   activeHostId: string | null
@@ -149,12 +156,13 @@ interface StateView {
 | `auth` | SSH 认证失败 | ✅ |
 | `host-key-changed` | 主机指纹变化 | ❌（需用户确认/重置） |
 | `host-key-unknown` | 首次连接，等待确认 | ✅（确认后） |
-| `remote-dsh-missing` | 远端无 DSH 且无法自举 | ✅ |
+| `remote-dsh-missing` | 远端缺少 Node ≥ 24.9 / npm / npx，或 npx 无法运行固定版本 | ✅ |
 | `remote-dsh-start-failed` | 远端 DSH 启动失败 | ✅ |
+| `remote-dsh-running` | 远端有手工启动的 DSH：用户选择了取消，或停止失败 | ✅（重新连接并选择处理方式） |
 | `remote-ui-unreachable` | 远端界面打不开 | ✅ |
-| `version-mismatch` | 远端版本与本机不一致 | ✅（选择升级/沿用后） |
+| `version-mismatch` | npx 回读的版本与本机不一致 | ✅（修正远端环境后重试） |
 | `unsupported-os` | 远端系统不支持（如 Windows） | ❌ |
-| `offline` | 无网络，离线包不可用 | ✅ |
+| `offline` | 无网络（预留错误码；当前运行时没有离线包路径） | ✅ |
 | `invalid-input` | 表单/参数不合法 | ❌ |
 | `internal` | 插件内部错误 | ✅ |
 
@@ -247,11 +255,11 @@ data: {}
 {
   "password": "仅本次连接使用；rememberPassword=true 时连接成功后存入凭据存储",
   "rememberPassword": false,
-  "rememberFingerprint": true,
-  "acceptHostKey": "SHA256:xxx",
-  "overrideVersion": false        // true = 允许远端版本不一致时继续
+  "rememberFingerprint": true
 }
 ```
+
+> v1.2：不再接受 `overrideVersion`（远端版本恒为本机版本，npx 预检不一致会直接失败）。
 
 ### `POST /hosts/:id/disconnect`
 请求 `{ "stopRemote": false }`。`stopRemote=true` 时同时停止远端 web。
@@ -261,6 +269,16 @@ data: {}
 
 ### `POST /hosts/:id/fingerprint`
 响应用户的指纹确认。请求 `{ "accept": true, "remember": true, "sha256": "SHA256:xxx" }`。
+
+### `POST /hosts/:id/conflict`
+响应用户的「远端已有手工启动的 DSH」提示。请求：
+```json
+{ "action": "stop" }   // stop | alongside | cancel
+```
+- `stop`：向检测到的手工 DSH 进程发送 SIGTERM/SIGKILL，然后继续启动受管实例。
+- `alongside`：保留手工实例，另起一个 npx 受管实例，并在 `HostView.warning` 里提示共享 `~/.dsh`。
+- `cancel`：中止本次连接，错误码 `remote-dsh-running`。
+仅在 `status === 'conflict-pending'` 且 `conflict` 非空时有效；120s 未响应按 `cancel` 处理。
 
 ### `GET /hosts/:id/open`
 仅在 `status === 'connected'` 时可用。返回带一次性 token 的本地回环 URL（交给桌面端 guest，绝不出现在日志）：
@@ -296,7 +314,7 @@ data: {}
   "hostId": "h_x",
   "hostName": "腾讯云测试机",
   "connected": true,
-  "dshHome": "/home/ubuntu/.dsh-remote-go/home",
+  "dshHome": "/home/ubuntu/.dsh",
   "initialized": true,
   "defaultWorkspaceId": "…",
   "workspaces": [
@@ -305,7 +323,7 @@ data: {}
 }
 ```
 
-> 说明：面板内不再有任何工作区列表——切换由本地侧边栏完成（`sidebar.panellist` 一行「远程主机」进入主机管理页，`main` 面板只承载这个管理页；远端界面由桌面端 guest 铺在主内容区，不在面板里）。
+> 说明：面板内不再有任何工作区列表——进出远端由本地侧边栏完成（`sidebar.panellist` 一行「远程主机」进入主机管理页，`main` 面板只承载这个管理页），换主机由接管内注入远端侧边栏顶部的主机条完成；远端界面由桌面端 guest 铺满整窗，不在面板里。
 >
 > v1.1 补充：宿主另有一个可选的 `workspaceRegistry` 服务（`create`/`resolveByPath`/`list`/`delete`），插件**可以**通过它在本地侧边栏注册工作区。自该能力接入后，连接主机会额外注册一个 `Remote: <主机名>` 工作区承载镜像会话；面板内的工作区栏后来整体移除，侧边栏工作区是唯一位置。见 `docs/session-design.md` §4.3。
 
@@ -344,8 +362,8 @@ data: {}
 | `host-key-confirm` | 等待用户确认主机指纹 |
 | `auth-checking` | 正在认证 |
 | `probing` | 正在探测远端环境 |
-| `bootstrapping` | 正在准备远端运行时 |
-| `bootstrap-progress` | 自举进度（params.template / params.detail） |
+| `remote-dsh-running` | 远端已有手工启动的 DSH，等待用户选择（params.count） |
+| `bootstrapping` | 正在准备远端运行时（`params.level` 恒为 `npx`） |
 | `starting-remote` | 正在启动远端 DSH |
 | `starting-remote-wait` | 等待远端 DSH 就绪（params.seconds） |
 | `tunneling` | 正在建立本地回环隧道 |
@@ -359,7 +377,7 @@ data: {}
 2. `token`/带 token 的 URL 只在内存中传递：`GET /open` 拿到的 URL 直接交给桌面端 guest，不写 localStorage、不打印日志。
 3. `saveTokens` 默认 false；为 true 时由 Host 在 `$DSH_HOME` 下以 0600 保存，客户端不接触。
 4. 所有 `fetch` 用 `credentials: 'same-origin'`，并带 `x-dsh-remote-go: 1`。
-5. iframe 只允许 `http://127.0.0.1:<port>`（Host 保证）；客户端必须校验 `url.startsWith('http://127.0.0.1:')` 再赋值。
+5. guest 只允许 `http://127.0.0.1:<port>`（Host 保证）；客户端必须校验 `url.startsWith('http://127.0.0.1:')` 再交给桌面端。
 6. 非回环地址在 UI 上给出明确警告（设计 §9.2）。
 
 ## 4. v1.1 新增（向后兼容；v1 语义未改动）
@@ -586,7 +604,7 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 成功），不会留下空分组。未连接 / 注册表不可读 / 瞬时空注册表时，`truncated` 与 `skipped` 均为 `0`。
 
 **围栏与写入租约（v1.1，L3 前置）**：每次同步会先向远端读一次可选的写入权威
-`<DSH_HOME>/remote-go/lease.json`（`{ writer, epoch }`），再决定本机能否写：
+`<remoteDir>/remote-go/lease.json`（默认 `~/.dsh-remote-go/remote-go/lease.json`；`{ writer, epoch }`），再决定本机能否写：
 
 - 远端 `epoch` **高于**本地高水位 → 本机已被接管：`MirrorView.readOnly=true`、`level="L1"`、
   `reason.code="fenced"`、`cursor` **不推进**、租约被清空，并写一条 `mirror/fenced` 非 surface 通知
@@ -702,7 +720,7 @@ v1.1 约束：
     而不是仅停止新建；重新开启后在下一次同步重建。删除主机时删除注册；删除失败由启动时的孤儿清理补删
     （只删镜像根下没有对应主机的注册，从不删除目录）。`workspaceRegistry` 缺失时该能力整体降级为
     `adapter-absent`，不影响 v1 的任何字段。
-11. **契约版本探测**：`GET /version` 追加 `apiVersion`（当前 `"1.1"`），与插件 `version` 并列返回。客户端据此
+11. **契约版本探测**：`GET /version` 追加 `apiVersion`（当前 `"1.2"`），与插件 `version` 并列返回。客户端据此
     判断是否可以使用本节的追加契约，不需要靠探测 404 猜能力；`apiVersion` 未来升级只增不改，v1 字段语义不变。
 12. **设置追加字段 `mirrorMaxSessions`**：`SettingsView` 追加 `mirrorMaxSessions: number`（默认 `200`，`0` = 不限制，
     上限 `5000`）。它只影响本地镜像会话的**创建**数量，见 `POST /hosts/:id/mirrors/sync` 的 `sessionLimit` /
@@ -713,3 +731,25 @@ v1.1 约束：
     互不阻塞，`saveSettings` 先写 settings 再写 secrets 不构成嵌套）。区别仍在各自的读取语义：`hosts/settings/secrets`
     读取损坏时回退默认值（不回退后写坏文件），镜像存储会把损坏/更高版本的文件另存而不是覆盖。所有文件均不含
     凭据或 token。
+
+## 5. v1.2（npx-only 远端运行时；向后兼容）
+
+> v1.2 只改**取值与语义**，并新增一个手工 DSH 冲突确认端点：远端 DSH 一律用
+> `npx -y @deepseek-ai/dsh@<本机 DSH 版本>` 启动，`DSH_HOME` 是远端用户真实的 `~/.dsh`。
+> `GET /version` 的 `apiVersion` 为 `"1.2"`。
+
+1. **`SettingsView.bootstrap` 收敛为 `{ remoteDir, profile }`**：删除 `targetVersion`、`mode`、`nodeVersion`。
+   `remoteDir` 现在只是插件远端状态目录（默认 `~/.dsh-remote-go`，只放 `logs/`、`run/`、租约与流助手），
+   不再存放隔离运行时；`profile` 默认 `web`，取值必须是一个安全路径段且不能是 `desktop`（桌面端保留）。
+2. **`POST /hosts/:id/connect` 不再接受 `overrideVersion`**：远端版本恒为本机版本，npx 预检回读不一致会直接以
+   `version-mismatch` 失败，没有「沿用远端」的继续路径。请求体只剩 `password` / `rememberPassword` /
+   `rememberFingerprint`。
+3. **`HostView.targetVersion` / `StateView.targetVersion` 恒等于本机 DSH 版本**（`hostVersion`），不再表示
+   「可配置的目标版本」。
+4. **`RemoteView` 追加 `profile`**（远端 DSH profile）；`bootstrapLevel` 现在恒为 `'npx'`（保留字段以兼容旧客户端），
+   `dshHome` 为远端真实 `~/.dsh`，`nodeVersion` 是远端运行 npx 的 Node 版本。
+5. **远端租约文件随 `remoteDir` 走**：`<remoteDir>/remote-go/lease[-<session>].json`（默认
+   `~/.dsh-remote-go/remote-go/`），不再写进远端 DSH 的 home。
+6. **新增 `conflict-pending` 状态与 `POST /hosts/:id/conflict`**：插件只收养自己启动的实例；扫到其他 DSH 进程时
+   暂停连接，`HostView.conflict` 列出进程，由用户选择 `stop` / `alongside` / `cancel`。取消时错误码
+   `remote-dsh-running`。

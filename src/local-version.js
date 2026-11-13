@@ -76,20 +76,3 @@ export function candidatePackageJsons(input = {}) {
   }
   return [...new Set(out)]
 }
-
-/**
- * Resolve the effective remote target version.
- * @param {{ configured: string, localVersion: string | null }} input
- * @returns {{ targetVersion: string | null, source: 'explicit' | 'local' | 'unknown' }}
- */
-export function resolveTargetVersion(input) {
-  const configured = String(input.configured ?? 'local').trim()
-  if (configured !== '' && configured !== 'local' && configured !== 'auto') {
-    const parsed = parseVersion(normalizeVersion(configured))
-    return parsed
-      ? { targetVersion: normalizeVersion(configured), source: 'explicit' }
-      : { targetVersion: null, source: 'unknown' }
-  }
-  if (input.localVersion) return { targetVersion: input.localVersion, source: 'local' }
-  return { targetVersion: null, source: 'unknown' }
-}

@@ -117,8 +117,8 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
   "name": "dsh-remote-go",
   "title": { "zh": "dsh remote go", "en": "dsh remote go" },
   "description": {
-    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端接管主内容区，侧边栏保留作切换器；含主机清单、接入向导、连接诊断、远端运行时自举与版本一致。",
-    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the main content area while the sidebar stays as the switcher, with host list, connection wizard, diagnostics, remote runtime bootstrap and exact version parity."
+    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入 远端侧边栏注入的主机条：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动（不安装、不下载 Node，数据在远端用户自己的 ~/.dsh）；含主机清单、接入向导、连接诊断与版本一致。",
+    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version (nothing is installed and its data stays in the user’s own ~/.dsh), with host list, connection wizard, diagnostics and exact version parity."
   }
 }
 ```
@@ -147,7 +147,7 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 - [ ] npm 页面展示 README、LICENSE、keywords 正确
 - [ ] GitHub Release 已生成，notes 与 `CHANGELOG.md` 一致，附带 `.tgz`
 - [ ] `dsh plugin --profile web add dsh-remote-go@<version>` 在全新 profile 安装成功
-- [ ] 首次连接向导可完成：指纹确认 → 远端自举 → 远端 DSH 接管主内容区
+- [ ] 首次连接向导可完成：指纹确认 → 远端环境探测（Node/npx）→ 远端 DSH 接管整窗
 - [ ] 断线重连、诊断、设置可用
 - [ ] 市场索引条目可解析、可一键安装（路径 A 或 B）
 - [ ] 升级后回滚路径：`dsh plugin --profile web add dsh-remote-go@<旧版本>` 可用

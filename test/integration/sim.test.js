@@ -16,7 +16,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { SshConnection } from '../../src/ssh.js'
 import { buildProbeScript, parseProbeOutput, probeRemote, toProbeFacts } from '../../src/probe.js'
-import { assertSupportedRemote, planBootstrap } from '../../src/bootstrap.js'
+import { assertSupportedRemote, planNpx } from '../../src/bootstrap.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
@@ -183,12 +183,11 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
       assert.equal(facts.home, '/home/sim')
       assert.equal(facts.sshConnection, true)
       assert.ok(facts.nodePath, 'node_path was empty')
-      assert.ok(facts.dshPath, 'dsh_path was empty')
+      assert.ok(facts.npxPath, 'npx_path was empty')
       assert.ok(facts.curlPath, 'curl_path was empty')
       assert.doesNotThrow(() => assertSupportedRemote(facts))
-      assert.ok(facts.dshVersion, 'dsh_version was empty')
-      const plan = planBootstrap({ facts, targetVersion: facts.dshVersion, remoteDir: '~/.dsh/remote-go' })
-      assert.equal(plan.level, 'T0')
+      const plan = planNpx({ facts, targetVersion: '0.2.2-rc.1', profile: 'web' })
+      assert.equal(plan.level, 'npx')
     })
 
     await t.test('probeRemote() sees the same facts over the SSH connection', async () => {

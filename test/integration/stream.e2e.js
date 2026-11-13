@@ -198,7 +198,6 @@ async function harness({ mirrorStream, fence = false, logLevel }) {
     // Only set when a test asks: the default path must be the shipped one.
     ...(typeof logLevel === 'string' ? { logLevel } : {}),
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
-    resolveTarget: () => ({ targetVersion: '0.2.2-rc.1', source: 'test' }),
     sessionAdapter: adapter,
     workspaceAdapter: null,
   })
@@ -211,7 +210,6 @@ async function harness({ mirrorStream, fence = false, logLevel }) {
     username: 'sim',
     auth: { type: 'password' },
     keepAlive: 'keep',
-    bootstrap: { mode: 'reuse' },
   })
   return {
     service,

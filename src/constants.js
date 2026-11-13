@@ -1,15 +1,12 @@
 /**
- * Shared constants for remote bootstrap and the plugin surface.
+ * Shared constants for the remote npx runtime and the plugin surface.
  */
 
-/** Node.js release used for the T3 no-Node bootstrap; pinned exact. */
-export const DEFAULT_NODE_VERSION = '24.22.2'
+/** Profile booted by the remote DSH; it lives under the remote's `$DSH_HOME/profiles`. */
+export const DEFAULT_REMOTE_PROFILE = 'web'
 
-/** Official Node distribution root (SHA-256 sums live beside the archives). */
-export const NODE_DIST_BASE = 'https://nodejs.org/dist'
-
-/** Remote DSH profile booted by the plugin. */
-export const REMOTE_PROFILE = 'web'
+/** Directory name of the remote DSH home under the remote user's home (`~/.dsh`). */
+export const REMOTE_DSH_DIR = '.dsh'
 
 /** API route prefix mounted on the local DSH Web server. */
 export const API_PREFIX = '/dsh-remote-go/api'
@@ -21,10 +18,10 @@ export const API_HEADER = 'x-dsh-remote-go'
 export const PLUGIN_ID = 'dsh-remote-go'
 export const PLUGIN_VERSION = '0.1.0'
 
-/** Host↔Client contract version served by `GET /version` (docs/api.md v1.1). */
-export const API_VERSION = '1.1'
+/** Host↔Client contract version served by `GET /version` (docs/api.md v1.2). */
+export const API_VERSION = '1.2'
 
-/** Default remote directory (tilde keeps it user-owned; expanded remotely). */
+/** Default plugin state directory on the remote (tilde keeps it user-owned; expanded remotely). */
 export const DEFAULT_REMOTE_DIR = '~/.dsh-remote-go'
 
 /**
@@ -36,6 +33,12 @@ export const DEFAULT_KEY_PATH = '~/.ssh/id_ed25519'
 
 /** How long the remote web may take to print its URL line. */
 export const REMOTE_START_TIMEOUT_MS = 300_000
+
+/** How long the first `npx -y @deepseek-ai/dsh@<version> --version` may take (cold cache). */
+export const REMOTE_PREFLIGHT_TIMEOUT_MS = 300_000
+
+/** How long the user has to answer the "manual DSH is already running" prompt. */
+export const REMOTE_CONFLICT_TIMEOUT_MS = 120_000
 
 /** How long a local SSH connect may take. */
 export const SSH_READY_TIMEOUT_MS = 20_000

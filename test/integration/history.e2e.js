@@ -163,7 +163,6 @@ function createService(options) {
     localVersion: options.localVersion,
     logger,
     loadSshMaterial: async () => ({ configText: '', knownHostsText: '' }),
-    resolveTarget: () => ({ targetVersion: options.localVersion, source: 'test' }),
     sessionAdapter: options.adapter,
     workspaceAdapter: null,
   })
@@ -238,7 +237,6 @@ test('L2 history replay projects remote history into the local mirror session', 
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       await connectHost(service, host.id, logs)
 
@@ -401,7 +399,6 @@ test('L2 history replay projects remote history into the local mirror session', 
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       try {
         await connectHost(service, host.id, logs)
@@ -435,7 +432,6 @@ test('L2 history replay projects remote history into the local mirror session', 
         const runtime = service.runtimes.get(host.id)
         assert.ok(runtime, 'the host runtime must exist after connect')
         runtime.remote = { ...runtime.remote, version: '0.0.1-mismatch' }
-        runtime.facts = { ...(runtime.facts ?? {}), dshVersion: '0.0.1-mismatch' }
         const refreshed = await service.syncHostMirrors(host.id)
 
         assert.equal(appends.length, appendsBefore, 'a version-mismatched host must not replay history')
@@ -497,7 +493,6 @@ test('a gap in the remote log stops the cursor and produces one bounded backfill
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       await connectHost(service, host.id, logs)
 
@@ -619,7 +614,6 @@ test('a remote without a sessions directory degrades to a typed reason', { timeo
         username: CREDENTIALS.username,
         auth: { type: 'password' },
         keepAlive: 'keep',
-        bootstrap: { mode: 'reuse' },
       })
       await connectHost(service, host.id, logs)
       for (let attempt = 0; attempt < 200; attempt += 1) {

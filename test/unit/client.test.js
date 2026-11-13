@@ -41,9 +41,11 @@ function loadClientPlugin(options = {}) {
     setInterval,
     clearInterval,
     fetch: options.fetch,
+    document: options.document,
   }
   sandbox.window = {
     fetch: options.fetch,
+    dshDesktop: options.desktop,
     __ModuleLoader__: {
       load(declaration) {
         sandbox.__declaration = declaration
@@ -64,6 +66,75 @@ function loadClientPlugin(options = {}) {
   })
   assert.ok(plugin && typeof plugin === 'object', 'factory must return the plugin object')
   return plugin
+}
+
+/**
+ * Minimal DOM for the imperative takeover carrier: elements with attributes,
+ * inline style, children, listeners and a body. Enough to build and inspect the
+ * carrier inside the VM without adding a DOM implementation to the dev
+ * dependencies. `style` is a plain bag: the carrier only assigns cssText and
+ * individual background values, it never reads computed styles.
+ * @returns {{ body: object, createElement: Function, createElementNS: Function }}
+ */
+function fakeDocument() {
+  /** @param {string} tag */
+  const create = (tag) => ({
+    tagName: String(tag).toUpperCase(),
+    attributes: {},
+    children: [],
+    listeners: {},
+    className: '',
+    textContent: '',
+    title: '',
+    id: '',
+    type: '',
+    parentNode: null,
+    style: {},
+    /** @param {string} name @param {string} value */
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
+    /** @param {object} child */
+    appendChild(child) {
+      child.parentNode = this
+      this.children.push(child)
+      return child
+    },
+    /** @param {...object} items */
+    append(...items) {
+      for (const item of items) this.appendChild(item)
+    },
+    /** @param {object} child */
+    removeChild(child) {
+      const index = this.children.indexOf(child)
+      if (index >= 0) this.children.splice(index, 1)
+      child.parentNode = null
+      return child
+    },
+    /** @param {string} type @param {Function} handler */
+    addEventListener(type, handler) {
+      this.listeners[type] = handler
+    },
+    click() {
+      if (typeof this.listeners.click === 'function') this.listeners.click({ target: this })
+    },
+    get firstChild() {
+      return this.children.length > 0 ? this.children[0] : null
+    },
+  })
+  const body = create('body')
+  return {
+    body,
+    listeners: {},
+    createElement: create,
+    createElementNS: (namespace, tag) => create(tag),
+    addEventListener(type, handler) {
+      this.listeners[type] = handler
+    },
+    removeEventListener(type) {
+      delete this.listeners[type]
+    },
+  }
 }
 
 /** Minimal dictionary interpolation, mirroring the locale service. */
@@ -233,7 +304,7 @@ function hostView(overrides) {
       localPort: 54321,
       pid: 1234,
       dshHome: '/home/ubuntu/.dsh',
-      bootstrapLevel: 'T0',
+      bootstrapLevel: 'npx',
       nodeVersion: '22.14.0',
       startedAt: '2026-11-10T15:00:00.000Z',
     },
@@ -523,7 +594,9 @@ test('host list shows the one-time "remote tasks keep running" notice when flagg
     }),
   )
   assert.match(html, /远端任务会继续运行/)
-  assert.match(html, /下次打开会直接回到该主机/)
+  // Leaving no longer auto-opens the last host, so the notice promises a return
+  // through the host page, not an automatic takeover.
+  assert.match(html, /再次打开会回到该主机/)
 })
 
 test('connecting host renders staged progress text', () => {
@@ -630,6 +703,102 @@ test('the panel stays a host manager: no separate takeover surface, no remote pa
   assert.doesNotMatch(html, /<iframe/)
 })
 
+test('the panel lands on host management instead of taking the window over on mount', () => {
+  // docs/design.md §4.3: the sidebar row opens the host page, and only "Open" on a
+  // host hands the main column to a remote. A bootstrap effect used to auto-open the
+  // preferred host here, which covered the host page the moment the panel mounted —
+  // adding, switching, diagnosing or deleting a host had nowhere to happen.
+  const start = SOURCE.indexOf('function MainPanel')
+  assert.ok(start > 0, 'MainPanel must exist in the client source')
+  const panel = SOURCE.slice(start, SOURCE.indexOf('function SettingsSection'))
+  assert.doesNotMatch(panel, /bootstrapped/, 'the panel must not bootstrap a takeover on mount')
+  // The takeover still has one explicit trigger: pressing "Open" on a host card.
+  assert.match(panel, /const openHost = \(host\) => \{[\s\S]*?setView\('viewport'\)/)
+})
+
+test('the takeover carrier hands the window to the guest and injects the host row', async () => {
+  const doc = fakeDocument()
+  const released = []
+  const takeover = loadClientPlugin({
+    document: doc,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async (lease) => released.push(lease),
+      },
+    },
+  })
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
+  const hosts = [
+    hostView({ id: 'h_a', name: '43.133.80.40', address: '43.133.80.40' }),
+    hostView({ id: 'h_b', name: '生产机 ubuntu', address: 'ubuntu@10.0.0.7' }),
+  ]
+  try {
+    const result = await takeover.carrier.open({
+      hostId: 'h_a',
+      url: 'http://127.0.0.1:43210/?token=abc',
+      t,
+      hosts,
+      activeHostId: 'h_a',
+      onPick: () => {},
+      onRefresh: () => {},
+      onExit: () => {},
+    })
+    assert.equal(result.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay')
+    assert.ok(root, 'the carrier must be mounted on document.body')
+    // Whole window, no local chrome: style + guest + the load-error line only. The host
+    // switcher lives inside the remote page, so there is nothing local to render.
+    assert.match(root.style.cssText, /left:0/)
+    assert.equal(root.children.length, 3)
+    assert.equal(
+      root.children.some((node) => node.className === 'drg-carrier-bar'),
+      false,
+    )
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    assert.ok(view, 'the guest must be mounted')
+    assert.equal(view.tagName, 'WEBVIEW')
+
+    // The row is injected after the guest settles, and the first state push follows it.
+    const calls = []
+    view.executeJavaScript = (code) => {
+      calls.push(code)
+      return Promise.resolve(code.includes('__drgHostRow = {') ? 'installed' : null)
+    }
+    view.listeners['did-stop-loading']()
+    await settle()
+    assert.ok(
+      calls.some((code) => code.includes('drg-host-row')),
+      'the injected row script must run',
+    )
+    assert.ok(
+      calls.some((code) => code.includes('43.133.80.40') && code.includes('生产机 ubuntu')),
+      'the host list must be pushed into the injected row',
+    )
+
+    // The guest's own title (the remote session) is pushed into the row as well.
+    view.listeners['page-title-updated']({ title: '  修一下远程接管的侧边栏  ' })
+    await settle()
+    assert.ok(calls.some((code) => code.includes('修一下远程接管的侧边栏')))
+
+    // /state changes keep flowing into the injected row without a reload.
+    takeover.carrier.updateBar({
+      t,
+      hosts: [...hosts, hostView({ id: 'h_c', name: '第三台', address: '10.0.0.9' })],
+      activeHostId: 'h_c',
+      onPick: () => {},
+      onRefresh: () => {},
+      onExit: () => {},
+    })
+    await settle()
+    assert.ok(calls.some((code) => code.includes('第三台')))
+  } finally {
+    await takeover.carrier.close()
+  }
+  assert.equal(doc.body.children.length, 0)
+  assert.deepEqual(released, ['lease-1'])
+})
 test('fingerprint card shows SHA256 and accept / remember actions', () => {
   const host = hostView({
     status: 'fingerprint-pending',
@@ -736,7 +905,7 @@ test('settings modal renders contract fields and the save action', () => {
     mirrorToSidebar: true,
     language: 'auto',
     logLevel: 'info',
-    bootstrap: { targetVersion: 'local', mode: 'auto', remoteDir: '~/.dsh/remote-go', nodeVersion: '22.14.0' },
+    bootstrap: { remoteDir: '~/.dsh-remote-go', profile: 'web' },
   }
   const html = render(
     React.createElement(plugin.components.SettingsModal, {
@@ -751,14 +920,39 @@ test('settings modal renders contract fields and the save action', () => {
   // only way a remote UI is shown, so no mode selector may be offered.
   assert.doesNotMatch(html, /呈现形态/)
   assert.doesNotMatch(html, /面板内嵌/)
-  assert.match(html, /关闭视窗行为/)
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)
-  assert.match(html, /镜像会话/)
-  assert.match(html, /显示在本地侧边栏/)
-  assert.match(html, /自举/)
+  // The fixed "window / close behavior" block and the sidebar mirroring toggle are
+  // gone: neither had a real choice after the whole-window takeover.
+  assert.doesNotMatch(html, /关闭视窗行为/)
+  assert.doesNotMatch(html, /镜像会话/)
+  assert.doesNotMatch(html, /显示在本地侧边栏/)
+  assert.match(html, /远端运行时/)
+  assert.match(html, /DSH profile/)
+  assert.match(html, /插件远端目录/)
   assert.match(html, /保存设置/)
+})
+
+test('conflict prompt lists the foreign processes and offers three actions', () => {
+  const html = render(
+    React.createElement(plugin.components.RemoteConflictPrompt, {
+      t,
+      host: {
+        id: 'h1',
+        name: 'Tencent VM',
+        conflict: { detectedAt: '2026-11-14T00:00:00Z', processes: [{ pid: 42, command: 'dsh web' }] },
+      },
+      onResolve: () => {},
+    }),
+  )
+  assert.match(html, /远端已有手工启动的 DSH/)
+  assert.match(html, /pid 42/)
+  assert.match(html, /dsh web/)
+  assert.match(html, /停止它并启动受管实例/)
+  assert.match(html, /保留它，另起一个/)
+  assert.match(html, /取消连接/)
+  assert.match(html, /data-testid="remote-conflict-prompt"/)
 })
 
 test('main panel renders its loading state inside the DSH theme root', () => {

@@ -13,6 +13,7 @@ export const ErrorCode = Object.freeze({
   HOST_KEY_UNKNOWN: 'host-key-unknown',
   REMOTE_DSH_MISSING: 'remote-dsh-missing',
   REMOTE_DSH_START_FAILED: 'remote-dsh-start-failed',
+  REMOTE_DSH_RUNNING: 'remote-dsh-running',
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
   VERSION_MISMATCH: 'version-mismatch',
   UNSUPPORTED_OS: 'unsupported-os',
@@ -46,6 +47,10 @@ const CODE_TABLE = {
   [ErrorCode.REMOTE_DSH_START_FAILED]: {
     retryable: true,
     title: { zh: '远端 DSH 启动失败', en: 'The remote DSH failed to start' },
+  },
+  [ErrorCode.REMOTE_DSH_RUNNING]: {
+    retryable: true,
+    title: { zh: '远端已有手工启动的 DSH', en: 'A manually started DSH is already running' },
   },
   [ErrorCode.REMOTE_UI_UNREACHABLE]: {
     retryable: true,
@@ -176,6 +181,23 @@ export const errors = {
             en: 'You can also install DSH manually on the remote host and retry',
           },
         ],
+      },
+    ),
+  remoteDshRunning: (detail, options) =>
+    make(
+      ErrorCode.REMOTE_DSH_RUNNING,
+      detail ?? {
+        zh: '远端检测到不是本插件启动的 DSH 进程，连接已按你的选择取消。',
+        en: 'The remote has a DSH process this plugin did not start; the connection was cancelled as you chose.',
+      },
+      {
+        nextSteps: [
+          {
+            zh: '重新连接，并选择「停止它并启动受管实例」或「保留它，另起一个」',
+            en: 'Reconnect and choose "Stop it and start the managed instance" or "Keep it and start alongside"',
+          },
+        ],
+        ...options,
       },
     ),
   remoteDshStartFailed: (tail) =>

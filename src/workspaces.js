@@ -96,7 +96,7 @@ export async function readLocalWorkspaces(input) {
 
 /**
  * Path of the remote registry inside a remote DSH_HOME.
- * @param {string} remoteDshHome absolute POSIX path (e.g. /home/ubuntu/.dsh-remote-go/home)
+ * @param {string} remoteDshHome absolute POSIX path (e.g. /home/ubuntu/.dsh)
  */
 export function remoteWorkspaceStoragePath(remoteDshHome) {
   return `${String(remoteDshHome).replace(/\/+$/, '')}/storages/workspace.json`

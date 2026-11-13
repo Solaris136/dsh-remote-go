@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { FakeSsh, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 import { createSessionAdapter } from '../../src/session-adapter.js'
 import { RemoteGoService } from '../../src/service.js'
@@ -95,7 +95,7 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   assert.equal(view.remote.uiReady, true)
   assert.equal(view.remote.version, '0.2.2-rc.1')
   assert.equal(view.remote.localPort, 45123)
-  assert.equal(view.remote.bootstrapLevel, 'T0-local')
+  assert.equal(view.remote.bootstrapLevel, 'npx')
   assert.equal(view.progress.code, 'ready')
   assert.ok(codes.includes('ssh-connecting'))
   assert.ok(codes.includes('probing'))
@@ -175,21 +175,140 @@ test('refusing the host key keeps the host in error state', async () => {
   await service.shutdown()
 })
 
-test('a version mismatch is refused before starting, and can be overridden', async () => {
-  const facts = makeFacts({ dshPath: '/usr/local/bin/dsh', dshVersion: '0.2.1', nodeVersion: '24.22.2' })
-  const { service } = await makeTestService({ facts })
-  const host = await createHost(service, {
-    bootstrap: { mode: 'reuse', targetVersion: 'local', remoteDir: '~/.dsh-remote-go', nodeVersion: '24.22.2' },
+test('the npx preflight refuses a different version before starting the remote', async () => {
+  let started = 0
+  const { service } = await makeTestService({
+    preflight: async () => {
+      throw errors.versionMismatch('0.2.2-rc.1', '0.2.1')
+    },
+    startWeb: async () => {
+      started += 1
+      return {
+        pid: 1,
+        port: 1,
+        token: 't',
+        url: 'http://127.0.0.1:1/?token=t',
+        logPath: '/tmp/x',
+        startedAt: new Date().toISOString(),
+        rawLine: '',
+        profile: 'web',
+        dshHome: '/home/ubuntu/.dsh',
+      }
+    },
   })
+  const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'error')
   assert.equal(service.snapshot().hosts[0].error.code, 'version-mismatch')
+  assert.equal(started, 0)
+  await service.shutdown()
+})
 
-  await service.connect(host.id, { overrideVersion: true })
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'override connect' })
-  const view = service.snapshot().hosts[0]
-  assert.equal(view.warning !== null, true)
-  assert.equal(view.remote.version, '0.2.1')
+test('a stale adopted instance is stopped before the pinned version starts', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    adopt: async () => ({
+      pid: 77,
+      port: 4000,
+      token: 'old',
+      url: 'http://127.0.0.1:4000/?token=old',
+      version: '0.0.1-old',
+      profile: 'web',
+      dshHome: '/home/ubuntu/.dsh',
+      adopted: true,
+    }),
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.deepEqual(stopped, [77])
+  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  await service.shutdown()
+})
+
+test('a foreign remote DSH pauses the pipeline and cancel aborts the connect', async () => {
+  let started = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => null,
+    findForeign: async () => ({
+      ok: true,
+      processes: [{ pid: 77, command: '/usr/local/bin/dsh --profile web --no-open' }],
+    }),
+    startWeb: async () => {
+      started += 1
+      throw new Error('must not start')
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending')
+  const pending = service.snapshot().hosts[0]
+  assert.equal(pending.conflict.processes[0].pid, 77)
+  assert.equal(pending.progress.code, 'remote-dsh-running')
+  await service.confirmConflict(host.id, { action: 'cancel' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'error')
+  assert.equal(service.snapshot().hosts[0].error.code, 'remote-dsh-running')
+  assert.equal(started, 0)
+  await service.shutdown()
+})
+
+test('a foreign remote DSH can be stopped and then the managed instance starts', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    readRegistry: async () => null,
+    findForeign: async () => ({ ok: true, processes: [{ pid: 88, command: 'dsh web' }] }),
+    stopForeign: async (_ssh, processes) => {
+      stopped.push(...processes.map((process) => process.pid))
+      return { ok: true, alive: [], output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending')
+  await service.confirmConflict(host.id, { action: 'stop' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.deepEqual(stopped, [88])
+  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  await service.shutdown()
+})
+
+test('a foreign remote DSH can be kept alongside with a warning', async () => {
+  let stopped = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => null,
+    findForeign: async () => ({ ok: true, processes: [{ pid: 99, command: 'dsh web' }] }),
+    stopForeign: async () => {
+      stopped += 1
+      return { ok: true, alive: [], output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending')
+  await service.confirmConflict(host.id, { action: 'alongside' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.equal(stopped, 0)
+  assert.ok(service.snapshot().hosts[0].warning)
+  await service.shutdown()
+})
+
+test('the conflict prompt ignores the plugin-owned registry pid', async () => {
+  let scanned = null
+  const { service } = await makeTestService({
+    readRegistry: async () => ({ pid: 123, dshHome: '/home/ubuntu/.dsh', profile: 'web' }),
+    findForeign: async (_ssh, options) => {
+      scanned = options
+      return { ok: true, processes: [] }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.deepEqual(scanned.ignorePids, [123])
   await service.shutdown()
 })
 
@@ -1120,31 +1239,6 @@ function createLiveMirrorAdapter() {
     },
   }
 }
-
-test('a version mismatch is annotated on every mirrored session, not just the host', async () => {
-  const facts = makeFacts({ dshPath: '/usr/local/bin/dsh', dshVersion: '0.2.1', nodeVersion: '24.22.2' })
-  const stdout = remoteRegistry({
-    'ws-1': { path: '/home/u/proj', title: 'remote project', sessionIds: ['s-a', 's-b'] },
-  })
-  const { service } = await makeTestService({ facts, sshFactory: registrySshFactory(stdout) })
-  const host = await createHost(service, {
-    bootstrap: { mode: 'reuse', targetVersion: 'local', remoteDir: '~/.dsh/remote-go', nodeVersion: '24.22.2' },
-  })
-  await service.connect(host.id, { overrideVersion: true })
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
-  await waitFor(() => service.mirrorStore.listMirrors({ hostId: host.id }).length === 2)
-
-  const listed = await service.listHostMirrors(host.id)
-  assert.equal(listed.level, 'L1')
-  assert.equal(listed.reason.code, 'version-mismatch')
-  for (const mirror of listed.mirrors) {
-    assert.equal(mirror.level, 'L1')
-    assert.equal(mirror.reason.code, 'version-mismatch')
-    assert.equal(typeof mirror.reason.message.zh, 'string')
-    assert.equal(typeof mirror.reason.message.en, 'string')
-  }
-  await service.shutdown()
-})
 
 test('mirrorMaxSessions caps creation and reports truncated/skipped', async () => {
   const stdout = remoteRegistry({
