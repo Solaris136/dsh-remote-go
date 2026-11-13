@@ -64,9 +64,6 @@ pnpm run test:e2e
 | 类型 | 名称 | 说明 |
 |---|---|---|
 | Secret | `NPM_PUBLISH_TOKEN` | npm Automation token（仅发布用，可撤销）；不配置则只发 GitHub Release |
-| Secret | `E2E_SSH_PRIVATE_KEY` | 仅 `e2e.yml` 使用，能登录测试主机的私钥 |
-| Secret | `E2E_SSH_KNOWN_HOSTS` | 可选，预置 known_hosts 行；不配置则用 `ssh-keyscan` |
-| Variable | `E2E_SSH_ADDRESS` | 测试主机地址/别名（`e2e.yml` 手动触发时的默认值） |
 
 也可以用 `workflow_dispatch` 手动触发并传入 `tag`；`dry_run=true`（默认）只演练不发布、不建 Release。
 
@@ -166,5 +163,5 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 | `pnpm publish --dry-run --no-git-checks` | 通过：`prepack` 门禁执行、包内容与 registry 目标校验通过 |
 | `pnpm pack` + `scripts/pack-check.mjs --find artifacts` | 通过：tarball 仅含运行时文件，必需文件齐全 |
 | 从 tarball 安装到干净 DSH profile | 通过（`test/e2e/publish.e2e.js`）：API 200、client-module 从安装目录加载 |
-| 从目录链接安装（开发模式） | 通过（`test/e2e/plugin.e2e.js`）：真实 SSH + 真实远端 DSH + 无头浏览器面板 iframe |
+| 从目录链接安装（开发模式） | 通过（当时的 `test/e2e/plugin.e2e.js`；该套件已随呈现方式收敛移除） |
 | `engines.dsh` 兼容校验 | 运行版本 0.2.2-rc.1 满足 `>=0.2.2-rc.1` |

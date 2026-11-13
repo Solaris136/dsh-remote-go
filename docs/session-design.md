@@ -16,7 +16,7 @@
 - 远端会话不能进本地 Conversation UI，本地的工作区栏、搜索、快捷键都用不上；
 - 两套界面并存（本地一套、远端 guest 一套），用户要在两套心智模型之间切换。
 
-同类项目的经验（[docs/research-competitors.md](research-competitors.md)）：`Golden-Pigeon/dsh-remote` 用
+同类项目的经验（2026-11 调研）：`Golden-Pigeon/dsh-remote` 用
 「local mirror Session + Agent façade」把远端会话镜像成本地原生会话，宣称 “remote sessions appear in the normal
 sidebar”；`dsh-remote-gui` 用侧栏入口 + 原生面板列远端会话。两者都**没有**去遮蔽宿主的 `sidebar.workspaces`。
 

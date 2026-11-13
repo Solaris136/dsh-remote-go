@@ -39,6 +39,14 @@
   `hosts.json` 里永远没有密码。该存储在本机是「仅当前用户可读的明文 YAML」，不是加密库——README 与界面都如实标注；
   没有凭据服务时明确说「无法保存，只能本次使用」，不假装保存。
 
+- **文档收敛**：删除已失效的 V0 可行性报告（同站 loopback iframe，相关呈现方式已移除）与两份早期同类项目调研报告；
+  结论仍保留在 README 的验收证据 / 功能表与 `docs/design.md` §11 / §15，原始材料可从 git 历史取回。`e2e/remote/README.md`
+  同步改写为当前的运行时自举与运维步骤，不再复述 V0 验证。
+
+- **删除对已移除套件的说明**：`test/e2e/plugin.e2e.js` 与 `.github/workflows/e2e.yml` 已不存在，README / CONTRIBUTING /
+  `docs/publish.md` 里按它们描述的 `test:e2e` 组成、`E2E_SSH_ADDRESS` 必填要求与 `E2E_SSH_*` 一次性配置一并删除；
+  `docs/implementation.md` 的客户端注册描述同步修正为当前的 `sidebar.panellist`（order 20）与主机管理页。
+
 ### 新增
 
 - **私钥文件浏览器**：`GET /keyfile/list` + 客户端「选择文件…」弹窗（目录可进入、文件可选中）。DSH 只提供目录选择器、

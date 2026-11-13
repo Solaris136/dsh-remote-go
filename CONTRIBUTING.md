@@ -21,8 +21,7 @@
 |---|---|---|
 | Node.js | 24 或更高 | `engines.node` 为 `>=24`；单元测试与校验脚本都在 Node 24 上验证，CI 只用 Node 24 |
 | pnpm | 11.x | `package.json` 用 `packageManager: pnpm@11.x` 固定版本，`corepack enable` 即对齐；CI 用 `pnpm/action-setup` |
-| SSH 测试主机 | 可选 | 仅 `test:e2e` 需要：真实 SSH + Linux 远端 + 可用的远端 DSH（`E2E_SSH_ADDRESS`，必填） |
-| Chrome / Edge | 可选 | `test:e2e` 与 `test:integration` 的浏览器套件需要（`CHROME_PATH` / `E2E_CHROME` 可覆盖） |
+| Chrome / Edge | 可选 | `test:web` / `test:desktop` 与 `test:integration` 的浏览器套件需要（`CHROME_PATH` / `E2E_CHROME` 可覆盖） |
 
 首次检出后安装依赖：
 
@@ -69,15 +68,14 @@ pnpm install --frozen-lockfile --ignore-scripts
 
 ### 端到端测试（可选）
 
-`pnpm run test:e2e` 由两个套件组成，都需要 `e2e/control` 下已准备好的隔离 control DSH 运行时
-（见 [e2e/remote/README.md](e2e/remote/README.md)）：
+`pnpm run test:e2e` 只剩发布路径一个套件：`test/e2e/publish.e2e.js` 把 tarball 装进干净的 DSH profile，验证 API 与
+client-module 都从安装目录加载。它需要 `e2e/control` 下已准备好的隔离 control DSH 运行时，以及 PATH 上的 `pnpm`
+（或用 `DSH_PNPM` / `PNPM_EXE` 指定入口），**不需要** SSH 测试主机。
 
-- `test/e2e/plugin.e2e.js`：真实 SSH 主机（**必须**设置 `E2E_SSH_ADDRESS`，取 SSH 别名或 `user@host`；未设置时该套件
-  会被跳过）+ 本机 Chrome/Edge（`E2E_CHROME` 可覆盖路径）；
-- `test/e2e/publish.e2e.js`：把 tarball 装进干净的 DSH profile 验证发布路径，需要 PATH 上有 `pnpm`
-  （或用 `DSH_PNPM` / `PNPM_EXE` 指定入口）。
+真实主机（真实 SSH + 真实远端 DSH）的验收已不在仓库的自动化套件里：需要你自备主机，按
+[e2e/remote/README.md](e2e/remote/README.md) 起好远端运行时后，用插件自身连一次验收。
 
-E2E 会连接真实服务器、启动与停止远端 DSH，并写出报告、截图与证据文件。**提交前务必确认这些证据不含令牌、密码、
+E2E 会启动与停止 DSH，并写出报告与证据文件。**提交前务必确认这些证据不含令牌、密码、
 私钥或真实主机名/地址**；`e2e/remote/evidence` 下的文件尤其需要人工复核（详见 [SECURITY.md](SECURITY.md)）。
 
 ## 4. 提交信息（Conventional Commits）
@@ -131,9 +129,9 @@ PR 触发 `.github/workflows/ci.yml`，只有两个作业：
   模拟远端集成/E2E（`test/integration`）、市场条目与 `files[]` 校验、`pnpm pack` + tarball 校验并上传 artifact
 - **Tests (windows-latest, Node 24)** —— 单元测试 + 模拟远端集成/E2E（路径与 SSH 配置对平台敏感，Windows 单独跑）
 
-真实浏览器验收由 `.github/workflows/acceptance.yml`（Web + Desktop E2E）**夜间定时 + 手动**运行，
-真实主机 E2E 由 `.github/workflows/e2e.yml` **手动触发**——两者都不构成 PR 门禁（真实 Chrome/Electron
-对 runner 负载敏感，偶发超时不应阻塞合并）。第三项**必需检查**是 `Analyze (javascript-typescript)`（`codeql.yml`）。
+真实浏览器验收由 `.github/workflows/acceptance.yml`（Web + Desktop E2E）**夜间定时 + 手动**运行——它不构成 PR 门禁
+（真实 Chrome/Electron 对 runner 负载敏感，偶发超时不应阻塞合并）。真实主机 E2E 曾由独立的 `e2e.yml` 手动触发，
+该工作流已随呈现方式收敛移除。第三项**必需检查**是 `Analyze (javascript-typescript)`（`codeql.yml`）。
 
 ### 仓库规则（已在仓库设置中启用）
 

@@ -42,8 +42,6 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 | [docs/publish.md](docs/publish.md) | 发布到 npm / 插件市场的流程与检查清单 |
 | [docs/session-design.md](docs/session-design.md) | 「完全会话」设计：远端会话镜像成本地原生会话（能力分级、数据模型、事件流、失败模式） |
 | [e2e/remote/README.md](e2e/remote/README.md) | 远端测试环境的自举与复跑步骤 |
-| [docs/research-competitors.md](docs/research-competitors.md) | 同类项目调研 |
-| [docs/research-dsh-remote-window.md](docs/research-dsh-remote-window.md) | 相近实现调研（dsh-remote-window） |
 
 ## 它是什么
 
@@ -72,7 +70,6 @@ host inventory, SSH connection plus tunnel, window takeover, and connection stat
 | 端到端（真实 SSH + 真实远端 DSH） | 由插件本地 API 验证：`POST /hosts/:id/connect` → `connected`、隧道 `/open` 返回回环 URL、`versionParity.same`；浏览器侧只保留设置页与打包产物验收（`e2e/artifacts/publish-e2e-report.json`） |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现由 `Acceptance E2E` 的 Web 作业（夜间定时 + 手动）复核 |
 | 持续集成 | GitHub Actions 共 **3 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Verify (ubuntu-latest)`（仓库规范 + Prettier 格式 + PR 标题 + 覆盖率门禁 + 模拟远端集成/E2E + tarball 校验）、`Tests (windows-latest, Node 24)`（单元 + 模拟远端集成/E2E）、`Analyze (javascript-typescript)`（CodeQL）；真实浏览器验收（Web/Desktop E2E）与真实主机 E2E 都不在门禁里，见「CI 与发布」 |
-| V0 可行性闸门（专项） | `e2e/remote/v0-report.md`：早期同站 loopback iframe 可行性验证（该呈现方式已移除，仅作历史记录） |
 
 > 端到端测试依赖一台可通过 SSH 访问、由你自行准备的主机（见 `e2e/remote/README.md`）；仓库不包含任何真实主机地址或凭据。
 
@@ -178,7 +175,7 @@ dsh plugin --profile web add dsh-remote-go
 └─ 每台远端主机一个工作区（标题 `Remote: <主机名>`），远端会话以镜像会话出现在其中
 ```
 
-1. **主内容区接管，而不是内嵌或反代**：远端 DSH 由桌面端以真正的 Chromium guest 渲染（自有 cookie 与下载管线，行为与真实浏览器一致），不再有同站 iframe、浮层控件或状态页。侧边栏保留，因此「进远端 / 回本地」是同一个动作——点侧边栏。早期同站 loopback iframe 的可行性结论保留在 `e2e/remote/v0-report.md`。
+1. **主内容区接管，而不是内嵌或反代**：远端 DSH 由桌面端以真正的 Chromium guest 渲染（自有 cookie 与下载管线，行为与真实浏览器一致），不再有同站 iframe、浮层控件或状态页。侧边栏保留，因此「进远端 / 回本地」是同一个动作——点侧边栏。早期同站 loopback iframe 的可行性结论已随该形态一并退役（可从 git 历史取回）。
 2. **每台主机独立本地端口**：cookie 按 authority 绑定，多主机登录态天然隔离。
 3. **远端自举只使用白名单模板命令**（Node 下载、npx 精确版本、npm 隔离安装），不接受任意 shell。
 4. **版本一致**：目标版本取自本机 DSH（`clientModules.graph().release.version`），安装/启动都写精确版本；不一致时给「准备同版本 / 沿用远端 / 取消」，不静默混用。
@@ -234,10 +231,10 @@ pnpm run verify                                   # 一条命令跑完下面全�
 覆盖率门禁（`pnpm run test:coverage`，阈值 85 / 70 / 80）**不在** `verify` 里：它由 CI 的
 `Repository conventions` 作业执行，本地可单独跑。
 
-端到端（需要真实测试主机与本机 Chrome/Edge）：
+发布路径验收（把 tarball 装进干净的 `dsh` profile，不需要远端主机）：
 
 ```bash
-pnpm run test:e2e   # control DSH → SSH → 测试主机 → 远端 DSH → 无头浏览器面板验收
+pnpm run test:e2e   # pnpm pack → 装进隔离 profile → API 与 client-module 都从安装目录加载
 ```
 
 Web 兼容性验收（`dsh web` + 真实浏览器，不需要远端主机）：
@@ -313,14 +310,14 @@ src/                        Host 插件实现（SSH/自举/隧道/服务/API/诊
 locale/                     插件市场显示元数据（zh/en）
 cordis.patch.yml            插件 bundle patch
 test/unit/                  单元测试（node:test）
-test/e2e/                   真实端到端验收（control DSH + 无头浏览器）
+test/e2e/                   发布路径验收（tarball → 干净 profile）
 e2e/control/                隔离的 control DSH 运行时/启动脚本
-e2e/remote/                 测试主机自举脚本与 V0 证据
+e2e/remote/                 测试主机自举与运维脚本
 scripts/                    规范检查 / 市场条目 / 打包校验脚本
 docs/                       设计、实现、API、发布文档
 ```
 
-E2E 环境变量：`E2E_SSH_ADDRESS`（**必填**：SSH 主机别名或 `user@host`）、`E2E_CHROME`（浏览器可执行文件路径）、`E2E_NODE`（Node 可执行文件，默认取 PATH 中的 `node`）。未设置 `E2E_SSH_ADDRESS` 时 E2E 用例会显式跳过，而不是去连一台不存在的默认主机。
+E2E 环境变量：`E2E_NODE`（Node 可执行文件，默认取 PATH 中的 `node`）、`E2E_CHROME`（浏览器可执行文件路径）。仓库内的套件已经不再连真实主机，因此不读 `E2E_SSH_ADDRESS`；手动做真实主机验收时按 `e2e/remote/README.md` 起远端运行时即可。
 
 ## CI 与发布
 
