@@ -74,6 +74,13 @@ const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account
 const SETTINGS_LABELS = ['设置', 'Settings']
 const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
 const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
+/**
+ * A settings row may only be located inside the settings surface. The plugin also
+ * registers a **sidebar** entry labelled "Remote hosts" (`sidebar.panellist`,
+ * `t('settingsNav')`), so a global text match answers "present" for a surface that
+ * was never opened and then clicks the sidebar entry instead of the settings row.
+ */
+const SETTINGS_SURFACE = '[role="dialog"]'
 // The onboarding affordance is localised. "Set up later" is what the shipped app renders in
 // English (observed on the Windows runner); "Configure later" was an assumption that made the
 // first CI run time out, so both spellings (and the Chinese one) are accepted.
@@ -322,15 +329,19 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 
 /**
  * Make the shell's settings surface show the Remote-hosts entry (account menu →
- * Settings), verified by **the nav row the next step needs** rather than by
- * `role="dialog"`: under load the desktop shell renders a loading view
- * ("正在加载设置…") before anything dialog-like exists.
+ * Settings), verified by **the nav row the next step needs**, scoped to the open
+ * settings dialog. Under load the shell renders a loading view ("正在加载设置…")
+ * before anything dialog-like exists, so the bounded wait covers the dialog
+ * appearing and the row landing inside it.
  *
  * Readiness and activation use the same locator (`activation.js`), and every click
  * is a DOM click that is checked for actionability and overlay coverage.
  */
 async function openSettingsSurface(page) {
-  if (await rowPresent(page, REMOTE_HOSTS_LABELS)) return true
+  // Scoped to the dialog: the plugin's sidebar entry carries the same label, so a
+  // global presence check would claim the settings surface is ready while the
+  // sidebar panel — not Settings — is what is actually on screen.
+  if (await rowPresent(page, REMOTE_HOSTS_LABELS, { within: SETTINGS_SURFACE })) return true
   if (!(await page.$('[role="dialog"]'))) {
     const menu = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
     if (!menu.clicked) {
@@ -345,7 +356,7 @@ async function openSettingsSurface(page) {
     console.log(`[desktop-e2e] Settings entry not activated: ${JSON.stringify(settings)}`)
     return false
   }
-  return await waitForRow(page, REMOTE_HOSTS_LABELS, { timeoutMs: 60_000 })
+  return await waitForRow(page, REMOTE_HOSTS_LABELS, { timeoutMs: 60_000, within: SETTINGS_SURFACE })
 }
 
 /**
@@ -372,6 +383,7 @@ async function openRemoteHostsSection(page) {
         label: 'the Remote-hosts section',
         describe: () => describePage(page),
         attempts: 2,
+        within: SETTINGS_SURFACE,
       })
       return
     } catch (error) {

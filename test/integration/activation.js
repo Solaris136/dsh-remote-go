@@ -27,12 +27,21 @@
  *
  * The return value is also the diagnostic: what matched, what would be clicked,
  * what covers it, and how many dialogs exist.
+ *
+ * `within` narrows the traversal to a container (usually the open settings dialog).
+ * A label matched globally is ambiguous once the sidebar and a dialog both show the
+ * same text — the plugin's sidebar entry and its Settings row are both "Remote
+ * hosts" — and the first match in DOM order is the sidebar one, which the dialog's
+ * backdrop then reports as `covered`.
  * @param {string[]} rawLabels
+ * @param {string | null} [within]
  */
-export function activateRowInPage(rawLabels) {
+export function activateRowInPage(rawLabels, within = null) {
   const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
   const labels = rawLabels.map(strip)
   const dialogs = document.querySelectorAll('[role="dialog"]').length
+  const root = within ? document.querySelector(within) : document
+  if (within && !root) return { clicked: false, reason: 'scope-missing', scope: within, dialogs }
   /** @param {Element | null} node */
   const describeNode = (node) => {
     if (!node) return null
@@ -51,10 +60,10 @@ export function activateRowInPage(rawLabels) {
   // The same traversal the readiness wait uses: `*`. A tag whitelist here would let
   // readiness and activation disagree, which is exactly the bug this module removes.
   const matches = []
-  for (const node of document.querySelectorAll('*')) {
+  for (const node of root.querySelectorAll('*')) {
     if (labels.includes(strip(node.textContent))) matches.push(node)
   }
-  if (matches.length === 0) return { clicked: false, reason: 'no-matching-node', dialogs }
+  if (matches.length === 0) return { clicked: false, reason: 'no-matching-node', scope: within, dialogs }
   // Smallest subtree wins: the label node, not every ancestor containing it.
   const row = matches.sort((left, right) => left.querySelectorAll('*').length - right.querySelectorAll('*').length)[0]
   const clickable = row.closest('button, [role="menuitem"], [role="button"], [role="tab"], a, li') ?? row
@@ -198,46 +207,67 @@ export function clickDialogButtonInPage(rawLabels) {
 
 /**
  * Is a row with one of these labels present right now?
+ *
+ * `within` has the same meaning as in `activateRowInPage`: without it, a sidebar
+ * entry that happens to share the row's label makes this answer `true` for a surface
+ * that is not open.
  * @param {import('puppeteer-core').Page} page
  * @param {string[]} labels
+ * @param {{ within?: string }} [options]
  */
-export async function rowPresent(page, labels) {
+export async function rowPresent(page, labels, options = {}) {
+  const within = options.within ?? null
   return await page
-    .evaluate((rawLabels) => {
-      const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
-      const wanted = rawLabels.map(strip)
-      return [...document.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
-    }, labels)
+    .evaluate(
+      ({ rawLabels, scope }) => {
+        const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
+        const wanted = rawLabels.map(strip)
+        const root = scope ? document.querySelector(scope) : document
+        if (!root) return false
+        return [...root.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
+      },
+      { rawLabels: labels, scope: within },
+    )
     .catch(() => false)
 }
 
 /**
  * Wait, bounded, until a row with one of these labels exists (presence only; use
  * `activateRowAndWaitFor` to also verify an activation).
+ *
+ * With `within`, the wait also covers the container appearing: the poll returns
+ * `false` until the scope exists **and** contains the row.
  * @param {import('puppeteer-core').Page} page
  * @param {string[]} labels
- * @param {{ timeoutMs?: number, label?: string }} [options]
+ * @param {{ timeoutMs?: number, label?: string, within?: string }} [options]
  * @returns {Promise<boolean>} whether it appeared in time.
  */
 export async function waitForRow(page, labels, options = {}) {
   const timeoutMs = options.timeoutMs ?? 60_000
+  const within = options.within ?? null
   return await page
     .waitForFunction(
-      (rawLabels) => {
+      ({ rawLabels, scope }) => {
         const strip = (value) => (value ?? '').replace(/\s+/g, '').trim()
         const wanted = rawLabels.map(strip)
-        return [...document.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
+        const root = scope ? document.querySelector(scope) : document
+        if (!root) return false
+        return [...root.querySelectorAll('*')].some((node) => wanted.includes(strip(node.textContent)))
       },
       { timeout: timeoutMs, polling: 150 },
-      labels,
+      { rawLabels: labels, scope: within },
     )
     .then(() => true)
     .catch(() => false)
 }
 
-/** @param {import('puppeteer-core').Page} page @param {string[]} labels */
-export async function activateRow(page, labels) {
-  return await page.evaluate(activateRowInPage, labels)
+/**
+ * @param {import('puppeteer-core').Page} page
+ * @param {string[]} labels
+ * @param {{ within?: string }} [options]
+ */
+export async function activateRow(page, labels, options = {}) {
+  return await page.evaluate(activateRowInPage, labels, options.within ?? null)
 }
 
 /** @param {import('puppeteer-core').Page} page @param {string[]} labels */
@@ -308,15 +338,25 @@ export async function dismissOpenDialog(page, options = {}) {
  *   attempts?: number,
  *   appearTimeoutMs?: number,
  *   mountTimeoutMs?: number,
+ *   within?: string,
  * }} options
  */
 export async function activateRowAndWaitFor(page, options) {
-  const { labels, selector, label, describe, attempts = 4, appearTimeoutMs = 60_000, mountTimeoutMs = 20_000 } = options
-  const appeared = await waitForRow(page, labels, { timeoutMs: appearTimeoutMs })
+  const {
+    labels,
+    selector,
+    label,
+    describe,
+    attempts = 4,
+    appearTimeoutMs = 60_000,
+    mountTimeoutMs = 20_000,
+    within = null,
+  } = options
+  const appeared = await waitForRow(page, labels, { timeoutMs: appearTimeoutMs, within })
   /** @type {any[]} */
   const log = [{ step: 'row-appeared', ok: appeared }]
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const result = await activateRow(page, labels)
+    const result = await activateRow(page, labels, { within })
     log.push({ attempt, result })
     if (result.clicked) {
       const mounted = await page
