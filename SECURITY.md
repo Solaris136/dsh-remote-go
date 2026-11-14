@@ -66,9 +66,9 @@
 ## 依赖与已知告警（Dependabot）
 
 发布包没有运行时依赖（`dependencies` 为空，安装时 `--ignore-scripts` 也不执行任何生命周期脚本），因此 Dependabot 报告的依赖告警不会进入用户
-安装的代码路径。依赖只存在于开发侧（`devDependencies`）与 E2E 夹具锁文件（`e2e/control/pnpm-lock.yaml`），
-这些目录不会被打进 npm tarball（`scripts/pack-check.mjs` 校验）。仓库已启用 Dependabot 安全更新与告警（`.github/dependabot.yml` + 仓库安全设置），
-修复型 PR 走正常 PR 流程合入；能通过**运行时**路径影响用户的告警（例如 vendored `ssh2` bundle 的问题）请按上文私下报告。
+安装的代码路径。依赖只存在于开发侧（`devDependencies`），这些包不会被打进 npm tarball（`scripts/pack-check.mjs` 校验）。仓库已启用
+Dependabot 安全更新与告警（`.github/dependabot.yml` + 仓库安全设置），修复型 PR 走正常 PR 流程合入；能通过**运行时**路径影响用户的告警
+（例如 vendored `ssh2` bundle 的问题）请按上文私下报告。
 
 ## 安全港（Safe Harbour）
 

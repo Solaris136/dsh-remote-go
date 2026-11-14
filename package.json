@@ -77,7 +77,6 @@
   "scripts": {
     "test": "node --test \"test/unit/*.test.js\"",
     "test:unit": "node --test \"test/unit/*.test.js\"",
-    "test:e2e": "node --test \"test/e2e/*.e2e.js\"",
     "test:web": "node --test \"test/integration/web.e2e.js\"",
     "test:desktop": "node --test \"test/integration/desktop.e2e.js\"",
     "test:integration": "node --test \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",

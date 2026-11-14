@@ -47,10 +47,8 @@ dsh-remote-go
 ├─ locale/{zh,en}.json      插件市场显示元数据
 ├─ test/unit/               node:test 单元测试
 ├─ test/integration/        模拟远端集成 + 浏览器/桌面验收
-├─ test/e2e/                发布路径验收（tarball → 干净 profile）
 ├─ test/helpers/            共享测试工具（source-scan 等）
 ├─ e2e/sim/                 本机模拟远端主机（真实 SSH + HTTP stub）
-├─ e2e/control/             隔离的 control DSH 运行时（发布路径验收用）
 ├─ e2e/remote/              真实主机验收说明（无自举脚本）
 └─ scripts/                 仓库规范 / 市场条目 / 打包 / 语法检查
 ```
@@ -117,8 +115,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 | 服务 | `service/api/store/secrets/key-files/host-key` | 连接管线、指纹确认、冲突、重连/存活、诊断、HTTP 鉴权/SSE、原子写 |
 | 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、关键组件、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
-| 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 浅/深色对比度、第三方主题 token 覆盖与恢复 |
-| 发布路径 | `test/e2e/publish.e2e.js` | tarball → 干净 profile → API 与 client-module 从安装目录加载 |
+| 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 浅/深色对比度、第三方主题 token 覆盖与恢复（同时覆盖发布路径的 tarball 安装） |
 
 四条结构性约定（见 CONTRIBUTING §9，全部由 `test/unit/guards.test.js` 扫描源码强制）：
 

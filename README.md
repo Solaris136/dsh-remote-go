@@ -95,7 +95,7 @@ pnpm run verify                                   # 仓库规范 + 格式 + 语�
 | `pnpm run test:unit` | 单元测试（Host + Client），不需要网络 / SSH |
 | `pnpm run test:integration` | 模拟远端集成；浏览器 / 桌面套件缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败 |
 | `pnpm run test:coverage` | 覆盖率门禁（阈值 85 / 70 / 80，不含 `vendor/` 与 `test/`） |
-| `pnpm run test:web` / `test:desktop` / `test:e2e` | 打包产物验收：隔离 `dsh web`、真实桌面端、tarball → 干净 profile 的发布路径 |
+| `pnpm run test:web` / `test:desktop` | 打包产物验收：隔离 `dsh web` / 真实桌面端安装 tarball、打开管理浮窗、浅/深色对比度与第三方主题 |
 | `pnpm run sim:remote` | 模拟远端主机自检（探针 → 隧道 → HTTP 200） |
 
 模拟远端主机（`e2e/sim`，不需要真实服务器）：

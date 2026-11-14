@@ -40,7 +40,6 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run test:unit` / `test:coverage` | `node --test "test/unit/*.test.js"`（Host + Client）/ 覆盖率门禁（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%，不含 `vendor/` 与自己） |
 | `pnpm run test:integration` | 集成/E2E（模拟远端 + `Web E2E` + `Desktop E2E`；缺 harness/浏览器时跳过，`DSH_E2E_STRICT=1` 下改为失败） |
 | `pnpm run check:pr-title` / `build:vendor` | 按 Conventional Commits 校验 PR 标题 / 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
-| `pnpm run test:e2e` | 发布路径验收（见下），需要 control DSH 运行时；不在常规 PR CI 中运行 |
 
 `pnpm run verify` 依次执行 `lint` + `format:check` + `check:syntax` + `check:workflows` + `market:check` + `pack:check` +
 `test:unit` + `test:integration`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。覆盖率门禁
@@ -48,11 +47,11 @@ pnpm install --frozen-lockfile --ignore-scripts
 
 格式由 Prettier 统一（`.prettierrc.json`：无分号、单引号、行宽 120、ES 尾逗号、LF），改完跑 `pnpm run format`；Markdown 由人换行（`.prettierignore`），不会被重排。
 
-### 端到端测试（可选）
+### 真实浏览器验收（可选）
 
-`pnpm run test:e2e` 只剩发布路径：`test/e2e/publish.e2e.js` 把 tarball 装进干净的 DSH profile，验证 API 与 client-module
-都从安装目录加载；需要 `e2e/control` 下准备好的隔离 control DSH 运行时，以及 PATH 上的 `pnpm`（或用 `DSH_PNPM_CJS` 指定 pnpm 入口脚本），
-**不需要** SSH 测试主机。真实主机验收不在自动化套件里：自备满足 README 前提的 Linux 主机，按 [e2e/remote/README.md](e2e/remote/README.md)
+`pnpm run test:web` / `pnpm run test:desktop` 把打包产物装进隔离 `dsh web` 或真实桌面端，验证主机条、管理浮窗、浅/深色对比度与第三方主题；
+缺 harness/浏览器时跳过，`DSH_E2E_STRICT=1` 下改为失败。它们同时覆盖发布路径的 tarball 安装（不再有独立的发布路径套件）。
+真实主机验收不在自动化套件里：自备满足 README 前提的 Linux 主机，按 [e2e/remote/README.md](e2e/remote/README.md)
 核对后用插件自身连一次。E2E 会在临时目录/工件里写出证据文件；**提交或转发前务必确认不含令牌、密码、私钥或真实主机名/地址**（见 [SECURITY.md](SECURITY.md)）。
 
 ## 4. 提交信息（Conventional Commits）

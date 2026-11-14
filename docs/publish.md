@@ -8,7 +8,7 @@
 pnpm install --frozen-lockfile --ignore-scripts
 pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 单测 + 集成
 ```
-端到端（需真实测试主机与本机浏览器，非必需门禁）：`pnpm run test:e2e`。
+端到端（非必需门禁，需要本机浏览器/桌面端）：`pnpm run test:web` / `pnpm run test:desktop`。
 
 `package.json` 关键字段（缺一不可）：
 

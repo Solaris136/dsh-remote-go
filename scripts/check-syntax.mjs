@@ -13,7 +13,7 @@ import path from 'node:path'
 import process from 'node:process'
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const includeDirs = ['src', 'scripts', 'test', 'e2e/control']
+const includeDirs = ['src', 'scripts', 'test']
 const includeFiles = ['index.js', 'client.js']
 const skipDirs = new Set('node_modules _research _tools artifacts home home-published logs vendor'.split(' '))
 
