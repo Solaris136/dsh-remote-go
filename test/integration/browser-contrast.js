@@ -12,10 +12,10 @@
 export const MIN_CONTRAST = 3
 
 /** The regression target: the primary buttons that were invisible before #10. */
-export const PRIMARY_TEST_IDS = ['settings-host-add', 'settings-host-add-empty']
+export const PRIMARY_TEST_IDS = ['host-add', 'host-add-empty']
 
 /**
- * Measure every button inside `[data-testid="settings-remote-section"]`:
+ * Measure every button inside `[data-testid="manage-window"]`:
  *
  * - the painted background (alpha-composited over ancestor `backgroundColor`s),
  * - any `background-image` gradient on the way up (the checker refuses to grade
@@ -112,7 +112,7 @@ export function measureButtons() {
   }
   const round = (value) => Math.round(value * 100) / 100
   const format = (color) => `rgb(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)})`
-  const section = document.querySelector('[data-testid="settings-remote-section"]')
+  const section = document.querySelector('[data-testid="manage-window"]')
   if (!section) return { mounted: false, buttons: [] }
   const sectionBackground = effectiveBackground(section)
   const buttons = [...section.querySelectorAll('button')].map((node) => {
@@ -184,11 +184,11 @@ export async function measureStable(page, options) {
  */
 export async function assertMeasured(measured, mode) {
   const { default: assert } = await import('node:assert/strict')
-  assert.equal(measured.mounted, true, `${mode}: the Remote-hosts settings section did not mount`)
+  assert.equal(measured.mounted, true, `${mode}: the host-management window did not mount`)
   assert.equal(
     measured.sectionGradient,
     null,
-    `${mode}: the settings section paints a gradient, which the contrast check cannot evaluate: ${measured.sectionGradient}`,
+    `${mode}: the host-management window paints a gradient, which the contrast check cannot evaluate: ${measured.sectionGradient}`,
   )
   assert.ok(
     measured.buttons.length >= 2,

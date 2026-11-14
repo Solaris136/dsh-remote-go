@@ -533,9 +533,9 @@ export function desktopAppVersion(exe) {
  * A compact snapshot of what a shell page currently shows, for failure messages.
  *
  * Both suites append this to a timeout: "TimeoutError" alone cannot distinguish
- * "the section never mounted" from "the row was found but the click did not land",
+ * "the window never mounted" from "the row was found but the click did not land",
  * and a red nightly run has no interactive page to inspect. It reports the URL, the
- * open dialogs, whether the plugin's settings section mounted, the visible labels
+ * open dialogs, whether the plugin's management window mounted, the visible labels
  * and the first 300 characters of text.
  *
  * Read-only, and it never throws: a diagnostics call that fails must not replace
@@ -556,7 +556,7 @@ export async function describePage(page) {
       return {
         url: location.href,
         dialogs,
-        section: Boolean(document.querySelector('[data-testid="settings-remote-section"]')),
+        section: Boolean(document.querySelector('[data-testid="manage-window"]')),
         labels,
         text: strip(document.body?.innerText).slice(0, 300),
       }

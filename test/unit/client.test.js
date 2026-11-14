@@ -520,7 +520,7 @@ test('components export is a non-empty map of renderable functions', () => {
   assert.equal(typeof plugin.components.DiagnoseDrawer, 'function')
   assert.equal(typeof plugin.components.SettingsModal, 'function')
   assert.equal(typeof plugin.components.PasswordPrompt, 'function')
-  assert.equal(typeof plugin.components.SettingsSection, 'function')
+  assert.equal(plugin.components.SettingsSection, undefined, 'the plugin must not ship a settings-page component')
   assert.equal(typeof plugin.components.RemoteIcon, 'function')
 })
 
@@ -552,13 +552,14 @@ test('dictionaries are bilingual and balanced', () => {
   }
 })
 
-test('apply registers only the overlay host and the settings section', () => {
+test('apply registers only the overlay host: the switcher row is the plugin sole entry', () => {
   const { calls } = runApply(plugin)
-  assert.deepEqual(calls.injects, ['shell.overlay', 'settings.section'])
-  assert.equal(calls.registers.length, 2)
-  // Nothing takes the main column and nothing takes a sidebar row: the switcher row and
-  // the floating windows are the plugin's whole surface.
+  assert.deepEqual(calls.injects, ['shell.overlay'])
+  assert.equal(calls.registers.length, 1)
+  // Nothing takes the main column, no sidebar row is registered, and no settings page
+  // is added: the switcher row and the floating windows are the plugin's whole surface.
   assert.ok(!calls.injects.includes('main'), 'the plugin must not own the main column')
+  assert.ok(!calls.injects.includes('settings.section'), 'no settings page may be registered')
   assert.ok(!calls.injects.includes('sidebar.panellist'), 'no global-panel row may be registered')
   assert.ok(!calls.injects.includes('sidebar.workspaces'), 'no sidebar workspace entry may be registered')
   assert.ok(!calls.injects.includes('sidebar.footer.action'), 'no footer action may be registered')
@@ -568,23 +569,12 @@ test('apply registers only the overlay host and the settings section', () => {
   assert.ok(overlay, 'the overlay host must be registered')
   assert.equal(overlay.component, plugin.components.PluginOverlay)
   assert.equal(overlay.options.locale, PANEL_ID)
-
-  const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
-  assert.ok(section, 'settings.section entry must be registered')
-  assert.equal(section.options.id, PANEL_ID)
-  assert.equal(section.options.order, 45)
-  assert.equal(section.options.locale, PANEL_ID)
-  assert.equal(section.component, plugin.components.SettingsSection)
-  assert.equal(typeof section.options.label, 'function')
-  assert.equal(section.options.label(), '远程主机')
 })
 
 test('shared inject face carries the command channels, not a panel', () => {
   const { calls } = runApply(plugin)
   const overlay = calls.registers.find((entry) => entry.options.name === 'shell.overlay')
-  const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
   assert.equal(typeof overlay.options.inject, 'function')
-  assert.equal(typeof section.options.inject, 'function')
   const face = overlay.options.inject()
   assert.equal(typeof face.getLocaleId, 'function')
   assert.equal(face.getLocaleId(), 'zh')
@@ -1390,7 +1380,7 @@ test('the overlay host carries the theme root and the stylesheet', () => {
   assert.match(html, /\[data-shell-overlay\] \{ z-index: 2147483001; \}/)
 })
 
-test('settings section renders the remote-hosts page and its empty state', () => {
+test('host management list renders the empty state and its controls', () => {
   const state = {
     hostVersion: '0.2.2-rc.1',
     targetVersion: '0.2.2-rc.1',
@@ -1400,23 +1390,26 @@ test('settings section renders the remote-hosts page and its empty state', () =>
     firstRun: true,
   }
   const html = render(
-    React.createElement(plugin.components.SettingsSection, {
+    React.createElement(plugin.components.HostListView, {
       t,
-      initialState: state,
-      openPanel: () => {},
-      panelStore: { request: () => {} },
-      getLocaleId: () => 'zh',
+      state,
+      loading: false,
+      error: null,
+      onAdd: () => {},
+      onRefresh: () => {},
+      onOpenSettings: () => {},
     }),
   )
-  assert.match(html, /data-testid="settings-remote-section"/)
+  assert.match(html, /data-testid="host-list-empty"/)
   assert.match(html, /远程主机/)
-  assert.match(html, /管理通过 SSH 连接的远程主机/)
-  assert.match(html, /data-testid="settings-host-add"/)
-  assert.match(html, /data-testid="settings-settings-open"/)
-  assert.match(html, /还没有远程主机。添加一台，然后在这里打开它的 DSH。/)
+  assert.match(html, /data-testid="host-add"/)
+  assert.match(html, /data-testid="host-add-empty"/)
+  assert.match(html, /data-testid="host-refresh"/)
+  assert.match(html, /data-testid="host-settings"/)
+  assert.match(html, /还没有远程主机。添加一台，然后打开它的远端 DSH 界面。/)
 })
 
-test('settings section offers open/connect actions per host', () => {
+test('host management list offers open/connect actions per host', () => {
   const state = {
     hostVersion: '0.2.2-rc.1',
     targetVersion: '0.2.2-rc.1',
@@ -1429,19 +1422,29 @@ test('settings section offers open/connect actions per host', () => {
     firstRun: false,
   }
   const html = render(
-    React.createElement(plugin.components.SettingsSection, {
+    React.createElement(plugin.components.HostListView, {
       t,
-      initialState: state,
-      openPanel: () => {},
-      panelStore: { request: () => {} },
-      getLocaleId: () => 'zh',
+      state,
+      loading: false,
+      error: null,
+      onAdd: () => {},
+      onRefresh: () => {},
+      onOpenSettings: () => {},
+      onOpenHost: () => {},
+      onDisconnectHost: () => {},
+      onReconnectHost: () => {},
+      onEditHost: () => {},
+      onDeleteHost: () => {},
+      onDiagnoseHost: () => {},
     }),
   )
-  assert.match(html, /data-testid="settings-host-open"/)
-  assert.match(html, /打开远程界面/)
-  assert.match(html, /data-testid="settings-host-connect"/)
+  assert.match(html, /data-testid="host-open"/)
   assert.match(html, /data-host-id="h_connected"/)
   assert.match(html, /data-host-id="h_offline"/)
+  // The card's one primary action follows the host state: open when up, connect when down.
+  assert.match(html, />打开</)
+  assert.match(html, />连接</)
+  assert.match(html, /data-testid="host-reconnect"/)
 })
 
 test('every automation data-testid required by acceptance is rendered', () => {
@@ -1457,14 +1460,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
   const emptyState = { ...baseState, hosts: [] }
   const markup = {
     overlay: render(React.createElement(plugin.components.PluginOverlay, { t, getLocaleId: () => 'zh' })),
-    settingsSection: render(
-      React.createElement(plugin.components.SettingsSection, {
-        t,
-        initialState: baseState,
-        panelStore: { request: () => {} },
-        getLocaleId: () => 'zh',
-      }),
-    ),
     empty: render(
       React.createElement(plugin.components.HostListView, {
         t,
@@ -1597,10 +1592,7 @@ test('every automation data-testid required by acceptance is rendered', () => {
     'settings-default-key-path',
     'settings-default-key-path-pick',
     'wizard-key-path-pick',
-    'settings-remote-section',
-    'settings-host-add',
-    'settings-host-open',
-    'settings-settings-open',
+    'host-settings',
     'error-card',
     'error-retry',
     'fingerprint-card',

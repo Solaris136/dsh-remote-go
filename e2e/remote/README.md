@@ -59,7 +59,7 @@
 command -v curl || command -v wget
 ```
 
-然后在本地 DSH 的 **设置 → 远程主机** 添加主机并点「打开」：插件会先把托管 Node 准备到
+然后在本地 DSH 的**主机条**（侧边栏顶部）里点「添加主机」添加主机，再从列表里点「打开」：插件会先把托管 Node 准备到
 `~/.dsh/remote-go/node`（首次下载官方 tarball 并校验），再跑一次
 `npx -y @deepseek-ai/dsh@<本机版本> --version` 预检（冷缓存下载发生在这里），最后用
 `DSH_HOME=~/.dsh <托管 npx> ... --profile web --no-open --port 0` 启动远端；远端数据直接在 `~/.dsh`。
