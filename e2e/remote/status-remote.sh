@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # dsh-remote-go · remote runtime status (read-only; runs ON the remote host)
 #
-# After V0 handover the plugin (or another harness) owns the remote `dsh web`
-# lifecycle. This script therefore only INSPECTS: it never starts, stops or
-# touches DSH_HOME, and it is safe to run while another process is using the
-# isolated runtime.
+# After V0 handover the plugin (or another harness) owns the remote `dsh web` lifecycle, so
+# this script only INSPECTS: it never starts, stops or touches DSH_HOME, and it is safe to
+# run while another process is using the isolated runtime.
 #
-# It reports:
-#   - runtime presence + versions (private Node, installed dsh, install record)
-#   - disk usage / directory layout
-#   - last recorded web run state from run/ (pid/port/log, stale or alive)
-#   - every process currently using this runtime's dsh CLI (read-only pgrep)
-#   - loopback listeners owned by those processes
+# It reports runtime presence + versions (private Node, installed dsh, install record), disk
+# usage and layout, the last recorded web run state from run/ (pid/port/log, stale or alive),
+# every process using this runtime's dsh CLI (read-only pgrep) and their loopback listeners.
 #
 # Env overrides: DSH_REMOTE_ROOT
 set -uo pipefail
@@ -37,10 +33,7 @@ redact_url() {
 }
 
 runtime_ok=1
-printf 'MODE=runtime-only\n'
-printf 'ROOT=%s\n' "$ROOT"
-printf 'DSH_HOME=%s\n' "$DSH_HOME_DIR"
-printf 'LOG=%s\n' "$LOG"
+printf 'MODE=runtime-only\nROOT=%s\nDSH_HOME=%s\nLOG=%s\n' "$ROOT" "$DSH_HOME_DIR" "$LOG"
 
 printf '\n== runtime ==================================================\n'
 if [ -x "$NODE_BIN" ]; then

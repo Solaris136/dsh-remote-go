@@ -1,6 +1,6 @@
-// Bundle the ssh2 dependency (devDependency) into a single ESM file under
-// vendor/, so the published plugin has no runtime dependencies and triggers no
-// install scripts. Re-run after upgrading ssh2: node scripts/build-vendor.mjs
+// Bundle the ssh2 dependency (devDependency) into one CommonJS file under vendor/, so the
+// published plugin has no runtime dependencies and triggers no install scripts.
+// Re-run after upgrading ssh2: node scripts/build-vendor.mjs
 import { build } from 'esbuild'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -34,6 +34,5 @@ await writeFile(
   `# Third-party notices\n\n## ssh2\n\n- Package: \`ssh2\` (MIT)\n- Source: https://github.com/mscdex/ssh2\n- Bundled file: \`vendor/ssh2.bundle.mjs\` (${(stats.length / 1024).toFixed(0)} KiB)\n- License text: see https://github.com/mscdex/ssh2/blob/master/LICENSE\n\nThe bundle excludes the optional native accelerator \`cpu-features\`; ssh2 uses its pure-JavaScript fallback then.\n`,
   'utf8',
 )
-console.log(
-  `[build-vendor] wrote ${path.relative(root, outfile)} (${(stats.length / 1024).toFixed(0)} KiB) and THIRD_PARTY_NOTICES.md`,
-)
+const kib = (stats.length / 1024).toFixed(0)
+console.log(`[build-vendor] wrote ${path.relative(root, outfile)} (${kib} KiB) and THIRD_PARTY_NOTICES.md`)

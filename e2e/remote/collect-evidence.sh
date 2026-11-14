@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # dsh-remote-go · collect V0 evidence from a running remote instance (read-only).
 #
-# Prints labelled sections that the local driver saves under evidence/. Also runs
-# one isolated startup-timing probe: a second, throwaway DSH_HOME that reuses the
-# installed node/dsh runtime through a temp root with symlinks, so the production
+# Prints labelled sections the local driver saves under evidence/, then runs one isolated
+# startup-timing probe (throwaway DSH_HOME, symlinked runtime) so the production
 # start-remote.sh path is measured without touching the main instance.
 #
 # Env override: DSH_REMOTE_ROOT (default ~/.dsh-remote-go)
@@ -15,6 +14,7 @@ LOG="$ROOT/logs/remote-web.log"
 PID="$(cat "$RUN/web.pid" 2>/dev/null || true)"
 
 section() { printf '\n===== %s =====\n' "$*"; }
+redact() { sed -E 's/(token=)([A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/\1\2<redacted>/g' "$@"; }
 
 section 'A. runtime versions'
 NODE_BIN="$ROOT/node/bin/node"
@@ -49,7 +49,7 @@ if [ -f "$LOG" ]; then
   printf 'pidfile_mtime=%s\n' "$(stat -c '%y' "$RUN/web.pid" 2>/dev/null || echo '(none)')"
   printf 'log_mode=%s pidfile_mode=%s\n' "$(stat -c '%a' "$LOG" 2>/dev/null)" "$(stat -c '%a' "$RUN/web.pid" 2>/dev/null)"
   printf 'log_content_redacted:\n'
-  sed -E 's/(token=)([A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/\1\2<redacted>/g' "$LOG" | head -20
+  redact "$LOG" | head -20
   if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
     now="$(date +%s)"; up="$(ps -o etimes= -p "$PID" 2>/dev/null | tr -d ' ')"
     if [ -n "$up" ]; then
@@ -68,7 +68,7 @@ find "$ROOT/home" -maxdepth 3 -mindepth 1 -printf '%y %P\n' 2>/dev/null | sort |
 
 section 'E. isolated startup timing probe (throwaway DSH_HOME, does not touch main instance)'
 TMPROOT="$ROOT/.timing-probe"
-if [ -d "$TMPROOT" ]; then rm -rf "$TMPROOT"; fi
+rm -rf "$TMPROOT"
 mkdir -p "$TMPROOT"
 ln -s "$ROOT/node" "$TMPROOT/node"
 ln -s "$ROOT/dsh-home" "$TMPROOT/dsh-home"
@@ -79,7 +79,7 @@ TMPPORT="$(cat "$TMPROOT/run/web.port" 2>/dev/null || true)"
 if [ -n "$TMPPORT" ]; then
   printf 'probe_probe_http=%s\n' "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$TMPPORT/" 2>/dev/null || echo 000)"
 fi
-printf 'probe_log:\n'; sed -E 's/(token=)([A-Za-z0-9_-]{6})[A-Za-z0-9_-]*/\1\2<redacted>/g' "$TMPROOT/logs/remote-web.log" 2>/dev/null | head -10
+printf 'probe_log:\n'; redact "$TMPROOT/logs/remote-web.log" 2>/dev/null | head -10
 DSH_REMOTE_ROOT="$TMPROOT" bash "$ROOT/scripts/stop-remote.sh" 2>&1 | grep -E '^(STOP_OK|ALREADY_STOPPED|PID|POST_STOP_PROBE_HTTP)' || true
 sleep 1
 if [ -n "$TMPPID" ] && kill -0 "$TMPPID" 2>/dev/null; then

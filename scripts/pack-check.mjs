@@ -1,16 +1,14 @@
-// Verify the published artifact without publishing: check `files` coverage and,
-// when given a tarball, that the archive contains exactly the runtime files.
+// Verify the published artifact without publishing: check `files` coverage and, when
+// given a tarball, that the archive contains exactly the runtime files.
 //
-// Usage:
 //   node scripts/pack-check.mjs                  # check package.json files coverage
 //   node scripts/pack-check.mjs <plugin.tgz>     # additionally inspect the packed tarball
 //
-// The tarball check reads the gzip header listing via `tar -tzf` (POSIX tar is
-// present on Windows 10+, macOS and Linux); if tar is unavailable the check
-// reports that instead of silently passing.
+// The tarball listing comes from `tar -tzf` (POSIX tar ships with Windows 10+, macOS
+// and Linux); if tar is unavailable the check reports that instead of passing silently.
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -29,25 +27,17 @@ if (findIndex >= 0) {
 /** @param {string} dir */
 async function newestTarball(dir) {
   if (!existsSync(dir)) return null
-  const entries = (await readdir(dir)).filter((name) => name.endsWith('.tgz'))
-  if (entries.length === 0) return null
   let best = null
   let bestTime = -1
-  for (const name of entries) {
+  for (const name of (await readdir(dir)).filter((name) => name.endsWith('.tgz'))) {
     const full = path.join(dir, name)
-    const stat = await statFile(full)
-    if (stat.mtimeMs > bestTime) {
+    const info = await stat(full)
+    if (info.mtimeMs > bestTime) {
       best = full
-      bestTime = stat.mtimeMs
+      bestTime = info.mtimeMs
     }
   }
   return best
-}
-
-/** @param {string} file */
-async function statFile(file) {
-  const { stat } = await import('node:fs/promises')
-  return stat(file)
 }
 
 function fail(message) {
@@ -58,17 +48,8 @@ function fail(message) {
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
 const problems = []
 
-const mustShip = [
-  'index.js',
-  'client.js',
-  'cordis.patch.yml',
-  'locale/en.json',
-  'locale/zh.json',
-  'src/index.js',
-  'src/api.js',
-  'src/service.js',
-  'package.json',
-]
+const mustShip = `index.js client.js cordis.patch.yml locale/en.json locale/zh.json src/index.js
+src/api.js src/service.js package.json`.split(/\s+/)
 
 for (const file of mustShip) {
   if (!existsSync(path.join(root, file))) problems.push(`missing file: ${file}`)
@@ -80,7 +61,7 @@ if (pkg.private === true) problems.push('package.json is private; publishing is 
 
 if (tarball) {
   if (!existsSync(tarball)) fail(`tarball not found: ${tarball}`)
-  let listing
+  let listing = ''
   try {
     listing = execFileSync('tar', ['-tzf', tarball], {
       encoding: 'utf8',

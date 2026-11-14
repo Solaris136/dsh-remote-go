@@ -1,12 +1,8 @@
 // Validate the committed CI workflow YAML files with a real YAML parser.
 //
-// Resolution order:
-//   1. the js-yaml devDependency (what CI installs),
-//   2. DSH_JS_YAML, an explicit path to a js-yaml entry point,
-//   3. python3 + PyYAML.
-//
-// Exits 1 when a workflow fails to parse or is missing, and 2 when no YAML
-// parser is available at all.
+// Resolution order: the js-yaml devDependency (what CI installs), DSH_JS_YAML (an
+// explicit path to a js-yaml entry point), then python3 + PyYAML. Exits 1 when a
+// workflow fails to parse or is missing, and 2 when no YAML parser is available.
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -15,17 +11,12 @@ import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const files = [
-  '.github/workflows/ci.yml',
-  '.github/workflows/codeql.yml',
-  '.github/workflows/release.yml',
-  '.github/workflows/acceptance.yml',
-]
+const files = ['ci', 'codeql', 'release', 'acceptance'].map((name) => `.github/workflows/${name}.yml`)
 
 /** @type {((text: string) => unknown) | null} */
 let parse = null
-// Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).
 try {
+  // Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).
   const module = await import('js-yaml')
   const yaml = /** @type {any} */ (module).default ?? module
   parse = (text) => yaml.load(text)
@@ -41,8 +32,7 @@ if (!parse && override) {
     process.exit(2)
   }
   try {
-    const require = createRequire(import.meta.url)
-    const yaml = require(override)
+    const yaml = createRequire(import.meta.url)(override)
     parse = (text) => yaml.load(text)
     console.log(`[check-workflows] using js-yaml: ${override}`)
   } catch (error) {
@@ -51,26 +41,17 @@ if (!parse && override) {
     )
   }
 }
-if (!parse) {
-  // Fallback: python3 + PyYAML.
-  // `windowsHide` keeps a console from flashing for every child the gates start.
-  const probe = spawnSync('python3', ['-c', 'import yaml; print("ok")'], { encoding: 'utf8', windowsHide: true })
-  if (probe.status === 0) {
-    parse = (text) => {
-      const result = spawnSync(
-        'python3',
-        ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
-        {
-          input: text,
-          encoding: 'utf8',
-          windowsHide: true,
-        },
-      )
-      if (result.status !== 0) throw new Error(result.stderr)
-      return JSON.parse(result.stdout)
-    }
-    console.log('[check-workflows] using python3 + PyYAML')
+if (!parse && spawnSync('python3', ['-c', 'import yaml; print("ok")'], { windowsHide: true }).status === 0) {
+  parse = (text) => {
+    const result = spawnSync(
+      'python3',
+      ['-c', 'import sys,yaml,json; print(json.dumps(yaml.safe_load(sys.stdin.read())))'],
+      { input: text, encoding: 'utf8', windowsHide: true },
+    )
+    if (result.status !== 0) throw new Error(result.stderr)
+    return JSON.parse(result.stdout)
   }
+  console.log('[check-workflows] using python3 + PyYAML')
 }
 if (!parse) {
   console.error(

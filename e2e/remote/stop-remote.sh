@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # dsh-remote-go · stop the isolated remote DSH web server (runs ON the remote host)
 #
-# Sends SIGTERM to the recorded process group, escalates to SIGKILL after a
-# grace period, and clears the run-state files. Idempotent: a stopped server is
-# reported as already-stopped, not an error.
-#
-# Env overrides: DSH_REMOTE_ROOT, STOP_TIMEOUT (seconds, default 20)
+# Sends SIGTERM to the recorded process group, escalates to SIGKILL after a grace period,
+# and clears the run-state files. Idempotent: a stopped server is reported as
+# already-stopped, not an error. Env overrides: DSH_REMOTE_ROOT, STOP_TIMEOUT (default 20s)
 set -euo pipefail
 
 ROOT="${DSH_REMOTE_ROOT:-$HOME/.dsh-remote-go}"
@@ -16,13 +14,6 @@ TOKEN_FILE="$RUN_DIR/web.token"
 URL_FILE="$RUN_DIR/web.url"
 STATE_FILE="$RUN_DIR/web.state.json"
 STOP_TIMEOUT="${STOP_TIMEOUT:-20}"
-
-probe_http() {
-  local port="$1" code
-  code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || true)"
-  [ -n "$code" ] || code=000
-  printf '%s' "$code"
-}
 
 clear_state() {
   rm -f "$PID_FILE" "$PORT_FILE" "$TOKEN_FILE" "$URL_FILE" "$STATE_FILE"
@@ -57,7 +48,10 @@ if kill -0 "$pid" 2>/dev/null; then
 fi
 
 post_code="000"
-if [ -n "$port" ]; then post_code="$(probe_http "$port")"; fi
+if [ -n "$port" ]; then
+  post_code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${port}/" 2>/dev/null || true)"
+  [ -n "$post_code" ] || post_code=000
+fi
 
 alive=0
 if kill -0 "$pid" 2>/dev/null; then alive=1; fi

@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # dsh-remote-go · V0 remote bootstrap (runs ON the remote test host)
 #
-# Creates an isolated, repeatable environment under ~/.dsh-remote-go:
-#   1. official Node v24.22.2 linux-x64 tarball, sha256-verified against SHASUMS256.txt
-#   2. @deepseek-ai/dsh@<exact version> installed into a private npm prefix
-#      (no global install, no root)
-#   3. prints verified `dsh --version`
+# Creates an isolated, repeatable environment under ~/.dsh-remote-go: official Node
+# v24.22.2 linux-x64 (sha256-verified against SHASUMS256.txt) and
+# @deepseek-ai/dsh@<exact version> installed into a private npm prefix (no global install,
+# no root), then prints the verified `dsh --version`.
 #
-# Idempotent: re-running skips finished steps unless FORCE=1.
-# Logs: ~/.dsh-remote-go/logs/setup.log
-#
+# Idempotent: re-running skips finished steps unless FORCE=1. Logs: logs/setup.log
 # Env overrides: DSH_REMOTE_ROOT, NODE_VERSION, DSH_VERSION, FORCE
 set -euo pipefail
 
@@ -106,11 +103,10 @@ install_dsh() {
     --no-audit --no-fund --no-progress --loglevel=warn
   dsh_ok || { log "ERROR: expected dsh@${DSH_VERSION} after npm install"; return 1; }
 
-  # npm >= 11.16 gates dependency install scripts behind `allow-scripts`.
-  # The only script this stack actually needs is a chmod on node-pty's bundled
-  # spawn-helper (native .node binaries are already ship-with-package prebuilds),
-  # so run that idempotent postinstall body directly instead of approving all
-  # dependency scripts.
+  # npm >= 11.16 gates dependency install scripts behind `allow-scripts`. The only script
+  # this stack needs is a chmod on node-pty's bundled spawn-helper (native .node binaries
+  # are already ship-with-package prebuilds), so run that idempotent postinstall body
+  # directly instead of approving all dependency scripts.
   local helper_script="$DSH_PREFIX/node_modules/@deepseek-ai/dsh-subprocess-local/scripts/ensure-spawn-helper.mjs"
   if [ -f "$helper_script" ]; then
     PATH="$NODE_DIR/bin:$PATH" "$NODE_DIR/bin/node" "$helper_script" \
@@ -136,26 +132,15 @@ write_install_record() {
   INSTALL_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   "$NODE_DIR/bin/node" -e '
     const fs = require("node:fs");
-    const record = {
-      root: process.env.INSTALL_ROOT,
-      nodeVersion: process.env.INSTALL_NODE_VERSION,
-      npmVersion: process.env.INSTALL_NPM_VERSION,
-      dshVersion: process.env.INSTALL_DSH_VERSION,
-      log: process.env.INSTALL_LOG,
-      installedSizeKb: Number(process.env.INSTALL_SIZE_KB),
-      installedAt: process.env.INSTALL_AT,
-    };
-    fs.writeFileSync(process.argv[1], JSON.stringify(record, null, 2) + "\n");
+    const e = process.env;
+    fs.writeFileSync(process.argv[1], JSON.stringify({
+      root: e.INSTALL_ROOT, nodeVersion: e.INSTALL_NODE_VERSION, npmVersion: e.INSTALL_NPM_VERSION,
+      dshVersion: e.INSTALL_DSH_VERSION, log: e.INSTALL_LOG,
+      installedSizeKb: Number(e.INSTALL_SIZE_KB), installedAt: e.INSTALL_AT,
+    }, null, 2) + "\n");
   ' "$RUN_DIR/install.json"
-  printf 'SETUP_OK\n'
-  printf 'NODE_VERSION=%s\n' "$node_ver"
-  printf 'NPM_VERSION=%s\n' "$npm_ver"
-  printf 'DSH_VERSION=%s\n' "$dsh_ver"
-  printf 'DSH_BIN=%s\n' "$DSH_BIN"
-  printf 'NODE_BIN=%s\n' "$NODE_DIR/bin/node"
-  printf 'ROOT=%s\n' "$ROOT"
-  printf 'INSTALL_FILE=%s\n' "$RUN_DIR/install.json"
-  printf 'LOG=%s\n' "$LOG"
+  printf 'SETUP_OK\nNODE_VERSION=%s\nNPM_VERSION=%s\nDSH_VERSION=%s\nDSH_BIN=%s\nNODE_BIN=%s\nROOT=%s\nINSTALL_FILE=%s\nLOG=%s\n' \
+    "$node_ver" "$npm_ver" "$dsh_ver" "$DSH_BIN" "$NODE_DIR/bin/node" "$ROOT" "$RUN_DIR/install.json" "$LOG"
 }
 
 main() {

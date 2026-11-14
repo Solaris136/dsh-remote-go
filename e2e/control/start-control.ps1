@@ -19,9 +19,7 @@ function Resolve-NodeExe {
   $command = Get-Command node -ErrorAction SilentlyContinue
   if ($command) {
     $candidate = if ($command.Source) { $command.Source } else { $command.Path }
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-      return (Resolve-Path -LiteralPath $candidate).Path
-    }
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return (Resolve-Path -LiteralPath $candidate).Path }
   }
   throw @"
 Node.js was not found. The Windows E2E control instance needs Node 24 to run DSH.
@@ -39,26 +37,25 @@ $log = Join-Path $logs 'control.log'
 $errLog = Join-Path $logs 'control.err.log'
 $statePath = Join-Path $root 'e2e/control/.state.json'
 
+$state = $null
 if (Test-Path $statePath) {
-  try {
-    $state = Get-Content $statePath -Raw | ConvertFrom-Json
-    if ($state.pid) {
-      $existing = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
-      if ($existing -and -not $Restart) {
-        Write-Output "control already running: pid=$($state.pid) port=$($state.port)"
-        return
-      }
-      if ($existing) { Stop-Process -Id $state.pid -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
+  try { $state = Get-Content $statePath -Raw | ConvertFrom-Json } catch { }
+  if ($state.pid) {
+    $existing = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
+    if ($existing -and -not $Restart) {
+      Write-Output "control already running: pid=$($state.pid) port=$($state.port)"
+      return
     }
-  } catch { }
+    if ($existing) { Stop-Process -Id $state.pid -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
+  }
 }
 
 if (Test-Path $log) { Remove-Item $log -Force }
 if (Test-Path $errLog) { Remove-Item $errLog -Force }
 $env:DSH_HOME = $controlHome
-# -WindowStyle Hidden: the control instance is a background helper, so it must never
-# pop a console window. (`-NoNewWindow` cannot be combined with `-WindowStyle`, and
-# the hidden style is what the Windows conventions in CONTRIBUTING call for.)
+# -WindowStyle Hidden: the control instance is a background helper, so it must never pop a
+# console window. (`-NoNewWindow` cannot be combined with `-WindowStyle`, and the hidden
+# style is what the Windows conventions in CONTRIBUTING call for.)
 $proc = Start-Process -FilePath $node -ArgumentList @($dshBin, '--profile', 'web', '--no-open', '--port', '0') `
   -WorkingDirectory $root -RedirectStandardOutput $log -RedirectStandardError $errLog -PassThru -WindowStyle Hidden
 $deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)

@@ -3,21 +3,16 @@
 //
 // Serves a minimal wrapper page on 127.0.0.1:<random> that embeds
 //   http://127.0.0.1:<remote-port>/?token=<launch-token>
-// in an <iframe>, drives a real Chrome through puppeteer-core, and records:
-//   - whether the remote frame loads and where it ends up (token -> clean URL)
-//   - whether the dsh-auth-* cookie was minted for this authority
-//   - whether the app UI actually rendered (DOM size, text, composer)
-//   - whether the WebSocket(s) connected and carried frames
-//   - console/page/network errors that could explain a failure
+// in an <iframe>, drives a real Chrome through puppeteer-core, and records: whether the
+// remote frame loads and where it ends up (token -> clean URL), whether the dsh-auth-*
+// cookie was minted for this authority, whether the app UI rendered, whether the
+// WebSocket(s) connected and carried frames, and console/page/network errors.
 //
-// The wrapper page deliberately uses 127.0.0.1:<other-port>: same-site as the
-// remote (scheme+host), different origin — the exact shape the plugin uses.
+// The wrapper uses 127.0.0.1:<other-port>: same-site as the remote (scheme+host),
+// different origin — the exact shape the plugin uses.
 //
-// Usage:
-//   node embed-check.mjs --remote-port 41234 --token-file ../.token
-// Optional:
-//   --chrome <path> --out <json path> --screenshot <png path> --timeout-ms 45000
-//
+// Usage: node embed-check.mjs --remote-port 41234 --token-file ../.token
+// Optional: --chrome <path> --out <json> --screenshot <png> --timeout-ms 45000
 // Exit code 0 = V0 iframe gate passed, 1 = failed (result JSON still written).
 
 import http from 'node:http'
@@ -46,8 +41,8 @@ function parseArgs(argv) {
 }
 
 /**
- * Portable Chrome discovery: --chrome, then CHROME_PATH, then the default
- * install location of each supported OS. No developer-specific path.
+ * Portable Chrome discovery: --chrome, then CHROME_PATH, then the default install location
+ * of each supported OS. No developer-specific path.
  * @returns {string | null}
  */
 function resolveChrome() {
@@ -66,10 +61,7 @@ function resolveChrome() {
     '/usr/bin/chromium',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   ].filter(Boolean)
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate
-  }
-  return null
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null
 }
 
 const args = parseArgs(process.argv.slice(2))
@@ -96,14 +88,9 @@ if (!chromePath) {
 const token = fs.readFileSync(tokenFile, 'utf8').trim()
 const remoteUrl = `http://127.0.0.1:${remotePort}/`
 const seedUrl = `${remoteUrl}?token=${encodeURIComponent(token)}`
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-function nowIso() {
-  return new Date().toISOString()
-}
-
-// --- minimal wrapper page (same-site, different port) ----------------------
+// Minimal wrapper page: same-site, different port.
 const wrapperHtml = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>dsh-remote-go V0 wrapper</title>
@@ -130,7 +117,7 @@ const wrapperPort = server.address().port
 const wrapperUrl = `http://127.0.0.1:${wrapperPort}/`
 
 const result = {
-  generatedAt: nowIso(),
+  generatedAt: new Date().toISOString(),
   kind: 'v0-iframe-embed-check',
   wrapperUrl,
   remoteUrl,
@@ -185,40 +172,32 @@ try {
   let wsFramesReceived = 0
   let wsFramesSent = 0
 
-  cdp.on('Network.webSocketCreated', (event) => {
-    wsCreated.push({ url: event.url, requestId: event.requestId })
-  })
-  cdp.on('Network.webSocketHandshakeResponseReceived', (event) => {
-    wsHandshakes.push({
-      url: event.response?.url,
-      status: event.response?.status,
-      headers: event.response?.headers,
-    })
-  })
+  cdp.on('Network.webSocketCreated', (event) => wsCreated.push({ url: event.url, requestId: event.requestId }))
+  cdp.on('Network.webSocketHandshakeResponseReceived', (event) =>
+    wsHandshakes.push({ url: event.response?.url, status: event.response?.status, headers: event.response?.headers }),
+  )
   cdp.on('Network.webSocketFrameReceived', () => {
     wsFramesReceived++
   })
   cdp.on('Network.webSocketFrameSent', () => {
     wsFramesSent++
   })
-  cdp.on('Network.webSocketClosed', (event) => {
-    wsClosed.push({ url: event.url })
-  })
-  cdp.on('Network.webSocketFrameError', (event) => {
-    wsErrors.push({ errorMessage: event.errorMessage, requestId: event.requestId })
-  })
+  cdp.on('Network.webSocketClosed', (event) => wsClosed.push({ url: event.url }))
+  cdp.on('Network.webSocketFrameError', (event) =>
+    wsErrors.push({ errorMessage: event.errorMessage, requestId: event.requestId }),
+  )
 
   page.on('console', (message) => {
     if (message.type() === 'error') result.consoleErrors.push(message.text().slice(0, 500))
   })
   page.on('pageerror', (error) => result.pageErrors.push(String(error).slice(0, 500)))
-  page.on('requestfailed', (request) => {
+  page.on('requestfailed', (request) =>
     result.requestFailures.push({
       url: request.url(),
       method: request.method(),
       errorText: request.failure()?.errorText ?? '',
-    })
-  })
+    }),
+  )
 
   const response = await page.goto(wrapperUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
   addCheck(
@@ -229,7 +208,7 @@ try {
     wrapperUrl,
   )
 
-  // --- wait for the remote frame to appear in the frame tree --------------
+  // Wait for the remote frame to appear in the frame tree.
   const deadline = Date.now() + timeoutMs
   let remoteFrame = null
   while (Date.now() < deadline) {
@@ -289,6 +268,7 @@ try {
     await sleep(1500)
 
     const frameUrl = remoteFrame.url()
+    const domReady = Boolean(dom) && (dom.elementCount > 80 || (dom.bodyText ?? '').trim().length > 80)
     addCheck(
       'frame.cookie-exchange',
       'frame URL settles on clean / (no token) after 303',
@@ -299,7 +279,7 @@ try {
       'frame.dom-rendered',
       'remote DOM has > 80 elements or > 80 chars of text',
       dom ? `elements=${dom.elementCount}, textLength=${dom.bodyText?.trim().length ?? 0}` : 'no dom snapshot',
-      Boolean(dom) && (dom.elementCount > 80 || (dom.bodyText ?? '').trim().length > 80),
+      domReady,
       'frame.dom',
     )
     addCheck(
@@ -322,7 +302,6 @@ try {
     }
   }
 
-  // --- wrapper DOM snapshot ------------------------------------------------
   try {
     result.wrapper = await page.evaluate(() => {
       const iframe = document.querySelector('iframe')
@@ -337,7 +316,7 @@ try {
     result.wrapper = { error: String(error).slice(0, 300) }
   }
 
-  // --- cookies via CDP (version-agnostic) ----------------------------------
+  // Cookies via CDP (version-agnostic).
   try {
     const { cookies } = await cdp.send('Network.getAllCookies')
     result.cookies = cookies
@@ -369,7 +348,6 @@ try {
     addCheck('cookie.dsh-auth-present', 'a dsh-auth-* cookie is stored', `error: ${String(error).slice(0, 300)}`, false)
   }
 
-  // --- WebSocket evidence --------------------------------------------------
   result.webSockets = {
     created: wsCreated,
     handshakes: wsHandshakes,
@@ -379,13 +357,13 @@ try {
     framesSent: wsFramesSent,
   }
   const mux = wsCreated.find((ws) => ws.url.includes('127.0.0.1'))
+  const successfulHandshake = wsHandshakes.find((handshake) => handshake.status === 101)
   addCheck(
     'websocket.created',
     'at least one WebSocket opened to 127.0.0.1:<remote-port>',
     wsCreated.length > 0 ? `${wsCreated.length} socket(s); first=${wsCreated[0].url}` : 'none',
     wsCreated.length > 0 && Boolean(mux),
   )
-  const successfulHandshake = wsHandshakes.find((handshake) => handshake.status === 101)
   addCheck(
     'websocket.101',
     'WebSocket handshake answered 101',
@@ -401,7 +379,7 @@ try {
     wsFramesReceived > 0,
   )
 
-  // --- errors --------------------------------------------------------------
+  const failedRemote = result.requestFailures.filter((failure) => failure.url.includes(`127.0.0.1:${remotePort}`))
   addCheck(
     'console.no-fatal',
     'no page-context uncaught errors',
@@ -411,11 +389,10 @@ try {
   addCheck(
     'network.no-failed-remote-requests',
     'no failed network request to the remote origin',
-    `${result.requestFailures.filter((failure) => failure.url.includes(`127.0.0.1:${remotePort}`)).length} failed remote request(s)`,
-    result.requestFailures.filter((failure) => failure.url.includes(`127.0.0.1:${remotePort}`)).length === 0,
+    `${failedRemote.length} failed remote request(s)`,
+    failedRemote.length === 0,
   )
 
-  // --- screenshot ----------------------------------------------------------
   try {
     fs.mkdirSync(path.dirname(screenshotPath), { recursive: true })
     await page.screenshot({ path: screenshotPath, fullPage: false })
@@ -439,7 +416,7 @@ try {
     if (browser) await browser.close()
   } catch {}
   await new Promise((resolve) => server.close(resolve))
-  result.finishedAt = nowIso()
+  result.finishedAt = new Date().toISOString()
   fs.mkdirSync(path.dirname(outPath), { recursive: true })
   fs.writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n')
   const passed = result.checks.filter((check) => check.pass).length

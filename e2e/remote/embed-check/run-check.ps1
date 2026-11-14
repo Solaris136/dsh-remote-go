@@ -1,8 +1,8 @@
 # dsh-remote-go · run the V0 iframe embedding check
 #
-# Installs puppeteer-core into this folder (if missing) and runs embed-check.mjs
-# against the currently tunnelled remote DSH web server. Reads ../.state.json and
-# ../.token written by remote.ps1.
+# Installs puppeteer-core into this folder (if missing) and runs embed-check.mjs against the
+# currently tunnelled remote DSH web server. Reads ../.state.json and ../.token written by
+# remote.ps1.
 #
 #   pwsh -File e2e/remote/embed-check/run-check.ps1
 #   pwsh -File e2e/remote/embed-check/run-check.ps1 -Chrome "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -47,11 +47,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Here 'node_modules/puppeteer-core')
   Write-Host '==> installing puppeteer-core (no browser download)'
   Push-Location $Here
   try {
-    if ($pnpmJs) {
-      & $node $pnpmJs install
-    } else {
-      & $pnpmExe install
-    }
+    if ($pnpmJs) { & $node $pnpmJs install } else { & $pnpmExe install }
     if ($LASTEXITCODE -ne 0) { throw "pnpm install failed (exit $LASTEXITCODE)" }
   } finally {
     Pop-Location

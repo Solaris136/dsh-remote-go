@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
 # dsh-remote-go · start the isolated remote DSH web server (runs ON the remote host)
 #
-# Boots `dsh --profile web --no-open --port 0` under an isolated DSH_HOME with
-# setsid+nohup so it survives the SSH connection closing. Writes run state to
-# ~/.dsh-remote-go/run/:
-#   web.pid    process id
-#   web.port   listening port (loopback only)
-#   web.token  full process launch token (mode 600, never printed by this script)
-#   web.url    authenticated URL (mode 600)
-#   web.state.json  machine-readable summary
-# Log: ~/.dsh-remote-go/logs/remote-web.log (mode 600 via umask)
+# Boots `dsh --profile web --no-open --port 0` under an isolated DSH_HOME with setsid+nohup
+# so it survives the SSH connection closing. Writes run state to ~/.dsh-remote-go/run/
+# (web.pid, web.port, web.token and web.url at mode 600, web.state.json) and logs to
+# ~/.dsh-remote-go/logs/remote-web.log.
 #
-# Idempotent: if the recorded process is alive and answering, it is reused.
-# RESTART=1 forces a clean restart.
-# Env overrides: DSH_REMOTE_ROOT, RESTART, START_TIMEOUT
+# Idempotent: if the recorded process is alive and answering, it is reused. RESTART=1
+# forces a clean restart. Env overrides: DSH_REMOTE_ROOT, RESTART, START_TIMEOUT
 set -euo pipefail
 
 umask 077
@@ -75,6 +69,7 @@ write_runtime_files() {
 
 emit_state() {
   local reused="$1" port="$2" pid="$3" elapsed="$4" token_len="$5" token_prefix="$6" http_code="$7"
+  # The state record is written by the private Node, so the caller needs no jq.
   PORT="$port" PID="$pid" REUSED="$reused" ELAPSED="$elapsed" \
   TOKEN_LEN="$token_len" TOKEN_PREFIX="$token_prefix" HTTP_CODE="$http_code" \
   STATE_FILE="$STATE_FILE" LOG="$LOG" ROOT="$ROOT" DSH_HOME="$DSH_HOME_DIR" \
@@ -82,47 +77,24 @@ emit_state() {
   SSH_CONNECTION_ARG="${SSH_CONNECTION:-}" SSH_TTY_ARG="${SSH_TTY:-}" \
   "$NODE_BIN" -e '
     const fs = require("node:fs");
-    const rec = {
-      reused: process.env.REUSED === "1",
-      pid: Number(process.env.PID),
-      port: Number(process.env.PORT),
-      reachableHttpStatus: Number(process.env.HTTP_CODE),
-      startupSeconds: Number(process.env.ELAPSED),
-      tokenLength: Number(process.env.TOKEN_LEN),
-      tokenPrefix: process.env.TOKEN_PREFIX,
-      tokenFile: process.env.TOKEN_FILE,
-      log: process.env.LOG,
-      root: process.env.ROOT,
-      dshHome: process.env.DSH_HOME,
-      nodeBin: process.env.NODE_BIN,
-      dshBin: process.env.DSH_BIN,
-      sshConnection: process.env.SSH_CONNECTION_ARG,
-      sshTty: process.env.SSH_TTY_ARG,
-      startedAt: new Date().toISOString(),
-    };
-    fs.writeFileSync(process.env.STATE_FILE, JSON.stringify(rec, null, 2) + "\n");
+    const e = process.env;
+    fs.writeFileSync(e.STATE_FILE, JSON.stringify({
+      reused: e.REUSED === "1", pid: Number(e.PID), port: Number(e.PORT),
+      reachableHttpStatus: Number(e.HTTP_CODE), startupSeconds: Number(e.ELAPSED),
+      tokenLength: Number(e.TOKEN_LEN), tokenPrefix: e.TOKEN_PREFIX, tokenFile: e.TOKEN_FILE,
+      log: e.LOG, root: e.ROOT, dshHome: e.DSH_HOME, nodeBin: e.NODE_BIN, dshBin: e.DSH_BIN,
+      sshConnection: e.SSH_CONNECTION_ARG, sshTty: e.SSH_TTY_ARG, startedAt: new Date().toISOString(),
+    }, null, 2) + "\n");
   ' 2>/dev/null || true
 
   local node_ver dsh_ver
   node_ver="$("$NODE_BIN" --version 2>/dev/null || printf 'unknown')"
   dsh_ver="$("$NODE_BIN" "$DSH_BIN" --version 2>/dev/null || printf 'unknown')"
-  printf 'START_OK\n'
-  printf 'REUSED=%s\n' "$reused"
-  printf 'PORT=%s\n' "$port"
-  printf 'PID=%s\n' "$pid"
-  printf 'LOG=%s\n' "$LOG"
-  printf 'DSH_HOME=%s\n' "$DSH_HOME_DIR"
-  printf 'STATE_FILE=%s\n' "$STATE_FILE"
-  printf 'TOKEN_FILE=%s\n' "$TOKEN_FILE"
-  printf 'TOKEN_LEN=%s\n' "$token_len"
-  printf 'TOKEN_PREFIX=%s\n' "$token_prefix"
-  printf 'REMOTE_PROBE_HTTP=%s\n' "$http_code"
-  printf 'STARTUP_SECONDS=%s\n' "$elapsed"
-  printf 'SSH_CONNECTION=%s\n' "${SSH_CONNECTION:-<unset>}"
-  printf 'SSH_TTY=%s\n' "${SSH_TTY:-<unset>}"
-  printf 'NODE_VERSION=%s\n' "$node_ver"
-  printf 'DSH_VERSION=%s\n' "$dsh_ver"
-  printf 'URL_REDACTED=%s\n' "http://127.0.0.1:${port}/?token=${token_prefix}...(len=${token_len})"
+  printf 'START_OK\nREUSED=%s\nPORT=%s\nPID=%s\nLOG=%s\nDSH_HOME=%s\nSTATE_FILE=%s\nTOKEN_FILE=%s\nTOKEN_LEN=%s\nTOKEN_PREFIX=%s\nREMOTE_PROBE_HTTP=%s\nSTARTUP_SECONDS=%s\nSSH_CONNECTION=%s\nSSH_TTY=%s\nNODE_VERSION=%s\nDSH_VERSION=%s\nURL_REDACTED=%s\n' \
+    "$reused" "$port" "$pid" "$LOG" "$DSH_HOME_DIR" "$STATE_FILE" "$TOKEN_FILE" \
+    "$token_len" "$token_prefix" "$http_code" "$elapsed" \
+    "${SSH_CONNECTION:-<unset>}" "${SSH_TTY:-<unset>}" "$node_ver" "$dsh_ver" \
+    "http://127.0.0.1:${port}/?token=${token_prefix}...(len=${token_len})"
 }
 
 # --- reuse path -----------------------------------------------------------
@@ -174,8 +146,8 @@ setsid env DSH_HOME="$DSH_HOME_DIR" bash -c 'echo $$ > "$1"; shift; exec "$@"' _
 disown 2>/dev/null || true
 
 # --- wait for the startup URL line ----------------------------------------
-# Note: the child writes its pid file as its first action; do not treat a
-# missing pid file in the first seconds as an exit.
+# The child writes its pid file as its first action, so a missing pid file in the first
+# seconds is not an exit.
 elapsed=0
 url=""
 while [ "$elapsed" -lt "$START_TIMEOUT" ]; do

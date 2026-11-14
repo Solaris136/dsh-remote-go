@@ -1,20 +1,18 @@
 # dsh-remote-go · V0 local driver (Windows PowerShell 7)
 #
-# Talk to the remote test host over SSH, run the remote-side shell scripts, keep
-# a local SSH tunnel open, and persist run state:
-#   .state.json  remote port / pid / log / local tunnel port
-#   .token       launch token (needs care: do not commit)
+# Talk to the remote test host over SSH, run the remote-side shell scripts, keep a local SSH
+# tunnel open, and persist run state: .state.json (remote port / pid / log / local tunnel
+# port) and .token (launch token; do not commit).
 #
-# Usage (from repo root or this directory):
-#   pwsh -File e2e/remote/remote.ps1 setup        # bootstrap Node + dsh on remote
-#   pwsh -File e2e/remote/remote.ps1 start        # start remote web + local tunnel
-#   pwsh -File e2e/remote/remote.ps1 status       # runtime + process inspection (read-only)
-#   pwsh -File e2e/remote/remote.ps1 stop         # stop remote web + local tunnel
-#   pwsh -File e2e/remote/remote.ps1 all          # setup + start
+#   pwsh -File e2e/remote/remote.ps1 setup    # bootstrap Node + dsh on remote
+#   pwsh -File e2e/remote/remote.ps1 start    # start remote web + local tunnel
+#   pwsh -File e2e/remote/remote.ps1 status   # runtime + process inspection (read-only)
+#   pwsh -File e2e/remote/remote.ps1 stop     # stop remote web + local tunnel
+#   pwsh -File e2e/remote/remote.ps1 all      # setup + start
 #
-# V0 handover note: the plugin owns the remote `dsh web` lifecycle in the real
-# E2E, reusing the isolated runtime installed here. Only use `start`/`stop` for
-# manual V0 reproduction; `status` is always safe (it never starts or stops).
+# V0 handover note: the plugin owns the remote `dsh web` lifecycle in the real E2E, reusing
+# the isolated runtime installed here. Only use `start`/`stop` for manual V0 reproduction;
+# `status` is always safe (it never starts or stops).
 #
 # Env: DSH_REMOTE_HOST (required, ssh alias or user@host), DSH_REMOTE_LOCAL_PORT (default: reuse remote port)
 [CmdletBinding()]
@@ -29,11 +27,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ProgressPreference = 'SilentlyContinue'
 if ([string]::IsNullOrWhiteSpace($RemoteHost)) {
   throw 'RemoteHost is required: set DSH_REMOTE_HOST (an ~/.ssh/config alias or user@host) or pass -RemoteHost'
 }
-$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$ProgressPreference = 'SilentlyContinue'
 
 $Here = Split-Path -Parent $PSCommandPath
 $RemoteRoot = '.dsh-remote-go'
@@ -43,29 +41,27 @@ $TunnelPidPath = Join-Path $Here '.tunnel.pid'
 $TunnelErrLog = Join-Path $Here 'evidence/tunnel.stderr.log'
 $TunnelOutLog = Join-Path $Here 'evidence/tunnel.stdout.log'
 $RemoteScripts = @('setup-remote.sh', 'start-remote.sh', 'stop-remote.sh', 'status-remote.sh')
+$RemoteBootstrap = 'remote bootstrap: Node v24.22.2 + @deepseek-ai/dsh@0.2.2-rc.1'
 
 function Write-Step([string]$Message) {
-  Write-Host ""
+  Write-Host ''
   Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
+function Get-State {
+  if (-not (Test-Path -LiteralPath $StatePath)) { return $null }
+  return Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+}
+function Save-State($State) { $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8 }
+
 function Get-SshArgs([string]$RemoteCommand) {
-  @(
-    '-o', 'ConnectTimeout=15',
-    '-o', 'ServerAliveInterval=20',
-    '-o', 'ServerAliveCountMax=3',
-    '-o', 'BatchMode=yes',
-    $RemoteHost,
-    $RemoteCommand
-  )
+  @('-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=3',
+    '-o', 'BatchMode=yes', $RemoteHost, $RemoteCommand)
 }
 
 # Run one remote command; retry only plausible transport failures.
 function Invoke-RemoteCommand {
-  param(
-    [Parameter(Mandatory)][string]$RemoteCommand,
-    [int]$Attempts = 5
-  )
+  param([Parameter(Mandatory)][string]$RemoteCommand, [int]$Attempts = 5)
   $lastError = ''
   for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
     $lines = & ssh @(Get-SshArgs $RemoteCommand) 2>&1
@@ -93,10 +89,7 @@ function Invoke-RemoteCommandChecked([string]$RemoteCommand) {
 function ConvertFrom-KeyValue([string]$Text) {
   $map = @{}
   foreach ($line in ($Text -split "`n")) {
-    $clean = $line.TrimEnd("`r")
-    if ($clean -match '^([A-Za-z0-9_]+)=(.*)$') {
-      $map[$Matches[1]] = $Matches[2]
-    }
+    if ($line.TrimEnd("`r") -match '^([A-Za-z0-9_]+)=(.*)$') { $map[$Matches[1]] = $Matches[2] }
   }
   return $map
 }
@@ -114,8 +107,8 @@ function Push-RemoteScripts {
 
     $uploaded = $false
     for ($attempt = 1; $attempt -le 4 -and -not $uploaded; $attempt++) {
-      # base64 keeps the byte stream ASCII-only: PowerShell->native stdin adds a
-      # trailing newline, which the remote decoder ignores, so md5 comparison is exact.
+      # base64 keeps the byte stream ASCII-only: PowerShell->native stdin adds a trailing
+      # newline, which the remote decoder ignores, so the md5 comparison is exact.
       $b64 | & ssh @(Get-SshArgs "base64 -d -i > ~/$RemoteRoot/scripts/$name") 2>$null
       if ($LASTEXITCODE -eq 0) { $uploaded = $true; break }
       Start-Sleep -Seconds 2
@@ -138,6 +131,42 @@ function Invoke-RemoteScript {
   return [pscustomobject]@{ ExitCode = 0; Output = $result }
 }
 
+# Run start-remote.sh and return its parsed KEY=VALUE output (callers push first).
+function Start-RemoteWeb {
+  Write-Step 'starting remote DSH web (isolated DSH_HOME, setsid+nohup)'
+  $result = Invoke-RemoteScript -Name 'start-remote.sh'
+  Write-Host $result.Output
+  if ($result.ExitCode -ne 0) { throw "start-remote.sh failed (exit $($result.ExitCode))" }
+  return ConvertFrom-KeyValue $result.Output
+}
+
+# The .state.json record, shared by `start` and `all`.
+function New-RemoteState($Kv, [int]$RemotePort, [int]$LocalPort, [int]$TokenLength, [string]$TokenPrefix) {
+  [ordered]@{
+    status          = 'running'
+    remoteHost      = $RemoteHost
+    runtimeRoot     = "~/$RemoteRoot"
+    remotePort      = $RemotePort
+    localPort       = $LocalPort
+    remotePid       = [int]$Kv['PID']
+    tunnelPid       = if (Test-Path -LiteralPath $TunnelPidPath) { [int](Get-Content -LiteralPath $TunnelPidPath -Raw) } else { 0 }
+    log             = $Kv['LOG']
+    dshHome         = $Kv['DSH_HOME']
+    nodeBin         = "~/$RemoteRoot/node/bin/node"
+    dshBin          = "~/$RemoteRoot/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js"
+    startCommand    = 'DSH_HOME=~/.dsh-remote-go/home setsid nohup ~/.dsh-remote-go/node/bin/node ~/.dsh-remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open --port 0 >> ~/.dsh-remote-go/logs/remote-web.log 2>&1 &'
+    tokenFile       = $TokenPath
+    tokenLength     = $TokenLength
+    tokenPrefix     = $TokenPrefix
+    remoteProbeHttp = $Kv['REMOTE_PROBE_HTTP']
+    startupSeconds  = if ($Kv.ContainsKey('STARTUP_SECONDS')) { [int]$Kv['STARTUP_SECONDS'] } else { 0 }
+    localProbeHttp  = Get-HttpCode -Port $LocalPort
+    sshConnection   = $Kv['SSH_CONNECTION']
+    sshTty          = $Kv['SSH_TTY']
+    checkedAt       = (Get-Date).ToString('o')
+  }
+}
+
 function Get-HttpCode([int]$Port, [string]$Path = '/') {
   $code = & curl.exe -s -o NUL -m 3 -w '%{http_code}' "http://127.0.0.1:$Port$Path" 2>$null
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($code)) { return '000' }
@@ -146,13 +175,7 @@ function Get-HttpCode([int]$Port, [string]$Path = '/') {
 
 function Test-PortFree([int]$Port) {
   $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
-  try {
-    $listener.Start()
-    $listener.Stop()
-    return $true
-  } catch {
-    return $false
-  }
+  try { $listener.Start(); $listener.Stop(); return $true } catch { return $false }
 }
 
 function Get-FreePort {
@@ -172,10 +195,9 @@ function Get-TunnelProcess {
 
 function Start-Tunnel {
   param([int]$RemotePort)
-
   $existing = Get-TunnelProcess
   if ($existing) {
-    $recorded = if (Test-Path -LiteralPath $StatePath) { Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json } else { $null }
+    $recorded = Get-State
     if ($recorded -and $recorded.localPort -and (Get-HttpCode -Port ([int]$recorded.localPort)) -ne '000') {
       Write-Host "    reusing tunnel pid $($existing.Id) on 127.0.0.1:$($recorded.localPort)"
       return [int]$recorded.localPort
@@ -192,16 +214,9 @@ function Start-Tunnel {
   }
 
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TunnelErrLog) | Out-Null
-  $forward = "127.0.0.1:${localPort}:127.0.0.1:${RemotePort}"
-  $sshArgs = @(
-    '-N',
-    '-o', 'ExitOnForwardFailure=yes',
-    '-o', 'ConnectTimeout=15',
-    '-o', 'ServerAliveInterval=20',
-    '-o', 'ServerAliveCountMax=3',
-    '-L', $forward,
-    $RemoteHost
-  )
+  $sshArgs = @('-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15',
+    '-o', 'ServerAliveInterval=20', '-o', 'ServerAliveCountMax=3',
+    '-L', "127.0.0.1:${localPort}:127.0.0.1:${RemotePort}", $RemoteHost)
   $proc = Start-Process -FilePath 'ssh' -ArgumentList $sshArgs -PassThru -WindowStyle Hidden `
     -RedirectStandardError $TunnelErrLog -RedirectStandardOutput $TunnelOutLog
   Set-Content -LiteralPath $TunnelPidPath -Value ([string]$proc.Id) -NoNewline -Encoding ascii
@@ -217,8 +232,7 @@ function Start-Tunnel {
       $err = if (Test-Path -LiteralPath $TunnelErrLog) { Get-Content -LiteralPath $TunnelErrLog -Raw } else { '' }
       throw "ssh tunnel exited early (code $($proc.ExitCode)): $err"
     }
-    Start-Sleep -Milliseconds 500
-    $waited++
+    Start-Sleep -Milliseconds 500; $waited++
   }
   throw "ssh tunnel did not become reachable on 127.0.0.1:$localPort"
 }
@@ -228,9 +242,7 @@ function Stop-Tunnel {
   if ($proc) {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Write-Host "    tunnel stopped (pid $($proc.Id))"
-  } else {
-    Write-Host '    no tunnel process recorded'
-  }
+  } else { Write-Host '    no tunnel process recorded' }
   Remove-Item -LiteralPath $TunnelPidPath -ErrorAction SilentlyContinue
 }
 
@@ -252,11 +264,10 @@ function Get-RemoteToken {
   return $token
 }
 
-# ---------------------------------------------------------------------------
 switch ($Action) {
   'setup' {
     Push-RemoteScripts
-    Write-Step 'remote bootstrap: Node v24.22.2 + @deepseek-ai/dsh@0.2.2-rc.1'
+    Write-Step $RemoteBootstrap
     $result = Invoke-RemoteScript -Name 'setup-remote.sh'
     Write-Host $result.Output
     if ($result.ExitCode -ne 0) { throw "setup-remote.sh failed (exit $($result.ExitCode))" }
@@ -264,45 +275,17 @@ switch ($Action) {
 
   'start' {
     Push-RemoteScripts
-    Write-Step 'starting remote DSH web (isolated DSH_HOME, setsid+nohup)'
-    $result = Invoke-RemoteScript -Name 'start-remote.sh'
-    Write-Host $result.Output
-    if ($result.ExitCode -ne 0) { throw "start-remote.sh failed (exit $($result.ExitCode))" }
-
-    $kv = ConvertFrom-KeyValue $result.Output
+    $kv = Start-RemoteWeb
     if (-not $kv.ContainsKey('PORT')) { throw 'start-remote.sh did not report PORT' }
     $remotePort = [int]$kv['PORT']
-    $remotePid = [int]$kv['PID']
     $token = Get-RemoteToken
     Save-Token $token
 
     Write-Step "opening local SSH tunnel for remote 127.0.0.1:$remotePort"
     $localPort = Start-Tunnel -RemotePort $remotePort
-
-    $state = [ordered]@{
-      status            = 'running'
-      remoteHost        = $RemoteHost
-      runtimeRoot       = "~/$RemoteRoot"
-      remotePort        = $remotePort
-      localPort         = $localPort
-      remotePid         = $remotePid
-      tunnelPid         = if (Test-Path -LiteralPath $TunnelPidPath) { [int](Get-Content -LiteralPath $TunnelPidPath -Raw) } else { 0 }
-      log               = $kv['LOG']
-      dshHome           = $kv['DSH_HOME']
-      nodeBin           = "~/$RemoteRoot/node/bin/node"
-      dshBin            = "~/$RemoteRoot/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js"
-      startCommand      = 'DSH_HOME=~/.dsh-remote-go/home setsid nohup ~/.dsh-remote-go/node/bin/node ~/.dsh-remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open --port 0 >> ~/.dsh-remote-go/logs/remote-web.log 2>&1 &'
-      tokenFile         = $TokenPath
-      tokenLength       = if ($kv.ContainsKey('TOKEN_LEN')) { [int]$kv['TOKEN_LEN'] } else { $token.Length }
-      tokenPrefix       = if ($kv.ContainsKey('TOKEN_PREFIX')) { $kv['TOKEN_PREFIX'] } else { $token.Substring(0, 6) }
-      remoteProbeHttp   = $kv['REMOTE_PROBE_HTTP']
-      startupSeconds    = if ($kv.ContainsKey('STARTUP_SECONDS')) { [int]$kv['STARTUP_SECONDS'] } else { 0 }
-      localProbeHttp    = Get-HttpCode -Port $localPort
-      sshConnection     = $kv['SSH_CONNECTION']
-      sshTty            = $kv['SSH_TTY']
-      checkedAt         = (Get-Date).ToString('o')
-    }
-    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
+    $tokenLength = if ($kv.ContainsKey('TOKEN_LEN')) { [int]$kv['TOKEN_LEN'] } else { $token.Length }
+    $tokenPrefix = if ($kv.ContainsKey('TOKEN_PREFIX')) { $kv['TOKEN_PREFIX'] } else { $token.Substring(0, 6) }
+    Save-State (New-RemoteState -Kv $kv -RemotePort $remotePort -LocalPort $localPort -TokenLength $tokenLength -TokenPrefix $tokenPrefix)
 
     Write-Step 'local reachability'
     Write-Host ("    GET http://127.0.0.1:{0}/  ->  HTTP {1} (401 expected before token exchange)" -f $localPort, (Get-HttpCode -Port $localPort))
@@ -314,11 +297,11 @@ switch ($Action) {
   }
 
   'tunnel-start' {
-    if (-not (Test-Path -LiteralPath $StatePath)) { throw "no .state.json; run 'start' first" }
-    $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    $state = Get-State
+    if (-not $state) { throw "no .state.json; run 'start' first" }
     $localPort = Start-Tunnel -RemotePort ([int]$state.remotePort)
     $state.localPort = $localPort
-    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
+    Save-State $state
     Write-Host "tunnel: 127.0.0.1:$localPort -> ${RemoteHost}:127.0.0.1:$($state.remotePort)"
   }
 
@@ -334,16 +317,16 @@ switch ($Action) {
     if ($result.ExitCode -ne 0) { Write-Host "    (stop-remote.sh exit $($result.ExitCode))" }
     Write-Step 'stopping local tunnel'
     Stop-Tunnel
-    # The launch token dies with the process: drop the local copy so a stale
-    # credential never survives the handover.
+    # The launch token dies with the process: drop the local copy so a stale credential
+    # never survives the handover.
     if (Test-Path -LiteralPath $TokenPath) { Remove-Item -LiteralPath $TokenPath -Force }
-    if (Test-Path -LiteralPath $StatePath) {
-      $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    $state = Get-State
+    if ($state) {
       $state | Add-Member -NotePropertyName stoppedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
       $state | Add-Member -NotePropertyName status -NotePropertyValue 'stopped' -Force
       $state | Add-Member -NotePropertyName tokenFile -NotePropertyValue $null -Force
       $state | Add-Member -NotePropertyName tokenPrefix -NotePropertyValue $null -Force
-      $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
+      Save-State $state
     }
     Write-Host 'stopped.'
   }
@@ -357,11 +340,9 @@ switch ($Action) {
     $proc = Get-TunnelProcess
     if ($proc) {
       Write-Host "    tunnel pid $($proc.Id) alive"
-      if (Test-Path -LiteralPath $StatePath) {
-        $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
-        if ($state.localPort) {
-          Write-Host ("    GET http://127.0.0.1:{0}/ -> HTTP {1}" -f $state.localPort, (Get-HttpCode -Port ([int]$state.localPort)))
-        }
+      $state = Get-State
+      if ($state -and $state.localPort) {
+        Write-Host ("    GET http://127.0.0.1:{0}/ -> HTTP {1}" -f $state.localPort, (Get-HttpCode -Port ([int]$state.localPort)))
       }
     } else {
       Write-Host '    no tunnel process recorded'
@@ -370,45 +351,16 @@ switch ($Action) {
 
   'all' {
     Push-RemoteScripts
-    Write-Step 'remote bootstrap: Node v24.22.2 + @deepseek-ai/dsh@0.2.2-rc.1'
+    Write-Step $RemoteBootstrap
     $setup = Invoke-RemoteScript -Name 'setup-remote.sh'
     Write-Host $setup.Output
     if ($setup.ExitCode -ne 0) { throw "setup-remote.sh failed (exit $($setup.ExitCode))" }
-
-    Write-Step 'starting remote DSH web (isolated DSH_HOME, setsid+nohup)'
-    $result = Invoke-RemoteScript -Name 'start-remote.sh'
-    Write-Host $result.Output
-    if ($result.ExitCode -ne 0) { throw "start-remote.sh failed (exit $($result.ExitCode))" }
-
-    $kv = ConvertFrom-KeyValue $result.Output
+    $kv = Start-RemoteWeb
     $remotePort = [int]$kv['PORT']
     $token = Get-RemoteToken
     Save-Token $token
     $localPort = Start-Tunnel -RemotePort $remotePort
-    $state = [ordered]@{
-      status          = 'running'
-      remoteHost      = $RemoteHost
-      runtimeRoot     = "~/$RemoteRoot"
-      remotePort      = $remotePort
-      localPort       = $localPort
-      remotePid       = [int]$kv['PID']
-      tunnelPid       = if (Test-Path -LiteralPath $TunnelPidPath) { [int](Get-Content -LiteralPath $TunnelPidPath -Raw) } else { 0 }
-      log             = $kv['LOG']
-      dshHome         = $kv['DSH_HOME']
-      nodeBin         = "~/$RemoteRoot/node/bin/node"
-      dshBin          = "~/$RemoteRoot/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js"
-      startCommand    = 'DSH_HOME=~/.dsh-remote-go/home setsid nohup ~/.dsh-remote-go/node/bin/node ~/.dsh-remote-go/dsh-home/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open --port 0 >> ~/.dsh-remote-go/logs/remote-web.log 2>&1 &'
-      tokenFile       = $TokenPath
-      tokenLength     = $token.Length
-      tokenPrefix     = $token.Substring(0, 6)
-      remoteProbeHttp = $kv['REMOTE_PROBE_HTTP']
-      startupSeconds  = if ($kv.ContainsKey('STARTUP_SECONDS')) { [int]$kv['STARTUP_SECONDS'] } else { 0 }
-      localProbeHttp  = Get-HttpCode -Port $localPort
-      sshConnection   = $kv['SSH_CONNECTION']
-      sshTty          = $kv['SSH_TTY']
-      checkedAt       = (Get-Date).ToString('o')
-    }
-    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding utf8
+    Save-State (New-RemoteState -Kv $kv -RemotePort $remotePort -LocalPort $localPort -TokenLength $token.Length -TokenPrefix $token.Substring(0, 6))
     Write-Host ''
     Write-Host ("endpoint   : http://127.0.0.1:{0}/" -f $localPort)
     Write-Host "state file : $StatePath"

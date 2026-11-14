@@ -1,11 +1,6 @@
 // Generate and validate the format-1 plugin market entry for dsh-remote-go.
 //
-// Outputs:
-//   market/plugin-entry.json  — one plugin object for a curated registry PR
-//   market/index.json         — a complete standalone format-1 index
-//
-// Usage:
-//   node scripts/market-entry.mjs           # write both files
+//   node scripts/market-entry.mjs           # write market/plugin-entry.json + market/index.json
 //   node scripts/market-entry.mjs --check   # validate only (CI / prepack gate)
 //
 // Validation uses @deepseek-ai/dsh-plugin-market-index (devDependency), the same
@@ -21,37 +16,11 @@ const checkOnly = process.argv.includes('--check')
 const INDEX_URL = process.env.DSH_REMOTE_GO_INDEX_URL || 'https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json'
 
 const REQUIRED_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json']
-const REQUIRED_ENTRY_POINTS = [
-  ['index.js', 'host entry'],
-  ['client.js', 'browser entry'],
-]
-const RUNTIME_SRC = [
-  'src/index.js',
-  'src/api.js',
-  'src/service.js',
-  'src/ssh.js',
-  'src/ssh-config.js',
-  'src/known-hosts.js',
-  'src/bootstrap.js',
-  'src/node-runtime.js',
-  'src/webapp.js',
-  'src/probe.js',
-  'src/tunnel.js',
-  'src/store.js',
-  'src/settings.js',
-  'src/errors.js',
-  'src/version.js',
-  'src/util.js',
-  'src/redact.js',
-  'src/atomic-json.js',
-  'src/layout.js',
-  'src/constants.js',
-  'src/local-version.js',
-  'src/local-ssh.js',
-  'src/host-runtime.js',
-  'src/host-view.js',
-  'src/diagnostics.js',
-]
+const RUNTIME_SRC = `index api service ssh ssh-config known-hosts bootstrap node-runtime webapp probe tunnel
+store settings errors version util redact atomic-json layout constants local-version local-ssh host-runtime
+host-view diagnostics`
+  .split(/\s+/)
+  .map((name) => `src/${name}.js`)
 
 function fail(message) {
   console.error(`[market-entry] ${message}`)
@@ -59,20 +28,19 @@ function fail(message) {
 }
 
 /**
- * Serialize a market document as Prettier-formatted JSON, so the committed
- * output also satisfies `pnpm run format:check`. Falls back to plain JSON when
- * Prettier is unavailable (it is a devDependency).
+ * Serialize a market document as Prettier-formatted JSON, so the committed output
+ * also satisfies `pnpm run format:check`. Falls back to plain JSON when Prettier is
+ * unavailable (it is a devDependency).
  * @param {unknown} value
  * @returns {Promise<string>}
  */
 async function toJsonText(value) {
-  const plain = `${JSON.stringify(value, null, 2)}\n`
   try {
     const prettier = await import('prettier')
     const options = (await prettier.resolveConfig(path.join(root, 'market'))) ?? {}
     return await prettier.format(JSON.stringify(value), { ...options, parser: 'json' })
   } catch {
-    return plain
+    return `${JSON.stringify(value, null, 2)}\n`
   }
 }
 
@@ -87,8 +55,8 @@ function commitTimestamp() {
       encoding: 'utf8',
       // windowsHide keeps a console from flashing for every child the gates start.
       windowsHide: true,
-    }).trim()
-    const value = Number(out)
+    })
+    const value = Number(out.trim())
     if (Number.isInteger(value) && value > 0) return value
   } catch {
     // Not a git checkout (packed package): fall back to a stable epoch.
@@ -110,7 +78,10 @@ async function main() {
   for (const file of [...REQUIRED_FILES, ...RUNTIME_SRC]) {
     if (!existsSync(path.join(root, file))) problems.push(`missing runtime file: ${file}`)
   }
-  for (const [file, label] of REQUIRED_ENTRY_POINTS) {
+  for (const [file, label] of [
+    ['index.js', 'host entry'],
+    ['client.js', 'browser entry'],
+  ]) {
     if (!existsSync(path.join(root, file))) problems.push(`missing ${label}: ${file}`)
   }
   const files = pkg.files ?? []
@@ -120,33 +91,26 @@ async function main() {
   }
   if (problems.length > 0) fail(problems.join('\n  - '))
 
-  // The listing copy is the plugin's own localized meta description: one source, so the
-  // market entry cannot drift from what the plugin manager shows.
+  // The listing copy is the plugin's own localized meta description: one source, so
+  // the market entry cannot drift from what the plugin manager shows.
   const localeZh = await readJson('locale/zh.json')
   const localeEn = await readJson('locale/en.json')
-  const description = {
-    zh: localeZh?.meta?.description,
-    en: localeEn?.meta?.description,
-  }
+  const description = { zh: localeZh?.meta?.description, en: localeEn?.meta?.description }
   if (typeof description.zh !== 'string' || description.zh === '')
     problems.push('locale/zh.json meta.description is required')
   if (typeof description.en !== 'string' || description.en === '')
     problems.push('locale/en.json meta.description is required')
   if (problems.length > 0) fail(problems.join('\n  - '))
 
+  const title = { zh: 'dsh remote go', en: 'dsh remote go' }
   const entry = {
     name: pkg.name,
-    title: {
-      zh: 'dsh remote go',
-      en: 'dsh remote go',
-    },
+    title,
     description,
     author: typeof pkg.author === 'string' ? pkg.author : (pkg.author?.name ?? 'Solaris136'),
     homepage: pkg.homepage,
     repository: { url: pkg.repository.url.replace(/^git\+/, '').replace(/\.git$/, '') },
-    metadata: {
-      keywords: pkg.keywords ?? [],
-    },
+    metadata: { keywords: pkg.keywords ?? [] },
     versions: [
       {
         version: pkg.version,
@@ -156,13 +120,9 @@ async function main() {
       },
     ],
   }
-
   const index = {
     format: 1,
-    title: {
-      zh: 'dsh remote go',
-      en: 'dsh remote go',
-    },
+    title,
     description: {
       zh: 'dsh remote go 的插件市场索引（单插件，可直接作为 Index source 添加）。',
       en: 'Plugin market index for dsh-remote-go (single plugin; add directly as an Index source).',
@@ -172,15 +132,15 @@ async function main() {
   }
 
   if (checkOnly) {
-    // Validate structure locally first, then with the official validator.
+    // Locally first, then with the official validator.
     const { parseMarketIndex } = await import('@deepseek-ai/dsh-plugin-market-index')
     try {
       parseMarketIndex(index, INDEX_URL)
     } catch (error) {
       fail(`official market-index validator rejected the entry: ${error.message}`)
     }
-    // The committed files are what a registry PR copies, so they are compared with the
-    // generated ones field by field: a stale listing must fail here, not at publish time.
+    // The committed files are what a registry PR copies, so they are compared with
+    // the generated ones field by field: a stale listing fails here, not at publish.
     const drift = []
     const committedEntry = await readJson('market/plugin-entry.json')
     const committedIndex = await readJson('market/index.json')
@@ -210,10 +170,8 @@ async function main() {
 
   const outDir = path.join(root, 'market')
   await mkdir(outDir, { recursive: true })
-  const pluginEntryText = await toJsonText(entry)
-  const indexText = await toJsonText(index)
-  await writeFile(path.join(outDir, 'plugin-entry.json'), pluginEntryText, 'utf8')
-  await writeFile(path.join(outDir, 'index.json'), indexText, 'utf8')
+  await writeFile(path.join(outDir, 'plugin-entry.json'), await toJsonText(entry), 'utf8')
+  await writeFile(path.join(outDir, 'index.json'), await toJsonText(index), 'utf8')
   console.log(`[market-entry] wrote market/plugin-entry.json and market/index.json for ${pkg.name}@${pkg.version}`)
   console.log('[market-entry] validate with: node scripts/market-entry.mjs --check')
 }

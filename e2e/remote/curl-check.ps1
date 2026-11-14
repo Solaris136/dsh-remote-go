@@ -1,14 +1,12 @@
 # dsh-remote-go · V0/B evidence: token -> cookie -> authenticated page -> API/WS trust fence
 #
-# Requires a running local tunnel (run `pwsh -File remote.ps1 start` first) and
-# reads .state.json + .token. Writes redacted evidence files under evidence/ and
-# evidence/curl-check.result.json.
-#
+# Requires a running local tunnel (`pwsh -File remote.ps1 start`) and reads .state.json +
+# .token. Writes redacted evidence files under evidence/ and evidence/curl-check.result.json:
 #   pwsh -File e2e/remote/curl-check.ps1
 #
-# Redaction: the launch token and the signed cookie VALUE are replaced before
-# anything is written to disk; header names, cookie name, attributes, status
-# codes, Location and Origin/Host results are kept verbatim.
+# Redaction: the launch token and the signed cookie VALUE are replaced before anything is
+# written to disk; header names, cookie name, attributes, status codes, Location and
+# Origin/Host results are kept verbatim.
 [CmdletBinding()]
 param()
 
@@ -58,19 +56,18 @@ function Get-FirstLine([string]$Text) {
   return (($Text -split "`n")[0]).TrimEnd("`r")
 }
 
-function Get-HeaderValue([string[]]$Lines, [string]$Name) {
-  foreach ($line in $Lines) {
-    if ($line -match ('(?i)^' + [regex]::Escape($Name) + ':\s*(.*)$')) { return $Matches[1].Trim() }
-  }
-  return ''
-}
-
 function Get-HeaderLines([string[]]$Lines, [string]$Name) {
   $found = New-Object System.Collections.Generic.List[string]
   foreach ($line in $Lines) {
     if ($line -match ('(?i)^' + [regex]::Escape($Name) + ':\s*(.*)$')) { $found.Add($Matches[1].Trim()) }
   }
   return @($found)
+}
+
+function Get-HeaderValue([string[]]$Lines, [string]$Name) {
+  $values = @(Get-HeaderLines $Lines $Name)
+  if ($values.Count -gt 0) { return $values[0] }
+  return ''
 }
 
 function Invoke-Curl {
@@ -90,7 +87,6 @@ function Invoke-Curl {
   if ($statusLine -match '^HTTP/\S+\s+(\d{3})') { $status = [int]$Matches[1] }
   Save-Evidence "$Name.headers.txt" $headerText | Out-Null
   Save-Evidence "$Name.body.txt" $bodyText | Out-Null
-  $headerLines = @($headerText -split "`n" | ForEach-Object { $_.TrimEnd("`r") })
   return [pscustomobject]@{
     Name       = $Name
     ExitCode   = $exit
@@ -99,7 +95,7 @@ function Invoke-Curl {
     HeaderText = $headerText
     BodyText   = $bodyText
     StdErr     = $stdout.Trim()
-    Headers    = $headerLines
+    Headers    = @($headerText -split "`n" | ForEach-Object { $_.TrimEnd("`r") })
   }
 }
 
@@ -118,12 +114,7 @@ Write-Host "==> curl evidence against $base"
 $exchange = Invoke-Curl '01-token-exchange' @('-c', $jarPath, "$base/?token=$token")
 $cookieHeaders = @(Get-HeaderLines $exchange.Headers 'set-cookie')
 $location = Get-HeaderValue $exchange.Headers 'location'
-$details.tokenExchange = [ordered]@{
-  status     = $exchange.Status
-  statusLine = $exchange.StatusLine
-  location   = $location
-  setCookie  = $cookieHeaders
-}
+$details.tokenExchange = [ordered]@{ status = $exchange.Status; statusLine = $exchange.StatusLine; location = $location; setCookie = $cookieHeaders }
 Add-Check 'B1.token-exchange' 'HTTP 303 + Set-Cookie + Location ./' `
   ("HTTP $($exchange.Status); location='$location'; set-cookie-count=$($cookieHeaders.Count)") `
   ($exchange.Status -eq 303 -and $cookieHeaders.Count -ge 1 -and $location -eq './') '01-token-exchange.headers.txt'
@@ -159,13 +150,8 @@ foreach ($value in $csp) {
   if ($value -match '(?i)frame-ancestors\s+([^;]+)') { $frameAncestors = $Matches[1].Trim() }
 }
 $details.authenticatedPage = [ordered]@{
-  status         = $page.Status
-  contentType    = $contentType
-  title          = $title
-  bodyLength     = $page.BodyText.Length
-  xFrameOptions  = $xfo
-  csp            = $csp
-  frameAncestors = $frameAncestors
+  status = $page.Status; contentType = $contentType; title = $title; bodyLength = $page.BodyText.Length
+  xFrameOptions = $xfo; csp = $csp; frameAncestors = $frameAncestors
 }
 Add-Check 'B2.authenticated-200' 'HTTP 200 with text/html' `
   ("HTTP $($page.Status); content-type='$contentType'; title='$title'; bodyLength=$($page.BodyText.Length)") `
@@ -179,12 +165,7 @@ Add-Check 'B2d.no-csp-frame-ancestors' 'no CSP frame-ancestors (iframe allowed)'
 
 # --- B3: no cookie -> 401 --------------------------------------------------
 $noCookie = Invoke-Curl '03-unauthenticated' @("$base/")
-$details.unauthenticated = [ordered]@{
-  status          = $noCookie.Status
-  statusLine      = $noCookie.StatusLine
-  wwwAuthenticate = @(Get-HeaderLines $noCookie.Headers 'www-authenticate')
-  body            = (Redact $noCookie.BodyText).Trim()
-}
+$details.unauthenticated = [ordered]@{ status = $noCookie.Status; statusLine = $noCookie.StatusLine; wwwAuthenticate = @(Get-HeaderLines $noCookie.Headers 'www-authenticate'); body = (Redact $noCookie.BodyText).Trim() }
 Add-Check 'B3.unauthenticated-401' 'HTTP 401 without cookie' "HTTP $($noCookie.Status)" ($noCookie.Status -eq 401) '03-unauthenticated.headers.txt'
 
 # --- B4: RPC + API trust fence (Host/Origin/Sec-Fetch-Site) ----------------
@@ -192,10 +173,7 @@ $rpcPath = '/api/session/list'
 $rpcArgs = @('-X', 'POST', '-H', 'content-type: application/json', '-d', '{}')
 $rpcCookie = Invoke-Curl '04-rpc-authenticated' (@('-b', $jarPath) + $rpcArgs + @("$base$rpcPath"))
 $rpcBodyPreview = (Redact $rpcCookie.BodyText).Trim()
-$details.rpc = [ordered]@{
-  status      = $rpcCookie.Status
-  bodyPreview = $rpcBodyPreview.Substring(0, [Math]::Min(200, $rpcBodyPreview.Length))
-}
+$details.rpc = [ordered]@{ status = $rpcCookie.Status; bodyPreview = $rpcBodyPreview.Substring(0, [Math]::Min(200, $rpcBodyPreview.Length)) }
 Add-Check 'B4.rpc-authenticated-200' 'POST /api/session/list with cookie -> 200' "HTTP $($rpcCookie.Status)" ($rpcCookie.Status -eq 200) '04-rpc-authenticated.headers.txt'
 
 $rpcNoCookie = Invoke-Curl '05-rpc-unauthenticated' (@() + $rpcArgs + @("$base$rpcPath"))
@@ -225,9 +203,8 @@ $wsHeaders = @(
 )
 $wsUpgrade = Invoke-Curl '11-ws-mux-upgrade' (@('-b', $jarPath, '--max-time', '5') + $wsHeaders + @("$base/api/remote.mux"))
 $details.websocketUpgrade = [ordered]@{
-  statusLine = $wsUpgrade.StatusLine
-  headers    = @($wsUpgrade.Headers | Where-Object { $_ -match '(?i)^(HTTP/|upgrade:|connection:|sec-websocket)' })
-  stderr     = $wsUpgrade.StdErr
+  statusLine = $wsUpgrade.StatusLine; stderr = $wsUpgrade.StdErr
+  headers = @($wsUpgrade.Headers | Where-Object { $_ -match '(?i)^(HTTP/|upgrade:|connection:|sec-websocket)' })
 }
 Add-Check 'B11.ws-mux-upgrade-101' 'GET /api/remote.mux upgrade with cookie -> 101' $wsUpgrade.StatusLine ($wsUpgrade.Status -eq 101) '11-ws-mux-upgrade.headers.txt'
 
@@ -241,16 +218,10 @@ $details.indexForeignOrigin = [ordered]@{ status = $indexForeignOrigin.Status; n
 $passed = @($checks | Where-Object { $_.pass }).Count
 $failed = @($checks | Where-Object { -not $_.pass }).Count
 $result = [ordered]@{
-  generatedAt = (Get-Date).ToString('o')
-  remoteHost  = $state.remoteHost
-  remotePort  = [int]$state.remotePort
-  localPort   = $port
-  baseUrl     = $base
-  tokenLength = $token.Length
-  tokenPrefix = $token.Substring(0, 6)
-  checks      = $checks
-  summary     = [ordered]@{ total = $checks.Count; passed = $passed; failed = $failed }
-  details     = $details
+  generatedAt = (Get-Date).ToString('o'); remoteHost = $state.remoteHost; remotePort = [int]$state.remotePort
+  localPort = $port; baseUrl = $base; tokenLength = $token.Length; tokenPrefix = $token.Substring(0, 6)
+  checks = $checks; summary = [ordered]@{ total = $checks.Count; passed = $passed; failed = $failed }
+  details = $details
 }
 $resultPath = Join-Path $EvidenceDir 'curl-check.result.json'
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $resultPath -Encoding utf8

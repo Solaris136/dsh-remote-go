@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 # dsh-remote-go · OPTIONAL remote helper: loopback SSH alias to this same host.
 #
-# Adds a `Host self` entry (127.0.0.1, current user, generated ed25519 key) to
-# ~/.ssh/config with the matching authorized_keys entry. This is only for future
-# "nested" experiments where a remote DSH embeds another DSH through an SSH
-# tunnel that terminates on the same machine. Idempotent.
-#
-# It never touches ~/.dsh-remote-go or any running DSH process.
+# Adds a `Host self` entry (127.0.0.1, current user, generated ed25519 key) to ~/.ssh/config
+# with the matching authorized_keys entry. Only for future "nested" experiments where a
+# remote DSH embeds another DSH through an SSH tunnel terminating on the same machine.
+# Idempotent; it never touches ~/.dsh-remote-go or any running DSH process.
 set -uo pipefail
 
 SSH_DIR="$HOME/.ssh"
