@@ -62,8 +62,10 @@
 点某台主机后，客户端：
 
 1. 通过 `GET /hosts/:id/open` 取一次性 token 的本地回环 URL，校验 `http://127.0.0.1:` 前缀。URL 与主机绑定：拿到的 URL 只会交给它自己的窗口。
-2. 经桌面桥 `window.dshDesktop.browser.acquire` 取得 guest lease，创建 Chromium guest（`<webview>`）铺满标题栏以下的整个窗口；本地侧边栏让位（guest 里也有同一条主机条）。
-3. guest 每次加载完成（`did-stop-loading`）后，向远端页面注入同一条主机条的脚本；列表与状态通过 `update(<payload>)` 推送，点击通过 `window.__drgBridgeQueue` 队列（轮询取走）回来。
+2. 经桌面桥 `window.dshDesktop.browser.acquire` 取得 guest lease，创建 Chromium guest（`<webview>`）**铺满整个窗口**。guest 页面是 Web 构建、没有 preload，所以每次加载后都要把桌面窗口的标记注入进去（`<html data-windows-titlebar>` + `--dsh-windows-titlebar-height`，高度读本地页面；以及全屏标记 `data-fullscreen`，全屏时宿主会撤掉由标题栏推导的浮层 inset）：页面自己让出窗口标题栏那一条，两边才是**同一套栅格**——侧边栏行高、入口页留白、居中浮层与 `position:fixed` 元素都对齐。不注入时远端按 Web 布局排，与本地会差 10–40px（品牌行 40 vs 60、主机条及以下 20、固定元素 20–40）。
+   注入失败、或窗口本来就没有这条带（macOS、Web 构建）时退回「guest 整体下移一条」的老行为：**任何时候都只有一条标题栏**。
+3. guest 盖住标题栏那一条后，窗口拖拽与本地菜单要补回来：carrier 在标题栏区域放一条 `-webkit-app-region: drag` 的拖拽条（guest 自己的固定控件只占左侧 84px，留给它），并在 `<html>` 上加 `drg-caption-live`，把宿主注入的标题栏菜单抬到 guest 之上；回到本地页时两者一起撤掉。
+4. guest 每次加载完成（`did-stop-loading`）后，先补标题栏标记，再向远端页面注入同一条主机条的脚本；列表与状态通过 `update(<payload>)` 推送，点击通过 `window.__drgBridgeQueue` 队列（轮询取走）回来。顺序不能反：主机条要按桌面栅格量到的品牌行来定位。
 
 **远端窗口保持热态**：每台主机一个 guest（独立 partition / cookie），**不设数量上限**；切走时只隐藏、不销毁，所以「本地 → 那台远端」「远端 A → 远端 B → 远端 A」都不重新加载页面。宿主断开、被删除或插件卸载时才释放 guest 与 lease。加载失败过的窗口下次显示时自动重载一次；窗口创建过程中用户改点别处时，建好的窗口不会抢走窗口。
 
@@ -102,7 +104,7 @@
   第三方插件若只在某个局部容器里改 token，浮层保持基础调色板（与 DSH 自己的弹层一致）。
 - 主按钮成对使用 `--dsw-alias-button-primary-fill` 与 `--dsw-alias-label-primary-foreground`，状态色使用
   `--dsw-alias-state-*-primary`，与 DSH 自己的组件同一套配对；**对比度由主题负责**，插件不替主题纠正颜色。
-- 远端窗口是远端 DSH 自己的页面，用远端的主题；本地主题不影响远端页面（这是整窗 guest 的边界，不是缺陷）。
+- 远端窗口是远端 DSH 自己的页面，用远端的主题；本地主题不影响远端页面（这是整窗 guest 的边界，不是缺陷）。标题栏那一条由远端页面自己绘制，因此也用远端主题；叠在它上面的宿主标题栏菜单仍是本地主题——两边主题不同时，菜单文字的可读性由本地主题负责，插件不为它另配颜色。
 - 可访问性：键盘焦点环走 `--dsw-focus-ring-*`；尊重 `prefers-reduced-motion`、`prefers-contrast: more` 与
   `forced-colors: active`；窄窗口下主机清单变单列、向导 / 设置变全宽浮层。
 - 验收：E2E 用「内联 token」模拟第三方主题，断言界面颜色跟随、按钮对比度仍达标、移除覆盖层后恢复宿主调色板；

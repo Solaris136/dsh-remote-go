@@ -42,6 +42,7 @@ function loadClientPlugin(options = {}) {
     clearInterval,
     fetch: options.fetch,
     document: options.document,
+    getComputedStyle: options.getComputedStyle,
   }
   sandbox.window = {
     fetch: options.fetch,
@@ -75,58 +76,89 @@ function loadClientPlugin(options = {}) {
  * inline style, children, listeners and a body. Enough to build and inspect the
  * carrier inside the VM without adding a DOM implementation to the dev
  * dependencies. `style` is a plain bag: the carrier only assigns cssText and
- * individual background values, it never reads computed styles.
- * @returns {{ body: object, createElement: Function, createElementNS: Function }}
+ * individual values, it never reads computed styles.
+ *
+ * `options.captionHeight` marks `<html data-windows-titlebar>` the way the desktop
+ * preload does on Windows, so the carrier can be exercised in a caption window.
+ * @param {{ captionHeight?: string }} [options]
+ * @returns {{ body: object, documentElement: object, createElement: Function, createElementNS: Function }}
  */
-function fakeDocument() {
+function fakeDocument(options = {}) {
   /** @param {string} tag */
-  const create = (tag) => ({
-    tagName: String(tag).toUpperCase(),
-    attributes: {},
-    children: [],
-    listeners: {},
-    className: '',
-    textContent: '',
-    title: '',
-    id: '',
-    type: '',
-    parentNode: null,
-    style: {},
-    /** @param {string} name @param {string} value */
-    setAttribute(name, value) {
-      this.attributes[name] = String(value)
-    },
-    /** @param {object} child */
-    appendChild(child) {
-      child.parentNode = this
-      this.children.push(child)
-      return child
-    },
-    /** @param {...object} items */
-    append(...items) {
-      for (const item of items) this.appendChild(item)
-    },
-    /** @param {object} child */
-    removeChild(child) {
-      const index = this.children.indexOf(child)
-      if (index >= 0) this.children.splice(index, 1)
-      child.parentNode = null
-      return child
-    },
-    /** @param {string} type @param {Function} handler */
-    addEventListener(type, handler) {
-      this.listeners[type] = handler
-    },
-    click() {
-      if (typeof this.listeners.click === 'function') this.listeners.click({ target: this })
-    },
-    get firstChild() {
-      return this.children.length > 0 ? this.children[0] : null
-    },
-  })
+  const create = (tag) => {
+    const node = {
+      tagName: String(tag).toUpperCase(),
+      attributes: {},
+      children: [],
+      listeners: {},
+      className: '',
+      textContent: '',
+      title: '',
+      id: '',
+      type: '',
+      parentNode: null,
+      style: {},
+      /** @param {string} name @param {string} value */
+      setAttribute(name, value) {
+        this.attributes[name] = String(value)
+      },
+      /** @param {string} name */
+      hasAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      },
+      classList: {
+        add(name) {
+          const parts = node.className.split(' ').filter((part) => part !== '')
+          if (!parts.includes(name)) parts.push(name)
+          node.className = parts.join(' ')
+        },
+        remove(name) {
+          node.className = node.className
+            .split(' ')
+            .filter((part) => part !== '' && part !== name)
+            .join(' ')
+        },
+        contains(name) {
+          return node.className.split(' ').includes(name)
+        },
+      },
+      /** @param {object} child */
+      appendChild(child) {
+        child.parentNode = this
+        this.children.push(child)
+        return child
+      },
+      /** @param {...object} items */
+      append(...items) {
+        for (const item of items) this.appendChild(item)
+      },
+      /** @param {object} child */
+      removeChild(child) {
+        const index = this.children.indexOf(child)
+        if (index >= 0) this.children.splice(index, 1)
+        child.parentNode = null
+        return child
+      },
+      /** @param {string} type @param {Function} handler */
+      addEventListener(type, handler) {
+        if (!this.listeners[type]) this.listeners[type] = []
+        this.listeners[type].push(handler)
+      },
+      click() {
+        for (const handler of this.listeners.click || []) handler({ target: this })
+      },
+      get firstChild() {
+        return this.children.length > 0 ? this.children[0] : null
+      },
+    }
+    return node
+  }
   const body = create('body')
+  const documentElement = create('html')
+  if (typeof options.captionHeight === 'string') documentElement.setAttribute('data-windows-titlebar', '')
   return {
     body,
+    documentElement,
     listeners: {},
     createElement: create,
     createElementNS: (namespace, tag) => create(tag),
@@ -137,6 +169,17 @@ function fakeDocument() {
       delete this.listeners[type]
     },
   }
+}
+
+/**
+ * Fire one guest event. The carrier registers more than one handler for some
+ * types (`dom-ready` both navigates and mirrors the caption), so the fake node
+ * keeps them in order instead of overwriting.
+ * @param {object} node @param {string} type @param {object} [event]
+ * @returns {void}
+ */
+function fire(node, type, event) {
+  for (const handler of node.listeners[type] || []) handler(event)
 }
 
 /**
@@ -958,7 +1001,7 @@ test('the takeover carrier hands the window to the guest and injects the switche
       calls.push(code)
       return Promise.resolve(code.includes('function mountHostRow') ? 'installed' : null)
     }
-    view.listeners['did-stop-loading']()
+    fire(view, 'did-stop-loading')
     await settle()
     assert.ok(
       calls.some((code) => code.includes('function mountHostRow')),
@@ -984,7 +1027,7 @@ test('the takeover carrier hands the window to the guest and injects the switche
     // A guest reload wipes the injected DOM, so every load stop re-installs it: the
     // control must never disappear.
     const scriptRuns = calls.filter((code) => code.includes('function mountHostRow')).length
-    view.listeners['did-stop-loading']()
+    fire(view, 'did-stop-loading')
     await settle()
     assert.equal(calls.filter((code) => code.includes('function mountHostRow')).length, scriptRuns + 1)
   } finally {
@@ -992,6 +1035,133 @@ test('the takeover carrier hands the window to the guest and injects the switche
   }
   assert.equal(doc.body.children.length, 0)
   assert.deepEqual(released, ['lease-1'])
+})
+
+test('a caption window hands the band to the guest and keeps the window draggable', async () => {
+  // The local page reserves the Windows caption band inside its own frame; a guest page
+  // (no preload) would lay out as the Web build unless it is taught the same band. That
+  // is what makes the two pages one grid instead of two grids 40px apart.
+  const doc = fakeDocument({ captionHeight: '40px' })
+  const released = []
+  const takeover = loadClientPlugin({
+    document: doc,
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+    }),
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async (lease) => released.push(lease),
+      },
+    },
+  })
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
+  try {
+    const result = await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    assert.equal(result.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    assert.ok(root, 'the carrier must be mounted on document.body')
+    // The guest covers the whole window: the band it paints is the window's band.
+    assert.match(root.style.cssText, /top:0/)
+
+    // Electron ignores app regions inside a guest, so the band needs a drag strip of the
+    // carrier's own — right of the guest's fixed caption controls.
+    const grip = root.children.find((node) => node.className === 'drg-carrier-grip')
+    assert.ok(grip, 'a guest that covers the band must give the window drag back')
+    assert.match(grip.style.cssText, /app-region:drag/)
+    assert.match(grip.style.cssText, /left:84px/)
+    assert.match(grip.style.cssText, /height:40px/)
+
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    const calls = []
+    view.loadURL = () => Promise.resolve()
+    view.executeJavaScript = (code) => {
+      calls.push(code)
+      return Promise.resolve(code.includes('function mountHostRow') ? 'installed' : 'ok')
+    }
+
+    fire(view, 'dom-ready')
+    await settle()
+    assert.ok(
+      calls.some(
+        (code) =>
+          code.includes('data-windows-titlebar') &&
+          code.includes('--dsh-windows-titlebar-height') &&
+          code.includes('40px'),
+      ),
+      'the guest must be told the band the local page reserves',
+    )
+    assert.equal(
+      doc.documentElement.classList.contains('drg-caption-live'),
+      true,
+      'the shell caption menus have to stay above a guest that owns the band',
+    )
+
+    // The band has to land before the injected row measures the sidebar it goes into, and
+    // fullscreen (which drops the insets the band implies) has to travel with it.
+    doc.documentElement.setAttribute('data-fullscreen', 'true')
+    calls.length = 0
+    fire(view, 'did-stop-loading')
+    await settle()
+    const captionAt = calls.findIndex((code) => code.includes('data-windows-titlebar'))
+    const rowAt = calls.findIndex((code) => code.includes('function mountHostRow'))
+    assert.ok(rowAt >= 0, 'the row script must still run')
+    assert.ok(captionAt >= 0 && captionAt < rowAt, 'the caption must be applied first')
+    assert.match(calls[captionAt], /toggleAttribute\("data-fullscreen",true\)/)
+
+    // A main-frame failure hands the band back to the local page: the failure line is not
+    // allowed to hide the window's own caption menus with it.
+    fire(view, 'did-fail-load', { isMainFrame: true, errorCode: -2 })
+    await settle()
+    assert.equal(root.style.top, '40px')
+    assert.equal(grip.style.display, 'none')
+
+    // Back to the local page: the band is the local page's again.
+    takeover.carrier.hide()
+    assert.equal(doc.documentElement.classList.contains('drg-caption-live'), false)
+  } finally {
+    await takeover.carrier.close()
+  }
+  assert.equal(doc.body.children.length, 0)
+  assert.deepEqual(released, ['lease-1'])
+})
+
+test('a guest that refuses the caption script stays below the local band', async () => {
+  // One band, never two: if the guest cannot take the marker, the carrier falls back to
+  // sitting below the window's own band (the pre-0.x framing) instead of overlapping it.
+  const doc = fakeDocument({ captionHeight: '40px' })
+  const takeover = loadClientPlugin({
+    document: doc,
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+    }),
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-2', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async () => {},
+      },
+    },
+  })
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 25))
+  try {
+    await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    const grip = root.children.find((node) => node.className === 'drg-carrier-grip')
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    view.loadURL = () => Promise.resolve()
+    view.executeJavaScript = () => Promise.resolve(null)
+
+    fire(view, 'dom-ready')
+    await settle()
+
+    assert.equal(root.style.top, '40px', 'the guest must not overlap the local band')
+    assert.equal(grip.style.display, 'none', 'the drag strip is only for the covered band')
+    assert.equal(doc.documentElement.classList.contains('drg-caption-live'), false)
+  } finally {
+    await takeover.carrier.close()
+  }
 })
 
 test('the switcher row is drawn into the local sidebar and lists local, hosts and the actions', () => {
@@ -1067,6 +1237,22 @@ test('the switcher menu opens on the row, closes on a second click and on a pick
   local.carrier.update({ hosts: [] })
   assert.equal(rowName(row), '本地')
   assert.deepEqual(rowItems(row).map(itemLabel), ['本地', '添加主机', '管理界面'])
+})
+
+test('the switcher menu surface does not inherit the row hand', () => {
+  // The row is a button, so the menu sits inside a pointer surface: its own padding, the
+  // separator and the slack beside a short label must not promise a click either.
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  local.carrier.update({ hosts: [], labels: { local: '本地', addHost: '添加主机', manage: '管理界面' } })
+  const style = dom.head.children.find((node) => node.tagName === 'STYLE')
+  assert.ok(style, 'the row injects its stylesheet into the page head')
+  const menuRule = style.textContent.match(/#drg-host-row \.drg-hr-menu\{[^}]*\}/)
+  assert.ok(menuRule, 'the menu surface must have a rule of its own')
+  assert.match(menuRule[0], /cursor:default/)
+  const itemRule = style.textContent.match(/#drg-host-row \.drg-hr-item\{[^}]*\}/)
+  assert.ok(itemRule)
+  assert.match(itemRule[0], /cursor:pointer/, 'the entries themselves stay clickable')
 })
 
 test('the guest script installs the same row and leaves intents on the page bridge', () => {
