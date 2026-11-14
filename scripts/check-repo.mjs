@@ -165,7 +165,7 @@ if (pkg === null) {
 // 4. Line hygiene
 const MAX_TEXT_BYTES = 1024 * 1024
 const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store'])
-const SKIPPED_PREFIXES = ['e2e/artifacts/', 'e2e/remote/evidence/', 'node_modules/', 'vendor/']
+const SKIPPED_PREFIXES = ['e2e/artifacts/', 'node_modules/', 'vendor/']
 const ROOT_DOTFILES =
   '.editorconfig .gitattributes .gitignore .nvmrc .node-version package.json index.js client.js'.split(' ')
 const TABBED_EXTENSIONS = /\.(?:js|mjs|cjs|json|ya?ml)$/
@@ -287,26 +287,6 @@ for (const rel of [...secretFiles].sort()) {
     })
     if (!hit) pass()
   }
-}
-
-// Recorded E2E evidence must stay redacted. The captured text dumps and their JSON summaries
-// are both checked, so a leak cannot survive a format change.
-const evidenceDir = 'e2e/remote/evidence'
-const evidenceList = await readdir(abs(evidenceDir)).catch(() => null)
-if (evidenceList === null) warnings.push('e2e/remote/evidence: directory missing; skipped the token redaction check')
-const TOKEN_VALUE = /\?token=([^\s&<>"'`\\]+)/g
-for (const name of (evidenceList ?? []).filter((name) => name.endsWith('.txt') || name.endsWith('.json')).sort()) {
-  const text = await readText(`${evidenceDir}/${name}`)
-  if (text === null) continue
-  let unredacted = 0
-  for (const match of text.matchAll(TOKEN_VALUE)) {
-    const value = match[1]
-    if (value.length < 20) continue
-    if (value.includes('...') || /^<redacted>/i.test(value) || /^redacted/i.test(value)) continue
-    unredacted += 1
-  }
-  const rel = `${evidenceDir}/${name}`
-  check(unredacted === 0, `${rel}: ${unredacted} unredacted ?token= value(s); replace them with <redacted>`)
 }
 
 // 6. Workflow hygiene

@@ -51,7 +51,7 @@ dsh-remote-go
 ├─ test/helpers/            共享测试工具（source-scan 等）
 ├─ e2e/sim/                 本机模拟远端主机（真实 SSH + HTTP stub）
 ├─ e2e/control/             隔离的 control DSH 运行时（发布路径验收用）
-├─ e2e/remote/              真实测试主机的准备脚本
+├─ e2e/remote/              真实主机验收说明（无自举脚本）
 └─ scripts/                 仓库规范 / 市场条目 / 打包 / 语法检查
 ```
 依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect-pipeline` / `host-lifecycle` / `connect-progress` / `prompts`。`connect-pipeline → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。

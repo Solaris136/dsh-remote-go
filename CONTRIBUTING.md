@@ -53,7 +53,7 @@ pnpm install --frozen-lockfile --ignore-scripts
 `pnpm run test:e2e` 只剩发布路径：`test/e2e/publish.e2e.js` 把 tarball 装进干净的 DSH profile，验证 API 与 client-module
 都从安装目录加载；需要 `e2e/control` 下准备好的隔离 control DSH 运行时，以及 PATH 上的 `pnpm`（或用 `DSH_PNPM_CJS` 指定 pnpm 入口脚本），
 **不需要** SSH 测试主机。真实主机验收不在自动化套件里：自备满足 README 前提的 Linux 主机，按 [e2e/remote/README.md](e2e/remote/README.md)
-核对后用插件自身连一次。E2E 会写出证据文件；**提交前务必确认不含令牌、密码、私钥或真实主机名/地址**，`e2e/remote/evidence` 下尤其要人工复核（见 [SECURITY.md](SECURITY.md)）。
+核对后用插件自身连一次。E2E 会在临时目录/工件里写出证据文件；**提交或转发前务必确认不含令牌、密码、私钥或真实主机名/地址**（见 [SECURITY.md](SECURITY.md)）。
 
 ## 4. 提交信息（Conventional Commits）
 
