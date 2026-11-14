@@ -140,13 +140,17 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 
 `client.js` 是**单文件、无构建步骤**的浏览器插件：`window.__ModuleLoader__.load({ id, factory(require) })`，只 `require('react')`。
 
-- 注册：`main` 面板、`settings.section`（order 45）、`sidebar.panellist`（order 20）。
-- 数据：`GET /state` 为唯一真相，`EventSource /events` 实时推送，失败退化为 3s 轮询。
+- 注册：`shell.overlay`（唯一的浮层宿主：管理清单 / 向导 / 提示）与 `settings.section`（order 45）。不注册 `main` 主面板，也不注册侧边栏任何行。
+- 主机条：`mountHostRow(win)` 是唯一实现——本地页面直接调用，远端 guest 里跑 `HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'`；`apply` 每 1.5s 用 `updateSwitcher` 推一次状态，并按 `[data-window-drag]` 找侧边栏，所以页面重渲染后行会自动回位。
+- 浮窗层级：`[data-shell-overlay]` 被抬到远端窗口之上（`.drg-root.drg-overlay` 自身不绘制），所以浮窗在远端开着时也在最前面。
+- 远端窗口池：`carrierPool`（每主机一个 `<webview>` + 独立 partition，**不设数量上限**）。`showOverlay` 串行执行并记住「想要的宿主」（`wanted`），复用热窗口、只切 `display`；`hideOverlays` 隐藏但不销毁；`closeCarrier` 释放。切回已打开过的主机不重新加载；建窗期间用户改点别处时，建好的窗口不会抢走窗口。
+- 数据：`GET /state` 为唯一真相，`EventSource /events` 实时推送，失败退化为 3s 轮询；常驻的浮层宿主订阅一次，设置页各订阅一份。
 - API 层：所有请求经一个 `apiRequest`，统一加 `x-dsh-remote-go: 1` 与 `credentials:'same-origin'`；错误转成 `ErrorView`。
 - i18n：内置 `zh`/`en` 字典 + 宿主 locale 服务；两侧键集合由单元测试保证一致。
-- 接管：`openOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest；`HOST_ROW_SCRIPT` 注入远端侧边栏；`__drgBridge` 轮询处理切主机/刷新/离开。
+- 接管：`showOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest；每次 `did-stop-loading` 重新注入主机条；`__drgBridgeQueue` 轮询把点击（`{target}` / `{action:'add'|'manage'|'disconnect', hostId?}`）交回 `switcher.dispatch`。
+- 意图：`panelStore.requestIntent({kind:'open'|'disconnect'|'manage'|'local'})` 与 `wizardStore.open({mode,host})` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开某台并释放它的窗口，`manage` 打开浮窗，`local` 隐藏远端窗口并清掉 Host 侧的 active。
 - 安全不变量（测试会读源码断言）：不打开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。
-- 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 接管/承载 → 向导 → 诊断 → 设置 → 密码/冲突 → 面板 → 设置区 → 样式 → 注册。
+- 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 主机条/远端窗口 → 向导 → 诊断 → 设置 → 密码/冲突 → 浮层宿主（`PluginOverlay`）→ 设置区 → 样式 → 注册。
 
 ## 9. 测试与结构守卫
 

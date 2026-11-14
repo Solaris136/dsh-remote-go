@@ -120,16 +120,27 @@ async function main() {
   }
   if (problems.length > 0) fail(problems.join('\n  - '))
 
+  // The listing copy is the plugin's own localized meta description: one source, so the
+  // market entry cannot drift from what the plugin manager shows.
+  const localeZh = await readJson('locale/zh.json')
+  const localeEn = await readJson('locale/en.json')
+  const description = {
+    zh: localeZh?.meta?.description,
+    en: localeEn?.meta?.description,
+  }
+  if (typeof description.zh !== 'string' || description.zh === '')
+    problems.push('locale/zh.json meta.description is required')
+  if (typeof description.en !== 'string' || description.en === '')
+    problems.push('locale/en.json meta.description is required')
+  if (problems.length > 0) fail(problems.join('\n  - '))
+
   const entry = {
     name: pkg.name,
     title: {
       zh: 'dsh remote go',
       en: 'dsh remote go',
     },
-    description: {
-      zh: '通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入一条 26px 状态行：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动，Node 运行时由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰远端系统 Node），数据在远端用户自己的 ~/.dsh；含主机清单、接入向导、连接诊断与版本一致。',
-      en: 'Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version on a plugin-managed Node installed at the lower bound of DSH\u2019s engines.node under ~/.dsh/remote-go/node (the system Node is never touched), with its data in the user\u2019s own ~/.dsh, plus host list, connection wizard, diagnostics and exact version parity.',
-    },
+    description,
     author: typeof pkg.author === 'string' ? pkg.author : (pkg.author?.name ?? 'Solaris136'),
     homepage: pkg.homepage,
     repository: { url: pkg.repository.url.replace(/^git\+/, '').replace(/\.git$/, '') },
@@ -168,8 +179,31 @@ async function main() {
     } catch (error) {
       fail(`official market-index validator rejected the entry: ${error.message}`)
     }
+    // The committed files are what a registry PR copies, so they are compared with the
+    // generated ones field by field: a stale listing must fail here, not at publish time.
+    const drift = []
+    const committedEntry = await readJson('market/plugin-entry.json')
+    const committedIndex = await readJson('market/index.json')
+    if (committedEntry === null) drift.push('market/plugin-entry.json is missing')
+    if (committedIndex === null) drift.push('market/index.json is missing')
+    const compare = (label, actual, expected) => {
+      if (JSON.stringify(actual) !== JSON.stringify(expected))
+        drift.push(`${label} differs from locale/*.json (run: node scripts/market-entry.mjs)`)
+    }
+    if (committedEntry !== null) {
+      compare('market/plugin-entry.json title', committedEntry.title, entry.title)
+      compare('market/plugin-entry.json description', committedEntry.description, entry.description)
+      compare('market/plugin-entry.json name', committedEntry.name, entry.name)
+      compare('market/plugin-entry.json version', committedEntry.versions?.[0]?.version, pkg.version)
+      compare('market/plugin-entry.json engines.dsh', committedEntry.versions?.[0]?.engines?.dsh, pkg.engines.dsh)
+    }
+    if (committedIndex !== null) {
+      compare('market/index.json version', committedIndex.plugins?.[0]?.versions?.[0]?.version, pkg.version)
+      compare('market/index.json description', committedIndex.plugins?.[0]?.description, entry.description)
+    }
+    if (drift.length > 0) fail(drift.join('\n  - '))
     console.log(
-      `[market-entry] OK: ${pkg.name}@${pkg.version} (${REQUIRED_FILES.length + RUNTIME_SRC.length} runtime files checked, format-1 index validated)`,
+      `[market-entry] OK: ${pkg.name}@${pkg.version} (${REQUIRED_FILES.length + RUNTIME_SRC.length} runtime files checked, format-1 index validated, committed entries match)`,
     )
     return
   }

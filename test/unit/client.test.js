@@ -46,6 +46,8 @@ function loadClientPlugin(options = {}) {
   sandbox.window = {
     fetch: options.fetch,
     dshDesktop: options.desktop,
+    document: options.document,
+    innerHeight: 800,
     __ModuleLoader__: {
       load(declaration) {
         sandbox.__declaration = declaration
@@ -137,9 +139,173 @@ function fakeDocument() {
   }
 }
 
+/**
+ * A DOM rich enough for the injected host switcher: elements with attributes, classes,
+ * children, listeners and a rect; a document whose `querySelectorAll` answers the two
+ * lookups the row uses to find the sidebar; a `head` for its stylesheet.
+ * @param {{ sidebarWidth?: number, brand?: boolean, hostRowStyle?: boolean }} [options]
+ * @returns {{ document: object, column: object, brand: object|null, head: object }}
+ */
+function fakeDom(options = {}) {
+  const columnWidth = options.sidebarWidth === undefined ? 280 : options.sidebarWidth
+  /** @param {string} tag */
+  const create = (tag) => {
+    const node = {
+      tagName: String(tag).toUpperCase(),
+      attributes: {},
+      children: [],
+      listeners: {},
+      className: '',
+      textContent: '',
+      title: '',
+      id: '',
+      parentNode: null,
+      style: {},
+      rect: { left: 0, top: 0, width: columnWidth, height: 800, right: columnWidth, bottom: 800 },
+      get firstChild() {
+        return this.children.length > 0 ? this.children[0] : null
+      },
+      get nextSibling() {
+        if (this.parentNode === null) return null
+        const index = this.parentNode.children.indexOf(this)
+        return index >= 0 && index + 1 < this.parentNode.children.length ? this.parentNode.children[index + 1] : null
+      },
+      classList: {
+        add(name) {
+          if (!node.className.split(' ').includes(name)) node.className = (node.className + ' ' + name).trim()
+        },
+        remove(name) {
+          node.className = node.className
+            .split(' ')
+            .filter((part) => part !== name)
+            .join(' ')
+        },
+        contains(name) {
+          return node.className.split(' ').includes(name)
+        },
+      },
+      setAttribute(name, value) {
+        this.attributes[name] = String(value)
+      },
+      getAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null
+      },
+      appendChild(child) {
+        child.parentNode = this
+        this.children.push(child)
+        return child
+      },
+      append(...items) {
+        for (const item of items) this.appendChild(item)
+      },
+      insertBefore(child, reference) {
+        child.parentNode = this
+        const at = reference === null ? this.children.length : this.children.indexOf(reference)
+        if (at < 0) this.children.push(child)
+        else this.children.splice(at, 0, child)
+        return child
+      },
+      removeChild(child) {
+        const index = this.children.indexOf(child)
+        if (index >= 0) this.children.splice(index, 1)
+        child.parentNode = null
+        return child
+      },
+      /** @param {string} type @param {Function} handler */
+      addEventListener(type, handler) {
+        if (!this.listeners[type]) this.listeners[type] = []
+        this.listeners[type].push(handler)
+      },
+      removeEventListener() {},
+      /** @param {object} candidate */
+      contains(candidate) {
+        let node2 = candidate
+        while (node2) {
+          if (node2 === this) return true
+          node2 = node2.parentNode
+        }
+        return false
+      },
+      getBoundingClientRect() {
+        return this.rect
+      },
+    }
+    return node
+  }
+
+  const head = create('head')
+  const body = create('body')
+  const column = create('div')
+  column.rect = { left: 0, top: 40, width: columnWidth, height: 760, right: columnWidth, bottom: 800 }
+  body.appendChild(column)
+  let brand = null
+  if (options.brand !== false) {
+    brand = create('div')
+    brand.setAttribute('data-window-drag', 'true')
+    brand.rect = { left: 0, top: 40, width: columnWidth, height: 40, right: columnWidth, bottom: 80 }
+    column.appendChild(brand)
+  }
+  const region = create('div')
+  region.rect = { left: 0, top: 80, width: columnWidth, height: 700, right: columnWidth, bottom: 780 }
+  column.appendChild(region)
+
+  const document = {
+    head,
+    body,
+    createElement: create,
+    createElementNS: (namespace, tag) => create(tag),
+    addEventListener(type, handler) {
+      this.listeners = this.listeners || {}
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    },
+    removeEventListener() {},
+    /** The two lookups `mountHostRow` performs, and nothing else. */
+    querySelectorAll(selector) {
+      if (selector === '[data-window-drag]') return brand === null ? [] : [brand]
+      if (selector === 'div,aside,nav,section') return [column]
+      return []
+    },
+  }
+  return { document, column, brand, head }
+}
+
+/** The switcher row a fake document holds, if any. @param {{ column: object }} dom */
+function rowOf(dom) {
+  return dom.column.children.find((child) => child.id === 'drg-host-row') || null
+}
+
+/** Text of the row's current-target label. @param {object} row */
+function rowName(row) {
+  const node = row.children.find((child) => child.className === 'drg-hr-name')
+  return node ? node.textContent : null
+}
+
+/** Menu entries in order, skipping the separator. @param {object} row */
+function rowItems(row) {
+  const menu = row.children.find((child) => child.className === 'drg-hr-menu')
+  return menu.children.filter((child) => child.className === 'drg-hr-item')
+}
+
+/** @param {object} item */
+function itemLabel(item) {
+  const node = item.children.find((child) => child.className === 'drg-hr-item-name')
+  return node ? node.textContent : null
+}
+
+/** @param {object} item */
+function itemDotState(item) {
+  const dot = item.children.find((child) => child.className === 'drg-hr-dot')
+  return dot ? dot.getAttribute('data-state') : null
+}
+
+/** Fire a click at `target`, the way a browser would bubble it into the row. */
+function clickInside(row, target) {
+  for (const handler of row.listeners.click || []) handler({ target })
+}
+
 /** Minimal dictionary interpolation, mirroring the locale service. */
 function interpolate(template, params) {
-  if (!params) return String(template)
   return String(template).replace(/\{(\w+)\}/g, (match, key) =>
     params[key] === undefined || params[key] === null ? match : String(params[key]),
   )
@@ -333,9 +499,12 @@ test('client.js registers one lazy factory through window.__ModuleLoader__', () 
   }
 })
 
-test('factory injects slots, layout, locale and uiWorkspace', () => {
+test('factory injects slots and locale', () => {
   const injects = Array.from(plugin.inject)
-  assert.deepEqual(injects, ['slots', 'layout', 'locale', 'uiWorkspace'])
+  assert.deepEqual(injects, ['slots', 'locale'])
+  // No panel registration means no layout service either: the plugin draws into the shell
+  // overlay layer and the sidebar it finds, never into the main column.
+  assert.equal(injects.includes('layout'), false)
 })
 
 test('components export is a non-empty map of renderable functions', () => {
@@ -345,7 +514,7 @@ test('components export is a non-empty map of renderable functions', () => {
   for (const name of names) {
     assert.equal(typeof plugin.components[name], 'function', name + ' must be a component function')
   }
-  assert.equal(typeof plugin.components.MainPanel, 'function')
+  assert.equal(typeof plugin.components.PluginOverlay, 'function')
   assert.equal(typeof plugin.components.HostListView, 'function')
   assert.equal(typeof plugin.components.WizardDialog, 'function')
   assert.equal(typeof plugin.components.DiagnoseDrawer, 'function')
@@ -383,20 +552,22 @@ test('dictionaries are bilingual and balanced', () => {
   }
 })
 
-test('apply registers the main panel, the settings section and the sidebar panel icon', () => {
+test('apply registers only the overlay host and the settings section', () => {
   const { calls } = runApply(plugin)
-  assert.deepEqual(calls.injects, ['main', 'settings.section', 'sidebar.panellist'])
-  assert.equal(calls.registers.length, 3)
-  // The sidebar gains exactly one global-panel icon (the way back to a remote);
-  // host management stays in Settings and no workspace-list entry is registered.
+  assert.deepEqual(calls.injects, ['shell.overlay', 'settings.section'])
+  assert.equal(calls.registers.length, 2)
+  // Nothing takes the main column and nothing takes a sidebar row: the switcher row and
+  // the floating windows are the plugin's whole surface.
+  assert.ok(!calls.injects.includes('main'), 'the plugin must not own the main column')
+  assert.ok(!calls.injects.includes('sidebar.panellist'), 'no global-panel row may be registered')
   assert.ok(!calls.injects.includes('sidebar.workspaces'), 'no sidebar workspace entry may be registered')
   assert.ok(!calls.injects.includes('sidebar.footer.action'), 'no footer action may be registered')
 
-  const main = calls.registers.find((entry) => entry.options.name === 'main')
-  assert.ok(main, 'main slot entry must be registered')
-  assert.equal(main.options.key, PANEL_ID)
-  assert.equal(main.options.locale, PANEL_ID)
-  assert.equal(main.component, plugin.components.MainPanel)
+  // Everything floats in the shell overlay layer, above a remote window.
+  const overlay = calls.registers.find((entry) => entry.options.name === 'shell.overlay')
+  assert.ok(overlay, 'the overlay host must be registered')
+  assert.equal(overlay.component, plugin.components.PluginOverlay)
+  assert.equal(overlay.options.locale, PANEL_ID)
 
   const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
   assert.ok(section, 'settings.section entry must be registered')
@@ -406,38 +577,38 @@ test('apply registers the main panel, the settings section and the sidebar panel
   assert.equal(section.component, plugin.components.SettingsSection)
   assert.equal(typeof section.options.label, 'function')
   assert.equal(section.options.label(), '远程主机')
-
-  const entry = calls.registers.find((registerCall) => registerCall.options.name === 'sidebar.panellist')
-  assert.ok(entry, 'the sidebar panel icon must be registered')
-  assert.equal(entry.options.id, PANEL_ID, 'the icon id must address the main panel')
-  assert.equal(entry.component, plugin.components.RemotePanelIcon)
-  // The row opens host management, so its label names that page, not the mode.
-  assert.equal(entry.options.label(), '远程主机')
 })
 
-test('shared inject face opens the panel, the local workspace and the panel request store', () => {
+test('shared inject face carries the command channels, not a panel', () => {
   const { calls } = runApply(plugin)
-  const main = calls.registers.find((entry) => entry.options.name === 'main')
+  const overlay = calls.registers.find((entry) => entry.options.name === 'shell.overlay')
   const section = calls.registers.find((entry) => entry.options.name === 'settings.section')
-  assert.equal(typeof main.options.inject, 'function')
+  assert.equal(typeof overlay.options.inject, 'function')
   assert.equal(typeof section.options.inject, 'function')
-  const face = main.options.inject()
-  assert.equal(typeof face.openPanel, 'function')
+  const face = overlay.options.inject()
   assert.equal(typeof face.getLocaleId, 'function')
-  assert.equal(typeof face.openLocalWorkspace, 'function')
-  assert.ok(face.panelStore && typeof face.panelStore.request === 'function')
   assert.equal(face.getLocaleId(), 'zh')
+  assert.equal(face.openPanel, undefined, 'there is no panel to select any more')
+  assert.ok(face.panelStore && typeof face.panelStore.request === 'function')
+  assert.ok(face.wizardStore && typeof face.wizardStore.open === 'function')
+  assert.equal(typeof face.openWizard, 'function')
 
-  face.openPanel()
-  assert.deepEqual(calls.selectPanel, [PANEL_ID])
-
-  face.openLocalWorkspace('ws_local')
-  assert.deepEqual(calls.selectPanel, [PANEL_ID, null])
-  assert.deepEqual(calls.openWorkspace, ['ws_local'])
-
+  // The panel store carries one command at a time.
   face.panelStore.request('h_test')
-  assert.equal(face.panelStore.take(), 'h_test')
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'open', hostId: 'h_test' })
   assert.equal(face.panelStore.take(), null)
+  face.panelStore.requestIntent({ kind: 'manage' })
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'manage' })
+  face.panelStore.requestIntent({ kind: 'local' })
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' })
+  face.panelStore.requestIntent({ kind: 'open' })
+  assert.equal(face.panelStore.take(), null, 'an open intent without a host is refused')
+
+  // The wizard store opens and closes one draft.
+  face.openWizard({ mode: 'edit', host: { id: 'h_test' } })
+  assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'edit', host: { id: 'h_test' } })
+  face.wizardStore.close()
+  assert.equal(face.wizardStore.current(), null)
 })
 
 // ---------------------------------------------------------------------------
@@ -573,32 +744,6 @@ test('host list renders a connected host card with remote version and actions', 
   assert.match(html, /诊断/)
 })
 
-test('host list shows the one-time "remote tasks keep running" notice when flagged', () => {
-  const state = {
-    hostVersion: '0.2.2-rc.1',
-    targetVersion: '0.2.2-rc.1',
-    hosts: [],
-    settings: {},
-    activeHostId: null,
-    firstRun: false,
-  }
-  const html = render(
-    React.createElement(plugin.components.HostListView, {
-      t,
-      state,
-      loading: false,
-      error: null,
-      closeNotice: true,
-      onDismissCloseNotice: () => {},
-      onAdd: () => {},
-    }),
-  )
-  assert.match(html, /远端任务会继续运行/)
-  // Leaving no longer auto-opens the last host, so the notice promises a return
-  // through the host page, not an automatic takeover.
-  assert.match(html, /再次打开会回到该主机/)
-})
-
 test('connecting host renders staged progress text', () => {
   const host = hostView({
     status: 'connecting',
@@ -681,14 +826,12 @@ test('error card resolves English text when the locale is en', () => {
   assert.match(html, /Test the jump host first/)
 })
 
-test('the panel stays a host manager: no separate takeover surface, no remote page', () => {
+test('the overlay host takes no page of its own until a window is asked for', () => {
   const host = hostView()
   const html = render(
-    React.createElement(plugin.components.MainPanel, {
+    React.createElement(plugin.components.PluginOverlay, {
       t,
       getLocaleId: () => 'zh',
-      openPanel: () => {},
-      closePanel: () => {},
       initialState: {
         hostVersion: '0.2.2-rc.1',
         targetVersion: '0.2.2-rc.1',
@@ -699,28 +842,77 @@ test('the panel stays a host manager: no separate takeover surface, no remote pa
       },
     }),
   )
-  // Connecting takes the window over as a side effect; the panel itself is the host
-  // page only and never renders the remote page.
-  assert.match(html, /data-testid="host-list"/)
-  assert.doesNotMatch(html, /data-testid="workspace-rail"/)
-  assert.doesNotMatch(html, /data-testid="overlay-surface"/)
+  // The plugin owns no page: closed windows render nothing but the theme root.
+  assert.match(html, /data-testid="dsh-remote-go-overlay-host"/)
+  assert.doesNotMatch(html, /data-testid="host-list"/)
+  assert.doesNotMatch(html, /data-testid="manage-window"/)
+  assert.doesNotMatch(html, /<div class="drg-modal-layer"/)
   assert.doesNotMatch(html, /<iframe/)
 })
 
-test('the panel lands on host management instead of taking the window over on mount', () => {
-  // docs/design.md §4.3: the sidebar row opens the host page, and only "Open" on a
-  // host hands the main column to a remote. A bootstrap effect used to auto-open the
-  // preferred host here, which covered the host page the moment the panel mounted —
-  // adding, switching, diagnosing or deleting a host had nowhere to happen.
-  const start = SOURCE.indexOf('function MainPanel')
-  assert.ok(start > 0, 'MainPanel must exist in the client source')
-  const panel = SOURCE.slice(start, SOURCE.indexOf('function SettingsSection'))
-  assert.doesNotMatch(panel, /bootstrapped/, 'the panel must not bootstrap a takeover on mount')
-  // The takeover still has one explicit trigger: pressing "Open" on a host card.
-  assert.match(panel, /const openHost = \(host\) => \{[\s\S]*?setView\('viewport'\)/)
+test('the plugin never selects a main panel or renders the remote page itself', () => {
+  // docs/design.md §4: the switcher row and the floating windows are the whole surface;
+  // the remote UI only ever reaches the desktop guest. No page can be taken over.
+  assert.doesNotMatch(SOURCE, /selectPanel/, 'the plugin must not select a layout panel')
+  assert.doesNotMatch(SOURCE, /'main'/, 'the plugin must not register the main slot')
+  assert.doesNotMatch(SOURCE, /<iframe|h\(\s*'iframe'/, 'no iframe may be rendered')
+  // The takeover still has one explicit trigger: opening a host from the row or the list.
+  assert.match(SOURCE, /const openHost = \(host\) => \{[\s\S]*?setTarget\(host\.id\)/)
 })
 
-test('the takeover carrier hands the window to the guest and injects the host row', async () => {
+test('the warm pool keeps every opened host and the last request wins a race', async () => {
+  // No count limit: every host you have opened keeps its window.
+  const doc = fakeDocument()
+  const released = []
+  let lease = 0
+  const takeover = loadClientPlugin({
+    document: doc,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-' + (lease += 1), partition: 'persist:dsh-remote-go:' + lease }),
+        release: async (id) => released.push(id),
+      },
+    },
+  })
+  const url = (hostId) => 'http://127.0.0.1:43210/?token=' + hostId
+  try {
+    for (const hostId of ['h_a', 'h_b', 'h_c', 'h_d']) {
+      const opened = await takeover.carrier.open({ hostId, url: url(hostId) })
+      assert.equal(opened.ok, true, hostId + ' must open')
+      assert.equal(opened.reused, false)
+    }
+    assert.equal(doc.body.children.length, 4, 'all four windows stay mounted')
+    for (const hostId of ['h_a', 'h_b', 'h_c', 'h_d']) {
+      assert.equal(takeover.carrier.warm(hostId), true, hostId + ' must stay warm')
+    }
+    assert.equal(takeover.carrier.shown(), 'h_d')
+
+    // Switching back is a show, not a reload.
+    const again = await takeover.carrier.open({ hostId: 'h_a' })
+    assert.equal(again.reused, true)
+    assert.equal(takeover.carrier.shown(), 'h_a')
+    assert.deepEqual(released, [], 'nothing may be released while a host is still up')
+
+    // Two opens in the same tick: the later one is what the window ends up on, and the
+    // window built for the earlier request is dropped instead of stealing it.
+    const [first, second] = await Promise.all([
+      takeover.carrier.open({ hostId: 'h_e', url: url('h_e') }),
+      takeover.carrier.open({ hostId: 'h_f', url: url('h_f') }),
+    ])
+    assert.deepEqual({ ok: first.ok, reason: first.reason }, { ok: false, reason: 'superseded' })
+    assert.equal(second.ok, true)
+    assert.equal(takeover.carrier.shown(), 'h_f')
+    assert.equal(takeover.carrier.warm('h_e'), false, 'a superseded window must not linger')
+    assert.equal(doc.body.children.length, 5, 'children: ' + doc.body.children.map((node) => node.id).join(','))
+  } finally {
+    await takeover.carrier.close()
+  }
+  assert.equal(doc.body.children.length, 0)
+  assert.equal(released.length, 6, 'every lease is handed back, including the superseded one')
+})
+
+test('the takeover carrier hands the window to the guest and injects the switcher', async () => {
   const doc = fakeDocument()
   const released = []
   const takeover = loadClientPlugin({
@@ -742,18 +934,13 @@ test('the takeover carrier hands the window to the guest and injects the host ro
     const result = await takeover.carrier.open({
       hostId: 'h_a',
       url: 'http://127.0.0.1:43210/?token=abc',
-      t,
-      hosts,
-      activeHostId: 'h_a',
-      onPick: () => {},
-      onRefresh: () => {},
-      onExit: () => {},
+      message: '远端界面加载失败',
     })
     assert.equal(result.ok, true)
-    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay')
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
     assert.ok(root, 'the carrier must be mounted on document.body')
     // Whole window, no local chrome: style + guest + the load-error line only. The host
-    // switcher lives inside the remote page, so there is nothing local to render.
+    // switcher lives inside the page, so there is nothing local to render.
     assert.match(root.style.cssText, /left:0/)
     assert.equal(root.children.length, 3)
     assert.equal(
@@ -764,51 +951,274 @@ test('the takeover carrier hands the window to the guest and injects the host ro
     assert.ok(view, 'the guest must be mounted')
     assert.equal(view.tagName, 'WEBVIEW')
 
-    // The row is injected after the guest settles, and the first state push follows it.
+    // The row script is injected after the guest settles; a state push follows it.
     const calls = []
     view.executeJavaScript = (code) => {
       calls.push(code)
-      return Promise.resolve(code.includes('__drgHostRow = {') ? 'installed' : null)
+      return Promise.resolve(code.includes('function mountHostRow') ? 'installed' : null)
     }
     view.listeners['did-stop-loading']()
     await settle()
     assert.ok(
-      calls.some((code) => code.includes('drg-host-row')),
-      'the injected row script must run',
+      calls.some((code) => code.includes('function mountHostRow')),
+      'the injected row script must run inside the guest',
     )
+
+    takeover.carrier.update({ hosts, current: 'h_a' })
+    await settle()
     assert.ok(
       calls.some((code) => code.includes('43.133.80.40') && code.includes('生产机 ubuntu')),
       'the host list must be pushed into the injected row',
     )
+    assert.ok(
+      calls.some((code) => code.includes('"current":"h_a"')),
+      'the current target must be pushed too',
+    )
+    // The session title line is gone: the row names the target and nothing else.
+    assert.equal(
+      calls.some((code) => code.includes('drg-hr-title')),
+      false,
+    )
 
-    // The guest's own title (the remote session) is pushed into the row as well.
-    view.listeners['page-title-updated']({ title: '  修一下远程接管的侧边栏  ' })
-    await settle()
-    assert.ok(calls.some((code) => code.includes('修一下远程接管的侧边栏')))
-
-    // /state changes keep flowing into the injected row without a reload.
-    takeover.carrier.updateBar({
-      t,
-      hosts: [...hosts, hostView({ id: 'h_c', name: '第三台', address: '10.0.0.9' })],
-      activeHostId: 'h_c',
-      onPick: () => {},
-      onRefresh: () => {},
-      onExit: () => {},
-    })
-    await settle()
-    assert.ok(calls.some((code) => code.includes('第三台')))
     // A guest reload wipes the injected DOM, so every load stop re-installs it: the
-    // control must never disappear (the refresh item in the row reloads the guest).
-    const scriptRuns = calls.filter((code) => code.includes('drg-host-row')).length
+    // control must never disappear.
+    const scriptRuns = calls.filter((code) => code.includes('function mountHostRow')).length
     view.listeners['did-stop-loading']()
     await settle()
-    assert.equal(calls.filter((code) => code.includes('drg-host-row')).length, scriptRuns + 1)
+    assert.equal(calls.filter((code) => code.includes('function mountHostRow')).length, scriptRuns + 1)
   } finally {
     await takeover.carrier.close()
   }
   assert.equal(doc.body.children.length, 0)
   assert.deepEqual(released, ['lease-1'])
 })
+
+test('the switcher row is drawn into the local sidebar and lists local, hosts and the actions', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  const connected = hostView({ id: 'h_a', name: '43.133.80.40', address: '43.133.80.40', status: 'connected' })
+  const idle = hostView({ id: 'h_b', name: '生产机 ubuntu', address: 'ubuntu@10.0.0.7', status: 'disconnected' })
+
+  local.carrier.update({
+    hosts: [connected, idle],
+    labels: { local: '本地', addHost: '添加主机', manage: '管理界面' },
+  })
+
+  const row = rowOf(dom)
+  assert.ok(row, 'the row must be placed in the local sidebar')
+  assert.equal(row.parentNode, dom.column)
+  // The row sits right under the brand row, exactly like the copy in the remote page.
+  assert.equal(dom.brand.nextSibling, row)
+  assert.equal(rowName(row), '本地', 'the closed row names the current target only')
+  const menu = row.children.find((child) => child.className === 'drg-hr-menu')
+  assert.equal(
+    menu.children.filter((child) => child.className === 'drg-hr-title').length,
+    0,
+    'the session-title line is gone',
+  )
+
+  const items = rowItems(row)
+  assert.deepEqual(items.map(itemLabel), ['本地', '43.133.80.40', '生产机 ubuntu', '添加主机', '管理界面'])
+  // A connected host carries the glowing green dot; the rest keep their status tone.
+  assert.equal(itemDotState(items[0]), 'local')
+  assert.equal(itemDotState(items[1]), 'connected')
+  assert.equal(itemDotState(items[2]), 'disconnected')
+  assert.equal(items[0].getAttribute('data-active'), '1')
+  assert.equal(items[1].getAttribute('data-target'), 'h_a')
+  assert.equal(items[2].getAttribute('data-target'), 'h_b')
+  assert.equal(items[3].getAttribute('data-action'), 'add')
+  assert.equal(items[4].getAttribute('data-action'), 'manage', 'management is the last entry')
+  // An action carries a glyph where a target carries its connection dot.
+  for (const action of [items[3], items[4]]) {
+    assert.ok(
+      action.children.some((child) => child.className === 'drg-hr-glyph'),
+      'an action must not look like an unconnected host',
+    )
+  }
+  // One separator, after the hosts and before the two actions; no refresh/exit entries.
+  const kinds = menu.children.map((child) => child.className)
+  assert.deepEqual(kinds, ['drg-hr-item', 'drg-hr-item', 'drg-hr-item', 'drg-hr-sep', 'drg-hr-item', 'drg-hr-item'])
+})
+
+test('the switcher menu opens on the row, closes on a second click and on a pick', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  local.carrier.update({
+    hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })],
+    labels: { local: '本地', addHost: '添加主机', manage: '管理界面' },
+  })
+  const row = rowOf(dom)
+  clickInside(row, row)
+  assert.equal(row.getAttribute('aria-expanded'), 'true')
+  assert.equal(row.classList.contains('drg-open'), true)
+  const menu = row.children.find((child) => child.className === 'drg-hr-menu')
+  // The sidebar clips its children, so the menu is fixed and anchored under the row.
+  assert.equal(menu.style.top, '804px')
+  assert.equal(menu.style.width, '280px')
+
+  clickInside(row, row)
+  assert.equal(row.getAttribute('aria-expanded'), 'false')
+  clickInside(row, row)
+  clickInside(row, rowItems(row)[1])
+  assert.equal(row.getAttribute('aria-expanded'), 'false', 'a pick closes the menu')
+
+  // A deleted host must not leave the row naming a target that no longer exists.
+  local.carrier.update({ hosts: [] })
+  assert.equal(rowName(row), '本地')
+  assert.deepEqual(rowItems(row).map(itemLabel), ['本地', '添加主机', '管理界面'])
+})
+
+test('the guest script installs the same row and leaves intents on the page bridge', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  const script = local.carrier.script()
+  assert.match(script, /^\(function mountHostRow\(win\)/)
+
+  // The guest is a foreign page: no sink, so the row queues intents on `window.__drgBridgeQueue`.
+  const guestDom = fakeDom()
+  const guestWindow = { document: guestDom.document, innerHeight: 800 }
+  const factory = new Function('window', 'return ' + script)
+  assert.equal(factory(guestWindow), 'installed')
+  guestWindow.__drgHostRow.update({
+    hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })],
+    current: 'h_a',
+    labels: { local: '本地', addHost: '添加主机', manage: '管理界面' },
+  })
+  const row = rowOf(guestDom)
+  assert.ok(row, 'the guest row must be placed in the guest sidebar')
+  assert.equal(rowName(row), '43.133.80.40')
+  const items = rowItems(row)
+  clickInside(row, items[items.length - 2])
+  // Two clicks inside one poll must both survive: the queue is drained in order.
+  clickInside(row, items[items.length - 1])
+  clickInside(row, items[0])
+  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'add' }, { action: 'manage' }, { target: 'local' }])
+  // A live host carries its own exit control on the row, right after the address.
+  const exit = items[1].children.find((child) => child.className === 'drg-hr-act')
+  assert.ok(exit, 'a connected host must expose an exit control')
+  assert.equal(exit.textContent, 'Exit remote')
+  assert.equal(exit.getAttribute('data-action'), 'disconnect')
+  assert.equal(exit.getAttribute('data-host-id'), 'h_a')
+})
+
+test('the exit control disconnects that host instead of switching to it', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  const { calls } = runApply(local)
+  local.carrier.update({
+    hosts: [
+      hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' }),
+      hostView({ id: 'h_b', name: '生产机', status: 'disconnected' }),
+    ],
+    labels: { local: '本地', addHost: '添加主机', manage: '管理界面', exit: '断开' },
+  })
+  const row = rowOf(dom)
+  const items = rowItems(row)
+  // Only a connected host is worth leaving; a disconnected one has nothing to close.
+  const exitA = items[1].children.find((child) => child.className === 'drg-hr-act')
+  const exitB = items[2].children.find((child) => child.className === 'drg-hr-act')
+  assert.ok(exitA, 'the connected host must carry the exit control')
+  assert.equal(exitB, undefined, 'a host that is not up must not')
+  assert.equal(exitA.textContent, '断开')
+
+  clickInside(row, exitA)
+  const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'disconnect', hostId: 'h_a' })
+  assert.equal(rowName(row), '本地', 'leaving a host must not switch to it')
+})
+
+test('apply installs the local switcher row with the dictionary labels', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  const { calls } = runApply(local)
+  const row = rowOf(dom)
+  assert.ok(row, 'apply must place the switcher row')
+  assert.equal(rowName(row), '本地')
+  assert.deepEqual(rowItems(row).map(itemLabel), ['本地', '添加主机', '管理界面'])
+
+  // Local is always first: it is how the window gets back from a remote.
+  const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
+  clickInside(row, rowItems(row)[0])
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' }, 'picking local hands the window back')
+
+  // A host click goes to the overlay host, which decides how to show it.
+  local.carrier.update({ hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })] })
+  clickInside(row, rowItems(row)[1])
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'open', hostId: 'h_a' })
+  assert.equal(rowName(row), '43.133.80.40')
+
+  // Add-host opens the wizard; management asks the overlay host for the floating list.
+  clickInside(row, rowItems(row).at(-2))
+  assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'add', host: null })
+  face.wizardStore.close()
+  assert.equal(face.wizardStore.current(), null)
+  clickInside(row, rowItems(row).at(-1))
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'manage' })
+  // No page is ever selected: the plugin owns no main column.
+  assert.deepEqual(calls.selectPanel, [])
+})
+
+test('opening a host or a window from the remote keeps the remote behind it', async () => {
+  // Picking a host anywhere — including from the remote page's own switcher — must not
+  // hand the window back to the local page. Only "local" does that.
+  const dom = fakeDom()
+  const released = []
+  const local = loadClientPlugin({
+    document: dom.document,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async (lease) => released.push(lease),
+      },
+    },
+  })
+  const { calls } = runApply(local)
+  const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
+  const roots = () =>
+    dom.document.body.children.filter((node) => String(node.id).indexOf('dsh-remote-go-overlay-') === 0)
+
+  const opened = await local.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+  assert.equal(opened.ok, true)
+  assert.equal(opened.reused, false)
+  assert.equal(roots().length, 1)
+  await local.carrier.update({ hosts: [hostView({ id: 'h_a', status: 'connected' })], current: 'h_a' })
+  assert.equal(local.carrier.shown(), 'h_a')
+
+  const row = rowOf(dom)
+  assert.ok(row, 'the row must be installed in the local page')
+
+  // Management and the wizard are floating windows: the remote stays shown behind them.
+  clickInside(row, rowItems(row).at(-1))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'manage' })
+  assert.equal(local.carrier.shown(), 'h_a', 'the remote must stay in front of the local page')
+
+  clickInside(row, rowItems(row).at(-2))
+  assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'add', host: null })
+  assert.equal(local.carrier.shown(), 'h_a', 'the wizard floats over the remote')
+  face.wizardStore.close()
+
+  // Only "local" hands the window back, and it keeps the guest warm.
+  clickInside(row, rowItems(row)[0])
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' })
+  assert.equal(local.carrier.shown(), null)
+  assert.equal(local.carrier.warm('h_a'), true, 'the window stays warm for the next visit')
+  const hidden = roots()[0]
+  assert.equal(hidden.style.display, 'none')
+
+  // Coming back is a show, not a reload.
+  const again = await local.carrier.open({ hostId: 'h_a' })
+  assert.equal(again.reused, true)
+  assert.equal(roots().length, 1)
+  assert.notEqual(roots()[0].style.display, 'none')
+
+  await local.carrier.close()
+  assert.equal(roots().length, 0)
+  assert.deepEqual(released, ['lease-1'])
+})
+
 test('fingerprint card shows SHA256 and accept / remember actions', () => {
   const host = hostView({
     status: 'fingerprint-pending',
@@ -965,20 +1375,19 @@ test('conflict prompt lists the foreign processes and offers three actions', () 
   assert.match(html, /data-testid="remote-conflict-prompt"/)
 })
 
-test('main panel renders its loading state inside the DSH theme root', () => {
+test('the overlay host carries the theme root and the stylesheet', () => {
   const html = render(
-    React.createElement(plugin.components.MainPanel, {
+    React.createElement(plugin.components.PluginOverlay, {
       t,
       getLocaleId: () => 'zh',
-      openPanel: () => {},
     }),
   )
-  assert.match(html, /class="drg-root"/)
-  assert.match(html, /data-testid="dsh-remote-go-panel"/)
-  assert.match(html, /远程主机/)
-  assert.match(html, /加载中/)
+  assert.match(html, /class="drg-root drg-overlay"/)
+  assert.match(html, /data-testid="dsh-remote-go-overlay-host"/)
   assert.match(html, /data-dsh-remote-go="styles"/)
   assert.match(html, /--dsw-alias-label-primary/)
+  // The overlay seat must float above a remote window.
+  assert.match(html, /\[data-shell-overlay\] \{ z-index: 2147483001; \}/)
 })
 
 test('settings section renders the remote-hosts page and its empty state', () => {
@@ -1047,14 +1456,11 @@ test('every automation data-testid required by acceptance is rendered', () => {
   }
   const emptyState = { ...baseState, hosts: [] }
   const markup = {
-    panel: render(
-      React.createElement(plugin.components.MainPanel, { t, getLocaleId: () => 'zh', openPanel: () => {} }),
-    ),
+    overlay: render(React.createElement(plugin.components.PluginOverlay, { t, getLocaleId: () => 'zh' })),
     settingsSection: render(
       React.createElement(plugin.components.SettingsSection, {
         t,
         initialState: baseState,
-        openPanel: () => {},
         panelStore: { request: () => {} },
         getLocaleId: () => 'zh',
       }),
@@ -1165,7 +1571,7 @@ test('every automation data-testid required by acceptance is rendered', () => {
     ),
   }
   const required = [
-    'dsh-remote-go-panel',
+    'dsh-remote-go-overlay-host',
     'host-list',
     'host-list-empty',
     'host-add',
@@ -1209,16 +1615,6 @@ test('every automation data-testid required by acceptance is rendered', () => {
   // promising a save it cannot perform.
   assert.match(markup.password, /没有可用的凭据存储|凭据存储/)
   assert.doesNotMatch(JSON.stringify(markup), /dsh-remote-go-sidebar/)
-})
-
-test('the sidebar panel icon draws the remote glyph at the row size', () => {
-  const plain = render(React.createElement(plugin.components.RemotePanelIcon, { size: 22, active: false }))
-  assert.match(plain, /<svg[^>]*width="22"[^>]*height="22"/)
-  const active = render(React.createElement(plugin.components.RemotePanelIcon, { size: 16, active: true }))
-  assert.match(active, /<svg[^>]*width="16"[^>]*height="16"/)
-  // A missing size must not render a zero-width glyph.
-  const fallback = render(React.createElement(plugin.components.RemotePanelIcon, {}))
-  assert.match(fallback, /<svg[^>]*width="18"[^>]*height="18"/)
 })
 
 test('remote icon is original, currentColor SVG that respects size', () => {

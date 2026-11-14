@@ -110,21 +110,9 @@ HTTPS/CDN（GitHub Pages、jsDelivr、自有域名），然后在 DSH 里：
 2. Fork 该仓库，在插件列表中按现有格式新增一条 `dsh-remote-go` 条目（名称、一句话描述、npm 包名、仓库链接、分类/标签）；
 3. 提交 PR（一个条目即可；站点与市场会自动同步，通常 1 天内生效）。
 
-PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
-
-```json
-{
-  "name": "dsh-remote-go",
-  "title": {
-    "zh": "dsh remote go",
-    "en": "dsh remote go"
-  },
-  "description": {
-    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：桌面端把远端界面铺满整个窗口，并在远端自己的侧边栏顶部注入一条主机条（当前主机 / 远端会话 / 切换 / 刷新 / 离开）；远端 Node 由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰系统 Node），再用 npx 固定本机 DSH 版本启动（数据在远端用户自己的 ~/.dsh）；含主机清单、接入向导、连接诊断与版本一致。",
-    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client fills the whole window with the remote UI and injects a host row at the top of the remote sidebar (current host / remote session / switch / reload / leave). The plugin installs its own Node under ~/.dsh/remote-go/node at the lower bound of DSH engines.node (never the system one), then launches the remote DSH with npx pinned to the local version; its data stays in the user’s own ~/.dsh. Host list, connection wizard, diagnostics and exact version parity included."
-  }
-}
-```
+PR 条目的中英标题与描述**不要手抄**：它们由 `locale/zh.json` / `locale/en.json` 的 `meta` 生成到
+`market/plugin-entry.json`（`node scripts/market-entry.mjs`，`--check` 会和多语言源比对）。提 PR 时直接从
+`market/plugin-entry.json` 复制 `title` / `description` 两个字段即可，不要再在文档里贴第二份正文——同一段文案只能有一个来源。
 
 > 注意：本仓库是插件本身，不是市场应用；不要向市场应用仓库提插件条目。
 

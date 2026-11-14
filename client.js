@@ -2,10 +2,12 @@
  * dsh-remote-go · Client half
  *
  * A single-file browser plugin (no build step) that contributes the
- * Settings → "Remote hosts" section and a global main panel. The panel lists
- * SSH hosts and hands the whole window to the remote DSH Web UI — reached
- * through a local loopback tunnel — as a live browser guest. A 32px bar below the
- * title bar names the current host and remote session, and switches hosts.
+ * Settings → "Remote hosts" section, a host switcher row at the top of the
+ * sidebar, and floating windows. The row lists the local page plus every SSH
+ * host and hands the whole window to the remote DSH Web UI — reached through a
+ * local loopback tunnel — as a live browser guest. Management, the add/edit
+ * wizard and every prompt float in the shell's overlay layer, so they open over
+ * whichever page (local or remote) is showing and leave it untouched.
  *
  * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
  * source of truth; this file renders that state and sends user intents back.
@@ -40,7 +42,7 @@ window.__ModuleLoader__.load({
 
     /** Dictionary namespace owned by this plugin. */
     const NS = 'dsh-remote-go'
-    /** The id shared by the sidebar entry and the main panel it opens. */
+    /** The plugin's id: namespace for its overlay seats and the Settings entry. */
     const PANEL_ID = 'dsh-remote-go'
     /** Base path of the Host HTTP API (same origin as the page). */
     const API_BASE = '/dsh-remote-go/api'
@@ -50,7 +52,7 @@ window.__ModuleLoader__.load({
     const POLL_INTERVAL_MS = 3000
     /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
     const DESKTOP_BRIDGE_VERSION = 1
-    /** DOM id of the full-window remote carrier, so a reload can drop a stale one. */
+    /** DOM id prefix of the full-window remote carriers (one per warm host). */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
     /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
@@ -105,7 +107,7 @@ window.__ModuleLoader__.load({
       settingsAddHost: '添加远程主机',
       settingsHostOpen: '打开远程界面',
       settingsPluginSettings: '插件设置',
-      panelSubtitle: '管理远程主机，并在本地整页打开远端 DSH。',
+      panelSubtitle: '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
       addHost: '添加主机',
       addFirstHost: '添加第一台服务器',
       emptyTitle: '还没有远程主机',
@@ -182,13 +184,13 @@ window.__ModuleLoader__.load({
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
-      viewportOverlayLoadFailed: '远端界面加载失败，请刷新后重试，或从左侧主机栏回到主机管理。',
-      // -- carrier bar (injected into the full-window takeover) ----------------
-      carrierSwitchHost: '切换远端主机',
-      carrierRefresh: '刷新远端界面',
-      carrierExit: '离开远端，回到主机管理',
-      closeNoticeTitle: '远端任务会继续运行',
-      closeNoticeBody: '已返回主机清单。远端 DSH 与正在运行的任务不会停止，再次打开会回到该主机。',
+      viewportOverlayLoadFailed: '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
+      desktopRequired: '当前环境没有可用的桌面端窗口，远端界面只能在 DeepSeek Harness 桌面端打开。',
+      // -- host switcher row (drawn in the local sidebar and the remote one) ----
+      switcherLocal: '本地',
+      switcherAddHost: '添加主机',
+      switcherManage: '管理界面',
+      switcherExit: '断开',
 
       // -- connect progress (docs/api.md 进度 code) -------------------------------------
       'progress.ssh-connecting': '正在连接 SSH…',
@@ -385,7 +387,7 @@ window.__ModuleLoader__.load({
       settingsAddHost: 'Add remote host',
       settingsHostOpen: 'Open remote UI',
       settingsPluginSettings: 'Plugin settings',
-      panelSubtitle: 'Manage remote hosts and open their DSH full-page locally.',
+      panelSubtitle: 'Manage remote hosts and hand the whole window to one of their DSH instances.',
       addHost: 'Add host',
       addFirstHost: 'Add your first server',
       emptyTitle: 'No remote hosts yet',
@@ -463,14 +465,13 @@ window.__ModuleLoader__.load({
 
       viewportConnecting: 'Connecting to "{name}"…',
       viewportOverlayLoadFailed:
-        'The remote UI failed to load. Reload it, or use the bar to return to host management.',
-      // -- carrier bar (injected into the full-window takeover) ----------------
-      carrierSwitchHost: 'Switch remote host',
-      carrierRefresh: 'Reload the remote UI',
-      carrierExit: 'Leave the remote and return to host management',
-      closeNoticeTitle: 'Remote tasks keep running',
-      closeNoticeBody:
-        'Back to the host list. The remote DSH and its running tasks keep running; open the host again to return to it.',
+        'The remote UI failed to load. Pick “Local” in the sidebar switcher and open the host again.',
+      desktopRequired: 'This window has no desktop guest seat; the remote UI only opens in the DSH desktop app.',
+      // -- host switcher row (drawn in the local sidebar and the remote one) ----
+      switcherLocal: 'Local',
+      switcherAddHost: 'Add host',
+      switcherManage: 'Manage hosts',
+      switcherExit: 'Disconnect',
 
       'progress.ssh-connecting': 'Connecting over SSH…',
       'progress.host-key-confirm': 'Waiting for you to confirm the host key…',
@@ -817,6 +818,19 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Detach a timer from the process lifetime where the platform allows it. In the
+     * browser `setInterval` returns a number and this is a no-op; under Node (unit tests
+     * and tooling) it keeps a background refresh from holding the process open.
+     * @param {unknown} timer - handle returned by setInterval/setTimeout.
+     * @returns {void}
+     */
+    function unrefTimer(timer) {
+      if (timer === null || typeof timer !== 'object') return
+      if (typeof timer.unref !== 'function') return
+      timer.unref()
+    }
+
+    /**
      * Read the local DSH release version from the page boot payload.
      * @returns {string|undefined} release version, when available.
      */
@@ -961,10 +975,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One-shot request channel between the settings section and the main panel:
-     * the settings page asks the panel to open a host, then switches the layout
-     * to it. The panel consumes the request on mount or on subscribe.
-     * @returns {{request: Function, take: Function, subscribe: Function}} store handle.
+     * One-shot request channel into the panel: the switcher row (and the settings page)
+     * ask the panel for one target — open a host, or start the add-host wizard — and then
+     * switch the layout to it. The panel consumes the request on mount or on subscribe,
+     * and an "open" waits for `/state` so it knows the host's status and auth type.
+     * @returns {{request: Function, requestIntent: Function, take: Function, subscribe: Function}} store handle.
      */
     function createPanelRequestStore() {
       let pending = null
@@ -979,17 +994,85 @@ window.__ModuleLoader__.load({
         }
       }
       return {
+        /**
+         * Ask for one host by id (settings page shorthand).
+         * @param {string} hostId - host to open.
+         * @returns {void}
+         */
         request(hostId) {
           if (typeof hostId === 'string' && hostId.length > 0) {
-            pending = hostId
+            pending = { kind: 'open', hostId }
             emit()
           }
         },
-        take() {
-          const hostId = pending
-          pending = null
-          return hostId
+        /**
+         * Ask for a target directly.
+         * @param {{kind: string, hostId?: string}} intent - `open` one host, `disconnect` one host, `manage` the list, or `local`.
+         * @returns {void}
+         */
+        requestIntent(intent) {
+          if (!intent || typeof intent !== 'object') return
+          const kinds = ['open', 'disconnect', 'manage', 'local']
+          if (!kinds.includes(intent.kind)) return
+          if ((intent.kind === 'open' || intent.kind === 'disconnect') && typeof intent.hostId !== 'string') return
+          pending =
+            intent.kind === 'open' || intent.kind === 'disconnect'
+              ? { kind: intent.kind, hostId: intent.hostId }
+              : { kind: intent.kind }
+          emit()
         },
+        take() {
+          const intent = pending
+          pending = null
+          return intent
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
+      }
+    }
+
+    /**
+     * The add/edit host wizard lives in the shell's overlay seat, not in the panel: opening
+     * it must work from any page (local content, host management, or over a remote window)
+     * and must not drag the management page along with it.
+     * @returns {{open: Function, close: Function, current: Function, subscribe: Function}} store handle.
+     */
+    function createWizardStore() {
+      let draft = null
+      const listeners = new Set()
+      const emit = () => {
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch (_error) {
+            // a stale listener must not break the wizard
+          }
+        }
+      }
+      return {
+        /**
+         * Open the wizard on one draft.
+         * @param {{mode?: string, host?: object|null}} next - add or edit this host.
+         * @returns {void}
+         */
+        open(next) {
+          if (!next || typeof next !== 'object') return
+          draft = { mode: next.mode === 'edit' ? 'edit' : 'add', host: next.host || null }
+          emit()
+        },
+        /** @returns {void} */
+        close() {
+          if (draft === null) return
+          draft = null
+          emit()
+        },
+        /** @returns {{mode: string, host: object|null}|null} the open draft. */
+        current() {
+          return draft
+        },
+        /** @returns {() => void} unsubscribe. */
         subscribe(listener) {
           listeners.add(listener)
           return () => listeners.delete(listener)
@@ -1250,6 +1333,13 @@ window.__ModuleLoader__.load({
       async activate(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
       },
+      /**
+       * Tell the Host that no host fills the window any more (docs/api.md `POST /active`).
+       * @returns {Promise<object>} acknowledgement.
+       */
+      async clearActive() {
+        return apiRequest('/active', { method: 'POST', body: { id: null } })
+      },
       /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (docs/api.md). */
       async getAliases() {
         const payload = await apiRequest('/ssh/aliases')
@@ -1319,6 +1409,7 @@ window.__ModuleLoader__.load({
         onStatus('polling')
         if (typeof setInterval === 'function') {
           timer = setInterval(fetchOnce, POLL_INTERVAL_MS)
+          unrefTimer(timer)
         }
         fetchOnce()
       }
@@ -2041,18 +2132,6 @@ window.__ModuleLoader__.load({
             }),
           ),
         ),
-        props.closeNotice === true
-          ? h(
-              Notice,
-              {
-                tone: 'info',
-                title: t('closeNoticeTitle'),
-                onDismiss: props.onDismissCloseNotice,
-                dismissLabel: t('dismiss'),
-              },
-              t('closeNoticeBody'),
-            )
-          : null,
         content,
       )
     }
@@ -2244,30 +2323,557 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#region 9b. full-window remote carrier (DSH desktop only)
+    //#region 9b. host switcher row + full-window remote carrier (DSH desktop only)
 
-    /** Height of the injected chrome bar at the top of the carrier, in CSS pixels. */
-    const CARRIER_BAR_HEIGHT = 44
+    /** How often the row re-places itself and refreshes its payload (ms). */
+    const SWITCHER_TICK_MS = 1500
 
     /**
-     * The DSH desktop shell exposes a browser-guest bridge on the page:
+     * What both copies of the row show. `/state` feeds the host list and the panel says
+     * which target the window is on; the row itself is plain DOM, so it never re-renders
+     * through React and keeps working while the local UI is behind a remote guest.
      */
-    const overlayCarrier = {
-      hostId: null,
-      lease: null,
-      root: null,
-      view: null,
-      activeHostId: null,
-      title: '',
-      labels: { switchHost: '', refresh: '', exit: '' },
-      rowInstalled: false,
-      rowPoll: null,
+    const switcher = {
+      /** `'local'` or a host id: where the window is right now. */
+      current: 'local',
+      /** HostView list from `/state`, trimmed to what the row needs. */
       hosts: [],
-      callbacks: { onPick: null, onRefresh: null, onExit: null },
-      url: null,
+      /** Localized row text, refreshed on every push. */
+      labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
+      /** Set by `apply`: turns a row intent into a plugin action. */
+      dispatch: null,
+      /** Set by `apply`: current localized labels, so a language switch lands on the next push. */
+      labelsOf: null,
+      /** Whether the local copy of the row is currently on screen. */
+      installed: false,
     }
 
-    /** @returns {object | null} the desktop browser bridge, or null outside the desktop app. */
+    /**
+     * @returns {{current: string, hosts: object[], labels: object}} the payload both copies of the row render from.
+     */
+    function switcherPayload() {
+      const hosts = []
+      for (const host of switcher.hosts) {
+        if (!host || typeof host.id !== 'string') continue
+        hosts.push({
+          id: host.id,
+          name: host.name || '',
+          address: host.address || '',
+          status: host.status || 'idle',
+        })
+      }
+      // A host deleted elsewhere must not leave the row naming a target that is gone.
+      const known = switcher.current === 'local' || hosts.some((host) => host.id === switcher.current)
+      const labels = typeof switcher.labelsOf === 'function' ? switcher.labelsOf() : switcher.labels
+      return {
+        current: known ? switcher.current : 'local',
+        hosts,
+        labels: {
+          local: labels.local,
+          addHost: labels.addHost,
+          manage: labels.manage,
+          exit: labels.exit,
+        },
+      }
+    }
+
+    /**
+     * Push the switcher state into every live copy of the row: the local page's sidebar
+     * and, while a remote owns the window, the row injected into the guest.
+     * @param {{current?: string, hosts?: object[], labels?: object}} [patch] - merged into the state first.
+     * @returns {object} the payload that was pushed.
+     */
+    function updateSwitcher(patch) {
+      if (patch && typeof patch === 'object') {
+        if (Array.isArray(patch.hosts)) {
+          switcher.hosts = patch.hosts.filter((host) => host && typeof host.id === 'string')
+        }
+        if (typeof patch.current === 'string' && patch.current.length > 0) switcher.current = patch.current
+        if (patch.labels && typeof patch.labels === 'object') {
+          switcher.labels = { ...switcher.labels, ...patch.labels }
+        }
+      }
+      const payload = switcherPayload()
+      pushLocalHostRow(payload)
+      pushGuestHostRow(payload)
+      return payload
+    }
+
+    /** @returns {Window|null} this page's window, or null when the module runs outside a document. */
+    function localWindow() {
+      if (typeof window === 'undefined' || window === null) return null
+      if (typeof window.document === 'undefined' || window.document === null) return null
+      return window
+    }
+
+    /**
+     * Draw (or refresh) the row in the local page's own sidebar. It is plain DOM beside
+     * React's children, so the shell may drop it on a re-render; this re-places it and
+     * refreshes the payload, and is cheap enough to call on every state push.
+     * @param {object} payload - state to render.
+     * @returns {boolean} whether the row is on screen.
+     */
+    function pushLocalHostRow(payload) {
+      const win = localWindow()
+      if (win === null) return false
+      // The local row talks to this module directly instead of being polled.
+      win.__drgBridgeSink = dispatchSwitcherIntent
+      let status = 'absent'
+      if (win.__drgHostRow && typeof win.__drgHostRow.update === 'function') {
+        try {
+          status = win.__drgHostRow.update(payload)
+        } catch (_error) {
+          status = 'error'
+        }
+      }
+      if (status === 'absent' || status === 'error') {
+        try {
+          win.__drgHostRow = null
+          status = mountHostRow(win)
+          if (status === 'installed') win.__drgHostRow.update(payload)
+        } catch (_error) {
+          status = 'error'
+        }
+      }
+      switcher.installed = status === 'installed'
+      return switcher.installed
+    }
+
+    /**
+     * Push the same payload into the shown remote guest's copy of the row.
+     * @param {object} payload - state to render.
+     * @returns {void}
+     */
+    function pushGuestHostRow(payload) {
+      const entry = shownCarrier()
+      if (entry === null || entry.rowInstalled !== true || entry.view === null) return
+      try {
+        entry.view.executeJavaScript(
+          'window.__drgHostRow && window.__drgHostRow.update(' + JSON.stringify(payload) + ')',
+        )
+      } catch (_error) {
+        // the guest may still be navigating
+      }
+    }
+
+    /**
+     * Turn the row's intent into the plugin's action. The local row calls this straight
+     * from the click handler; the guest reaches it through the carrier's poll.
+     * @param {{target?: string, action?: string, hostId?: string}} intent - sidebar entry, an action, or one host's exit.
+     * @returns {void}
+     */
+    function dispatchSwitcherIntent(intent) {
+      if (!intent || typeof intent !== 'object') return
+      if (typeof switcher.dispatch === 'function') switcher.dispatch(intent)
+    }
+
+    /**
+     * The host switcher, as one self-contained function.
+     *
+     * It runs directly in the local page and is stringified into the remote guest
+     * (`HOST_ROW_SCRIPT`), so both windows get the same markup, the same theme tokens and
+     * the same intents. It may therefore only touch `win` and its own locals - no closure
+     * over this module.
+     *
+     * Intents leave through `win.__drgBridgeSink` when the page sets one (the local page
+     * hands them straight to the plugin) and through `win.__drgBridgeQueue` otherwise (the
+     * guest, drained by the carrier).
+     *
+     * The sidebar row shows the current target only - no session title line; the menu
+     * lists "local" first, then one entry per host (a connected host carries a glowing
+     * green dot), then "add host" at the bottom.
+     * @param {Window} win - page to draw the row into.
+     * @returns {string} 'installed' once the row is placed, otherwise why it is not.
+     */
+    function mountHostRow(win) {
+      try {
+        var doc = win.document
+        if (!doc || !doc.head) return 'no-document'
+        var existing = win.__drgHostRow
+        if (existing && typeof existing.update === 'function') return existing.update(null)
+
+        // A guest has no callback channel, so it leaves intents in a queue the carrier
+        // drains: a single slot would drop the first of two quick clicks.
+        var emit =
+          typeof win.__drgBridgeSink === 'function'
+            ? win.__drgBridgeSink
+            : function (intent) {
+                var queue = win.__drgBridgeQueue
+                if (!queue || typeof queue.push !== 'function') queue = []
+                queue.push(intent)
+                win.__drgBridgeQueue = queue
+              }
+
+        var make = function (tag, className) {
+          var node = doc.createElement(tag)
+          if (className) node.className = className
+          return node
+        }
+        var style = win.__drgHostRowStyle || null
+        if (style === null) {
+          style = make('style')
+          style.id = 'drg-host-row-style'
+          win.__drgHostRowStyle = style
+        }
+        style.textContent = [
+          // Above the page's own modal backdrops: while one is up it covers the whole
+          // viewport, and the switcher is the only way back out of a remote.
+          '#drg-host-row{position:relative;z-index:2147483000;display:flex;align-items:center;gap:8px;margin:4px 8px 6px;padding:6px 8px;border-radius:8px;cursor:pointer;font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--dsw-alias-label-secondary,#5c5c66)}',
+          '#drg-host-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
+          '#drg-host-row .drg-hr-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:var(--dsw-alias-state-idle,#8a8a93)}',
+          '#drg-host-row .drg-hr-dot[data-state="local"],#drg-host-row .drg-hr-dot[data-state="connected"]{background:var(--dsw-alias-state-success,#22a06b);box-shadow:0 0 0 3px rgba(34,160,107,.16),0 0 6px 1px rgba(34,160,107,.55)}',
+          '#drg-host-row .drg-hr-dot[data-state="connecting"]{background:var(--dsw-alias-state-business-primary,#3b82f6);box-shadow:0 0 0 3px rgba(59,130,246,.18)}',
+          '#drg-host-row .drg-hr-dot[data-state="fingerprint-pending"],#drg-host-row .drg-hr-dot[data-state="conflict-pending"]{background:var(--dsw-alias-state-warn,#e0a100)}',
+          '#drg-host-row .drg-hr-dot[data-state="error"],#drg-host-row .drg-hr-dot[data-state="limited"]{background:var(--dsw-alias-state-error,#d64545)}',
+          '#drg-host-row .drg-hr-glyph{display:flex;align-items:center;justify-content:center;width:7px;height:7px;flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8a93);font:12px/1 system-ui,sans-serif}',
+          '#drg-host-row .drg-hr-name{flex:1 1 auto;min-width:0;font-weight:500;color:var(--dsw-alias-label-primary,#202027);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+          '#drg-host-row .drg-hr-chev{display:flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8a93)}',
+          '#drg-host-row .drg-hr-menu{display:none;position:fixed;z-index:2147483000;min-width:200px;padding:4px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.16));background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 12px 32px rgba(0,0,0,.16);font-size:13px;color:var(--dsw-alias-label-primary,#202027)}',
+          '#drg-host-row.drg-open .drg-hr-menu{display:block}',
+          '#drg-host-row .drg-hr-item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden}',
+          '#drg-host-row .drg-hr-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
+          '#drg-host-row .drg-hr-item[data-active="1"]{background:var(--dsw-specific-sidebar-nav-item-active,var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14)))}',
+          '#drg-host-row .drg-hr-sep{height:1px;margin:4px 6px;background:var(--dsw-alias-border-l1,rgba(128,128,128,.16))}',
+          // The name takes the slack, so the address and the exit control stay flush right.
+          '#drg-host-row .drg-hr-item-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}',
+          '#drg-host-row .drg-hr-addr{flex:0 0 auto;max-width:112px;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-tertiary,#8a8a93);font-size:12px}',
+          // Text, not an icon, and only while the row is hovered: an accidental exit is a
+          // worse outcome than a hidden control.
+          '#drg-host-row .drg-hr-act{flex:0 0 auto;margin-left:2px;padding:1px 4px;border:0;border-radius:5px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8a93);font:12px/1.4 system-ui,sans-serif;cursor:pointer;opacity:0;pointer-events:none}',
+          '#drg-host-row .drg-hr-item:hover .drg-hr-act,#drg-host-row .drg-hr-act:focus-visible{opacity:1;pointer-events:auto}',
+          '#drg-host-row .drg-hr-act:hover,#drg-host-row .drg-hr-act:focus-visible{background:var(--dsw-alias-state-error-primary-soft,rgba(214,69,69,.12));color:var(--dsw-alias-state-error-primary,#d64545)}',
+        ].join('')
+        if (style.parentNode !== doc.head) doc.head.appendChild(style)
+
+        var row = make('div')
+        row.id = 'drg-host-row'
+        row.setAttribute('role', 'button')
+        row.setAttribute('aria-haspopup', 'menu')
+        row.setAttribute('aria-expanded', 'false')
+        var dotNode = make('span', 'drg-hr-dot')
+        dotNode.setAttribute('data-state', 'local')
+        row.appendChild(dotNode)
+        var nameNode = make('span', 'drg-hr-name')
+        row.appendChild(nameNode)
+        var chevNode = make('span', 'drg-hr-chev')
+        // Built node by node (never innerHTML), so no host name or address needs escaping.
+        var svg = doc.createElementNS('http://www.w3.org/2000/svg', 'svg')
+        svg.setAttribute('viewBox', '0 0 16 16')
+        svg.setAttribute('width', '12')
+        svg.setAttribute('height', '12')
+        svg.setAttribute('fill', 'none')
+        svg.setAttribute('stroke', 'currentColor')
+        svg.setAttribute('stroke-width', '1.7')
+        svg.setAttribute('stroke-linecap', 'round')
+        svg.setAttribute('stroke-linejoin', 'round')
+        svg.setAttribute('aria-hidden', 'true')
+        var chevPath = doc.createElementNS('http://www.w3.org/2000/svg', 'path')
+        chevPath.setAttribute('d', 'M4.2 6.4 8 10.2l3.8-3.8')
+        svg.appendChild(chevPath)
+        chevNode.appendChild(svg)
+        row.appendChild(chevNode)
+        var menuNode = make('span', 'drg-hr-menu')
+        menuNode.setAttribute('role', 'menu')
+        row.appendChild(menuNode)
+
+        var state = {
+          current: 'local',
+          hosts: [],
+          labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
+        }
+
+        var dotFor = function (status) {
+          var node = make('span', 'drg-hr-dot')
+          node.setAttribute('data-state', status || 'idle')
+          return node
+        }
+        var itemFor = function (label, options) {
+          var opts = options || {}
+          var node = make('span', 'drg-hr-item')
+          node.setAttribute('role', 'menuitem')
+          if (opts.target) node.setAttribute('data-target', opts.target)
+          if (opts.action) node.setAttribute('data-action', opts.action)
+          if (opts.active === true) node.setAttribute('data-active', '1')
+          // An action gets a glyph where a target would carry its connection dot.
+          if (opts.action) {
+            var glyphNode = make('span', 'drg-hr-glyph')
+            glyphNode.textContent = opts.glyph || '+'
+            node.appendChild(glyphNode)
+          } else {
+            node.appendChild(dotFor(opts.state))
+          }
+          var textNode = make('span', 'drg-hr-item-name')
+          textNode.textContent = label
+          node.appendChild(textNode)
+          if (opts.trailing) {
+            var trailingNode = make('span', 'drg-hr-addr')
+            trailingNode.textContent = opts.trailing
+            node.appendChild(trailingNode)
+          }
+          // A live host carries its own exit control, on the same line, right-aligned and
+          // revealed on hover: switching to a host and leaving it are different actions,
+          // and the menu had no way to leave one.
+          if (opts.exit) {
+            var exitLabel = state.labels.exit || 'Disconnect'
+            var exitNode = make('button', 'drg-hr-act')
+            exitNode.setAttribute('type', 'button')
+            exitNode.setAttribute('data-action', 'disconnect')
+            exitNode.setAttribute('data-host-id', opts.exit)
+            exitNode.setAttribute('title', exitLabel + ' ' + label)
+            exitNode.setAttribute('aria-label', exitLabel + ' ' + label)
+            exitNode.textContent = exitLabel
+            node.appendChild(exitNode)
+          }
+          return node
+        }
+        var clear = function (node) {
+          while (node.firstChild) node.removeChild(node.firstChild)
+        }
+        var render = function () {
+          var active = null
+          for (var index = 0; index < state.hosts.length; index += 1) {
+            if (state.hosts[index] && state.hosts[index].id === state.current) {
+              active = state.hosts[index]
+              break
+            }
+          }
+          var isLocal = state.current === 'local'
+          nameNode.textContent = isLocal
+            ? state.labels.local
+            : active
+              ? active.name || active.address || active.id
+              : state.labels.local
+          dotNode.setAttribute('data-state', isLocal ? 'local' : active ? active.status || 'idle' : 'idle')
+          clear(menuNode)
+          menuNode.appendChild(itemFor(state.labels.local, { target: 'local', state: 'local', active: isLocal }))
+          for (var cursor = 0; cursor < state.hosts.length; cursor += 1) {
+            var host = state.hosts[cursor]
+            if (!host || typeof host.id !== 'string') continue
+            var label = host.name || host.address || host.id
+            var address = host.address && host.address !== label ? host.address : ''
+            menuNode.appendChild(
+              itemFor(label, {
+                target: host.id,
+                state: host.status || 'idle',
+                active: host.id === state.current,
+                trailing: address,
+                exit: host.status === 'connected' ? host.id : '',
+              }),
+            )
+          }
+          menuNode.appendChild(make('span', 'drg-hr-sep'))
+          menuNode.appendChild(itemFor(state.labels.addHost, { action: 'add', glyph: '+' }))
+          menuNode.appendChild(itemFor(state.labels.manage, { action: 'manage', glyph: '\u2261' }))
+        }
+        /**
+         * Find the sidebar column and the row the switcher belongs under: the drag-handle
+         * brand row when the shell exposes one, otherwise the tall left column itself.
+         */
+        var findSlot = function () {
+          var handles = doc.querySelectorAll('[data-window-drag]')
+          var best = null
+          for (var index = 0; index < handles.length; index += 1) {
+            var box = handles[index].getBoundingClientRect()
+            if (box.width <= 0 && box.height <= 0) continue
+            // The sidebar brand is inset by its padding and near the top; the conversation
+            // header and the tab strip are wide, so the width bound leaves only the brand.
+            if (box.width > 520) continue
+            if (box.top > win.innerHeight * 0.4) continue
+            if (!handles[index].parentNode) continue
+            var columnBox = handles[index].parentNode.getBoundingClientRect()
+            if (columnBox.left > 24) continue
+            if (columnBox.width < 180) continue
+            // macOS puts a drag strip *above* the brand row, and both qualify: the lower one
+            // is the row the switcher belongs under.
+            if (best === null || box.top > best.top) {
+              best = { column: handles[index].parentNode, anchor: handles[index], top: box.top }
+            }
+          }
+          if (best !== null) return { column: best.column, anchor: best.anchor }
+          var columns = doc.querySelectorAll('div,aside,nav,section')
+          var found = null
+          for (var probe = 0; probe < columns.length; probe += 1) {
+            var rect = columns[probe].getBoundingClientRect()
+            if (rect.left > 2) continue
+            if (rect.width < 180 || rect.width > 480) continue
+            if (rect.height < win.innerHeight * 0.6) continue
+            found = columns[probe]
+          }
+          if (found === null) return null
+          return { column: found, anchor: found.children.length > 0 ? found.children[0] : null }
+        }
+        var place = function () {
+          var slot = findSlot()
+          if (slot === null) {
+            // The collapsed rail is ~56px wide and no longer a candidate column: hide the
+            // row instead of leaving it squeezed into it.
+            var parent = row.parentNode
+            var parentBox = parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null
+            if (parentBox !== null && parentBox.width < 180) {
+              row.style.display = 'none'
+              return 'collapsed'
+            }
+            return 'no-anchor'
+          }
+          // The collapsed rail is 56px wide: the row belongs to the expanded column only.
+          if (slot.column.getBoundingClientRect().width < 180) {
+            row.style.display = 'none'
+            return 'collapsed'
+          }
+          row.style.display = ''
+          if (slot.anchor === null) {
+            if (row.parentNode !== slot.column) slot.column.appendChild(row)
+            return 'installed'
+          }
+          if (slot.anchor.nextSibling !== row) slot.column.insertBefore(row, slot.anchor.nextSibling)
+          return 'installed'
+        }
+        var closeMenu = function () {
+          row.classList.remove('drg-open')
+          row.setAttribute('aria-expanded', 'false')
+        }
+        row.addEventListener('click', function (event) {
+          var target = event.target
+          // A host's own exit control acts on that host without switching to it.
+          if (target && target.classList && target.classList.contains('drg-hr-act')) {
+            var exitHost = target.getAttribute('data-host-id')
+            closeMenu()
+            if (exitHost) emit({ action: 'disconnect', hostId: exitHost })
+            return
+          }
+          while (target && target !== row && !(target.classList && target.classList.contains('drg-hr-item'))) {
+            target = target.parentNode
+          }
+          if (target && target !== row && target.classList && target.classList.contains('drg-hr-item')) {
+            var targetId = target.getAttribute('data-target')
+            var action = target.getAttribute('data-action')
+            closeMenu()
+            if (action) emit({ action: action })
+            else if (targetId) emit({ target: targetId })
+            return
+          }
+          if (row.classList.contains('drg-open')) {
+            closeMenu()
+            return
+          }
+          // The sidebar clips its children: anchor the fixed menu to the row so it can
+          // escape that overflow and sit over the page like a native menu.
+          var rect = row.getBoundingClientRect()
+          menuNode.style.top = rect.bottom + 4 + 'px'
+          menuNode.style.left = rect.left + 'px'
+          menuNode.style.width = rect.width + 'px'
+          row.classList.add('drg-open')
+          row.setAttribute('aria-expanded', 'true')
+        })
+        var outsideClick = function (event) {
+          if (row.contains && row.contains(event.target)) return
+          closeMenu()
+        }
+        doc.addEventListener('click', outsideClick)
+        var update = function (payload) {
+          if (payload && typeof payload === 'object') {
+            if (Object.prototype.toString.call(payload.hosts) === '[object Array]') state.hosts = payload.hosts
+            if (typeof payload.current === 'string' && payload.current.length > 0) state.current = payload.current
+            if (payload.labels && typeof payload.labels === 'object') {
+              state.labels = {
+                local: String(payload.labels.local || state.labels.local),
+                addHost: String(payload.labels.addHost || state.labels.addHost),
+                manage: String(payload.labels.manage || state.labels.manage),
+                exit: String(payload.labels.exit || state.labels.exit),
+              }
+            }
+          }
+          var status = place()
+          if (status !== 'installed') return status
+          render()
+          return status
+        }
+        win.__drgHostRow = {
+          update: update,
+          destroy: function () {
+            closeMenu()
+            if (typeof doc.removeEventListener === 'function') doc.removeEventListener('click', outsideClick)
+            if (row.parentNode) row.parentNode.removeChild(row)
+            if (style.parentNode) style.parentNode.removeChild(style)
+            win.__drgHostRow = null
+            win.__drgHostRowStyle = null
+          },
+        }
+        // A sidebar that is not mounted yet (or is collapsed) still gets its handle: the
+        // caller's next push places the row the moment the column exists.
+        return update(null)
+      } catch (_error) {
+        return 'error'
+      }
+    }
+
+    /** The same row, as the script the carrier evaluates inside the remote guest. */
+    const HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'
+
+    /**
+     * The live guests, most recently shown first, plus which one fills the window.
+     *
+     * Keeping a guest warm is what makes switching instant: the remote page is never
+     * reloaded when you go away and come back, it is only hidden and shown. There is no
+     * count limit — every host you have opened keeps its window — so a guest is dropped
+     * only when its host disconnects or is deleted, or when the plugin is disposed.
+     */
+    const carrierPool = {
+      /** @type {object[]} live guests, most recent first. */
+      entries: [],
+      /** Host id filling the window right now, or null when the local page is up. */
+      current: null,
+      /**
+       * Host id the window should end up on. A window is created asynchronously (the
+       * bridge hands out a lease), so this is what makes the *last* request win: a
+       * creation that finishes after the user picked something else is dropped.
+       */
+      wanted: null,
+      /** The one intent poll, owned by the shown guest. */
+      poll: null,
+    }
+
+    /**
+     * Show/hide operations run one at a time, in order: two overlapping opens must never
+     * build two guests for the same host, and the later pick must land last.
+     * @type {Promise<unknown>}
+     */
+    let carrierQueue = Promise.resolve()
+
+    /**
+     * Serialize one carrier operation behind the previous one.
+     * @param {Function} task - async work to run when the queue is free.
+     * @returns {Promise<unknown>} that task's result.
+     */
+    function whenCarrierIdle(task) {
+      const run = carrierQueue.then(task, task)
+      carrierQueue = run.then(
+        () => undefined,
+        () => undefined,
+      )
+      return run
+    }
+
+    /**
+     * @param {string} hostId - host to look up.
+     * @returns {object|null} that host's warm guest, if any.
+     */
+    function carrierOf(hostId) {
+      if (typeof hostId !== 'string' || hostId === '') return null
+      return carrierPool.entries.find((entry) => entry.hostId === hostId) || null
+    }
+
+    /** @returns {object|null} the guest filling the window, if any. */
+    function shownCarrier() {
+      return carrierPool.current === null ? null : carrierOf(carrierPool.current)
+    }
+
+    /** @returns {boolean} whether this host already has a warm window (switching is instant). */
+    function carrierWarm(hostId) {
+      return carrierOf(hostId) !== null
+    }
+
+    /** @returns {object|null} the desktop browser bridge, or null outside the desktop app. */
     function desktopBrowserBridge() {
       if (typeof window === 'undefined') return null
       const carrier = window.dshDesktop
@@ -2278,7 +2884,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The carrier's own CSS. There is no local chrome left to style: the host switcher
+     * The carrier's own CSS. There is no local chrome left to style: the host switcher is
+     * drawn inside whichever page owns the window.
      */
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:#fff;pointer-events:auto}
@@ -2286,273 +2893,94 @@ window.__ModuleLoader__.load({
     `
 
     /**
-     * The host switcher, drawn inside the remote page itself.
+     * Install the switcher row inside one guest.
+     * @param {object} entry - warm guest to inject into.
+     * @returns {Promise<boolean>} whether that guest's copy of the row is live.
      */
-    const HOST_ROW_SCRIPT = `
-(function () {
-  try {
-    if (window.__drgHostRow) return 'installed'
-    var sidebar = null
-    var all = document.querySelectorAll('div,aside,nav,section')
-    for (var i = 0; i < all.length; i += 1) {
-      var el = all[i]
-      var rect = el.getBoundingClientRect()
-      if (rect.left > 2) continue
-      if (rect.width < 200 || rect.width > 480) continue
-      if (rect.height < window.innerHeight * 0.6) continue
-      sidebar = el
-    }
-    if (!sidebar) return 'no-anchor'
-    var style = document.createElement('style')
-    style.id = 'drg-host-row-style'
-    style.textContent = [
-      '#drg-host-row{position:relative;display:flex;align-items:center;gap:8px;margin:4px 8px 6px;padding:6px 8px;border-radius:8px;cursor:pointer;font:12px/1.35 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--dsw-alias-label-secondary,#5c5c66)}',
-      '#drg-host-row:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
-      '#drg-host-row .drg-hr-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:var(--dsw-alias-state-idle,#8a8a93)}',
-      '#drg-host-row .drg-hr-text{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}',
-      '#drg-host-row .drg-hr-name{font-weight:500;color:var(--dsw-alias-label-primary,#202027);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '#drg-host-row .drg-hr-title{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a93);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
-      '#drg-host-row .drg-hr-chev{display:flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8a8a93)}',
-      '#drg-host-row .drg-hr-menu{display:none;position:fixed;z-index:2147483000;min-width:200px;padding:4px;border-radius:10px;border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.16));background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 12px 32px rgba(0,0,0,.16);font-size:13px;color:var(--dsw-alias-label-primary,#202027)}',
-      '#drg-host-row.drg-open .drg-hr-menu{display:block}',
-      '#drg-host-row .drg-hr-item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden}',
-      '#drg-host-row .drg-hr-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.10))}',
-      '#drg-host-row .drg-hr-item[data-active="1"]{background:var(--dsw-specific-sidebar-nav-item-active,var(--dsw-alias-interactive-bg-active,rgba(128,128,128,.14)))}',
-      '#drg-host-row .drg-hr-sep{height:1px;margin:4px 6px;background:var(--dsw-alias-border-l1,rgba(128,128,128,.16))}',
-      '#drg-host-row .drg-hr-addr{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8a8a93);font-size:12px}',
-    ].join('')
-    document.head.appendChild(style)
-    var row = document.createElement('div')
-    row.id = 'drg-host-row'
-    row.setAttribute('role', 'button')
-    row.innerHTML =
-      '<span class="drg-hr-dot"></span>' +
-      '<span class="drg-hr-text"><span class="drg-hr-name"></span><span class="drg-hr-title"></span></span>' +
-      '<span class="drg-hr-chev"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 6.4 8 10.2l3.8-3.8"></path></svg></span>' +
-      '<span class="drg-hr-menu"></span>'
-    var state = { hosts: [], activeHostId: null, title: '', labels: { switchHost: 'Switch remote host', refresh: 'Reload', exit: 'Leave remote' } }
-    var nameNode = row.querySelector('.drg-hr-name')
-    var titleNode = row.querySelector('.drg-hr-title')
-    var dotNode = row.querySelector('.drg-hr-dot')
-    var menuNode = row.querySelector('.drg-hr-menu')
-    var tones = { idle: 'var(--dsw-alias-state-idle,#8a8a93)', success: 'var(--dsw-alias-state-success,#22a06b)', warn: 'var(--dsw-alias-state-warn,#e0a100)', error: 'var(--dsw-alias-state-error,#d64545)', busy: 'var(--dsw-alias-state-business-primary,#3b82f6)' }
-    var escape = function (value) { return String(value == null ? '' : value).replace(/[<>&"]/g, '') }
-    var render = function () {
-      var active = null
-      for (var j = 0; j < state.hosts.length; j += 1) {
-        if (state.hosts[j] && state.hosts[j].id === state.activeHostId) { active = state.hosts[j]; break }
-      }
-      nameNode.textContent = active ? active.name || active.address || active.id : ''
-      row.title = state.labels.switchHost
-      titleNode.textContent = state.title || ''
-      dotNode.style.background = tones[active && active.status] || tones.idle
-      var html = ''
-      for (var k = 0; k < state.hosts.length; k += 1) {
-        var host = state.hosts[k]
-        if (!host || typeof host.id !== 'string') continue
-        var activeAttr = host.id === state.activeHostId ? ' data-active="1"' : ''
-        var address = host.address && host.address !== (host.name || '') ? '<span class="drg-hr-addr">' + escape(host.address) + '</span>' : ''
-        html += '<span class="drg-hr-item" role="menuitem" data-host="' + escape(host.id) + '"' + activeAttr + '>' +
-          '<span class="drg-hr-dot" style="background:' + (tones[host.status] || tones.idle) + '"></span>' +
-          '<span class="drg-hr-item-name">' + escape(host.name || host.address || host.id) + '</span>' + address + '</span>'
-      }
-      html += '<span class="drg-hr-sep"></span>' +
-        '<span class="drg-hr-item" data-action="refresh">' + escape(state.labels.refresh) + '</span>' +
-        '<span class="drg-hr-item" data-action="exit">' + escape(state.labels.exit) + '</span>'
-      menuNode.innerHTML = html
-    }
-    row.addEventListener('click', function (event) {
-      var target = event.target
-      while (target && target !== row && !(target.classList && target.classList.contains('drg-hr-item'))) {
-        target = target.parentNode
-      }
-      if (target && target !== row && target.classList && target.classList.contains('drg-hr-item')) {
-        var host = target.getAttribute('data-host')
-        var action = target.getAttribute('data-action')
-        window.__drgBridge = host ? { action: 'pick', hostId: host } : { action: action || 'refresh' }
-        row.classList.remove('drg-open')
-        return
-      }
-      // The sidebar is a clipping column: anchor the fixed menu to the row so it can
-      // escape the sidebar's overflow and sit over the page like a native menu.
-      var rect = row.getBoundingClientRect()
-      menuNode.style.top = rect.bottom + 4 + 'px'
-      menuNode.style.left = rect.left + 'px'
-      menuNode.style.width = rect.width + 'px'
-      row.classList.toggle('drg-open')
-    })
-    document.addEventListener('click', function (event) {
-      if (!row.contains(event.target)) row.classList.remove('drg-open')
-    })
-    var next = sidebar.children.length > 1 ? sidebar.children[1] : null
-    sidebar.insertBefore(row, next)
-    window.__drgHostRow = {
-      update: function (payload) {
-        state.hosts = Array.isArray(payload && payload.hosts) ? payload.hosts : []
-        state.activeHostId = payload && payload.activeHostId ? payload.activeHostId : null
-        state.title = payload && payload.title ? String(payload.title) : ''
-        if (payload && payload.labels) state.labels = payload.labels
-        render()
-      },
-      destroy: function () {
-        if (row.parentNode) row.parentNode.removeChild(row)
-        if (style.parentNode) style.parentNode.removeChild(style)
-        window.__drgHostRow = null
-      },
-    }
-    return 'installed'
-  } catch (error) {
-    return 'error'
-  }
-})()
-`
-
-    /**
-     * Install the injected row.
-     * @returns {Promise<boolean>} whether the injected row is live.
-     */
-    async function installHostRow() {
-      const view = overlayCarrier.view
+    async function installHostRow(entry) {
+      const view = entry === null ? null : entry.view
       if (view === null || typeof view.executeJavaScript !== 'function') return false
-      let ok = false
+      let status = 'error'
       try {
-        ok = (await view.executeJavaScript(HOST_ROW_SCRIPT)) === 'installed'
+        status = await view.executeJavaScript(HOST_ROW_SCRIPT)
       } catch (_error) {
-        ok = false
+        status = 'error'
       }
-      overlayCarrier.rowInstalled = ok
-      if (ok) pushHostRowState()
-      return ok
+      // 'collapsed' and 'no-anchor' still mean the handle exists: the next state push
+      // places the row as soon as the remote sidebar is wide enough to hold it.
+      const live = typeof status === 'string' && status !== 'error' && status !== 'no-document'
+      entry.rowInstalled = live
+      if (live && carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+      return live
     }
 
     /**
-     * Push the host list, the active host, the remote title and the menu labels into
+     * Poll the shown guest's row for a click, then hand the intent to the plugin. A plain
+     * poll is the only channel a cross-origin guest offers without a preload script.
+     * @param {object} entry - warm guest to poll.
      * @returns {void}
      */
-    function pushHostRowState() {
-      const view = overlayCarrier.view
-      if (overlayCarrier.rowInstalled !== true || view === null) return
-      const hosts = overlayCarrier.hosts.map((host) => ({
-        id: host.id,
-        name: host.name || '',
-        address: host.address || '',
-        status: host.status || 'idle',
-      }))
-      const payload = JSON.stringify({
-        hosts,
-        activeHostId: overlayCarrier.activeHostId,
-        title: overlayCarrier.title,
-        labels: overlayCarrier.labels,
-      })
-      try {
-        view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.update(' + payload + ')')
-      } catch (_error) {
-        // the guest may still be navigating
-      }
-    }
-
-    /**
-     * Poll the injected row's bridge. A plain polling loop is the only channel a
-     * @returns {void}
-     */
-    function startHostRowPoll() {
+    function startHostRowPoll(entry) {
       stopHostRowPoll()
-      const view = overlayCarrier.view
+      const view = entry === null ? null : entry.view
       if (view === null || typeof view.executeJavaScript !== 'function') return
-      overlayCarrier.rowPoll = setInterval(() => {
-        if (overlayCarrier.view !== view || overlayCarrier.rowInstalled !== true) return
+      carrierPool.poll = entry
+      // One drain at a time: an overlapping read of the same intent must not dispatch twice.
+      let draining = false
+      entry.timer = setInterval(() => {
+        if (carrierPool.poll !== entry || carrierPool.current !== entry.hostId) return
+        if (draining) return
         let pending = null
         try {
-          pending = view.executeJavaScript('window.__drgBridge || null')
+          pending = view.executeJavaScript('window.__drgBridgeQueue || []')
         } catch (_error) {
           return
         }
         if (pending === null || typeof pending.then !== 'function') return
+        draining = true
         pending
           .then((value) => {
-            if (!value || typeof value !== 'object' || overlayCarrier.view !== view) return
+            if (!value || !Array.isArray(value) || value.length === 0 || carrierPool.poll !== entry) return
             try {
-              view.executeJavaScript('window.__drgBridge = null')
+              view.executeJavaScript('window.__drgBridgeQueue = []')
             } catch (_error) {
-              // ignore
+              // ignore a guest that navigated away mid-poll
             }
-            const callbacks = overlayCarrier.callbacks
-            if (value.action === 'pick' && typeof value.hostId === 'string') {
-              const host = overlayCarrier.hosts.find((item) => item && item.id === value.hostId)
-              if (host && typeof callbacks.onPick === 'function') callbacks.onPick(host)
-              return
-            }
-            if (value.action === 'refresh' && typeof callbacks.onRefresh === 'function') callbacks.onRefresh()
-            if (value.action === 'exit' && typeof callbacks.onExit === 'function') callbacks.onExit()
+            for (const intent of value) dispatchSwitcherIntent(intent)
           })
           .catch(() => {})
+          .then(() => {
+            draining = false
+          })
       }, 400)
+      unrefTimer(entry.timer)
     }
 
     /** @returns {void} */
     function stopHostRowPoll() {
-      if (overlayCarrier.rowPoll !== null) {
-        clearInterval(overlayCarrier.rowPoll)
-        overlayCarrier.rowPoll = null
+      const entry = carrierPool.poll
+      carrierPool.poll = null
+      if (entry !== null && entry !== undefined && entry.timer !== null && entry.timer !== undefined) {
+        if (typeof clearInterval === 'function') clearInterval(entry.timer)
+        entry.timer = null
       }
     }
 
     /**
-     * Keep the injected row in step with /state. A no-op while no carrier is up, so
-     * the panel may call it on every state change.
-     * @param {{ t: Function, hosts: object[], activeHostId: string|null, onPick: Function, onRefresh: Function, onExit: Function }} options
-     * @returns {void}
+     * Build one guest: a fresh partition, the switcher row, and the failure line.
+     * @param {string} hostId - host this window belongs to.
+     * @param {string} url - loopback launch URL (already validated by the caller).
+     * @param {string} message - load-failure line.
+     * @returns {Promise<object|null>} the warm guest, or null when it cannot be acquired.
      */
-    function updateOverlayBar(options) {
-      const hosts = Array.isArray(options.hosts) ? options.hosts : []
-      overlayCarrier.hosts = hosts
-      overlayCarrier.activeHostId = typeof options.activeHostId === 'string' ? options.activeHostId : null
-      overlayCarrier.labels = {
-        switchHost: typeof options.t === 'function' ? options.t('carrierSwitchHost') : '',
-        refresh: typeof options.t === 'function' ? options.t('carrierRefresh') : '',
-        exit: typeof options.t === 'function' ? options.t('carrierExit') : '',
-      }
-      overlayCarrier.callbacks = {
-        onPick: typeof options.onPick === 'function' ? options.onPick : null,
-        onRefresh: typeof options.onRefresh === 'function' ? options.onRefresh : null,
-        onExit: typeof options.onExit === 'function' ? options.onExit : null,
-      }
-      pushHostRowState()
-    }
-
-    /**
-     * Take the whole window over with a live remote-DSH guest plus the injected bar.
-     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
-     */
-    async function openOverlay(options) {
+    async function createCarrier(hostId, url, message) {
       const bridge = desktopBrowserBridge()
-      if (bridge === null) return { ok: false, reason: 'unsupported' }
-      const hostId = typeof options.hostId === 'string' ? options.hostId : ''
-      const url = typeof options.url === 'string' ? options.url : ''
-      if (!isValidLoopbackUrl(url)) return { ok: false, reason: 'bad-url' }
-      const t = typeof options.t === 'function' ? options.t : (key) => key
-      if (overlayCarrier.root !== null) {
-        if (overlayCarrier.hostId === hostId) {
-          const changed = overlayCarrier.url !== url
-          overlayCarrier.url = url
-          if (changed && overlayCarrier.view !== null) {
-            try {
-              await overlayCarrier.view.loadURL(url)
-            } catch (_error) {
-              // the guest reports navigation failures through did-fail-load
-            }
-          }
-          updateOverlayBar(options)
-          return { ok: true, reused: true }
-        }
-        // A different host means a different partition: start the carrier over.
-        await closeOverlay()
-      }
+      if (bridge === null) return null
       let reservation = null
       try {
         reservation = await bridge.acquire('dsh-remote-go:' + (hostId || 'host'))
       } catch (_error) {
-        return { ok: false, reason: 'acquire-failed' }
+        return null
       }
       if (
         !reservation ||
@@ -2560,12 +2988,14 @@ window.__ModuleLoader__.load({
         typeof reservation.partition !== 'string' ||
         reservation.lease === ''
       ) {
-        return { ok: false, reason: 'acquire-failed' }
+        return null
       }
 
       const root = document.createElement('div')
-      root.id = OVERLAY_ROOT_ID
+      // One root per warm host, so the ids stay unique (the host shows which window it is).
+      root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
       root.setAttribute('data-testid', 'remote-overlay')
+      root.setAttribute('data-host-id', hostId)
       // The desktop window is frameless with a 40px titlebar overlay (Windows caption
       // buttons / macOS traffic lights), so the carrier starts below it: clicks in
       // that band belong to the OS, not to this page.
@@ -2582,7 +3012,7 @@ window.__ModuleLoader__.load({
       const errorLayer = document.createElement('div')
       errorLayer.className = 'drg-carrier-error'
       errorLayer.setAttribute('data-testid', 'remote-overlay-error')
-      errorLayer.textContent = t('viewportOverlayLoadFailed')
+      errorLayer.textContent = typeof message === 'string' ? message : ''
 
       const view = document.createElement('webview')
       view.className = 'drg-carrier-view'
@@ -2590,106 +3020,192 @@ window.__ModuleLoader__.load({
       view.setAttribute('partition', String(reservation.partition))
       view.setAttribute('allowpopups', '')
       view.setAttribute('src', 'about:blank#' + String(reservation.lease))
+
+      // Built before any listener is attached: the handlers below read it, and a guest
+      // that fired an event while the element was being appended would otherwise read a
+      // binding that is still in its temporal dead zone.
+      const entry = {
+        hostId,
+        lease: String(reservation.lease),
+        root,
+        view,
+        url,
+        rowInstalled: false,
+        /** Set when a main-frame load failed, so the next show retries instead of reusing it. */
+        failed: false,
+        timer: null,
+      }
+
       // `dom-ready` fires once per committed navigation, so navigating from it
       // unconditionally would reload the remote page forever (visible as flicker).
       let navigated = false
       view.addEventListener('dom-ready', () => {
-        if (overlayCarrier.view !== view || navigated) return
+        if (entry.view !== view || navigated) return
         navigated = true
-        view.loadURL(overlayCarrier.url).catch(() => {})
+        view.loadURL(entry.url).catch(() => {})
       })
       view.addEventListener('did-stop-loading', () => {
-        if (overlayCarrier.view !== view) return
+        if (entry.view !== view) return
         errorLayer.style.display = 'none'
-        // Re-install after *every* load stop: a guest reload (the row's own refresh, or
-        // the remote page navigating) wipes the injected DOM, and a one-shot install
-        // would leave the window without any control. The script is idempotent inside
-        // the page, so a normal load simply reports 'installed'.
-        installHostRow().then((live) => {
-          if (overlayCarrier.view !== view || !live) return
-          startHostRowPoll()
+        entry.failed = false
+        // Re-install after *every* load stop: the remote page reloading wipes the
+        // injected DOM, and a one-shot install would leave the window without any
+        // control. The script is idempotent inside the page.
+        installHostRow(entry).then((live) => {
+          if (entry.view !== view || !live) return
+          if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
         })
       })
-      // The guest's own document.title is the remote DSH's current session title
-      // (its layout derives the title from the open session), so the bar can show
-      // which remote session the window is on without touching the remote page.
-      view.addEventListener('page-title-updated', (event) => {
-        if (overlayCarrier.view !== view) return
-        overlayCarrier.title = event && typeof event.title === 'string' ? event.title.trim() : ''
-        pushHostRowState()
-      })
       view.addEventListener('did-fail-load', (event) => {
-        if (overlayCarrier.view !== view) return
+        if (entry.view !== view) return
         // A main-frame failure leaves a blank window, so say so; sub-resource
         // failures (errorCode -3, aborted) are normal and must stay silent.
         const isMainFrame = !event || event.isMainFrame !== false
         const aborted = event && (event.errorCode === -3 || event.errorCode === undefined)
         if (!isMainFrame || aborted) return
+        entry.failed = true
         errorLayer.style.display = 'flex'
       })
 
       root.append(style, view, errorLayer)
       document.body.appendChild(root)
 
-      overlayCarrier.hostId = hostId
-      overlayCarrier.lease = String(reservation.lease)
-      overlayCarrier.root = root
-      overlayCarrier.view = view
-      overlayCarrier.url = url
-      updateOverlayBar(options)
-      return { ok: true, reused: false }
-    }
-
-    /** Reload the live carrier in place; a no-op while it is closed. */
-    function reloadOverlay() {
-      const view = overlayCarrier.view
-      if (view === null) return false
-      try {
-        view.reload()
-        return true
-      } catch (_error) {
-        return false
-      }
+      return entry
     }
 
     /**
-     * Remove the carrier and release its lease. The SSH link, the tunnel and the
-     * @returns {Promise<void>}
+     * Show one host's window, warming it first when this is its first visit. Everything
+     * else is hidden, never torn down: that is what makes coming back instant.
+     *
+     * Operations are queued, and a window is created asynchronously (the bridge hands out
+     * a lease), so two things can happen in between: the user picks another host, or the
+     * window has to go back to the local page. `carrierPool.wanted` remembers the last
+     * request; a creation that is no longer wanted is dropped instead of shown.
+     * @param {{hostId?: string, url?: string, message?: string}} options - target host and an optional fresh launch URL.
+     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
      */
-    async function closeOverlay() {
-      const root = overlayCarrier.root
-      const lease = overlayCarrier.lease
-      const view = overlayCarrier.view
-      stopHostRowPoll()
-      if (view !== null && overlayCarrier.rowInstalled === true) {
+    async function showOverlay(options) {
+      const hostId = typeof options.hostId === 'string' ? options.hostId : ''
+      carrierPool.wanted = hostId
+      return whenCarrierIdle(() => showOverlayNow(hostId, options))
+    }
+
+    /**
+     * @param {string} hostId - host to show.
+     * @param {{url?: string, message?: string}} options - launch URL / failure line.
+     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
+     */
+    async function showOverlayNow(hostId, options) {
+      const url = typeof options.url === 'string' ? options.url : ''
+      let entry = carrierOf(hostId)
+      const reused = entry !== null
+      if (entry === null) {
+        if (!isValidLoopbackUrl(url)) return { ok: false, reason: 'bad-url' }
+        entry = await createCarrier(hostId, url, options.message)
+        if (entry === null) return { ok: false, reason: 'acquire-failed' }
+        // The user moved on (another host, or back to local) while this one was being
+        // built: drop it instead of stealing the window.
+        if (carrierPool.wanted !== hostId) {
+          await disposeCarrier(entry)
+          return { ok: false, reason: 'superseded' }
+        }
+      } else if (url !== '' && entry.url !== url && isValidLoopbackUrl(url)) {
+        // A reconnect hands out a new one-shot URL: the warm page is stale, reload it.
+        entry.url = url
         try {
-          view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
+          await entry.view.loadURL(url)
+        } catch (_error) {
+          // the guest reports navigation failures through did-fail-load
+        }
+      }
+      // A window whose page failed to load is not worth showing as-is: retry it once.
+      if (reused && entry.failed === true) {
+        entry.failed = false
+        try {
+          entry.view.reload()
         } catch (_error) {
           // the guest may already be gone
         }
       }
-      overlayCarrier.rowInstalled = false
-      overlayCarrier.root = null
-      overlayCarrier.view = null
-      overlayCarrier.hosts = []
-      overlayCarrier.activeHostId = null
-      overlayCarrier.title = ''
-      overlayCarrier.callbacks = { onPick: null, onRefresh: null, onExit: null }
-      overlayCarrier.lease = null
-      overlayCarrier.url = null
-      overlayCarrier.hostId = null
-      if (root !== null && root.parentNode !== null) root.parentNode.removeChild(root)
-      const bridge = desktopBrowserBridge()
-      if (bridge !== null && lease !== null) {
+      for (const other of carrierPool.entries) {
+        if (other === entry) continue
+        other.root.style.display = 'none'
+      }
+      carrierPool.entries = [entry, ...carrierPool.entries.filter((item) => item !== entry)]
+      carrierPool.current = hostId
+      entry.root.style.display = ''
+      updateSwitcher({ current: hostId })
+      if (entry.rowInstalled === true) {
+        pushGuestHostRow(switcherPayload())
+        startHostRowPoll(entry)
+      }
+      return { ok: true, reused }
+    }
+
+    /**
+     * Hide every guest and hand the window back to the local page, keeping all of them
+     * warm: leaving a remote is not the same as closing it.
+     * @returns {void}
+     */
+    function hideOverlays() {
+      carrierPool.wanted = null
+      if (carrierPool.current === null) return
+      stopHostRowPoll()
+      for (const entry of carrierPool.entries) entry.root.style.display = 'none'
+      carrierPool.current = null
+    }
+
+    /**
+     * Tear one guest down: its row, its DOM, its renderer and its lease. Safe for a guest
+     * that never made it into the pool (a superseded creation).
+     * @param {object} entry - guest to drop.
+     * @returns {Promise<void>}
+     */
+    async function disposeCarrier(entry) {
+      if (entry === null || entry === undefined) return
+      if (carrierPool.poll === entry) stopHostRowPoll()
+      carrierPool.entries = carrierPool.entries.filter((item) => item !== entry)
+      if (carrierPool.current === entry.hostId) carrierPool.current = null
+      if (entry.view !== null && entry.rowInstalled === true) {
         try {
-          await bridge.release(lease)
+          entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
+        } catch (_error) {
+          // the guest may already be gone
+        }
+      }
+      if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
+      const bridge = desktopBrowserBridge()
+      if (bridge !== null && entry.lease !== null) {
+        try {
+          await bridge.release(entry.lease)
         } catch (_error) {
           // a lease the shell already dropped is a no-op
         }
       }
     }
 
-    //#endregion
+    /**
+     * Drop one host's warm window: its host disconnected or was deleted, or the plugin is
+     * going away. There is no count-based eviction.
+     * @param {string} hostId - host whose window goes away.
+     * @returns {Promise<void>}
+     */
+    async function closeCarrier(hostId) {
+      const entry = carrierOf(hostId)
+      if (entry === null) return
+      await disposeCarrier(entry)
+    }
+
+    /**
+     * Drop every warm window (plugin disposal, or a host that is no longer usable).
+     * @returns {Promise<void>}
+     */
+    async function closeOverlay() {
+      stopHostRowPoll()
+      const hosts = carrierPool.entries.map((entry) => entry.hostId)
+      carrierPool.current = null
+      for (const hostId of hosts) await closeCarrier(hostId)
+    }
 
     //#endregion
 
@@ -4152,26 +4668,10 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region 14b. sidebar panel icon
+    //#region 15. overlay host (floating windows + remote window)
 
     /**
-     * Icon for the sidebar's global-panel row.
-     * @param {object} props - size (square edge in px), active (row is selected).
-     * @returns {object} svg element.
-     */
-    function RemotePanelIcon(props) {
-      const size = typeof props.size === 'number' && props.size > 0 ? props.size : 18
-      return h(
-        'span',
-        { className: 'drg-panel-icon', style: { display: 'inline-flex' } },
-        h(RemoteIcon, { size, active: props.active === true }),
-      )
-    }
-
-    //#region 15. panel container
-
-    /**
-     * Owns the panel's live state: one initial `/state` read, then SSE with a
+     * Owns the plugin's live state: one initial `/state` read, then SSE with a
      * 3s polling fallback (docs/api.md). Disposal closes the stream and timers.
      * An optional `initialState` is a test/preview seam; production callers omit it.
      * @param {object|undefined} [initialState] - state used for the first render.
@@ -4230,35 +4730,44 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The main panel: routes between the host list and the remote viewport,
-     * @param {object} props - slot props (`t`) plus injected `openPanel`/`getLocaleId`.
-     * @returns {object} panel root element.
+     * The plugin's overlay host, mounted once in the shell's overlay layer.
+     *
+     * It owns everything that is not the sidebar row: the host state, the remote window, the
+     * floating host-management window, the add/edit wizard, and every prompt. Because it
+     * sits above the remote window, opening or closing one of those never changes what is
+     * behind it — a remote stays exactly as it was.
+     * @param {object} props - slot props (`t`) plus the injected stores.
+     * @returns {object} overlay element.
      */
-    function MainPanel(props) {
+    function PluginOverlay(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
-      // The host passes no initial state; the seam lets tests and tooling render a
-      // concrete panel without a live transport.
+      // One `/state` feed for the whole plugin (docs/api.md): the row, the windows and the
+      // remote window all read from it.
       const remote = useRemoteState(props.initialState)
       const state = remote.state
-      const [view, setView] = useState('hosts')
-      const [activeHostId, setActiveHostId] = useState(() => {
+      /** Host filling the window, or null when the local page is in front. */
+      const [target, setTarget] = useState(() => {
         const initial = props.initialState
         return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
       })
+      const [manageOpen, setManageOpen] = useState(false)
       // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
       // one-shot launch token, so it is fetched on demand and never persisted.
       const [remoteUrl, setRemoteUrl] = useState(null)
       const [busyHostId, setBusyHostId] = useState(null)
-      const [wizard, setWizard] = useState(null)
       const [diagnose, setDiagnose] = useState(null)
       const [settingsOpen, setSettingsOpen] = useState(false)
       const [pendingDelete, setPendingDelete] = useState(null)
       const [deleting, setDeleting] = useState(false)
       const [passwordPrompt, setPasswordPrompt] = useState(null)
       const [conflictBusy, setConflictBusy] = useState(false)
-      const [showCloseNotice, setShowCloseNotice] = useState(false)
+      const [fingerprintBusy, setFingerprintBusy] = useState(false)
       const [toast, setToast] = useState(null)
+      const [wizard, setWizard] = useState(() => {
+        const store = props.wizardStore
+        return store && typeof store.current === 'function' ? store.current() : null
+      })
       const toastTimer = useRef(null)
 
       const notify = (text, tone) => {
@@ -4281,41 +4790,38 @@ window.__ModuleLoader__.load({
 
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
       const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
-      const activeHost = activeHostId ? hosts.find((host) => host && host.id === activeHostId) || null : null
+      const activeHost = target ? hosts.find((host) => host && host.id === target) || null : null
       const activeStatus = activeHost ? activeHost.status : null
+      const hostsRef = useRef(hosts)
+      hostsRef.current = hosts
+      // A host we asked for that still has to connect: the list stays up until it is ready.
+      const pendingSwitch = useRef(null)
+      const pendingIntent = useRef(null)
+      // Host we already told the user cannot be shown here (no desktop window seat).
+      const noWindowNotified = useRef(null)
 
-      // The panel always lands on host management (docs/design.md（主机管理页）): the sidebar
-      // row opens the host page, and "Open" on a host is the only action that hands
-      // the window to a remote. V1.0 auto-opened the preferred host here; that covered
-      // this page on mount, so adding, switching, diagnosing or deleting a host had
-      // nowhere to happen and the takeover could not be left from the row.
-
-      // A host removed elsewhere closes the viewport instead of showing a blank page.
+      // A host removed elsewhere closes its window instead of leaving a blank frame.
       useEffect(() => {
-        if (view !== 'viewport' || !state || !activeHostId) return
-        if (!Array.isArray(state.hosts) || !state.hosts.some((host) => host && host.id === activeHostId)) {
-          setActiveHostId(null)
-          setView('hosts')
-        }
-      }, [view, state, activeHostId])
+        if (target === null || state === null) return
+        if (!hosts.some((host) => host && host.id === target)) setTarget(null)
+      }, [state, target])
 
-      // Forget the loopback URL when the host changes or re-connects.
-      useEffect(() => {
-        setRemoteUrl(null)
-      }, [activeHostId])
+      // The launch URL is bound to the host it was issued for: a URL for another host is
+      // worth nothing (it is one-shot and host-specific), so it can never reach a window.
       useEffect(() => {
         if (activeStatus === 'connecting') setRemoteUrl(null)
       }, [activeStatus])
 
-      // Fetch `GET /hosts/:id/open` only for a connected host, and only once: the
-      // guest needs the launch-token URL, and a spent URL is never reused.
+      // Fetch `GET /hosts/:id/open` only for a host that is up and not already warm: the
+      // guest needs the launch-token URL once, and a warm window is shown without it.
       useEffect(() => {
-        if (view !== 'viewport' || activeHostId === null || activeStatus !== 'connected' || remoteUrl !== null)
-          return undefined
+        if (target === null || carrierWarm(target)) return undefined
+        if (remoteUrl !== null && remoteUrl.hostId === target) return undefined
+        if (activeStatus !== 'connected') return undefined
         let cancelled = false
-        api.openHost(activeHostId).then(
+        api.openHost(target).then(
           (url) => {
-            if (!cancelled) setRemoteUrl(url)
+            if (!cancelled) setRemoteUrl({ hostId: target, url })
           },
           (error) => {
             if (cancelled) return
@@ -4325,33 +4831,73 @@ window.__ModuleLoader__.load({
         return () => {
           cancelled = true
         }
-      }, [view, activeHostId, activeStatus, remoteUrl])
+      }, [target, activeStatus, remoteUrl])
 
-      // The settings page asks the panel to open one host, then switches to it.
+      // Where the window is. Guests stay warm: a warm one is shown again without any load,
+      // which is what makes switching between remotes (and coming back from local) instant.
       useEffect(() => {
-        const store = props.panelStore
-        if (!store || typeof store.take !== 'function' || typeof store.subscribe !== 'function') return undefined
-        const consume = () => {
-          const requested = store.take()
-          if (typeof requested !== 'string' || requested.length === 0) return
-          setActiveHostId(requested)
-          setView('viewport')
-          openPanel()
-          remote.refresh()
+        if (target === null) {
+          hideOverlays()
+          return
         }
-        consume()
-        return store.subscribe(consume)
-      }, [props.panelStore])
+        if (activeStatus !== 'connected') {
+          hideOverlays()
+          return
+        }
+        if (carrierWarm(target)) {
+          showOverlay({ hostId: target, message: t('viewportOverlayLoadFailed') })
+          return
+        }
+        // The launch URL for *this* host is still being fetched: keep the current guest up
+        // so switching does not flash the local UI behind it.
+        if (remoteUrl === null || remoteUrl.hostId !== target) return
+        const shown = showOverlay({ hostId: target, url: remoteUrl.url, message: t('viewportOverlayLoadFailed') })
+        if (shown && typeof shown.then === 'function') {
+          shown.then(
+            (outcome) => {
+              if (!outcome || outcome.ok !== false || outcome.reason !== 'acquire-failed') return
+              if (noWindowNotified.current === target) return
+              noWindowNotified.current = target
+              notify(t('desktopRequired'), 'error')
+            },
+            () => {},
+          )
+        }
+      }, [target, activeStatus, remoteUrl])
 
-      const openPanel = () => {
-        if (typeof props.openPanel === 'function') {
-          try {
-            props.openPanel()
-          } catch (_error) {
-            // selecting the already-active panel is a no-op
-          }
+      // When the host we asked for comes up, the window switches and the list gets out of
+      // the way; a failure leaves the list up so its error is readable.
+      useEffect(() => {
+        if (target === null || activeStatus !== 'connected' || pendingSwitch.current !== target) return
+        pendingSwitch.current = null
+        setManageOpen(false)
+      }, [target, activeStatus])
+
+      // The row shows where the window is and which hosts are up; both live in `state`.
+      useEffect(() => {
+        updateSwitcher({ hosts })
+      }, [state])
+      useEffect(() => {
+        updateSwitcher({ current: target === null ? 'local' : target })
+      }, [target])
+
+      // A host that is gone (or was closed) must not keep a hidden renderer alive.
+      useEffect(() => {
+        if (state === null) return
+        for (const entry of carrierPool.entries.slice()) {
+          const host = hosts.find((item) => item && item.id === entry.hostId) || null
+          if (host !== null && (host.status === 'connected' || host.status === 'connecting')) continue
+          closeCarrier(entry.hostId).catch(() => {})
         }
-      }
+      }, [state])
+
+      // While the plugin is loaded its windows stay warm; the plugin's own disposal (in
+      // `apply`) tears them down.
+      useEffect(() => {
+        return () => {
+          hideOverlays()
+        }
+      }, [])
 
       /** Connect with an optional one-time password (memory only). */
       const performConnect = (host, password) => {
@@ -4387,18 +4933,97 @@ window.__ModuleLoader__.load({
         performConnect(host, opts.password)
       }
 
+      /**
+       * Hand the window to one host: the management window steps aside for a host that is
+       * up, and stays up while one that is not (connecting, waiting for a fingerprint, in
+       * conflict) gets there, so its progress or prompt is visible.
+       * @param {object} host - HostView to open.
+       * @returns {void}
+       */
       const openHost = (host) => {
         if (!host) return
         const needsConnect = host.status === 'unconfigured' || host.status === 'disconnected' || host.status === 'error'
+        const ready = host.status === 'connected'
         if (needsConnect && host.authType === 'password') {
+          pendingSwitch.current = host.id
+          setManageOpen(true)
           setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
           return
         }
-        setActiveHostId(host.id)
-        setView('viewport')
-        openPanel()
+        pendingSwitch.current = ready ? null : host.id
+        setManageOpen(!ready)
+        setTarget(host.id)
         api.activate(host.id).catch(() => {})
         if (needsConnect) performConnect(host)
+      }
+      const openHostById = (hostId) => {
+        const host = hostsRef.current.find((item) => item && item.id === hostId) || null
+        if (host === null) {
+          // The host may be newer than the last `/state` frame (just added by the wizard):
+          // aim at it and let the takeover effect pick it up when the state arrives.
+          setTarget(hostId)
+          return true
+        }
+        openHost(host)
+        return true
+      }
+
+      // The switcher and the Settings page name one target: open a host, leave one, show
+      // host management, or hand the window back to the local page.
+      const applyIntent = (intent) => {
+        if (!intent || typeof intent !== 'object') return
+        if (intent.kind === 'manage') {
+          pendingIntent.current = null
+          setManageOpen(true)
+          remote.refresh()
+          return
+        }
+        if (intent.kind === 'local') {
+          pendingIntent.current = null
+          setManageOpen(false)
+          setTarget(null)
+          // The Host side remembers which host fills the window; nothing does while local
+          // content is up, so clear it instead of leaving a stale "current".
+          api.clearActive().catch(() => {})
+          return
+        }
+        const host = hostsRef.current.find((item) => item && item.id === intent.hostId) || null
+        if (intent.kind === 'disconnect') {
+          pendingIntent.current = null
+          if (host !== null) disconnectHost(host)
+          if (target === intent.hostId) setTarget(null)
+          return
+        }
+        if (host === null) {
+          pendingIntent.current = intent
+          return
+        }
+        pendingIntent.current = null
+        openHost(host)
+      }
+      useEffect(() => {
+        const store = props.panelStore
+        if (!store || typeof store.take !== 'function' || typeof store.subscribe !== 'function') return undefined
+        const consume = () => applyIntent(store.take())
+        consume()
+        return store.subscribe(consume)
+      }, [props.panelStore])
+      useEffect(() => {
+        if (pendingIntent.current === null) return
+        applyIntent(pendingIntent.current)
+      }, [state])
+
+      // The wizard is driven by its own store so it can be opened from anywhere.
+      useEffect(() => {
+        const store = props.wizardStore
+        if (!store || typeof store.subscribe !== 'function') return undefined
+        const sync = () => setWizard(typeof store.current === 'function' ? store.current() : null)
+        sync()
+        return store.subscribe(sync)
+      }, [props.wizardStore])
+      const closeWizard = () => {
+        const store = props.wizardStore
+        if (store && typeof store.close === 'function') store.close()
       }
 
       /** Submit the one-time password for the pending open/connect/reconnect. */
@@ -4414,9 +5039,8 @@ window.__ModuleLoader__.load({
         const host = pending.host
         const intent = pending.intent
         if (intent === 'open') {
-          setActiveHostId(host.id)
-          setView('viewport')
-          openPanel()
+          setManageOpen(true)
+          setTarget(host.id)
         }
         if (intent === 'reconnect') setRemoteUrl(null)
         setPasswordPrompt({ ...pending, busy: true, error: null })
@@ -4442,7 +5066,13 @@ window.__ModuleLoader__.load({
           )
           .finally(() => setBusyHostId(null))
       }
-      const cancelPassword = () => setPasswordPrompt(null)
+      const cancelPassword = () => {
+        // The row moved to that host when it was picked; the switch was cancelled, so put
+        // it back where the window actually is.
+        pendingSwitch.current = null
+        updateSwitcher({ current: target === null ? 'local' : target })
+        setPasswordPrompt(null)
+      }
 
       const disconnectHost = (host) => {
         if (!host) return
@@ -4450,7 +5080,13 @@ window.__ModuleLoader__.load({
         api
           .disconnect(host.id, false)
           .then(
-            () => remote.refresh(),
+            () => {
+              // The remote UI goes away with the connection: give its renderer back now,
+              // and hand the window back if it was that host's.
+              if (target === host.id) setTarget(null)
+              closeCarrier(host.id).catch(() => {})
+              remote.refresh()
+            },
             (error) => notify(errorMessage(error), 'error'),
           )
           .finally(() => setBusyHostId(null))
@@ -4463,6 +5099,7 @@ window.__ModuleLoader__.load({
           return
         }
         setRemoteUrl(null)
+        closeCarrier(host.id).catch(() => {})
         setBusyHostId(host.id)
         api
           .reconnect(host.id)
@@ -4484,60 +5121,6 @@ window.__ModuleLoader__.load({
           )
           .finally(() => setConflictBusy(false))
       }
-
-      const dismissCloseNotice = () => {
-        setShowCloseNotice(false)
-      }
-
-      /**
-       * Leave the remote: drop the carrier, keep the SSH link and the remote task,
-       */
-      const leaveCarrier = () => {
-        closeOverlay().catch(() => {})
-        setView('hosts')
-        // The launch URL is one-shot: throw it away so reopening fetches a fresh one.
-        setRemoteUrl(null)
-      }
-
-      // Take the whole window over once a loopback URL exists. The carrier lives on
-      // `document.body`, so a panel re-render never tears the guest down; a different
-      // host makes `openOverlay` start a new partition; the panel unmounting (local
-      // content selected) closes it. A host that is not up yet hands the window back:
-      // its connect progress belongs to the host page, not to a dead carrier.
-      useEffect(() => {
-        if (view !== 'viewport' || activeHostId === null) return
-        if (activeStatus !== 'connected') {
-          if (overlayCarrier.root !== null) closeOverlay().catch(() => {})
-          return
-        }
-        // A fresh launch URL is being fetched (first open, or after switching hosts):
-        // keep the current guest up so switching does not flash the local UI.
-        if (remoteUrl === null) return
-        openOverlay({
-          hostId: activeHostId,
-          url: remoteUrl,
-          t,
-          hosts,
-          activeHostId,
-          onPick: openHost,
-          onRefresh: reloadOverlay,
-          onExit: leaveCarrier,
-        })
-      }, [view, activeStatus, remoteUrl, activeHostId])
-
-      // Keep the injected bar in step with /state: host list, status dot and the
-      // active host all live in `state`, and the bar is plain DOM outside React.
-      useEffect(() => {
-        updateOverlayBar({ t, hosts, activeHostId, onPick: openHost, onRefresh: reloadOverlay, onExit: leaveCarrier })
-      }, [state, activeHostId])
-
-      // Unmounting the panel ends the takeover: the shell deselects this panel when
-      // local content is selected, and the remote must not keep the window.
-      useEffect(() => {
-        return () => {
-          closeOverlay().catch(() => {})
-        }
-      }, [])
 
       const runDiagnose = (host) => {
         if (!host || !host.id) return
@@ -4562,15 +5145,14 @@ window.__ModuleLoader__.load({
       const confirmDeleteHost = () => {
         if (!pendingDelete) return
         setDeleting(true)
+        const deletedId = pendingDelete.id
         api
-          .deleteHost(pendingDelete.id)
+          .deleteHost(deletedId)
           .then(
             () => {
               setPendingDelete(null)
-              if (activeHostId === pendingDelete.id) {
-                setActiveHostId(null)
-                setView('hosts')
-              }
+              closeCarrier(deletedId).catch(() => {})
+              if (target === deletedId) setTarget(null)
               remote.refresh()
             },
             (error) => notify(errorMessage(error), 'error'),
@@ -4584,51 +5166,92 @@ window.__ModuleLoader__.load({
         notify(t('settings.saved'), 'success')
       }
 
-      const openRemoteFromWizard = (hostId) => {
-        setWizard(null)
-        setActiveHostId(hostId)
-        setView('viewport')
-        openPanel()
-        api.activate(hostId).catch(() => {})
-        remote.refresh()
-      }
-      const closeWizard = () => {
-        setWizard(null)
-        remote.refresh()
+      /**
+       * Confirm or refuse the host key the window is waiting on. The wizard asks the same
+       * question in its second step; this is the same call, reached from the floating list
+       * so a host opened straight from the switcher can get past that step too.
+       * @param {object} host - HostView waiting for its fingerprint.
+       * @param {boolean} accept - true to pin it, false to refuse it (which drops the link).
+       * @param {boolean} [remember] - pin permanently (accept only).
+       * @returns {void}
+       */
+      const answerFingerprint = (host, accept, remember) => {
+        if (!host || !host.id) return
+        const sha256 = host.fingerprint && typeof host.fingerprint.sha256 === 'string' ? host.fingerprint.sha256 : ''
+        setFingerprintBusy(true)
+        api.acceptFingerprint(host.id, accept === true, remember === true, sha256).then(
+          () => {
+            setFingerprintBusy(false)
+            remote.refresh()
+          },
+          (error) => {
+            setFingerprintBusy(false)
+            notify(errorMessage(error), 'error')
+          },
+        )
       }
 
-      // The panel is the host page, nothing else: no workspace rail competing with the
-      // sidebar, no status surface between the local UI and the remote one.
-      const panelBody = h(
-        'div',
-        { className: 'drg-panel-main' },
-        h(HostListView, {
-          t,
-          locale,
-          state,
-          loading: remote.loading,
-          error: remote.error,
-          busyHostId,
-          closeNotice: showCloseNotice,
-          onDismissCloseNotice: dismissCloseNotice,
-          onAdd: () => setWizard({ mode: 'add', host: null }),
-          onRefresh: remote.refresh,
-          onOpenSettings: () => setSettingsOpen(true),
-          onOpenHost: openHost,
-          onConnectHost: connectHost,
-          onDisconnectHost: disconnectHost,
-          onReconnectHost: reconnectHost,
-          onEditHost: (host) => setWizard({ mode: 'edit', host }),
-          onDeleteHost: (host) => setPendingDelete(host),
-          onDiagnoseHost: runDiagnose,
-        }),
-      )
+      /** Open the add/edit wizard; it floats over whatever is on screen. */
+      const openWizard = (draft) => {
+        if (typeof props.openWizard === 'function') {
+          props.openWizard(draft)
+          return
+        }
+        const store = props.wizardStore
+        if (store && typeof store.open === 'function') store.open(draft)
+      }
+
+      /** A host that is connecting or waiting for its host key stays on screen here. */
+      const liveStatus = activeStatus === 'connecting' || activeStatus === 'fingerprint-pending'
 
       return h(
         'div',
-        { className: 'drg-root', 'data-testid': 'dsh-remote-go-panel' },
+        { className: 'drg-root drg-overlay', 'data-testid': 'dsh-remote-go-overlay-host' },
         h(StyleSheet),
-        panelBody,
+        manageOpen
+          ? h(
+              'div',
+              { className: 'drg-manage-window', 'data-testid': 'manage-window' },
+              h(
+                Modal,
+                { wide: true, onClose: () => setManageOpen(false), closeLabel: t('cancel') },
+                manageOpen && activeHost && liveStatus
+                  ? h(
+                      'div',
+                      { className: 'drg-manage-live', 'data-testid': 'manage-live' },
+                      activeStatus === 'fingerprint-pending'
+                        ? h(FingerprintCard, {
+                            t,
+                            locale,
+                            host: activeHost,
+                            busy: fingerprintBusy,
+                            onAccept: (remember) => answerFingerprint(activeHost, true, remember === true),
+                            onReject: () => answerFingerprint(activeHost, false, false),
+                          })
+                        : h(ConnectProgress, { t, host: activeHost }),
+                    )
+                  : null,
+                h(HostListView, {
+                  t,
+                  locale,
+                  state,
+                  loading: remote.loading,
+                  error: remote.error,
+                  busyHostId,
+                  onAdd: () => openWizard({ mode: 'add', host: null }),
+                  onRefresh: remote.refresh,
+                  onOpenSettings: () => setSettingsOpen(true),
+                  onOpenHost: openHost,
+                  onConnectHost: connectHost,
+                  onDisconnectHost: disconnectHost,
+                  onReconnectHost: reconnectHost,
+                  onEditHost: (host) => openWizard({ mode: 'edit', host }),
+                  onDeleteHost: (host) => setPendingDelete(host),
+                  onDiagnoseHost: runDiagnose,
+                }),
+              ),
+            )
+          : null,
         wizard
           ? h(WizardDialog, {
               key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
@@ -4639,7 +5262,10 @@ window.__ModuleLoader__.load({
               state,
               onClose: closeWizard,
               onRefresh: remote.refresh,
-              onOpenRemote: openRemoteFromWizard,
+              onOpenRemote: (hostId) => {
+                closeWizard()
+                openHostById(hostId)
+              },
               onDiagnose: runDiagnose,
             })
           : null,
@@ -4740,21 +5366,12 @@ window.__ModuleLoader__.load({
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
       const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
 
-      const openPanel = () => {
-        if (typeof props.openPanel === 'function') {
-          try {
-            props.openPanel()
-          } catch (_error) {
-            // selecting the already-active panel is a no-op
-          }
-        }
-      }
       const requestPanelHost = (hostId) => {
         api.activate(hostId).catch(() => {})
+        // The overlay host consumes this and hands the window to the host.
         if (props.panelStore && typeof props.panelStore.request === 'function') props.panelStore.request(hostId)
-        openPanel()
         // The settings.section slot hands us the shell's `close` callback; close the
-        // settings dialog so the remote panel is not left behind it.
+        // settings dialog so the remote window is not left behind it.
         if (typeof props.close === 'function') {
           try {
             props.close()
@@ -5055,6 +5672,9 @@ window.__ModuleLoader__.load({
 .drg-root ul, .drg-root ol { padding: 0; list-style: none; }
 .drg-root code { font-family: var(--ds-font-family-code, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12px; }
 .drg-root button { font: inherit; color: inherit; }
+/* A seat in the shell overlay layer: it only carries the theme variables and the dialog
+   (which is fixed); it must not paint or take size, or it would cover the app behind it. */
+.drg-root.drg-overlay { display: block; height: auto; background: transparent; }
 .drg-break { word-break: break-all; }
 
 .drg-page { display: flex; flex-direction: column; gap: var(--drg-gap); padding: 20px 24px; min-height: 0; overflow: auto; flex: 1; }
@@ -5245,8 +5865,13 @@ window.__ModuleLoader__.load({
 .drg-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--drg-label-3); }
 .drg-divider { height: 1px; background: var(--drg-border-soft); margin: 8px 0; }
 
-/* main-panel layout */
-.drg-panel-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+/* Floating windows: the management list lives in a dialog, so its body owns the padding. */
+.drg-manage-window .drg-modal-body { padding: 0; }
+.drg-manage-window .drg-page { border-radius: 0 0 var(--drg-radius) var(--drg-radius); }
+.drg-manage-live { padding: 16px 24px 4px; border-bottom: 1px solid var(--drg-border-soft); }
+.drg-manage-live .drg-progress, .drg-manage-live .drg-fingerprint { padding: 0; }
+/* The shell's overlay seat may have to float above a remote guest window. */
+[data-shell-overlay] { z-index: 2147483001; }
 .drg-settings-remote { display: flex; flex-direction: column; height: auto; min-height: 0; background: transparent; }
 .drg-settings-remote .drg-page { padding: 0; overflow: visible; }
 
@@ -5265,7 +5890,8 @@ window.__ModuleLoader__.load({
     //#region 18. plugin registration
 
     /**
-     * Register dictionaries, the remote main panel, and the Settings →
+     * Register the dictionaries, the overlay host (floating windows + remote window),
+     * the Settings section, and the sidebar switcher row.
      * @param {object} ctx - browser plugin context.
      * @returns {void}
      */
@@ -5297,48 +5923,34 @@ window.__ModuleLoader__.load({
         return 'zh'
       }
 
-      /** Host/panel request channel shared by the settings section and the panel. */
+      /** Command channel into the overlay host: open one host, show management, go local. */
       const panelStore = createPanelRequestStore()
-      const openPanel = () => ctx.layout.selectPanel(PANEL_ID)
-      /** Hand the window back to the local UI (used when the takeover ends). */
-      const closePanel = () => {
-        try {
-          ctx.layout.selectPanel(null)
-        } catch (_error) {
-          // leaving the panel is best-effort; the caller falls back to its body
-        }
-      }
+      /** The add/edit wizard's own channel, so it can open from anywhere. */
+      const wizardStore = createWizardStore()
       /**
-       * Leave the remote panel for the local conversation and switch the local
-       * @param {string} workspaceId - local workspace id.
+       * Open the host wizard. It floats in the shell's overlay layer, above a remote window,
+       * so nothing behind it changes.
+       * @param {{mode?: string, host?: object|null}} draft - what the dialog edits.
+       * @returns {void}
        */
-      const openLocalWorkspace = (workspaceId) => {
-        try {
-          ctx.layout.selectPanel(null)
-        } catch (_error) {
-          // leaving the panel is best-effort; switching still proceeds
-        }
-        try {
-          const workspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
-          if (workspace && typeof workspace.openWorkspace === 'function' && typeof workspaceId === 'string') {
-            const result = workspace.openWorkspace(workspaceId)
-            if (result && typeof result.catch === 'function') result.catch(() => {})
-          }
-        } catch (_error) {
-          // the local conversation is already visible; a missing service is fine
-        }
+      const openWizard = (draft) => {
+        wizardStore.open(draft)
       }
-      const sharedInject = () => ({ openPanel, closePanel, panelStore, openLocalWorkspace, getLocaleId })
+      const sharedInject = () => ({ panelStore, wizardStore, openWizard, getLocaleId })
 
-      ctx.slots.inject('main', () =>
+      // Everything the plugin draws lives in the shell's overlay layer: the floating
+      // management window, the wizard and the prompts. It sits above a remote window, so
+      // opening or closing them leaves the remote exactly as it was.
+      ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register(
           {
-            name: 'main',
-            key: PANEL_ID,
+            name: 'shell.overlay',
+            id: PANEL_ID,
+            order: 40,
             locale: NS,
             inject: sharedInject,
           },
-          MainPanel,
+          PluginOverlay,
         ),
       )
 
@@ -5356,30 +5968,85 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      // One sidebar row opens host management: the panel lists hosts, switches the
-      // takeover on with "Open", and keeps add/edit/diagnose/delete in the same place.
-      // Selecting any other sidebar item leaves the remote, so the sidebar is still
-      // the only switcher — there is no floating control anywhere.
-      ctx.slots.inject('sidebar.panellist', () =>
-        ctx.slots.register(
-          {
-            name: 'sidebar.panellist',
-            id: PANEL_ID,
-            order: 20,
-            label: () => t('settingsNav'),
-            locale: NS,
-            inject: sharedInject,
-          },
-          RemotePanelIcon,
-        ),
-      )
+      // The window's one control is the switcher row drawn into the sidebar of whichever
+      // page owns the window: this one (local) or the remote guest's. It lists local plus
+      // every host, so picking one is all it takes to move the window. There is no sidebar
+      // panel entry, and no main panel either: management and the wizard are floating
+      // windows in the overlay layer.
+      ctx.effect(() => {
+        switcher.labelsOf = () => ({
+          local: t('switcherLocal'),
+          addHost: t('switcherAddHost'),
+          manage: t('switcherManage'),
+          exit: t('switcherExit'),
+        })
+        updateSwitcher()
+        const timer = setInterval(() => updateSwitcher(), SWITCHER_TICK_MS)
+        // The ticker is a safety net for a shell that re-rendered the sidebar away; it
+        // must never keep a non-browser test process alive.
+        unrefTimer(timer)
+        return () => {
+          if (typeof clearInterval === 'function') clearInterval(timer)
+          switcher.dispatch = null
+          switcher.labelsOf = null
+          const win = localWindow()
+          if (win !== null && win.__drgHostRow && typeof win.__drgHostRow.destroy === 'function') {
+            win.__drgHostRow.destroy()
+          }
+          // Plugin disposal: every warm remote window and its lease goes with it.
+          closeOverlay().catch(() => {})
+          switcher.installed = false
+        }
+      }, 'dsh-remote-go: host switcher row')
+
+      /**
+       * Hand the window back to the local UI. The SSH link, the tunnel and the remote task
+       * stay up, so returning to that host later is instant; the row's "local" entry is the
+       * only way back, which is why it is always the first menu item.
+       * @returns {void}
+       */
+      function returnToLocal() {
+        switcher.current = 'local'
+        updateSwitcher({ current: 'local' })
+        // Hidden, not closed: the remote window is already warm for the next visit.
+        hideOverlays()
+        panelStore.requestIntent({ kind: 'local' })
+      }
+
+      switcher.dispatch = (intent) => {
+        if (intent.action === 'add') {
+          // The wizard floats over whatever is on screen — including a remote window.
+          openWizard({ mode: 'add', host: null })
+          return
+        }
+        if (intent.action === 'manage') {
+          // Host management floats the same way: the window behind it does not change.
+          panelStore.requestIntent({ kind: 'manage' })
+          return
+        }
+        if (intent.action === 'disconnect' && typeof intent.hostId === 'string') {
+          // The row's exit control: drop that host's link (and its warm window) without
+          // switching to it.
+          panelStore.requestIntent({ kind: 'disconnect', hostId: intent.hostId })
+          return
+        }
+        if (typeof intent.target !== 'string') return
+        if (intent.target === 'local') {
+          returnToLocal()
+          return
+        }
+        // Say where the window is going at once; the overlay host does the rest.
+        switcher.current = intent.target
+        updateSwitcher({ current: intent.target })
+        panelStore.requestIntent({ kind: 'open', hostId: intent.target })
+        api.activate(intent.target).catch(() => {})
+      }
     }
 
     /** Components exported for tests and host-side tooling. */
     const components = {
       RemoteIcon,
-      RemotePanelIcon,
-      MainPanel,
+      PluginOverlay,
       SettingsSection,
       HostListView,
       HostCard,
@@ -5401,7 +6068,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'layout', 'locale', 'uiWorkspace'],
+      inject: ['slots', 'locale'],
       apply,
       components,
       /**
@@ -5409,13 +6076,20 @@ window.__ModuleLoader__.load({
        */
       api,
       /**
-       * The takeover carrier's seams, exposed for unit tests: the injected DOM is
+       * The takeover carrier's seams, exposed for unit tests: the warm-window pool, the
+       * injected row, the local/guest pushes and the intent dispatcher.
        */
       carrier: {
-        barHeight: CARRIER_BAR_HEIGHT,
-        open: openOverlay,
+        open: showOverlay,
         close: closeOverlay,
-        updateBar: updateOverlayBar,
+        closeOne: closeCarrier,
+        hide: hideOverlays,
+        warm: carrierWarm,
+        shown: () => carrierPool.current,
+        update: updateSwitcher,
+        dispatch: (intent) => dispatchSwitcherIntent(intent),
+        row: mountHostRow,
+        script: () => HOST_ROW_SCRIPT,
       },
     }
 
