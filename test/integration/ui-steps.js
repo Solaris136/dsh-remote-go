@@ -73,8 +73,18 @@ export async function closeManageWindow(page) {
   await page.waitForFunction(() => !document.querySelector('[data-testid="manage-window"]'), { timeout: 20_000 })
 }
 
+const reducedMotionPages = new WeakSet()
+
+/** Opt one page into reduced motion (desktop windows can be occluded and pause animations). */
+export async function emulateReducedMotion(page) {
+  reducedMotionPages.add(page)
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }])
+}
+
 export async function applyColorScheme(page, scheme, previousBodyBackground) {
-  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: scheme }])
+  const features = [{ name: 'prefers-color-scheme', value: scheme }]
+  if (reducedMotionPages.has(page)) features.push({ name: 'prefers-reduced-motion', value: 'reduce' })
+  await page.emulateMediaFeatures(features)
   await page.waitForFunction(
     (value) => matchMedia(`(prefers-color-scheme: ${value})`).matches,
     { timeout: 20_000 },

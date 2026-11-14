@@ -23,7 +23,7 @@ import {
   desktopAppVersion,
   writeFailureArtifacts,
 } from './harness-support.js'
-import { closeManageWindow, openManageWindow } from './ui-steps.js'
+import { closeManageWindow, emulateReducedMotion, openManageWindow } from './ui-steps.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
@@ -257,6 +257,9 @@ test('the desktop shell renders the host-management window with legible buttons'
       })
       page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
       await page.setViewport({ width: 1400, height: 950 }).catch(() => {})
+      // An occluded desktop window pauses the dialog fade-in at opacity 0, which
+      // would make the contrast measurement depend on window focus.
+      await emulateReducedMotion(page)
       console.log(
         `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,
       )
