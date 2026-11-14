@@ -198,22 +198,35 @@ export function resolveDshCli() {
     return { command: envBin, args: [], kind: 'env' }
   }
   if (isWindows) {
-    const install =
-      process.env.DSH_INSTALL_DIR ?? path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness')
-    const exe = path.join(install, 'DeepSeek Harness.exe')
-    const bin = path.join(
-      install,
-      'resources',
-      'app.asar',
-      'dsh',
-      'node_modules',
-      '@deepseek-ai',
-      'dsh',
-      'lib',
-      'bin.js',
-    )
-    if (existsSync(exe) && probeVersion(exe, [bin], { ELECTRON_RUN_AS_NODE: '1' })) {
-      return { command: exe, args: [bin], kind: 'windows-install' }
+    // DSH_INSTALL_DIR is set to the package directory inside a running DSH, so probe
+    // the standard install roots as well and use whichever one holds the app exe.
+    const installs = [
+      process.env.DSH_INSTALL_DIR,
+      path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness'),
+    ].filter(Boolean)
+    for (const install of installs) {
+      const exe = path.join(install, 'DeepSeek Harness.exe')
+      if (!existsSync(exe)) continue
+      const bin = path.join(
+        install,
+        'resources',
+        'app.asar',
+        'dsh',
+        'node_modules',
+        '@deepseek-ai',
+        'dsh',
+        'lib',
+        'bin.js',
+      )
+      if (probeVersion(exe, [bin], { ELECTRON_RUN_AS_NODE: '1' })) {
+        return { command: exe, args: [bin], kind: 'windows-install' }
+      }
+      // Node cannot read inside `app.asar`; the installer's runtime CLI shim can
+      // (it sets ELECTRON_RUN_AS_NODE itself) and needs no PATH entry.
+      const shim = path.join(install, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
+      if (existsSync(shim) && probeVersion('cmd.exe', ['/d', '/c', shim])) {
+        return { command: 'cmd.exe', args: ['/d', '/c', shim], kind: 'windows-runtime-cli' }
+      }
     }
   }
   const cliJs = resolveDshCliJs()
