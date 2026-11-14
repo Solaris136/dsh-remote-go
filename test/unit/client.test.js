@@ -793,6 +793,12 @@ test('the takeover carrier hands the window to the guest and injects the host ro
     })
     await settle()
     assert.ok(calls.some((code) => code.includes('第三台')))
+    // A guest reload wipes the injected DOM, so every load stop re-installs it: the
+    // control must never disappear (the refresh item in the row reloads the guest).
+    const scriptRuns = calls.filter((code) => code.includes('drg-host-row')).length
+    view.listeners['did-stop-loading']()
+    await settle()
+    assert.equal(calls.filter((code) => code.includes('drg-host-row')).length, scriptRuns + 1)
   } finally {
     await takeover.carrier.close()
   }
@@ -905,7 +911,7 @@ test('settings modal renders contract fields and the save action', () => {
     mirrorToSidebar: true,
     language: 'auto',
     logLevel: 'info',
-    bootstrap: { remoteDir: '~/.dsh-remote-go', profile: 'web' },
+    bootstrap: { profile: 'web' },
   }
   const html = render(
     React.createElement(plugin.components.SettingsModal, {
@@ -930,7 +936,8 @@ test('settings modal renders contract fields and the save action', () => {
   assert.doesNotMatch(html, /显示在本地侧边栏/)
   assert.match(html, /远端运行时/)
   assert.match(html, /DSH profile/)
-  assert.match(html, /插件远端目录/)
+  // The plugin state directory is fixed under ~/.dsh now, so it is not a field.
+  assert.doesNotMatch(html, /插件远端目录/)
   assert.match(html, /保存设置/)
 })
 

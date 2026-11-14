@@ -24,7 +24,9 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.mirrorMaxSessions, 200)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.profile, 'web')
-  assert.equal(settings.bootstrap.remoteDir, '~/.dsh-remote-go')
+  // The remote state directory is fixed (`~/.dsh/remote-go`), so it is no longer
+  // a setting at all: a saved value must not survive sanitization.
+  assert.equal('remoteDir' in settings.bootstrap, false)
 })
 
 test('the retired presentation mode is gone from settings entirely', () => {
@@ -53,7 +55,7 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal(settings.autoReconnect.baseDelayMs, 100)
   assert.equal(settings.language, 'auto')
   assert.equal(settings.bootstrap.profile, 'web')
-  assert.equal(settings.bootstrap.remoteDir, defaultSettings().bootstrap.remoteDir)
+  assert.equal('remoteDir' in settings.bootstrap, false)
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
   // A malformed value falls back to the documented default (off since 0.1.0).
   assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, false)

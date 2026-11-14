@@ -174,7 +174,7 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
     await t.test('answers the real probe script with supported facts', async () => {
       // Drive the simulator with the plugin's own script builder: this is the
       // regression that made the probe fall through to `os: unknown`.
-      const result = await ssh.exec(buildProbeScript('~/.dsh/remote-go'), { timeoutMs: 30_000 })
+      const result = await ssh.exec(buildProbeScript(), { timeoutMs: 30_000 })
       assert.equal(result.code, 0, `probe exited ${result.code}: ${result.stderr}`)
       const facts = toProbeFacts(parseProbeOutput(result.stdout))
       assert.equal(facts.os, 'Linux')
@@ -191,7 +191,7 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
     })
 
     await t.test('probeRemote() sees the same facts over the SSH connection', async () => {
-      const facts = await probeRemote(ssh, { remoteDir: '~/.dsh/remote-go', timeoutMs: 30_000 })
+      const facts = await probeRemote(ssh, { timeoutMs: 30_000 })
       assert.equal(facts.os, 'Linux')
       assert.equal(facts.arch, 'x86_64')
       assert.equal(facts.sshConnection, true)

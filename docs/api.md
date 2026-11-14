@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1 冻结 + v1.1 / v1.2 增补）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v1 冻结 + v1.1 / v1.2 / v1.3 增补）
 
 > 本文件是 Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议。两侧都不得依赖对方的内部实现。
 > 基地址：`/dsh-remote-go/api`（挂在本地 DSH Web 服务同源路由下）。
@@ -58,7 +58,9 @@ interface RemoteView {
   dshHome: string | null        // 远端 DSH_HOME（真实用户主目录下的 ~/.dsh）
   profile: string | null        // 远端 DSH profile（默认 web）
   bootstrapLevel: string | null // 运行时形态；v1.2 起恒为 'npx'（保留字段以兼容旧客户端）
-  nodeVersion: string | null    // 远端用于运行 npx 的 Node 版本
+  nodeVersion: string | null    // 远端实际用于运行 npx 的 Node 版本（托管或系统）
+  /** v1.3：Node 来源；always `managed`（插件装在 ~/.dsh/remote-go/node 的那一份；没有系统 Node 兜底） */
+  nodeSource: 'managed' | null
   startedAt: string | null      // ISO
 }
 
@@ -130,9 +132,8 @@ interface SettingsView {
   mirrorStream: boolean
   language: 'auto' | 'zh' | 'en'
   logLevel: 'error' | 'warn' | 'info' | 'debug'
-  /** 远端运行时（v1.2）：只有 npx 固定本机版本一条路径；不再有 targetVersion/mode/nodeVersion */
+  /** 远端运行时（v1.3）：插件托管 Node + npx 固定本机版本；不再有 targetVersion/mode/nodeVersion 设置 */
   bootstrap: {
-    remoteDir: string            // 插件远端状态目录（默认 ~/.dsh-remote-go；只放 logs/run/租约）
     profile: string              // 远端 DSH profile（默认 web；不能是 desktop）
   }
 }
@@ -156,7 +157,8 @@ interface StateView {
 | `auth` | SSH 认证失败 | ✅ |
 | `host-key-changed` | 主机指纹变化 | ❌（需用户确认/重置） |
 | `host-key-unknown` | 首次连接，等待确认 | ✅（确认后） |
-| `remote-dsh-missing` | 远端缺少 Node ≥ 24.9 / npm / npx，或 npx 无法运行固定版本 | ✅ |
+| `remote-dsh-missing` | 远端无法运行固定版本 DSH（Node/托管安装、npm/npx 或 registry 不可用） | ✅ |
+| `remote-node-install-failed` | 远端没有可用 Node 且自动安装失败（网络/磁盘/架构/musl） | ✅（修正远端环境后重试） |
 | `remote-dsh-start-failed` | 远端 DSH 启动失败 | ✅ |
 | `remote-dsh-running` | 远端有手工启动的 DSH：用户选择了取消，或停止失败 | ✅（重新连接并选择处理方式） |
 | `remote-ui-unreachable` | 远端界面打不开 | ✅ |
@@ -364,6 +366,12 @@ data: {}
 | `probing` | 正在探测远端环境 |
 | `remote-dsh-running` | 远端已有手工启动的 DSH，等待用户选择（params.count） |
 | `bootstrapping` | 正在准备远端运行时（`params.level` 恒为 `npx`） |
+| `installing-node` | 正在自动准备托管 Node（params.version） |
+| `downloading-node` | 正在下载托管 Node（params.version / params.mb） |
+| `bootstrap-first-run` | 首次运行，正在下载 DSH 包（params.version） |
+| `bootstrap-fetching` | 正在下载 DSH 依赖包 |
+| `bootstrap-installed` | 依赖已安装，正在启动 |
+| `bootstrap-progress` | 其他 npm 输出（params.detail） |
 | `starting-remote` | 正在启动远端 DSH |
 | `starting-remote-wait` | 等待远端 DSH 就绪（params.seconds） |
 | `tunneling` | 正在建立本地回环隧道 |
@@ -604,7 +612,7 @@ L2 在 L1 之上把远端会话的**历史**投影成本地镜像会话的内容
 成功），不会留下空分组。未连接 / 注册表不可读 / 瞬时空注册表时，`truncated` 与 `skipped` 均为 `0`。
 
 **围栏与写入租约（v1.1，L3 前置）**：每次同步会先向远端读一次可选的写入权威
-`<remoteDir>/remote-go/lease.json`（默认 `~/.dsh-remote-go/remote-go/lease.json`；`{ writer, epoch }`），再决定本机能否写：
+`$DSH_HOME/remote-go/lease.json`（默认 `~/.dsh/remote-go/lease.json`；`{ writer, epoch }`），再决定本机能否写：
 
 - 远端 `epoch` **高于**本地高水位 → 本机已被接管：`MirrorView.readOnly=true`、`level="L1"`、
   `reason.code="fenced"`、`cursor` **不推进**、租约被清空，并写一条 `mirror/fenced` 非 surface 通知
@@ -720,7 +728,7 @@ v1.1 约束：
     而不是仅停止新建；重新开启后在下一次同步重建。删除主机时删除注册；删除失败由启动时的孤儿清理补删
     （只删镜像根下没有对应主机的注册，从不删除目录）。`workspaceRegistry` 缺失时该能力整体降级为
     `adapter-absent`，不影响 v1 的任何字段。
-11. **契约版本探测**：`GET /version` 追加 `apiVersion`（当前 `"1.2"`），与插件 `version` 并列返回。客户端据此
+11. **契约版本探测**：`GET /version` 追加 `apiVersion`（当前 `"1.3"`，见 §6），与插件 `version` 并列返回。客户端据此
     判断是否可以使用本节的追加契约，不需要靠探测 404 猜能力；`apiVersion` 未来升级只增不改，v1 字段语义不变。
 12. **设置追加字段 `mirrorMaxSessions`**：`SettingsView` 追加 `mirrorMaxSessions: number`（默认 `200`，`0` = 不限制，
     上限 `5000`）。它只影响本地镜像会话的**创建**数量，见 `POST /hosts/:id/mirrors/sync` 的 `sessionLimit` /
@@ -739,8 +747,9 @@ v1.1 约束：
 > `GET /version` 的 `apiVersion` 为 `"1.2"`。
 
 1. **`SettingsView.bootstrap` 收敛为 `{ remoteDir, profile }`**：删除 `targetVersion`、`mode`、`nodeVersion`。
-   `remoteDir` 现在只是插件远端状态目录（默认 `~/.dsh-remote-go`，只放 `logs/`、`run/`、租约与流助手），
-   不再存放隔离运行时；`profile` 默认 `web`，取值必须是一个安全路径段且不能是 `desktop`（桌面端保留）。
+   `remoteDir` 现在只是插件远端状态目录（v1.2 时默认 `~/.dsh-remote-go`，只放 `logs/`、`run/`、租约与流助手；
+   **v1.3 起该字段被删除**，目录固定为 `~/.dsh/remote-go`），不再存放隔离运行时；`profile` 默认 `web`，
+   取值必须是一个安全路径段且不能是 `desktop`（桌面端保留）。
 2. **`POST /hosts/:id/connect` 不再接受 `overrideVersion`**：远端版本恒为本机版本，npx 预检回读不一致会直接以
    `version-mismatch` 失败，没有「沿用远端」的继续路径。请求体只剩 `password` / `rememberPassword` /
    `rememberFingerprint`。
@@ -753,3 +762,17 @@ v1.1 约束：
 6. **新增 `conflict-pending` 状态与 `POST /hosts/:id/conflict`**：插件只收养自己启动的实例；扫到其他 DSH 进程时
    暂停连接，`HostView.conflict` 列出进程，由用户选择 `stop` / `alongside` / `cancel`。取消时错误码
    `remote-dsh-running`。
+
+## 6. v1.3（插件托管 Node；向后兼容）
+
+> 远端不再需要预装 Node：插件把官方 Node 构建装到 `~/.dsh/remote-go/node` 并用它启动 DSH。
+> `GET /version` 的 `apiVersion` 为 `"1.3"`；v1 字段语义不变。
+
+1. **`SettingsView.bootstrap` 只剩 `{ profile }`**：删除 `remoteDir`。插件远端目录固定为 `~/.dsh/remote-go`
+   （DSH home 下的子目录：`logs/`、`run/`、`node/`、`downloads/`、租约与流助手），旧的 `~/.dsh-remote-go/`
+   与其中的值不再被读取。
+2. **`RemoteView` 追加 `nodeSource`**：恒为 `'managed'`（插件托管的 Node）；`nodeVersion` 是**实际使用**的托管版本（当前由本机 DSH `engines.node` 的下限决定，如 24.9.0）。没有系统 Node 兜底，托管安装失败会直接报错。
+3. **新增进度 code**：`installing-node`（params.version）、`downloading-node`（params.version / params.mb），以及预检阶段的 `bootstrap-first-run` / `bootstrap-fetching` / `bootstrap-installed` / `bootstrap-progress`（params.detail）；它们都发生在 `phase = 'bootstrap'` 期间。npx 预检**不设超时**，npm 的抓取输出实时映射成这些进度。
+4. **新增错误码 `remote-node-install-failed`**：托管 Node 无法安装（网络、磁盘、架构不支持、musl、glibc < 2.28 等）。没有「自动安装失败后降级用系统 Node」的路径。
+5. **租约/流助手路径**：固定为 `~/.dsh/remote-go/lease[-<session>].json` 与 `~/.dsh/remote-go/follow.mjs`
+   （此前为 `<remoteDir>/remote-go/...`）；旧文件不会被迁移。

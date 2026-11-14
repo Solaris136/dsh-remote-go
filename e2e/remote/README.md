@@ -1,9 +1,10 @@
 # e2e/remote · 远端测试环境（历史：隔离运行时）
 
-> **当前插件已不再使用本目录的隔离运行时。** 插件的远端运行时是 npx-only：远端 DSH 由插件用
+> **当前插件已不再使用本目录的隔离运行时。** 插件的远端运行时是「插件托管的 Node + npx 固定版本」：远端 DSH 由插件用
 > `npx -y @deepseek-ai/dsh@<本机版本> --profile <profile> --no-open --port 0` 启动，`DSH_HOME` 就是远端用户真实的
-> `~/.dsh`；不下载 Node、不安装到私有 prefix、不做隔离 home。真实主机验收现在只需要远端满足：
-> Linux、Node ≥ 24.9.0、npm/npx、curl、首次运行能访问 npm registry。插件自己负责启动/停止远端 web。
+> `~/.dsh`；Node 由插件自动安装/升级到 `~/.dsh/remote-go/node`（官方 tarball + SHA-256，不碰系统 Node、不做隔离 home）。
+> 真实主机验收现在只需要远端满足：Linux、`curl` 或 `wget`、首次连接能访问 nodejs.org（或 npmmirror.com）与 npm registry。
+> 插件自己负责启动/停止远端 web。
 >
 > 下面 `setup-remote.sh` / `start-remote.sh` / `remote.ps1` 的隔离运行时流程是 0.1.0 早期的真实主机验收工具，
 > 保留用于回看历史证据与旧版本排障；**不要**在插件连接期间执行它们，否则会争用远端 `~/.dsh` 或端口。
@@ -33,9 +34,10 @@
 
 - **历史隔离运行时**（仅旧版插件）：`~/.dsh-remote-go/{node,dsh-home,home}`（Node `v24.22.2` + `@deepseek-ai/dsh@0.2.2-rc.1`），
   具体路径与最后一次启动参数见 `.state.json`。当前插件不读取这些目录，也不会收养这里的进程。
-- **当前插件**：远端数据在 `~/.dsh`；插件自己的日志/run/租约在 `~/.dsh-remote-go/{logs,run,remote-go}`。插件连接期间不要用
+- **当前插件**：远端数据在 `~/.dsh`；插件自己的日志/run/托管 Node 在 `~/.dsh/remote-go/{logs,run,node,downloads}`。
+  插件连接期间不要用
   `start-remote.sh` / `remote.ps1 start` 另起一个 web，否则会争用同一个 `~/.dsh` profile。
-- 只读检查随时可用：`bash ~/.dsh-remote-go/scripts/status-remote.sh`（不会启动/停止任何进程，也不碰 `DSH_HOME`）。
+- 只读检查随时可用：`bash ~/.dsh-remote-go/scripts/status-remote.sh`（历史脚本目录；不会启动/停止任何进程，也不碰 `DSH_HOME`）。
 - 远端 `~/.ssh/config` 已有 `Host self`（127.0.0.1 自环登录，可选实验用；见 `setup-self-ssh.sh`）。
 
 ## 前置条件
@@ -45,24 +47,23 @@
   - `DSH_NODE`：node 可执行文件（`run-check.ps1` 使用）
   - `DSH_PNPM`：pnpm 的 JS 入口（如 `pnpm.cjs`/`pnpm.mjs`）
   - `CHROME_PATH`：Chrome/Edge 可执行文件
-- 远端（**当前插件**）：Ubuntu 24.04 + Node ≥ 24.9.0 + npm/npx + curl；首次运行能访问 npm registry。
-  不再要求 tar/xz/sha256sum，也不要求 nodejs.org。
+- 远端（**当前插件**）：Ubuntu 24.04 + `curl` 或 `wget`；首次连接能访问 nodejs.org（或 npmmirror.com）与 npm registry。
+  不再要求预装 Node、tar/xz/sha256sum（插件会自己下载并校验 Node）。
 - 远端（**历史隔离运行时**）：`curl/tar/xz/sha256sum/setsid/nohup/ss/pgrep/base64` 可用；能访问 nodejs.org 与 npm registry。
 
-## 当前插件：npx-only 真实主机验收
+## 当前插件：托管 Node 的真实主机验收
 
 不需要在本目录做任何“自举”。在远端确认：
 
 ```bash
-node -v        # >= 24.9.0
-command -v npx
-command -v curl
+command -v curl || command -v wget
 ```
 
-然后在本地 DSH 的 **设置 → 远程主机** 添加主机并点「打开」：插件会先跑一次
-`npx -y @deepseek-ai/dsh@<本机版本> --version` 预检（冷缓存下载发生在这里），再用
-`DSH_HOME=~/.dsh npx ... --profile web --no-open --port 0` 启动远端；远端数据直接在 `~/.dsh`。
-失败时看连接错误卡片与远端 `~/.dsh-remote-go/logs/web.log`。
+然后在本地 DSH 的 **设置 → 远程主机** 添加主机并点「打开」：插件会先把托管 Node 准备到
+`~/.dsh/remote-go/node`（首次下载官方 tarball 并校验），再跑一次
+`npx -y @deepseek-ai/dsh@<本机版本> --version` 预检（冷缓存下载发生在这里），最后用
+`DSH_HOME=~/.dsh <托管 npx> ... --profile web --no-open --port 0` 启动远端；远端数据直接在 `~/.dsh`。
+失败时看连接错误卡片与远端 `~/.dsh/remote-go/logs/web.log`。
 
 ## 历史：隔离运行时复跑步骤
 

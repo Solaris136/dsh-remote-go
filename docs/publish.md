@@ -117,8 +117,8 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
   "name": "dsh-remote-go",
   "title": { "zh": "dsh remote go", "en": "dsh remote go" },
   "description": {
-    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入 远端侧边栏注入的主机条：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动（不安装、不下载 Node，数据在远端用户自己的 ~/.dsh）；含主机清单、接入向导、连接诊断与版本一致。",
-    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version (nothing is installed and its data stays in the user’s own ~/.dsh), with host list, connection wizard, diagnostics and exact version parity."
+    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入远端侧边栏注入的主机条：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动，Node 运行时由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰远端系统 Node），数据在远端用户自己的 ~/.dsh；含主机清单、接入向导、连接诊断与版本一致。",
+    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version on a plugin-managed Node installed at the lower bound of DSH’s engines.node under ~/.dsh/remote-go/node (the system Node is never touched), with its data in the user’s own ~/.dsh, plus host list, connection wizard, diagnostics and exact version parity."
   }
 }
 ```

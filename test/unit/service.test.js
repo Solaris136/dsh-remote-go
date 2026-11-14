@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 import { createSessionAdapter } from '../../src/session-adapter.js'
-import { RemoteGoService } from '../../src/service.js'
+import { RemoteGoService, describePreflightEvent } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
 import { createWorkspaceAdapter } from '../../src/workspace-adapter.js'
 import { assertSeededCreateOptions } from '../helpers/fake-sessions.js'
@@ -114,6 +114,148 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   assert.equal(hostView.jumpHost, null)
   assert.equal(hostView.warning, null)
   assert.equal(hostView.versionParity.status, 'same')
+  await service.shutdown()
+})
+
+test('connect always launches on the plugin-managed Node', async () => {
+  /** @type {any[]} */
+  const provisining = []
+  /** @type {any[]} */
+  const plans = []
+  const { service } = await makeTestService({
+    ensureNode: async (_ssh, options) => {
+      provisining.push({ facts: options.facts.nodeVersion, version: options.version })
+      return managedNodeFixture(options.version)
+    },
+    startWeb: async (_ssh, options) => {
+      plans.push(options.plan)
+      return {
+        pid: 4242,
+        port: 38123,
+        token: 'tok_test_123',
+        url: 'http://127.0.0.1:38123/?token=tok_test_123',
+        logPath: '/tmp/web.log',
+        startedAt: new Date().toISOString(),
+        rawLine: '',
+        profile: 'web',
+        dshHome: '/home/ubuntu/.dsh',
+      }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+
+  const view = service.snapshot().hosts[0]
+  // The remote already had a supported Node; the plugin still provisions its own,
+  // so a shared system/nvm runtime can never leak into the remote DSH.
+  assert.deepEqual(provisining, [{ facts: '24.22.2', version: '24.9.0' }])
+  assert.equal(view.remote.nodeSource, 'managed')
+  assert.equal(view.remote.nodeVersion, '24.9.0')
+  assert.equal(plans.length, 1)
+  assert.equal(plans[0].start.npxPath, '/home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx')
+  assert.equal(plans[0].start.nodeBinDir, '/home/ubuntu/.dsh/remote-go/node/v24.9.0/bin')
+  await service.shutdown()
+})
+
+test('the managed Node version follows the local DSH engines.node', async () => {
+  /** @type {string[]} */
+  const versions = []
+  const { service } = await makeTestService({
+    engineNodeRange: '>=25.1.0',
+    ensureNode: async (_ssh, options) => {
+      versions.push(options.version)
+      return managedNodeFixture(options.version)
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  assert.deepEqual(versions, ['25.1.0'])
+  await service.shutdown()
+})
+
+test('a failed managed install is fatal even when the system Node looks usable', async () => {
+  const { service } = await makeTestService({
+    // The system Node is perfectly fine; strict mode must not fall back to it.
+    facts: makeFacts({ nodeVersion: '24.22.2', npxPath: '/usr/bin/npx' }),
+    ensureNode: async () => {
+      throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'network blocked' })
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
+
+  const view = service.snapshot().hosts[0]
+  assert.equal(view.error.code, 'remote-node-install-failed')
+  await service.shutdown()
+})
+
+test('describePreflightEvent turns npm output into localized progress codes', () => {
+  assert.deepEqual(
+    describePreflightEvent(
+      '\u001B[33mnpm WARN exec The following package was not found and will be installed\u001B[39m',
+      '0.2.2-rc.1',
+    ),
+    { code: 'bootstrap-first-run', params: { version: '0.2.2-rc.1' } },
+  )
+  assert.deepEqual(
+    describePreflightEvent('npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh', 'x'),
+    { code: 'bootstrap-fetching' },
+  )
+  assert.deepEqual(describePreflightEvent('added 120 packages in 8s', 'x'), { code: 'bootstrap-installed' })
+  // The version line is the success signal, not a progress message.
+  assert.equal(describePreflightEvent('0.2.2-rc.1', 'x'), null)
+  assert.equal(describePreflightEvent('   ', 'x'), null)
+  assert.deepEqual(describePreflightEvent('some other line', 'x'), {
+    code: 'bootstrap-progress',
+    params: { detail: 'some other line' },
+  })
+})
+
+test('the npx preflight reports npm output as connect progress', async () => {
+  const { service } = await makeTestService({
+    preflight: async (_ssh, _plan, options) => {
+      options.onStderr('npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh\n')
+      return '0.2.2-rc.1'
+    },
+  })
+  /** @type {any[]} */
+  const progress = []
+  service.on('state', (state) => {
+    const line = state.hosts[0]?.progress
+    if (line) progress.push(line)
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const streamed = progress.find((entry) => entry.code === 'bootstrap-fetching')
+  assert.ok(streamed, 'expected a bootstrap-fetching progress entry')
+  await service.shutdown()
+})
+
+test('a remote web instance from an older launch path is replaced before starting', async () => {
+  /** @type {number[]} */
+  const stopped = []
+  const { service } = await makeTestService({
+    // The registry row is valid, but it predates the browser-carrier launch tag.
+    readRegistry: async () => ({
+      pid: 777,
+      port: 39123,
+      profile: 'web',
+      dshHome: '/home/ubuntu/.dsh',
+      version: '0.2.2-rc.1',
+    }),
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  assert.deepEqual(stopped, [777])
   await service.shutdown()
 })
 
@@ -424,6 +566,7 @@ test('diagnose returns the documented checklist', async () => {
       'tunnel',
       'remote-service',
       'remote-ui',
+      'remote-node',
       'remote-version',
       'model-credentials',
       'desktop-guard',

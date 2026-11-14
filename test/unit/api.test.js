@@ -492,7 +492,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.version, '0.1.0')
     // v1.2 removes the bootstrap-mode/target-version settings and npx-pins the
     // remote runtime; an unknown field is ignored rather than rejected.
-    assert.equal(result.json.apiVersion, '1.2')
+    assert.equal(result.json.apiVersion, '1.3')
   } finally {
     await api.close()
     await service.shutdown()

@@ -12,6 +12,7 @@ export const ErrorCode = Object.freeze({
   HOST_KEY_CHANGED: 'host-key-changed',
   HOST_KEY_UNKNOWN: 'host-key-unknown',
   REMOTE_DSH_MISSING: 'remote-dsh-missing',
+  REMOTE_NODE_INSTALL_FAILED: 'remote-node-install-failed',
   REMOTE_DSH_START_FAILED: 'remote-dsh-start-failed',
   REMOTE_DSH_RUNNING: 'remote-dsh-running',
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
@@ -43,6 +44,10 @@ const CODE_TABLE = {
   [ErrorCode.REMOTE_DSH_MISSING]: {
     retryable: true,
     title: { zh: '远端没有可用的 DSH', en: 'No usable DSH on the remote host' },
+  },
+  [ErrorCode.REMOTE_NODE_INSTALL_FAILED]: {
+    retryable: true,
+    title: { zh: '远端 Node 自动安装失败', en: 'Automatic Node installation failed' },
   },
   [ErrorCode.REMOTE_DSH_START_FAILED]: {
     retryable: true,
@@ -181,6 +186,27 @@ export const errors = {
             en: 'You can also install DSH manually on the remote host and retry',
           },
         ],
+      },
+    ),
+  nodeInstallFailed: (detail, options) =>
+    make(
+      ErrorCode.REMOTE_NODE_INSTALL_FAILED,
+      detail ?? {
+        zh: '远端没有可用的 Node，自动安装也没有成功。',
+        en: 'The remote has no usable Node and automatic installation did not succeed.',
+      },
+      {
+        nextSteps: [
+          {
+            zh: '让远端可以访问 nodejs.org 或 npmmirror.com 后重试',
+            en: 'Allow the remote to reach nodejs.org or npmmirror.com and retry',
+          },
+          {
+            zh: '确认远端磁盘 ≥ 400 MB，且是受支持的 glibc 架构（musl/Alpine 不支持）',
+            en: 'Make sure the remote has >= 400 MB free and a supported glibc architecture (musl/Alpine is not supported)',
+          },
+        ],
+        ...options,
       },
     ),
   remoteDshRunning: (detail, options) =>

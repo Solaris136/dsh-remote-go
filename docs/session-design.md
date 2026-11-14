@@ -162,8 +162,8 @@ Host `workspaceRegistry`（`ctx.get('workspaceRegistry')`，可选依赖）：
 远端服务器：原版 DSH（不装任何专属组件）
 ```
 
-> 路径约定（npx-only 运行时）：远端 DSH 的数据在 `~/.dsh`（profile、`storages/workspace.json`、`sessions/**`、凭据），
-> 插件只在自己的状态目录（默认 `~/.dsh-remote-go`，设置项 `bootstrap.remoteDir`）写 `logs/`、`run/`、租约与流助手。
+> 路径约定（托管 Node 的 npx 运行时）：远端 DSH 的数据在 `~/.dsh`（profile、`storages/workspace.json`、`sessions/**`、凭据），
+> 插件固定在自己的状态目录 `~/.dsh/remote-go`（`logs/`、`run/`、`node/`、`downloads/`、租约与流助手）。
 
 镜像会话能不能出现在侧边栏，取决于「工作区注册」这一行：DSH 的侧边栏按工作区列会话，而工作区成员由会话头的
 规范化 cwd 决定（§4.3）。镜像目录与会话 `meta.cwd` 必须完全一致，因此两者共用一个路径函数。
@@ -236,8 +236,8 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 
 **谁持有什么**：
 
-- 远端（或 L3 落地后的控制通道）发布插件状态目录下的 `<remoteDir>/remote-go/lease.json`（默认
-  `~/.dsh-remote-go/remote-go/lease.json`；不再写进远端 DSH 的 home）：`{ writer, epoch, expiresAt }`。
+- 远端（或 L3 落地后的控制通道）发布插件状态目录下的 `$DSH_HOME/remote-go/lease.json`（默认
+  `~/.dsh/remote-go/lease.json`；插件子目录，不写 DSH 的 profile/会话文件）：`{ writer, epoch, expiresAt }`。
   这是**可选**的：文件不存在表示「没有竞争写入者」，本地照常持有自己的租约；文件损坏（`lease-malformed`）
   则表示「权威不可信」，同样不当作「没人写」。
 - 本地在 descriptor 里持久化 `epoch`（高水位）、`lease`（`owner/acquiredAt/renewedAt/expiresAt/epoch`）、
@@ -387,7 +387,7 @@ L3（流式事件、输入转发、审批回传）之前必须先有「旧写入
 （`test/unit/mirror-stream.test.js`），集成测试里**模拟远端拦截了命令并直接返回预制 JSON**
 （`e2e/sim/simulated-remote.mjs:580` 丢弃安装命令、`:584` 用正则匹配 follow 命令）。也就是说，助手的偏移算术、
 epoch 检查、切片与 JSON 组帧从未跑过；被验证的是**模拟端对协议的重新实现**。要让它真正跑起来需要一台装了 `node`
-且在 `PATH` 上、并有可写插件状态目录（`~/.dsh-remote-go`）的远端 DSH。因此 §10 的 P2 只应读作「插件侧端到端已验证，远端为模拟」。
+且在 `PATH` 上、并有可写插件状态目录（`~/.dsh/remote-go`）的远端 DSH。因此 §10 的 P2 只应读作「插件侧端到端已验证，远端为模拟」。
 **开关**：`mirrorStream` 默认 **false**（`src/settings.js:51`）。关闭时行为与引入跟随者之前逐字节相同；开启后每个 host
 多一次轮询，把远端新记录追加到本地镜像。**激活已端到端验证**：`test/integration/stream.e2e.js` 四个测试——连接期间
 追加的记录无需手动同步即出现且只出现一次、**关闭开关的负对照**、被围栏的 host 不流任何东西、重连从持久 cursor 续接且
@@ -483,7 +483,7 @@ L2 的范围是「**回放，不流式**」：它读的是远端已经落盘的�
     `logVisible` + 单元测试保证）。**还有一个纯属我自己的 bug**：诊断输出写在会先失败的断言之后，所以它从未执行。
     **诚实边界**：远端助手（`remoteStreamScriptSource()`）在 CI 中**从未执行**——模拟远端拦截命令并返回预制 JSON
     （`e2e/sim/simulated-remote.mjs:580`/`:584`），单元测试只把它当字符串读。被验证的是插件侧加上模拟端对协议的
-    重新实现，真实远端行为需要一台有 `node` 与可写插件状态目录（`~/.dsh-remote-go`）的机器才能验证。
+    重新实现，真实远端行为需要一台有 `node` 与可写插件状态目录（`~/.dsh/remote-go`）的机器才能验证。
     **现状**：`mirrorStream` 默认 false；开启后连接期间追加的远端记录无需手动同步即出现且只出现一次（负对照：关闭时
     不出现）；被围栏的 host 不流任何东西；重连从持久 cursor 续接且不重复。**下一个尝试者需要**：一条真正的推送通道
     （`ws-mux`）来消掉「延迟 ≈ 轮询间隔」，以及 L3 的输入转发与审批桥。

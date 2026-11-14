@@ -14,24 +14,34 @@
 
 ### 变更
 
+- **远端 Node 由插件固定托管**：连接时总是使用插件自己的 Node —— 即使远端已经装了 Node，也不再借用系统/nvm 的那一份，避免和远端其他项目互相干扰。要装的版本 = **本机 DSH 自己 `engines.node` 的下限**（0.2.2 的 `>=24.9.0` → Node 24.9.0），随插件读取并钉死该版本：已装同一版本即复用，不轮询 registry、不静默升级；DSH 抬高下限时随之下一个新版本并清理旧目录。首次连接从 nodejs.org 下载官方 Linux 构建（`.tar.gz`），用官方 `SHASUMS256.txt` 校验 SHA-256 后解压到 `~/.dsh/remote-go/node/v<version>`；官方源不可达回退 npmmirror.com 的同一版本。**没有系统 Node 兜底**：网络/磁盘/架构不支持/musl/glibc 过低等失败一律明确报错。
+
+- **远端页面起不来时自动修正浏览器载体**：如果远端 profile 的 bundle（例如 `@goldenpigeon/dsh-remote-agent`）为原生 UI 关闭了 `api-remotes`，DSH 浏览器客户端会停在「failed to load plugins / $events unavailable」。启动前会先 `--dump-config` 检查，只在需要时用 `--patch remote-go/browser-carrier.patch.yml` 对**本次启动**重新启用该行（不改用户 profile）；旧启动方式留下的实例按 run 注册表的 `launch` 标记识别并先停止，再按当前方式拉起。
+
+- **npx 预检不再设超时**：首次冷缓存可能要下载几分钟，改用 `npm_config_loglevel=http` 把 npm 的抓取输出流式映射成连接进度（首次运行下载 / 正在下载 DSH 依赖 / 依赖已安装），不再用猜的超时时间把正常下载截断。
+
+- **插件远端目录固定到 `~/.dsh/remote-go`**：删除设置项 `bootstrap.remoteDir`（设置页与 API 都不再暴露）。日志、run 注册表、托管 Node、下载缓存、租约与流助手全部放这个固定目录；旧的 `~/.dsh-remote-go/` 不再读取或迁移。`GET /version` 的 `apiVersion` 升到 **1.3**，`RemoteView` 新增 `nodeSource`，进度新增 `installing-node` / `downloading-node`，错误新增 `remote-node-install-failed`，诊断检查表新增「远端 Node 运行时」一项（10 项）。
+
+- **主机切换注入远端侧边栏**：接管期间不再画本地横条，也不再有任何兜底条——主机条由 webview.executeJavaScript() 注入远端页面自己的侧边栏（品牌行下方，左侧贴边、全高那一列），用远端页面的 --dsw-* 变量绘制，所以随远端主题、hover 与弹层遮罩一起变化；点开是主机列表 +「刷新远端界面」+「离开远端」，点击经 window.__drgBridge 轮询桥回本地。每次页面加载完成都会重新注入，修掉「点刷新后远端退出按钮消失」的问题。
+
 - **远端运行时收敛为 npx 固定版本（npx-only）**：远端 DSH 一律用
   `npx -y @deepseek-ai/dsh@<本机 DSH 版本> --profile <profile> --no-open --port 0` 启动，`DSH_HOME` 使用远端用户真实的
-  `~/.dsh`——凭据、会话、工作区就是该用户自己的那一份。删除 T0/T0-local/T1/T2/T3 自举分级、Node 下载与隔离安装：
-  远端只要 Linux + Node ≥ 24.9 + npm/npx，且首次运行能访问 npm registry 即可；缺环境时明确失败并给出准备步骤，
-  不自动安装 Node/npm。连接前先在前台跑一次 `npx … --version` 预检（冷缓存下载发生在预检里，失败带日志），
-  回读版本必须与本机一致，否则直接 `version-mismatch`。
+  `~/.dsh`——凭据、会话、工作区就是该用户自己的那一份。删除 T0/T0-local/T1/T2/T3 自举分级与隔离 DSH home；
+  Node 由「远端 Node 由插件固定托管」条目的运行时提供。连接前先在前台跑一次 `npx … --version` 预检
+  （冷缓存下载发生在预检里，失败带日志），回读版本必须与本机一致，否则直接 `version-mismatch`。
 
 - **手工启动的远端 DSH 冲突提示**：插件只收养自己启动的实例；未收养时扫描远端同一 `~/.dsh` 下其他 DSH 进程
   （忽略本插件 registry pid）。命中则暂停连接（`conflict-pending`）、列出进程，由用户选择「停止它并启动受管实例」
   「保留它，另起一个（共享 ~/.dsh，给出警告）」或「取消连接」；120s 未选择按取消处理。取消/停止失败的错误码是
   `remote-dsh-running`。新增 `POST /hosts/:id/conflict`。
 
-- **设置与契约随运行时收敛**：`settings.bootstrap` 只剩 `{ remoteDir, profile }`——`remoteDir`（默认
-  `~/.dsh-remote-go`）现在只是插件状态目录（`logs/`、`run/`、租约与流助手），`profile`（默认 `web`，拒绝 `desktop`）
-  决定远端 DSH 用哪个 profile；删除 `bootstrap.targetVersion` / `bootstrap.mode` / `bootstrap.nodeVersion`，主机条目也不再保存
+- **设置与契约随运行时收敛**：`settings.bootstrap` 只剩 `{ profile }`——插件远端目录固定为 `~/.dsh/remote-go`
+  （`logs/`、`run/`、`node/`、`downloads/`、租约与流助手），`profile`（默认 `web`，拒绝 `desktop`）
+  决定远端 DSH 用哪个 profile；删除 `bootstrap.targetVersion` / `bootstrap.mode` / `bootstrap.nodeVersion` /
+  `bootstrap.remoteDir`，主机条目也不再保存
   自己的 `bootstrap` 字段（运行时配置是全局设置）。
   `POST /hosts/:id/connect` 不再接受 `overrideVersion`；`HostView.targetVersion` 恒等于本机版本；`RemoteView` 增加
-  `profile`，`bootstrapLevel` 恒为 `npx`；API 契约升到 **1.2**。
+  `profile`、`nodeSource`，`bootstrapLevel` 恒为 `npx`；API 契约升到 **1.3**。
 
 - **不再迁移旧版隔离运行时**：`~/.dsh-remote-go/{node,dsh-home,home}` 不再被读取；run 注册表还要求 `dshHome`
   （`~/.dsh`）与 `profile` 匹配才会被收养，旧进程不会被复用。

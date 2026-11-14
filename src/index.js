@@ -10,7 +10,7 @@ import { API_PREFIX, PLUGIN_ID } from './constants.js'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { createApi } from './api.js'
-import { detectLocalVersion } from './local-version.js'
+import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
 import { canonicalMirrorRoot, createSessionAdapter } from './session-adapter.js'
 import { createWorkspaceAdapter } from './workspace-adapter.js'
@@ -79,7 +79,13 @@ export function apply(ctx, config = {}) {
     service,
     getOrigin,
     logger,
-    diagnostics: () => describeSelf(ctx, { home, stateDir, localVersion: service.localVersion }),
+    diagnostics: () =>
+      describeSelf(ctx, {
+        home,
+        stateDir,
+        localVersion: service.localVersion,
+        engineNodeRange: service.engineNodeRange,
+      }),
   })
 
   ctx.effect(() => {
@@ -97,6 +103,10 @@ export function apply(ctx, config = {}) {
         await service.init()
         const detected = await detectLocalVersion({ ctx })
         if (detected.version) service.setLocalVersion(detected.version, detected.source)
+        // The managed Node version is the lower bound of DSH's own `engines.node`;
+        // reading it here keeps the plugin in step with the running DSH build.
+        const engine = await detectLocalEnginesNode({ ctx })
+        if (engine.range) service.setLocalEnginesNode(engine.range, engine.source)
         if (!detected.version)
           logger.warn(
             'could not detect the local DSH version; the remote npx runtime cannot be pinned to this machine, so connections will fail until the version is readable',
@@ -122,7 +132,7 @@ export function apply(ctx, config = {}) {
  * host row is loaded and whether the browser half is registered in the client
  * module graph (with a readable bundle path).
  * @param {any} ctx
- * @param {{ home: string, stateDir: string, localVersion: string | null }} info
+ * @param {{ home: string, stateDir: string, localVersion: string | null, engineNodeRange?: string | null }} info
  */
 export function describeSelf(ctx, info) {
   /** @type {Record<string, unknown>} */
@@ -130,6 +140,8 @@ export function describeSelf(ctx, info) {
     home: info.home,
     stateDir: info.stateDir,
     hostVersion: info.localVersion,
+    /** Local DSH `engines.node`; the managed Node version is its lower bound. */
+    engineNodeRange: info.engineNodeRange ?? null,
     entry: null,
     client: null,
   }

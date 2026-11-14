@@ -2,10 +2,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import {
+  BROWSER_CARRIER_PATCH_FILE,
+  LAUNCH_MARKER,
   adoptRemoteWeb,
+  buildBrowserCarrierProbe,
   buildForeignDshCommand,
   buildStartCommand,
   buildStartScript,
+  ensureBrowserCarrier,
   exchangeTokenOverTunnel,
   findForeignDshProcesses,
   parseForeignDshOutput,
@@ -18,7 +22,7 @@ import {
 } from '../../src/webapp.js'
 import { remoteLayout } from '../../src/layout.js'
 
-const LAYOUT = remoteLayout('~/.dsh-remote-go', '/home/ubuntu')
+const LAYOUT = remoteLayout('/home/ubuntu')
 
 /** @returns {import('../../src/bootstrap.js').RuntimePlan} */
 function npxPlan(overrides = {}) {
@@ -56,6 +60,48 @@ test('buildStartCommand produces the pinned npx launch command against ~/.dsh', 
   assert.match(command, /PATH='\/usr\/bin':"\$PATH"/)
 })
 
+test('buildStartCommand applies the browser-carrier overlay before the profile', () => {
+  const patchPath = '/home/ubuntu/.dsh/remote-go/browser-carrier.patch.yml'
+  const command = buildStartCommand(npxPlan(), LAYOUT, { patchPath })
+  assert.match(command, new RegExp(`--patch '${patchPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}' --profile 'web'`))
+})
+
+test('buildBrowserCarrierProbe dumps the profile and only then writes the overlay', () => {
+  const script = buildBrowserCarrierProbe(npxPlan(), LAYOUT, 'web')
+  assert.match(script, /--dump-config/)
+  assert.match(script, /grep -A6 'id: api-remotes'/)
+  assert.ok(script.includes('- id: api-remotes\n  disabled: false'), script)
+  assert.ok(script.includes(`/home/ubuntu/.dsh/remote-go/${BROWSER_CARRIER_PATCH_FILE}`), script)
+  // The overlay is only written when the dumped profile actually disables the row.
+  assert.ok(script.indexOf('disabled: true') < script.indexOf('cat >'), script)
+})
+
+test('ensureBrowserCarrier reports patched, clear and unknown probes', async () => {
+  const replies = [
+    { code: 0, stdout: 'PATCH\n', stderr: '' },
+    { code: 0, stdout: 'CLEAR\n', stderr: '' },
+    { code: 0, stdout: 'DUMP-FAILED\n', stderr: '' },
+  ]
+  const ssh = {
+    async exec() {
+      return replies.shift() ?? { code: 1, stdout: '', stderr: '' }
+    },
+  }
+  const options = { plan: npxPlan(), layout: LAYOUT, profile: 'web' }
+  assert.deepEqual(await ensureBrowserCarrier(ssh, options), {
+    status: 'patched',
+    patchPath: `/home/ubuntu/.dsh/remote-go/${BROWSER_CARRIER_PATCH_FILE}`,
+  })
+  assert.deepEqual(await ensureBrowserCarrier(ssh, options), { status: 'clear', patchPath: null })
+  assert.deepEqual(await ensureBrowserCarrier(ssh, options), { status: 'unknown', patchPath: null })
+  const throwing = {
+    async exec() {
+      throw new Error('no npx')
+    },
+  }
+  assert.deepEqual(await ensureBrowserCarrier(throwing, options), { status: 'unknown', patchPath: null })
+})
+
 test('buildStartScript detaches, waits for the readiness line and records the run registry', () => {
   const script = buildStartScript('env A=1 /bin/true', LAYOUT, {
     waitSeconds: 7,
@@ -68,12 +114,17 @@ test('buildStartScript detaches, waits for the readiness line and records the ru
   assert.match(script, /"0\.2\.2-rc\.1"/)
   assert.match(script, /"dshHome":%s/)
   assert.ok(script.includes('"/home/ubuntu/.dsh"'))
+  assert.ok(script.includes(`"launch":"${LAUNCH_MARKER}"`), script)
   assert.match(script, /-lt 7/)
 })
 
 test('startRemoteWeb parses the combined stdout and returns pid/port/token', async () => {
+  /** @type {string[]} */
+  const commands = []
   const ssh = {
     async exec(command, options) {
+      commands.push(command)
+      if (command.includes('--dump-config')) return { code: 0, stdout: 'CLEAR\n', stderr: '' }
       assert.match(command, /setsid nohup/)
       options.onStdout('PID:999\ni=0\nLINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n')
       return { code: 0, stdout: 'LINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n', stderr: '' }
@@ -85,6 +136,29 @@ test('startRemoteWeb parses the combined stdout and returns pid/port/token', asy
   assert.equal(info.token, 'tok')
   assert.equal(info.profile, 'web')
   assert.equal(info.dshHome, '/home/ubuntu/.dsh')
+  assert.equal(info.browserCarrier, 'clear')
+  assert.equal(commands.filter((command) => command.includes('--dump-config')).length, 1)
+  assert.ok(!commands.some((command) => command.includes('--patch ')))
+})
+
+test('startRemoteWeb re-enables api-remotes with --patch when the profile disables it', async () => {
+  /** @type {string[]} */
+  const commands = []
+  const ssh = {
+    async exec(command, options) {
+      commands.push(command)
+      if (command.includes('--dump-config')) return { code: 0, stdout: 'PATCH\n', stderr: '' }
+      options.onStdout('LINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n')
+      return { code: 0, stdout: 'LINE:dsh web: http://127.0.0.1:41234/?token=tok\nDONE:999:41234\n', stderr: '' }
+    },
+  }
+  const info = await startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT })
+  assert.equal(info.browserCarrier, 'patched')
+  const start = commands.find((command) => command.includes('setsid nohup'))
+  // The script embeds the launch command through shellQuote, so the path appears
+  // escaped; the exact flag spelling is covered by the buildStartCommand test.
+  assert.ok(start.includes('--patch'), start)
+  assert.ok(start.includes(BROWSER_CARRIER_PATCH_FILE), start)
 })
 
 test('startRemoteWeb fails with coded errors when the remote dies or times out', async () => {
@@ -140,7 +214,7 @@ test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL
   const responses = [
     {
       code: 0,
-      stdout: '{"pid":4242,"port":38123,"version":"0.2.2-rc.1","profile":"web","dshHome":"/home/ubuntu/.dsh"}',
+      stdout: `{"pid":4242,"port":38123,"version":"0.2.2-rc.1","profile":"web","dshHome":"/home/ubuntu/.dsh","launch":"${LAUNCH_MARKER}"}`,
       stderr: '',
     }, // cat registry
     { code: 0, stdout: 'alive', stderr: '' }, // kill -0
@@ -166,11 +240,13 @@ test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL
   assert.equal(await adoptRemoteWeb(dead, LAYOUT, { profile: 'web' }), null)
 })
 
-test('adoptRemoteWeb refuses a registry from another home or profile', async () => {
+test('adoptRemoteWeb refuses a registry from another home/profile or an older launch path', async () => {
   for (const registry of [
-    { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh-remote-go/home' },
-    { pid: 1, port: 2, profile: 'headless', dshHome: '/home/ubuntu/.dsh' },
-    { pid: 1, port: 2, version: '0.2.2-rc.1' },
+    { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh-remote-go/home', launch: LAUNCH_MARKER },
+    { pid: 1, port: 2, profile: 'headless', dshHome: '/home/ubuntu/.dsh', launch: LAUNCH_MARKER },
+    { pid: 1, port: 2, version: '0.2.2-rc.1', launch: LAUNCH_MARKER },
+    // Started before the browser-carrier overlay existed: no launch tag.
+    { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh', version: '0.2.2-rc.1' },
   ]) {
     const ssh = {
       async exec() {

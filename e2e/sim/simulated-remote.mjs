@@ -123,6 +123,9 @@ const SIM = {
   dshVersion: '0.2.2-rc.1',
   dshHome: '/home/sim/.dsh',
   curlPath: '/usr/bin/curl',
+  /** The plugin-managed Node the simulator pretends is already installed. */
+  managedNodeVersion: '24.9.0',
+  managedNodeDir: '/home/sim/.dsh/remote-go/node/v24.9.0',
   diskFreeKb: '35000000',
   /** Launch token printed in the simulated `dsh web:` readiness line. */
   token: 'sim-token-0123456789abcdef',
@@ -179,6 +182,9 @@ function probeOutput() {
     ['npm_path', '/home/sim/.nvm/versions/node/v24.21.0/bin/npm'],
     ['npx_path', '/home/sim/.nvm/versions/node/v24.21.0/bin/npx'],
     ['curl_path', SIM.curlPath],
+    ['wget_path', '/usr/bin/wget'],
+    ['libc', 'glibc'],
+    ['glibc_version', '2.39'],
     ['disk_free_kb', SIM.diskFreeKb],
     ['ssh_connection', 'yes'],
     ['credentials_file', 'no'],
@@ -534,6 +540,8 @@ function runRegistry(sim) {
     profile: 'web',
     version: SIM.dshVersion,
     dshHome: SIM.dshHome,
+    // The simulator emulates a current launch, so adoption is allowed.
+    launch: 'browser-carrier-v1',
   })
 }
 
@@ -620,16 +628,43 @@ function respond(command, sim) {
     )
   }
 
-  // 1. The one compound probe (src/probe.js buildProbeScript): its first line
-  //    is `set -u` and the first assignment is DIR=.
-  if (cmd.startsWith('set -u\nDIR=') || (cmd.startsWith('set -u\n') && cmd.includes('\nnpx_path\t'))) {
+  // 1. The one compound probe (src/probe.js buildProbeScript): starts with
+  //    `set -u` and prints the runtime facts.
+  if (cmd.startsWith('set -u\n') && cmd.includes('ssh_connection\t') && cmd.includes('provider_env_keys\t')) {
     return ok(probeOutput())
+  }
+
+  // 1b. Managed Node scan (src/node-runtime.js buildNodeScanScript). The
+  //     simulator pretends the pinned build is already installed, so connecting
+  //     exercises the real reuse path with no download at all.
+  if (cmd.startsWith('set -u\nNODE_DIR=')) {
+    return ok(`NODE\t${SIM.managedNodeVersion}\t${SIM.managedNodeDir}\n`)
+  }
+
+  // 1c. Managed Node checksum (buildNodeChecksumScript) and install
+  //     (buildNodeInstallScript): only reached when the scan did not report the
+  //     pinned build. A well-formed answer exercises the real parsing/verification
+  //     path without any network access.
+  if (cmd.includes('SHASUMS256.txt')) {
+    return ok(`CHECKSUM\thttps://nodejs.org/dist\t${'a'.repeat(64)}\n`)
+  }
+  if (cmd.startsWith('set -eu\nNODE_DIR=') && cmd.includes('tar -xzf')) {
+    const nodeDir = /NODE_DIR='([^']+)'/.exec(cmd)?.[1] ?? ''
+    const version = /VERSION='([^']+)'/.exec(cmd)?.[1] ?? ''
+    return ok(`STEP\textract\nREADY\t${nodeDir}/v${version}\n`)
   }
 
   // 2a. npx preflight (src/bootstrap.js buildPreflightCommand): running the
   //     exact package in the foreground must report the same version.
   if (/npx.*-y @deepseek-ai\/dsh@[0-9][^\s]* --version/.test(cmd)) {
     return ok(`${SIM.dshVersion}\n`)
+  }
+
+  // 2b. Browser-carrier probe (src/webapp.js buildBrowserCarrierProbe): the
+  //     simulated profile does not disable api-remotes, so the launch stays
+  //     patch-free (a real profile can; unit tests cover the PATCH branch).
+  if (cmd.includes('--dump-config')) {
+    return ok('CLEAR\n')
   }
 
   // 2. Detached remote web start (src/webapp.js buildStartScript).
@@ -725,8 +760,9 @@ function respond(command, sim) {
     return ok(sim.started ? `${runRegistry(sim)}\n` : '')
   }
 
-  // 6. Remote loopback HTTP status (src/webapp.js remoteHttpStatus).
-  if (cmd.startsWith('curl ') && cmd.includes("-w '%{http_code}'")) {
+  // 6. Remote loopback HTTP status (src/webapp.js remoteHttpStatus): curl first,
+  //    wget as the fallback, so the script no longer starts with `curl `.
+  if (cmd.includes("-w '%{http_code}'") || cmd.includes('--server-response')) {
     const port = Number(/127\.0\.0\.1:(\d+)/.exec(cmd)?.[1] ?? 0)
     return ok(port === sim.remotePort ? '200' : '000')
   }
@@ -1099,7 +1135,7 @@ async function runSelfTest(host) {
   const client = await connectClient(host.sshPort)
 
   // 1. The plugin's real probe script must produce supported facts.
-  const probe = await execOver(client, buildProbeScript('~/.dsh/remote-go'))
+  const probe = await execOver(client, buildProbeScript())
   expect(probe.code === 0, `probe exited ${probe.code}: ${probe.stderr.trim()}`)
   const facts = toProbeFacts(parseProbeOutput(probe.stdout))
   expect(facts.os === 'Linux', `probe os = ${JSON.stringify(facts.os)}`)

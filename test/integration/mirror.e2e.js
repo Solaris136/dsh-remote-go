@@ -28,7 +28,6 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { createApi } from '../../src/api.js'
-import { DEFAULT_REMOTE_DIR } from '../../src/constants.js'
 import { remoteLayout } from '../../src/layout.js'
 import { l1Capabilities, mirrorSessionId, planMirror } from '../../src/mirror.js'
 import { MirrorStore, MIRROR_STORE_VERSION } from '../../src/mirror-store.js'
@@ -443,7 +442,7 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
     await ssh.connect()
 
     await t.test('the simulator serves the configurable remote workspace fixture', async () => {
-      const facts = await probeRemote(ssh, { remoteDir: DEFAULT_REMOTE_DIR, timeoutMs: 30_000 })
+      const facts = await probeRemote(ssh, { timeoutMs: 30_000 })
       assert.equal(facts.os, 'Linux')
       assert.equal(facts.sshConnection, true)
       assert.ok(facts.npxPath, 'the probe reported no remote npx')
@@ -452,7 +451,7 @@ test('remote sessions appear as local mirror sessions, end to end', { timeout: 1
       // The plugin reads `<remote DSH home>/storages/workspace.json`; prove the
       // answer is the fixture this test asked for, not the built-in registry.
       assert.equal(simulator.state.workspaceFixture, FIXTURE_FILE)
-      const layout = remoteLayout(DEFAULT_REMOTE_DIR, facts.home)
+      const layout = remoteLayout(facts.home)
       const workspaces = await readRemoteWorkspaces(ssh, layout.dshHome)
       assert.equal(workspaces.ok, true, `workspace read failed: ${workspaces.reason ?? 'unknown'}`)
       assert.equal(workspaces.file, remoteWorkspaceStoragePath(layout.dshHome))
