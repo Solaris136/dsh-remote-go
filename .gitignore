@@ -1,6 +1,8 @@
 node_modules/
 _research/
 _tools/
+# Agent worktrees live here (DSH-specific); they are never part of the package.
+.agents/
 e2e/control/node_modules/
 e2e/control/home/
 e2e/control/home-published/
@@ -11,7 +13,7 @@ e2e/control/bin/node
 e2e/remote/.state.json
 e2e/remote/.token
 e2e/remote/embed-check/node_modules/
-e2e/artifacts/*.tgz
+e2e/artifacts/
 *.log
 .DS_Store
 
