@@ -59,6 +59,20 @@ window.__ModuleLoader__.load({
     const DESKTOP_BRIDGE_VERSION = 1
     /** DOM id prefix of the full-window remote carriers (one per warm host). */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
+    /**
+     * Caption band this window's page reserves when the desktop shell does not publish
+     * one (`--dsh-windows-titlebar-height`). Only a fallback: the published value wins.
+     */
+    const CAPTION_FALLBACK_HEIGHT = 40
+    /** `<html>` marker the desktop preload sets on the window that owns the caption row. */
+    const CAPTION_MARKER = 'data-windows-titlebar'
+    /** Set on `<html>` while a guest owns the caption band, so the shell's caption menus stay clickable. */
+    const CAPTION_LIVE_CLASS = 'drg-caption-live'
+    /**
+     * Left inset of the carrier's drag strip: the band's first pixels belong to the guest
+     * page's own fixed caption controls (collapse toggle 12–40, collapsed new session 48–76).
+     */
+    const CAPTION_GRIP_LEFT = 84
     /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /** Ordered connect phases (contract ConnectPhase). */
@@ -2512,7 +2526,10 @@ window.__ModuleLoader__.load({
           '#drg-host-row .drg-hr-name{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
           '#drg-host-row .drg-hr-chev{display:flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary);transition:transform 160ms ease}',
           '#drg-host-row.drg-open .drg-hr-chev{transform:rotate(180deg)}',
-          '#drg-host-row .drg-hr-menu{display:none;position:fixed;z-index:2147483000;min-width:220px;max-height:min(60vh,420px);overflow:auto;padding:5px;border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-panel);font-size:13px}',
+          // The row is a button, so the menu is a child of a pointer surface: the surface
+          // itself (padding, separators, the slack around a short row) must not inherit the
+          // hand, or the blank parts of the menu promise a click they do not have.
+          '#drg-host-row .drg-hr-menu{display:none;position:fixed;z-index:2147483000;min-width:220px;max-height:min(60vh,420px);overflow:auto;padding:5px;border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-panel);font-size:13px;cursor:default}',
           '#drg-host-row.drg-open .drg-hr-menu{display:block;animation:drg-hr-in 120ms ease-out}',
           '@keyframes drg-hr-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}',
           '#drg-host-row .drg-hr-item{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-secondary);cursor:pointer;white-space:nowrap;overflow:hidden;transition:background-color 120ms ease,color 120ms ease}',
@@ -2826,6 +2843,9 @@ window.__ModuleLoader__.load({
      */
     let carrierQueue = Promise.resolve()
 
+    /** Watches the local page's fullscreen flag while a caption-aware guest exists. */
+    let captionStateWatcher = null
+
     /**
      * Serialize one carrier operation behind the previous one.
      * @param {Function} task - async work to run when the queue is free.
@@ -2953,6 +2973,130 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The caption band this window's own page reserves, or null when it reserves none.
+     *
+     * The desktop shell draws a frameless window with a caption overlay over the page, and
+     * its preload marks `<html data-windows-titlebar>` and publishes the band height, so the
+     * page lays its frame out below the band. A guest page has no preload, which is why the
+     * remote UI would otherwise lay out as the Web build inside a window that is not one.
+     * @returns {{ height: number } | null} band to mirror into the guest, or null.
+     */
+    function desktopCaption() {
+      if (typeof document === 'undefined' || !document.documentElement) return null
+      const root = document.documentElement
+      try {
+        if (typeof root.hasAttribute !== 'function' || !root.hasAttribute(CAPTION_MARKER)) return null
+      } catch (_error) {
+        return null
+      }
+      let height = CAPTION_FALLBACK_HEIGHT
+      if (typeof getComputedStyle === 'function') {
+        try {
+          const raw = getComputedStyle(root).getPropertyValue('--dsh-windows-titlebar-height')
+          const parsed = Number.parseFloat(String(raw))
+          if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 200) height = parsed
+        } catch (_error) {
+          // keep the fallback height
+        }
+      }
+      return { height }
+    }
+
+    /**
+     * Teach one guest page the desktop layout: same marker, same band height, same frame.
+     * Idempotent, and re-run after every navigation — a fresh document drops the marker,
+     * and the marker is the only thing that keeps both pages on one grid.
+     * @param {object} entry - warm guest.
+     * @returns {Promise<boolean>} whether the guest now lays out as the desktop build.
+     */
+    async function applyGuestCaption(entry) {
+      const caption = entry === null || entry === undefined ? null : entry.caption
+      if (caption === null || caption === undefined) return false
+      const view = entry.view
+      if (view === null || view === undefined || typeof view.executeJavaScript !== 'function') return false
+      // Fullscreen drops the insets derived from the caption band (the window controls are
+      // hidden), so the guest has to mirror the flag as well as the band.
+      let fullscreen = false
+      try {
+        fullscreen = document.documentElement.hasAttribute('data-fullscreen')
+      } catch (_error) {
+        fullscreen = false
+      }
+      const source =
+        '(function(){var root=document.documentElement;if(!root)return "no-document";' +
+        'root.setAttribute("' +
+        CAPTION_MARKER +
+        '","");' +
+        'root.style.setProperty("--dsh-windows-titlebar-height","' +
+        caption.height +
+        'px");' +
+        'root.toggleAttribute("data-fullscreen",' +
+        (fullscreen === true ? 'true' : 'false') +
+        ');' +
+        'return "ok"})()'
+      let status = ''
+      try {
+        status = await view.executeJavaScript(source)
+      } catch (_error) {
+        status = ''
+      }
+      return status === 'ok'
+    }
+
+    /**
+     * Watch the local page's fullscreen flag: a guest that is already loaded cannot learn
+     * about the transition any other way, and its overlays would keep the band's inset.
+     * @returns {void}
+     */
+    function watchCaptionState() {
+      if (captionStateWatcher !== null || typeof MutationObserver !== 'function') return
+      if (typeof document === 'undefined' || !document.documentElement) return
+      captionStateWatcher = new MutationObserver(() => {
+        const entry = shownCarrier()
+        if (entry === null || entry.captionApplied !== true) return
+        applyGuestCaption(entry)
+      })
+      captionStateWatcher.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-fullscreen'],
+      })
+    }
+
+    /**
+     * Exactly one band, never two: the guest reserves the band itself once the marker
+     * landed, and is pushed below the window's own band when it did not (an older shell, or
+     * a guest that refuses the script). The drag strip only exists in the first case.
+     * @param {object} entry - guest whose load just settled.
+     * @param {boolean} applied - whether the caption marker is live in that guest.
+     * @returns {void}
+     */
+    function syncCarrierCaption(entry, applied) {
+      const caption = entry === null || entry === undefined ? null : entry.caption
+      if (caption === null || caption === undefined) return
+      entry.captionApplied = applied === true
+      entry.root.style.top = entry.captionApplied ? '0px' : caption.height + 'px'
+      if (entry.grip !== null && entry.grip !== undefined) {
+        entry.grip.style.display = entry.captionApplied ? '' : 'none'
+      }
+      if (carrierPool.current === entry.hostId) setCaptionLive(entry.captionApplied)
+    }
+
+    /**
+     * Raise or drop the shell's caption menus above the guest. While a remote window owns
+     * the caption band, the band's menus belong to the local page and only this class keeps
+     * them above the guest (see the stylesheet's `html.drg-caption-live` rule).
+     * @param {boolean} live - whether a guest currently owns the caption band.
+     * @returns {void}
+     */
+    function setCaptionLive(live) {
+      if (typeof document === 'undefined' || !document.documentElement) return
+      const classes = document.documentElement.classList
+      if (!classes || typeof classes.add !== 'function' || typeof classes.remove !== 'function') return
+      if (live === true) classes.add(CAPTION_LIVE_CLASS)
+      else classes.remove(CAPTION_LIVE_CLASS)
+    }
+
+    /**
      * Build one guest: a fresh partition, the switcher row, and the failure line.
      * @param {string} hostId - host this window belongs to.
      * @param {string} url - loopback launch URL (already validated by the caller).
@@ -2977,16 +3121,20 @@ window.__ModuleLoader__.load({
         return null
       }
 
+      const caption = desktopCaption()
+      if (caption !== null) watchCaptionState()
       const root = document.createElement('div')
       // One root per warm host, so the ids stay unique (the host shows which window it is).
       root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
       root.setAttribute('data-testid', 'remote-overlay')
       root.setAttribute('data-host-id', hostId)
-      // The desktop window is frameless with a 40px titlebar overlay (Windows caption
-      // buttons / macOS traffic lights), so the carrier starts below it: clicks in
-      // that band belong to the OS, not to this page.
+      // A guest that is taught the desktop layout reserves the caption band itself, so the
+      // carrier covers the whole window and both pages lay out on one grid. Without a band
+      // to mirror (the Web build, or a macOS window) the guest starts below the window's own
+      // band: clicks in it belong to the OS, not to this page.
+      const top = caption === null ? CAPTION_FALLBACK_HEIGHT + 'px' : '0px'
       root.style.cssText = [
-        'position:fixed;left:0;right:0;bottom:0;top:40px;z-index:2147483000',
+        'position:fixed;left:0;right:0;bottom:0;top:' + top + ';z-index:2147483000',
         'overflow:hidden;background:var(--dsw-alias-bg-base)',
       ].join(';')
 
@@ -2999,6 +3147,23 @@ window.__ModuleLoader__.load({
       errorLayer.className = 'drg-carrier-error'
       errorLayer.setAttribute('data-testid', 'remote-overlay-error')
       errorLayer.textContent = typeof message === 'string' ? message : ''
+
+      // A guest that covers the caption band takes the window drag away with it (Electron
+      // ignores app regions inside a guest). This strip hands the empty part of the band
+      // back to the window; the guest's own fixed caption controls sit left of it, and the
+      // shell's caption menus paint above the whole carrier.
+      let grip = null
+      if (caption !== null) {
+        grip = document.createElement('div')
+        grip.className = 'drg-carrier-grip'
+        grip.setAttribute('data-testid', 'remote-overlay-grip')
+        grip.style.cssText =
+          'position:absolute;left:' +
+          CAPTION_GRIP_LEFT +
+          'px;right:0;top:0;height:' +
+          caption.height +
+          'px;z-index:1;-webkit-app-region:drag'
+      }
 
       const view = document.createElement('webview')
       view.className = 'drg-carrier-view'
@@ -3015,6 +3180,11 @@ window.__ModuleLoader__.load({
         lease: String(reservation.lease),
         root,
         view,
+        grip,
+        /** Caption band to mirror into this guest, or null when there is none. */
+        caption,
+        /** Set once the guest page carries the desktop marker (never in a band-less window). */
+        captionApplied: false,
         url,
         rowInstalled: false,
         /** Set when a main-frame load failed, so the next show retries instead of reusing it. */
@@ -3030,17 +3200,33 @@ window.__ModuleLoader__.load({
         navigated = true
         view.loadURL(entry.url).catch(() => {})
       })
+      // Every committed navigation starts from a fresh document, which drops the injected
+      // caption marker: re-apply it before the page can paint the Web grid.
+      view.addEventListener('dom-ready', () => {
+        if (entry.view !== view) return
+        applyGuestCaption(entry).then((applied) => {
+          if (entry.view !== view) return
+          syncCarrierCaption(entry, applied)
+        })
+      })
       view.addEventListener('did-stop-loading', () => {
         if (entry.view !== view) return
         errorLayer.style.display = 'none'
         entry.failed = false
         // Re-install after *every* load stop: the remote page reloading wipes the
         // injected DOM, and a one-shot install would leave the window without any
-        // control. The script is idempotent inside the page.
-        installHostRow(entry).then((live) => {
-          if (entry.view !== view || !live) return
-          if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
-        })
+        // control. Both scripts are idempotent inside the page, and the caption has to
+        // land before the row measures the sidebar it is placed into.
+        applyGuestCaption(entry)
+          .then((applied) => {
+            if (entry.view !== view) return false
+            syncCarrierCaption(entry, applied)
+            return installHostRow(entry)
+          })
+          .then((live) => {
+            if (entry.view !== view || !live) return
+            if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
+          })
       })
       view.addEventListener('did-fail-load', (event) => {
         if (entry.view !== view) return
@@ -3051,9 +3237,14 @@ window.__ModuleLoader__.load({
         if (!isMainFrame || aborted) return
         entry.failed = true
         errorLayer.style.display = 'flex'
+        // The page cannot paint its own frame, so it must not own the caption band either:
+        // hand the band back to the local page (its menus stay reachable while the failure
+        // line is up) and the next successful load takes it again.
+        syncCarrierCaption(entry, false)
       })
 
       root.append(style, view, errorLayer)
+      if (grip !== null) root.append(grip)
       document.body.appendChild(root)
 
       return entry
@@ -3120,6 +3311,9 @@ window.__ModuleLoader__.load({
       carrierPool.entries = [entry, ...carrierPool.entries.filter((item) => item !== entry)]
       carrierPool.current = hostId
       entry.root.style.display = ''
+      // The band belongs to this guest now: keep the shell's caption menus above it, but
+      // only when the guest actually reserved the band (otherwise the local band is intact).
+      setCaptionLive(entry.captionApplied === true)
       updateSwitcher({ current: hostId })
       if (entry.rowInstalled === true) {
         pushGuestHostRow(switcherPayload())
@@ -3139,6 +3333,8 @@ window.__ModuleLoader__.load({
       stopHostRowPoll()
       for (const entry of carrierPool.entries) entry.root.style.display = 'none'
       carrierPool.current = null
+      // The local band is back: its menus belong to the page again, not above a guest.
+      setCaptionLive(false)
     }
 
     /**
@@ -3156,7 +3352,10 @@ window.__ModuleLoader__.load({
       // enough - a disconnect arrives through a subscription created at mount, whose
       // closure holds the target from that render, so it cannot clear it.
       const wasShown = carrierPool.current === entry.hostId
-      if (wasShown) carrierPool.current = null
+      if (wasShown) {
+        carrierPool.current = null
+        setCaptionLive(false)
+      }
       if (entry.view !== null && entry.rowInstalled === true) {
         try {
           entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
@@ -3196,6 +3395,11 @@ window.__ModuleLoader__.load({
       stopHostRowPoll()
       const hosts = carrierPool.entries.map((entry) => entry.hostId)
       carrierPool.current = null
+      setCaptionLive(false)
+      if (captionStateWatcher !== null) {
+        captionStateWatcher.disconnect()
+        captionStateWatcher = null
+      }
       for (const hostId of hosts) await closeCarrier(hostId)
     }
 
@@ -5991,6 +6195,11 @@ window.__ModuleLoader__.load({
     }
     /* The shell's overlay seat may have to float above a remote guest window. */
     [data-shell-overlay] { z-index: 2147483001; }
+    /* While a guest fills the window it also paints the caption band, which the desktop
+       window's own caption row sits on: the shell's caption menus (Windows) are the only
+       local chrome left in that band, so they have to paint above the guest to stay usable.
+       The class is only present while a guest owns the band. */
+    html.drg-caption-live body > [data-windows-menu] { z-index: 2147483002; }
 `
 
     /** Injects the panel styles once per mounted panel (removed on unmount). */

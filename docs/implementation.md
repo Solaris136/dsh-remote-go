@@ -147,7 +147,7 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 - 数据：`GET /state` 为唯一真相，`EventSource /events` 实时推送，失败退化为 3s 轮询；常驻的浮层宿主订阅一次，主机条与浮窗都读它。
 - API 层：所有请求经一个 `apiRequest`，统一加 `x-dsh-remote-go: 1` 与 `credentials:'same-origin'`；错误转成 `ErrorView`。
 - i18n：内置 `zh`/`en` 字典 + 宿主 locale 服务；两侧键集合由单元测试保证一致。
-- 接管：`showOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest；每次 `did-stop-loading` 重新注入主机条；`__drgBridgeQueue` 轮询把点击（`{target}` / `{action:'add'|'manage'|'disconnect', hostId?}`）交回 `switcher.dispatch`。
+- 接管：`showOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest，carrier 铺满整窗；`desktopCaption()` 读本地页面的 `<html data-windows-titlebar>` 与 `--dsh-windows-titlebar-height`，`applyGuestCaption` 在每个 `dom-ready` / `did-stop-loading` 把同一标记（含 `data-fullscreen`）注入 guest，`syncCarrierCaption` 据此决定 guest 自己让出标题栏还是退回「整体下移一条」（注入失败时），并同步 carrier 内的 `drg-carrier-grip`（标题栏区域的 `-webkit-app-region: drag` 拖拽条，左侧 84px 留给 guest 自己的固定控件）与 `<html class="drg-caption-live">`（把宿主标题栏菜单抬到 guest 之上）；本地页面的全屏状态由 `watchCaptionState` 的 MutationObserver 推给已加载的 guest。每次 `did-stop-loading` 在标题栏之后重新注入主机条；`__drgBridgeQueue` 轮询把点击（`{target}` / `{action:'add'|'manage'|'disconnect', hostId?}`）交回 `switcher.dispatch`。
 - 意图：`panelStore.requestIntent({kind:'open'|'disconnect'|'manage'|'local'})` 与 `wizardStore.open({mode,host})` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开某台、释放它的窗口并在 Host 确认后把窗口交回本地（主机条的当前目标随之回落到「本地」），`manage` 打开浮窗，`local` 隐藏远端窗口并清掉 Host 侧的 active。意图订阅在挂载时建立，回调里读不到最新的窗口状态，所以「窗口在哪台」的收尾一律走 ref 或 `setState(fn)` 这类实时更新。
 - 安全不变量（测试会读源码断言）：不打开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。
 - 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 主机条/远端窗口 → 向导 → 诊断 → 设置 → 密码/冲突 → 浮层宿主（`PluginOverlay`）→ 样式 → 注册。
