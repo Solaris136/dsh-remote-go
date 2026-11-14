@@ -35,9 +35,7 @@ export async function detectLocalVersion(input = {}) {
       if (parsed?.name === '@deepseek-ai/dsh' && parsed?.version && parseVersion(normalizeVersion(parsed.version))) {
         return { version: normalizeVersion(parsed.version), source: `package.json:${candidate}` }
       }
-    } catch {
-      /* keep looking */
-    }
+    } catch {}
   }
   return { version: null, source: 'unknown' }
 }
@@ -61,9 +59,7 @@ export async function detectLocalEnginesNode(input = {}) {
       if (typeof range === 'string' && range.trim() !== '') {
         return { range: range.trim(), source: `package.json:${candidate}` }
       }
-    } catch {
-      /* keep looking */
-    }
+    } catch {}
   }
   return { range: null, source: 'unknown' }
 }

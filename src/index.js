@@ -14,6 +14,7 @@ import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
+import { messageOf } from './util.js'
 
 export const name = PLUGIN_ID
 export const inject = ['webServer']
@@ -123,7 +124,7 @@ export function describeSelf(ctx, info) {
         const stat = statSync(clientPath)
         bundle = { path: clientPath, size: stat.size, mtimeMs: stat.mtimeMs }
       } catch (error) {
-        bundle = { path: clientPath, error: error instanceof Error ? error.message : String(error) }
+        bundle = { path: clientPath, error: messageOf(error) }
       }
     }
     out.client = {
@@ -135,7 +136,7 @@ export function describeSelf(ctx, info) {
       bundle,
     }
   } catch (error) {
-    out.client = { error: error instanceof Error ? error.message : String(error) }
+    out.client = { error: messageOf(error) }
   }
   return out
 }

@@ -8,26 +8,21 @@ import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import { sleep } from './util.js'
 
-export const RENAME_RETRY_ATTEMPTS = 5
-export const RENAME_RETRY_BASE_MS = 20
-export const LOCK_STALE_MS = 10_000
-export const LOCK_WAIT_MS = 20_000
-export const LOCK_RETRY_MS = 10
+const RENAME_RETRY_ATTEMPTS = 5
+const RENAME_RETRY_BASE_MS = 20
+const LOCK_STALE_MS = 10_000
+const LOCK_WAIT_MS = 20_000
+const LOCK_RETRY_MS = 10
 /**
  * How long a non-`EEXIST` lock error counts as contention without the lock present.
  * Windows reports mid-create/mid-delete races as EPERM/EACCES, but those codes also
  * mean a lock that can never be created (ACL denial, read-only mount); past this
  * window the original error is surfaced instead of a misleading timeout.
  */
-export const LOCK_TRANSIENT_MS = 250
-export const LOCK_UNLINK_ATTEMPTS = 3
-
-export function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
+const LOCK_TRANSIENT_MS = 250
+const LOCK_UNLINK_ATTEMPTS = 3
 
 /**
  * In-process chains keyed by lock path; the value is the always-settled tail so a
@@ -83,9 +78,7 @@ async function acquireLock(lockFile, options) {
       return async () => {
         try {
           await handle.close()
-        } catch {
-          /* already closed */
-        }
+        } catch {}
         // A leaked lock costs the next writer a full stale wait, so retry the unlink
         // (Windows can hold it briefly after close).
         for (let attempt = 0; attempt < LOCK_UNLINK_ATTEMPTS; attempt += 1) {
@@ -153,9 +146,7 @@ export async function writeJsonAtomic(file, value, options = {}) {
     if (handle) {
       try {
         await handle.close()
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
     await removeQuietly(fsImpl, tmp)
     throw error
@@ -193,9 +184,7 @@ async function syncDir(fsImpl, dir) {
     if (handle) {
       try {
         await handle.close()
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   }
 }
@@ -213,26 +202,10 @@ export async function readJsonFile(file, options = {}) {
   }
 }
 
-export async function quarantineFile(file, kind, options = {}) {
-  const fsImpl = options.fs ?? fs
-  const logger = options.logger ?? console
-  const target = `${file}.${kind}-${Date.now()}`
-  try {
-    await fsImpl.rename(file, target)
-    logger.warn?.(`[dsh-remote-go] kept ${path.basename(file)} aside as ${path.basename(target)} (${kind})`)
-    return target
-  } catch (error) {
-    logger.warn?.(`[dsh-remote-go] cannot keep ${path.basename(file)} aside:`, error)
-    return null
-  }
-}
-
 async function removeQuietly(fsImpl, target) {
   try {
     await fsImpl.unlink(target)
-  } catch {
-    /* already gone */
-  }
+  } catch {}
 }
 
 async function lockExists(fsImpl, lockFile) {

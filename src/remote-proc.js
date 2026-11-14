@@ -1,0 +1,213 @@
+/**
+ * Remote process and reachability primitives: finding stopping and probing DSH
+ * processes on the remote, plus the one HTTP round-trip the local tunnel needs to
+ * prove the remote UI answers through it.
+ *
+ * Everything here is a bounded shell command or a loopback request; nothing owns
+ * lifecycle state, so the web lifecycle (`remote-web.js`) can build on it.
+ */
+import http from 'node:http'
+import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
+import { isPid, messageOf } from './util.js'
+
+/** A listener answering 200, 302 or 401 is up: 401 without the launch cookie still proves it serves. */
+export function isUiUp(status) {
+  return status === 200 || status === 302 || status === 401
+}
+
+export function buildForeignDshCommand(ignorePids = []) {
+  const ignore = (Array.isArray(ignorePids) ? ignorePids : [])
+    .map((pid) => Number(pid))
+    .filter((pid) => isPid(pid))
+    .join(' ')
+  return `set -u
+IGNORE=" ${ignore} "
+PS_OUT=$(ps -eww -o pid=,comm=,args= 2>/dev/null || ps -eo pid=,comm=,args= 2>/dev/null || true)
+printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
+  [ -z "$LINE" ] && continue
+  set -- $LINE
+  PID=$1
+  COMM=$2
+  shift 2
+  ARGS="$*"
+  [ -z "$PID" ] && continue
+  case "$IGNORE" in *" $PID "*) continue ;; esac
+  case "$COMM" in node|dsh|npm|npx) ;; *) continue ;; esac
+  case "$ARGS" in
+    *"@deepseek-ai/dsh"*|*"/bin/dsh "*|*" dsh "*) ;;
+    *) continue ;;
+  esac
+  case "$ARGS" in
+    *"ps -eww"*|*"PS_OUT"*|*"IGNORE"*) continue ;;
+  esac
+  ENV_HOME=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
+  if [ -n "\${ENV_HOME:-}" ] && [ "$ENV_HOME" != "$HOME/.dsh" ]; then continue; fi
+  printf '%s\\t%s\\n' "$PID" "$ARGS"
+done`
+}
+
+export function parseForeignDshOutput(stdout) {
+  const processes = []
+  for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
+    const tab = rawLine.indexOf('\t')
+    if (tab <= 0) continue
+    const pid = Number(rawLine.slice(0, tab).trim())
+    const command = rawLine.slice(tab + 1).trim()
+    if (!isPid(pid) || command === '') continue
+    processes.push({ pid, command })
+  }
+  return processes
+}
+
+/**
+ * Find DSH processes on the remote that this plugin did not start.
+ *
+ * Never throws: a failed scan is reported as `{ ok: false }`, and the caller
+ * proceeds without a conflict prompt (a broken scan must not block connecting).
+ */
+export async function findForeignDshProcesses(ssh, options = {}) {
+  try {
+    const result = await ssh.exec(buildForeignDshCommand(options.ignorePids ?? []), {
+      timeoutMs: options.timeoutMs ?? 20_000,
+      maxBytes: 200_000,
+    })
+    if (result.code !== 0) {
+      return { ok: false, processes: [], reason: 'exec-failed', technical: String(result.stderr ?? '').slice(0, 500) }
+    }
+    return { ok: true, processes: parseForeignDshOutput(result.stdout) }
+  } catch (error) {
+    // swallow-ok: a scan failure is surfaced as ok:false and the caller proceeds without a prompt
+    return {
+      ok: false,
+      processes: [],
+      reason: 'exec-failed',
+      technical: messageOf(error),
+    }
+  }
+}
+
+export async function stopForeignDshProcesses(ssh, processes, options = {}) {
+  const pids = [
+    ...new Set(
+      (Array.isArray(processes) ? processes : []).map((process) => Number(process?.pid)).filter((pid) => isPid(pid)),
+    ),
+  ]
+  if (pids.length === 0) return { ok: true, alive: [], output: '' }
+  const script = `set -u
+PIDS="${pids.join(' ')}"
+for PID in $PIDS; do kill -TERM "$PID" 2>/dev/null || true; done
+i=0
+while [ "$i" -lt 20 ]; do
+  ALIVE=0
+  for PID in $PIDS; do
+    if kill -0 "$PID" 2>/dev/null; then ALIVE=1; fi
+  done
+  if [ "$ALIVE" -eq 0 ]; then break; fi
+  i=$((i+1))
+  sleep 0.5
+done
+for PID in $PIDS; do
+  if kill -0 "$PID" 2>/dev/null; then kill -KILL "$PID" 2>/dev/null || true; fi
+done
+sleep 0.2
+for PID in $PIDS; do
+  if kill -0 "$PID" 2>/dev/null; then echo "ALIVE:$PID"; fi
+done
+echo "STOPPED"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 30_000 })
+    const output = String(result.stdout ?? '')
+    const alive = [...output.matchAll(/ALIVE:(\d+)/g)].map((match) => Number(match[1]))
+    return { ok: result.code === 0 && alive.length === 0, alive, output }
+  } catch (error) {
+    // swallow-ok: a stop failure is returned to the caller with the original message
+    return { ok: false, alive: pids, output: messageOf(error) }
+  }
+}
+
+export async function remoteHttpStatus(ssh, port) {
+  if (!isPid(port)) return null
+  const script = `URL="http://127.0.0.1:${port}/"
+if command -v curl >/dev/null 2>&1; then
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true
+elif command -v wget >/dev/null 2>&1; then
+  wget -S -O /dev/null --max-time 5 "$URL" 2>&1 | sed -n 's/.*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' | head -n 1
+fi
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 15_000 })
+    const code = Number(String(result.stdout ?? '').trim())
+    return Number.isInteger(code) && code > 0 ? code : null
+  } catch {
+    return null
+  }
+}
+
+export async function waitForRemoteUi(ssh, port, options = {}) {
+  const attempts = options.attempts ?? 20
+  const intervalMs = options.intervalMs ?? 500
+  let last = null
+  for (let i = 0; i < attempts; i += 1) {
+    last = await remoteHttpStatus(ssh, port)
+    if (isUiUp(last)) return { ok: true, status: last }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+  return { ok: false, status: last }
+}
+
+export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
+  const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS
+  const basePath = options.path ?? '/'
+  const tokenPath = `/?token=${encodeURIComponent(token)}`
+  const first = await httpRequest({
+    port: localPort,
+    path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`,
+    timeoutMs,
+  })
+  const setCookies = first.headers['set-cookie'] ?? []
+  const cookieHeader = setCookies.map((cookie) => String(cookie).split(';')[0]).join('; ')
+  const location = first.headers.location ?? null
+  const second = await httpRequest({
+    port: localPort,
+    path: location && location.startsWith('/') ? location : '/',
+    timeoutMs,
+    headers: cookieHeader ? { cookie: cookieHeader } : {},
+  })
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(second.body)
+  return {
+    ok: second.status === 200 && second.body.length > 0,
+    firstStatus: first.status,
+    status: second.status,
+    title: titleMatch ? titleMatch[1].trim().slice(0, 200) : null,
+  }
+}
+
+function httpRequest(options) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: '127.0.0.1',
+        port: options.port,
+        path: options.path,
+        method: 'GET',
+        headers: { 'user-agent': 'dsh-remote-go', ...options.headers },
+        timeout: options.timeoutMs,
+      },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+        response.on('end', () => {
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString('utf8'),
+          })
+        })
+      },
+    )
+    request.on('timeout', () => request.destroy(new Error('local tunnel probe timed out')))
+    request.on('error', reject)
+    request.end()
+  })
+}

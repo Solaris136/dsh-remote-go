@@ -11,7 +11,12 @@ dsh-remote-go
 ├─ src/
 │  ├─ index.js              Host 插件入口：挂 API、初始化 service、探测本机版本
 │  ├─ api.js                本地 HTTP + SSE 路由（契约实现）
-│  ├─ service.js            主机注册表、连接管线、公共 API facade（CRUD、设置、快照、诊断入口）
+│  ├─ service.js            公共 facade：装配 ctx（依赖 + 可变状态）并委托给下面 6 个协作者
+│  ├─ connect-pipeline.js   连接管线：目标解析 → transport → probe → 托管 Node → 启动/收养 → 隧道 → 校验
+│  ├─ host-registry.js      主机 CRUD、设置、快照、key-file 浏览与 ssh 别名发现
+│  ├─ host-lifecycle.js     重连/空闲计时器、唯一 teardown 路径、shutdown
+│  ├─ connect-progress.js   日志环、/state 合并、进度码与 npx 行解析
+│  ├─ prompts.js            指纹确认与远端冲突的用户决定 rendezvous
 │  ├─ host-runtime.js       每主机 runtime 对象的唯一形状（建/用分开）
 │  ├─ host-view.js          每主机对客户端的只读视图（HostView 投影）
 │  ├─ connect-log.js        连接日志：环形缓冲下限、对外日志尾与可见状态
@@ -49,29 +54,29 @@ dsh-remote-go
 ├─ e2e/remote/              真实测试主机的准备脚本
 └─ scripts/                 仓库规范 / 市场条目 / 打包 / 语法检查
 ```
-依赖方向单向：`index → service → (ssh / probe / node-runtime / bootstrap / webapp / tunnel / …)`；`service → (host-runtime / host-view / diagnostics / store / settings / …)`；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。
+依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect-pipeline` / `host-lifecycle` / `connect-progress` / `prompts`。`connect-pipeline → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。
 
 ## 2. Host 入口与装配
 `src/index.js#apply(ctx, config)`：解析 `$DSH_HOME` 与插件状态目录 → `HostStore` → `SecretStore`（没有 `credentials` 服务时降级为仅内存）→ `RemoteGoService`（注入 store/home/logger/secrets/本地版本/指纹确认超时）→ `createApi({ service, getOrigin, logger, diagnostics })` 在 `ctx.effect` 内挂到 `webServer` 的 `/dsh-remote-go/api` 前缀 → 异步 `service.init()` + `detectLocalVersion`/`detectLocalEnginesNode`（读不到版本记 warn）→ 卸载时 `api.dispose()`、`service.shutdown()`、注销路由。`optional = ['connection','credentials']`；其余依赖都是 node 内置模块或本仓库模块，发布包 `dependencies: {}`。
 
 ## 3. 连接管线
-入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），把 `runtime.connectPromise` 设为 `#connectPipeline(runtime)` 后立即返回；进度全走 `state` 事件。顺序：
+入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），交给 `connect-pipeline.js#startConnect`，把 `runtime.connectPromise` 设为 `connectPipeline(ctx, runtime)` 后立即返回；进度全走 `state` 事件。顺序：
 
 ```text
 1. 清空上次 error/warning/facts/exchange，status = connecting
-2. #resolveTargetForRuntime：本机 ssh 材料 → 别名解析 → known_hosts 指纹集合；已保存过密码则从 SecretStore 取回（后台重连无需弹窗）
-3. #openTransport：直接 sshFactory(buildOptions) → connect → #captureFingerprint；跳板机先连跳板再 forwardOut(target 22)，通道上建第二条 ssh；onHostKey 进入 #onHostKey（strict 直接拒绝，否则挂起等 UI）
+2. resolveTarget：本机 ssh 材料 → 别名解析 → known_hosts 指纹集合；已保存过密码则从 SecretStore 取回（后台重连无需弹窗）
+3. openTransport：直接 sshFactory(buildOptions) → connect → captureFingerprint；跳板机先连跳板再 forwardOut(target 22)，通道上建第二条 ssh；onHostKey 进入 prompts.requestHostKey（strict 直接拒绝，否则挂起等 UI）
 4. probeRemote：OS/Node/npm/npx/curl/磁盘/凭据/SSH 会话标记 → runtime.facts；ensureRemoteNode 按 engines.node 下限装/复用 ~/.dsh/remote-go/node/v<version>（失败即中止），applyManagedNodeFacts 写回 node/npm/npx 路径
-5. 本机版本未知则失败；planNpx 产出固定模板并绑定托管 Node 的 PATH（局部 plan，不挂到 runtime）
-6. adopt：读 run registry（dshHome/profile/pid/日志 URL/HTTP 探活），版本不符的本插件实例先 stop 再另起；未收养才继续：清掉不可收养的残留实例 → #resolveForeignConflict 扫描外来 DSH（stop/alongside/cancel）
+5. 本机版本未知则失败；planNpx 产出固定模板并绑定托管 Node 的 PATH
+6. adopt：读 run registry（dshHome/profile/pid/日志 URL/HTTP 探活），版本不符的本插件实例先 stop 再另起；未收养才继续：清掉不可收养的残留实例 → resolveForeignConflict 扫描外来 DSH（stop/alongside/cancel）
 7. npx 预检（前台，无超时）：verifyNpxVersion 回读必须精确相等
 8. startRemoteWeb：setsid nohup 启动，轮询 `dsh web:` 行取 pid/port/token；createTunnel：本地 127.0.0.1:0 → forwardOut(远端 port)
 9. waitForRemoteUi（远端 curl）→ exchangeTokenOverTunnel（token→cookie→干净首页）
-10. connected：记录 lastOpenedAt/activeHostId，按设置保存 token/密码，挂断线处理器
+10. connected：记录 lastOpenedAt/activeHostId，按设置保存 token/密码，挂断线处理器（host-lifecycle.scheduleReconnect）
 11. 失败：toErrorView，按 desired 判定「用户取消」/「连接失败」，统一 teardown
 ```
 
-teardown（`#teardownRuntime`）是唯一收尾路径：取消冲突提示、置 `closing`、取消空闲计时器、按策略停远端、关隧道、释放 SSH、清空 probe/exchange/token/remote；`disconnect`、`removeHost`、连接失败与 `shutdown` 都复用它。
+teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消冲突提示、置 `closing`、取消空闲计时器、按策略停远端、关隧道、释放 SSH、清空 probe/exchange/token/remote；`disconnect`、`removeHost`、连接失败与 `shutdown` 都复用它。
 
 ## 4. SSH、指纹与运行时
 `ssh.js` 封装 ssh2：`hostVerifier` 计算 `SHA256:<base64>`，按 `pinnedFingerprint` → `knownHostFingerprints` → `hostKeyPolicy` 决策；认证回退只有私钥文件 →（密码认证时）密码，不支持 Agent；`exec(command,{timeoutMs})` 统一返回 `{ code, stdout, stderr }`，`forwardOut` 供隧道与跳板机。`onHostKey` 由 service 提供：`strict` 直接抛 `host-key-unknown`，否则把指纹挂到 runtime 并返回 promise，`confirmFingerprint()` 或 120s 超时后 resolve。

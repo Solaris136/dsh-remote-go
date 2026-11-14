@@ -1,26 +1,17 @@
 /**
  * The plugin's own Node.js runtime on the remote.
  *
- * The remote runtime is `npx` pinned to the local DSH version, so it needs a Node
- * with npm/npx — and the plugin always uses its **own** copy, whether or not the
- * remote already has one. A shared system/nvm Node is exactly what makes "works
- * for my other project" break the remote DSH, so the managed install is the only
- * path: an official Node.js build, SHA-256 verified against the published
- * checksum file, unpacked under `$DSH_HOME/remote-go/node/v<version>`. It never
- * touches the system Node and needs no root.
+ * The managed install is the only path: an official Node build, SHA-256 verified
+ * against the published checksum file, unpacked under `$DSH_HOME/remote-go/node`.
+ * A shared system/nvm Node is exactly what makes "works for my other project"
+ * break the remote DSH, so the version is pinned to the lower bound of the local
+ * DSH `engines.node` and reused, with no registry polling and no silent upgrades.
  *
- * The version comes from the local DSH package's own `engines.node` declaration
- * (the remote runs that exact DSH build), reduced to its lower bound — for DSH
- * 0.2.2 that is Node 24.9.0. It is **pinned**: the plugin installs that exact
- * build and reuses it, with no registry polling and no silent upgrades; when a
- * future DSH raises its floor, the plugin follows it. Older builds under the
- * same directory are removed after a successful install.
- *
- * Everything here is a fixed command template built from validated values
- * (version, architecture, checksum, base URL) — never a user-composed shell.
+ * Every command here is a fixed template built from validated values (version,
+ * architecture, checksum, base URL) — never a user-composed shell.
  */
 import { errors } from './errors.js'
-import { headTail, shellQuote } from './util.js'
+import { headTail, messageOf, shellQuote } from './util.js'
 import { MIN_NODE_VERSION, normalizeVersion, parseVersion } from './version.js'
 
 export const NODE_DIST_BASES = Object.freeze(['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node'])
@@ -61,6 +52,19 @@ const DIST_ARCH = new Map([
   ['ppc64le', 'ppc64le'],
   ['s390x', 's390x'],
 ])
+
+/**
+ * Pick the downloader both install scripts share: curl when present, else wget.
+ * Exit 9 is the "neither tool" contract the caller maps to `no-fetch`.
+ */
+const FETCH_PROLOGUE = `if command -v curl >/dev/null 2>&1; then
+  FETCH=curl
+elif command -v wget >/dev/null 2>&1; then
+  FETCH=wget
+else
+  printf 'FAILED\\tno-fetch\\n'
+  exit 9
+fi`
 
 export function nodeDistArch(arch) {
   return DIST_ARCH.get(String(arch ?? '').toLowerCase()) ?? null
@@ -117,14 +121,7 @@ DL=${shellQuote(input.downloadDir)}
 VERSION=${shellQuote(input.version)}
 FILE="node-v$VERSION-linux-${input.arch}.tar.gz"
 mkdir -p "$DL" || exit 3
-if command -v curl >/dev/null 2>&1; then
-  FETCH=curl
-elif command -v wget >/dev/null 2>&1; then
-  FETCH=wget
-else
-  printf 'FAILED\\tno-fetch\\n'
-  exit 9
-fi
+${FETCH_PROLOGUE}
 fetch() {
   URL=$1
   OUT=$2
@@ -182,14 +179,7 @@ if [ -x "$BINDIR/bin/node" ] && [ "$("$BINDIR/bin/node" -v 2>/dev/null || true)"
   printf 'READY\\t%s\\n' "$BINDIR"
   exit 0
 fi
-if command -v curl >/dev/null 2>&1; then
-  FETCH=curl
-elif command -v wget >/dev/null 2>&1; then
-  FETCH=wget
-else
-  printf 'FAILED\\tno-fetch\\n'
-  exit 9
-fi
+${FETCH_PROLOGUE}
 verify() {
   TARGET=$1
   if command -v sha256sum >/dev/null 2>&1; then
@@ -268,14 +258,16 @@ printf 'READY\\t%s\\n' "$BINDIR"
 }
 
 function technicalOf(error) {
-  return error instanceof Error ? error.message : String(error ?? '')
+  return messageOf(error ?? '')
 }
 
 function nodeError(detail, technical) {
   return errors.nodeInstallFailed(detail, technical ? { technical } : undefined)
 }
 
-function normalizeExecResult(result) {
+/** Run one remote command and normalize whatever shape the transport returned. */
+async function runRemote(ssh, command, options) {
+  const result = await ssh.exec(command, options)
   return {
     code: typeof result?.code === 'number' ? result.code : 0,
     stdout: String(result?.stdout ?? ''),
@@ -283,12 +275,18 @@ function normalizeExecResult(result) {
   }
 }
 
+/** Diagnostic tail of one exec result: stderr when it said anything, else stdout. */
+function failureTail(result, max) {
+  return headTail(result.stderr || result.stdout, max)
+}
+
 async function scanManagedNode(ssh, layout) {
   let result
   try {
-    result = normalizeExecResult(
-      await ssh.exec(buildNodeScanScript(layout), { timeoutMs: NODE_SCAN_TIMEOUT_MS, maxBytes: 200_000 }),
-    )
+    result = await runRemote(ssh, buildNodeScanScript(layout), {
+      timeoutMs: NODE_SCAN_TIMEOUT_MS,
+      maxBytes: 200_000,
+    })
   } catch (error) {
     throw nodeError(
       { zh: '无法检查远端托管的 Node。', en: 'Could not inspect the managed Node on the remote.' },
@@ -310,16 +308,15 @@ async function scanManagedNode(ssh, layout) {
 async function resolveNodeRelease(ssh, input) {
   let result
   try {
-    result = normalizeExecResult(
-      await ssh.exec(
-        buildNodeChecksumScript({
-          downloadDir: input.layout.downloadDir,
-          version: input.version,
-          arch: input.arch,
-          bases: input.bases,
-        }),
-        { timeoutMs: NODE_CHECKSUM_TIMEOUT_MS, maxBytes: 200_000 },
-      ),
+    result = await runRemote(
+      ssh,
+      buildNodeChecksumScript({
+        downloadDir: input.layout.downloadDir,
+        version: input.version,
+        arch: input.arch,
+        bases: input.bases,
+      }),
+      { timeoutMs: NODE_CHECKSUM_TIMEOUT_MS, maxBytes: 200_000 },
     )
   } catch (error) {
     // swallow-ok: unreachable — a transport failure is reported as a typed resolution
@@ -382,8 +379,10 @@ async function installNodeRelease(ssh, input) {
   }
   let result
   try {
-    result = normalizeExecResult(
-      await ssh.exec(buildNodeInstallScript({ layout: input.layout, release: input.release, bases: input.bases }), {
+    result = await runRemote(
+      ssh,
+      buildNodeInstallScript({ layout: input.layout, release: input.release, bases: input.bases }),
+      {
         timeoutMs: NODE_INSTALL_TIMEOUT_MS,
         maxBytes: 400_000,
         onStdout: (chunk) => {
@@ -392,7 +391,7 @@ async function installNodeRelease(ssh, input) {
           buffered = lines.pop() ?? ''
           for (const piece of lines) handleLine(piece.replace(/\r$/, ''))
         },
-      }),
+      },
     )
   } catch (error) {
     // swallow-ok: unreachable — same contract as the checksum step: the caller turns
@@ -533,6 +532,3 @@ export function applyManagedNodeFacts(facts, managed) {
     npxPath: managed.npxPath,
   }
 }
-
-/** The minimum Node version a managed build must satisfy (kept for diagnostics). */
-export const MANAGED_NODE_MIN = MIN_NODE_VERSION

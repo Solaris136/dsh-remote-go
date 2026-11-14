@@ -10,10 +10,22 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import ssh2 from '../vendor/ssh2.bundle.cjs'
 import { fingerprintFromBlob } from './known-hosts.js'
-import { expandHome, headTail, isLoopbackHost } from './util.js'
+import { expandHome, headTail } from './util.js'
 import { errors, RemoteGoError } from './errors.js'
 
 const { Client } = ssh2
+
+/** Settle a promise at most once; later calls are ignored, so callers need no flag. */
+function oneShot(resolve, reject, cleanup) {
+  let settled = false
+  return (error, value) => {
+    if (settled) return
+    settled = true
+    cleanup?.()
+    if (error) reject(error)
+    else resolve(value)
+  }
+}
 
 export function parseSshKeyType(blob) {
   try {
@@ -47,8 +59,6 @@ export class SshConnection extends EventEmitter {
     this.closed = false
     this.disposed = false
     this.hostKeyDecision = null
-    this.hostKeyInfo = null
-    this.execSeq = 0
     // ssh2 clients emit `error` for every failed auth attempt and again while
     // tearing down. EventEmitter treats an unhandled `error` as a thrown
     // exception, which would take down the whole DSH host process; keep a
@@ -62,7 +72,7 @@ export class SshConnection extends EventEmitter {
   }
 
   async connect() {
-    if (this.connected) return { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '', serverBanner: null }
+    if (this.connected) return { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '' }
     const candidates = await this.resolveAuthCandidates()
     if (candidates.length === 0) {
       throw errors.invalidInput('auth', {
@@ -94,13 +104,7 @@ export class SshConnection extends EventEmitter {
 
   connectOnce(authConfig) {
     return new Promise((resolve, reject) => {
-      let settled = false
-      const settle = (/** @type {Error | null} */ error, /** @type {any} */ value) => {
-        if (settled) return
-        settled = true
-        if (error) reject(error)
-        else resolve(value)
-      }
+      const settle = oneShot(resolve, reject)
       const client = this.clientFactory()
       this.client = client
       // A rejected earlier candidate tears its transport down through
@@ -110,17 +114,12 @@ export class SshConnection extends EventEmitter {
       // `connected === false` and every later `exec`/`forwardOut` would throw
       // "SSH connection is not open" on a transport that is actually up.
       this.closed = false
-      let serverBanner = null
-      client.on('banner', (message) => {
-        serverBanner = String(message).trim()
-      })
       client.once('ready', () => {
-        settle(null, { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '', serverBanner })
+        settle(null, { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '' })
       })
       // Permanent listener: settle the promise on the first error, swallow any
       // later teardown errors (they are already reflected in the rejection).
       client.on('error', (error) => {
-        if (settled) return
         settle(toSshError(error, this.options.host, this.options.port))
       })
       const config = {
@@ -155,7 +154,6 @@ export class SshConnection extends EventEmitter {
     const pinned = this.options.pinnedFingerprint
     const known = this.options.knownHostFingerprints ?? []
     const info = { sha256, keyType, pinned: Boolean(pinned && pinned === sha256) }
-    this.hostKeyInfo = info
     if (pinned) {
       if (pinned === sha256) return true
       this.emit('hostkey-rejected', info)
@@ -212,7 +210,7 @@ export class SshConnection extends EventEmitter {
       if (seen.has(normalized)) continue
       seen.add(normalized)
       const privateKey = await readKey(keyPath)
-      if (privateKey) out.push({ privateKey, passphrase: auth.passphrase ?? undefined })
+      if (privateKey) out.push({ privateKey })
     }
     return out
   }
@@ -225,18 +223,13 @@ export class SshConnection extends EventEmitter {
         reject(new Error('SSH connection is not open'))
         return
       }
-      let settled = false
       let timedOut = false
       let timer = null
       const chunks = { stdout: '', stderr: '' }
-      const finish = (/** @type {any} */ error, /** @type {any} */ value) => {
-        if (settled) return
-        settled = true
+      const finish = oneShot(resolve, reject, () => {
         if (timer) clearTimeout(timer)
         options.signal?.removeEventListener?.('abort', onAbort)
-        if (error) reject(error)
-        else resolve(value)
-      }
+      })
       const onAbort = () => {
         finish(new Error('aborted'))
       }
@@ -322,18 +315,7 @@ export class SshConnection extends EventEmitter {
         // Keep an error sink attached: ssh2 may still emit during teardown.
         client.on('error', () => {})
         client.end()
-      } catch {
-        /* already gone */
-      }
-    }
-  }
-
-  assertLoopbackForward() {
-    if (!isLoopbackHost(this.options.host)) {
-      throw errors.invalidInput('host', {
-        zh: '远端界面只能绑定回环地址；隧道目标必须是远端自身的 127.0.0.1。',
-        en: 'The remote UI binds loopback only; the tunnel target must be the remote 127.0.0.1.',
-      })
+      } catch {}
     }
   }
 }

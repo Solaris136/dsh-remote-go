@@ -56,25 +56,3 @@ export function redactObject(value) {
   for (const [key, item] of Object.entries(value)) out[key] = redactValue(key, item)
   return /** @type {T} */ (out)
 }
-
-export function redactUrl(url) {
-  try {
-    const parsed = new URL(url)
-    for (const key of SECRET_QUERY_KEYS) parsed.searchParams.delete(key)
-    return parsed.toString()
-  } catch {
-    return redactText(String(url))
-  }
-}
-
-export function redactLongOpaque(text) {
-  return redactText(String(text)).replace(LONG_HEX_RE, '<redacted-hex>').replace(LONG_BASE64_RE, '<redacted-b64>')
-}
-
-export function buildDiagnosticBundle(input) {
-  return redactObject({
-    generatedAt: new Date().toISOString(),
-    plugin: 'dsh-remote-go',
-    ...input,
-  })
-}

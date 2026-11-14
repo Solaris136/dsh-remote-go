@@ -137,10 +137,6 @@ export class HostStore {
     this.secrets[hostId] = token
     await this.#persistSecrets()
   }
-
-  getToken(hostId) {
-    return this.data.settings.saveTokens ? (this.secrets[hostId] ?? null) : null
-  }
 }
 
 export function resolveDshHome(env = process.env) {

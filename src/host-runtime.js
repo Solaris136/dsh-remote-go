@@ -37,8 +37,6 @@ export function createHostRuntime(host) {
     token: null,
     password: null,
     facts: null,
-    plan: null,
-    managedNode: null,
     exchange: null,
     pendingHostKey: null,
     pendingConflict: null,

@@ -80,11 +80,6 @@ export function findKnownHostEntries(parsed, host, port) {
   return parsed.entries.filter((entry) => entry.hosts.some((pattern) => knownHostFieldMatches(pattern, host, port)))
 }
 
-export function findPinnedFingerprint(parsed, host, port) {
-  const matches = findKnownHostEntries(parsed, host, port)
-  return matches.length > 0 ? matches[0].fingerprint : null
-}
-
 export function summarizeKnownHosts(parsed) {
   const hosts = new Set()
   for (const entry of parsed.entries) {

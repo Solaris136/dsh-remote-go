@@ -10,7 +10,7 @@
  */
 import { headTail } from './util.js'
 import { errors } from './errors.js'
-import { normalizeVersion, isNodeVersionSupported } from './version.js'
+import { normalizeVersion } from './version.js'
 
 export function buildProbeScript() {
   return `set -u
@@ -93,37 +93,4 @@ export async function probeRemote(ssh, options = {}) {
     })
   }
   return toProbeFacts(parseProbeOutput(result.stdout))
-}
-
-export function describeProbeCapabilities(facts) {
-  return {
-    system: {
-      os: facts.os,
-      arch: facts.arch,
-      name: facts.osName || `${facts.os} ${facts.arch}`,
-      supported: facts.os === 'Linux',
-    },
-    node: {
-      version: facts.nodeVersion,
-      supported: isNodeVersionSupported(facts.nodeVersion),
-      path: facts.nodePath,
-    },
-    npx: {
-      path: facts.npxPath,
-      available: Boolean(facts.npxPath),
-    },
-    network: {
-      curl: Boolean(facts.curlPath),
-      wget: Boolean(facts.wgetPath),
-    },
-    libc: facts.libc,
-    glibcVersion: facts.glibcVersion,
-    modelCredentials: {
-      credentialsFile: facts.credentialsFile,
-      deepseekKeyEnv: facts.deepseekKeyEnv,
-      providerKeys: facts.providerEnvKeys,
-    },
-    sshSession: facts.sshConnection,
-    diskFreeKb: facts.diskFreeKb,
-  }
 }

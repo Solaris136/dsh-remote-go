@@ -6,28 +6,6 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/**
- * Resolve a promise or reject after `ms`.
- * @template T
- * @param {Promise<T> | T} value
- * @param {number} ms
- * @param {string} label
- * @returns {Promise<T>}
- */
-export async function withTimeout(value, ms, label = 'operation') {
-  let timer
-  try {
-    return await Promise.race([
-      Promise.resolve(value),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
-
 export function randomDelay(min, max) {
   return Math.round(min + Math.random() * Math.max(0, max - min))
 }
@@ -128,55 +106,8 @@ export function isLoopbackHost(host) {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)
 }
 
-/** Mask a destination for display; passwords never reach this layer. */
-export function maskSshAddress(target) {
-  const alias = target.alias ? `${target.alias}` : null
-  const user = target.user ? `${target.user}@` : ''
-  const host = target.host || '?'
-  const port = target.port && target.port !== 22 ? `:${target.port}` : ''
-  const base = `${user}${host}${port}`
-  return alias && alias !== base ? `${alias} (${base})` : base
-}
-
 export function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`
-}
-
-export function splitShellWords(line) {
-  const words = []
-  let current = ''
-  let quote = null
-  let escaped = false
-  for (const ch of String(line)) {
-    if (escaped) {
-      current += ch
-      escaped = false
-      continue
-    }
-    if (ch === '\\' && quote !== "'") {
-      escaped = true
-      continue
-    }
-    if (quote) {
-      if (ch === quote) quote = null
-      else current += ch
-      continue
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch
-      continue
-    }
-    if (/\s/.test(ch)) {
-      if (current !== '') {
-        words.push(current)
-        current = ''
-      }
-      continue
-    }
-    current += ch
-  }
-  if (current !== '') words.push(current)
-  return words
 }
 
 export function headTail(text, max = 4000) {
@@ -193,17 +124,37 @@ export function logVisible(level, threshold = 'info') {
   return rank >= floor
 }
 
+/** Message of an unknown thrown value, so catch blocks need not spell the ternary. */
+export function messageOf(error) {
+  return String(error?.message ?? error)
+}
+
+/** A positive integer — the only shape `kill`, `/proc` and a TCP port accept. */
+export function isPid(value) {
+  return Number.isInteger(value) && value > 0
+}
+
 /**
- * A promise with externally callable resolve/reject, for flows waiting on a
- * user decision (host-key confirmation).
+ * A promise that resolves at most once: through `settle`, or with `onTimeout()`
+ * when the deadline passes first. `onSettled` runs before the promise resolves so
+ * a caller can clear the pending slot it installed on both paths.
  * @template T
+ * @param {number} timeoutMs
+ * @param {() => T} [onTimeout]
+ * @param {(value: T) => void} [onSettled]
  */
-export function createDeferred() {
-  let resolve
-  let reject
-  const promise = new Promise((res, rej) => {
-    resolve = res
-    reject = rej
+export function createDecision(timeoutMs, onTimeout, onSettled) {
+  let settle
+  const promise = new Promise((resolve) => {
+    let done = false
+    const timer = setTimeout(() => settle(onTimeout?.()), timeoutMs)
+    settle = (value) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      onSettled?.(value)
+      resolve(value)
+    }
   })
-  return { promise, resolve, reject }
+  return { promise, settle }
 }

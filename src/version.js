@@ -103,7 +103,3 @@ export function isNodeVersionSupported(version) {
   if (!parseVersion(version)) return false
   return compareVersions(normalizeVersion(version), MIN_NODE_VERSION) >= 0
 }
-
-export function pickExactVersion(candidates, wanted) {
-  return candidates.find((candidate) => versionsEqual(candidate, wanted)) ?? null
-}
