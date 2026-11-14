@@ -2,6 +2,7 @@
  * The client-facing view of one host (docs/api.md HostView).
  */
 import { versionParity } from './version.js'
+import { connectLogTail, connectLogVisible } from './connect-log.js'
 
 /** @param {any} runtime @param {{ targetVersion: string | null, passwordStorageAvailable: boolean }} ctx */
 export function hostView(runtime, ctx) {
@@ -25,6 +26,12 @@ export function hostView(runtime, ctx) {
     warning: runtime.warning,
     conflict: runtime.conflict,
     fingerprint: runtime.fingerprint,
+    /**
+     * Connect log tail for the window that is showing this host's connection
+     * (docs/api.md): empty unless the status has a connect window, bounded so a
+     * `/state` frame stays small. Newest entry last.
+     */
+    logs: connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],
     remote: {
       ...runtime.remote,
       version: runtime.remote.version ?? null,

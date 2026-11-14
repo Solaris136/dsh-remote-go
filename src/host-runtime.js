@@ -51,6 +51,8 @@ export function createHostRuntime(host) {
     idleTimer: null,
     connectPromise: null,
     closing: false,
+    /** Unfiltered ring of this connection's log; `seq` is monotonic so the Client can key lines. */
     logs: [],
+    logSeq: 0,
   }
 }

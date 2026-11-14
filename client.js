@@ -22,7 +22,7 @@
  *   6. HTTP + SSE API client
  *   7. icons and small UI primitives
  *   8. host list view
- *   9. full-window remote carrier (DSH desktop guest)
+ *   9. takeover surface, connect window (progress + connect log) and carrier helpers
  *   9b. host switcher row + full-window remote carrier
  *   9c. key-file picker
  *  10. connect wizard
@@ -142,7 +142,6 @@ window.__ModuleLoader__.load({
       disconnect: '断开',
       connecting: '连接中…',
       loading: '加载中…',
-      unknown: '未知',
       optional: '可选',
       copy: '复制',
       copied: '已复制',
@@ -198,6 +197,11 @@ window.__ModuleLoader__.load({
       viewportConnecting: '正在连接「{name}」…',
       viewportOverlayLoadFailed: '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
       desktopRequired: '当前环境没有可用的桌面端窗口，远端界面只能在 DeepSeek Harness 桌面端打开。',
+      // -- connect window: the log the Host streams under the progress ----------
+      connectLogTitle: '连接日志',
+      connectLogHint: '关窗不中断连接',
+      connectLogCount: '{count} 行',
+      connectLogEmpty: '等待日志输出…',
       // -- host switcher row (drawn in the local sidebar and the remote one) ----
       switcherLocal: '本地',
       switcherAddHost: '添加主机',
@@ -260,9 +264,6 @@ window.__ModuleLoader__.load({
       conflictBusy: '正在提交选择…',
 
       // -- wizard --------------------------------------------------------------
-      'wizard.step1': 'SSH 信息',
-      'wizard.step2': '连接测试',
-      'wizard.step3': '完成',
       'wizard.name': '显示名',
       'wizard.namePlaceholder': '例如：腾讯云测试机',
       'wizard.address': 'SSH 地址或别名',
@@ -288,31 +289,13 @@ window.__ModuleLoader__.load({
       'wizard.keepAliveIdle': '空闲停止',
       'wizard.idleMinutes': '空闲分钟数',
       'wizard.autoReconnect': '断线后自动重连',
-      'wizard.testHint': '保存后会立即测试连接；首次连接需要确认主机指纹。',
-      'wizard.saveAndTest': '保存并测试',
+      'wizard.actionHint': '保存只记下配置；连接会保存并立即连上去，首次连接需要确认主机指纹。',
+      'wizard.saved': '已保存',
       'wizard.savingHost': '正在保存…',
       'wizard.aliases': '从 SSH 配置选择',
       'wizard.aliasesLoading': '正在读取 ~/.ssh/config…',
       'wizard.aliasesEmpty': '没有发现可用的 SSH 别名',
       'wizard.knownHosts': '已知主机 {count} 条',
-      'wizard.testTitle': '连接测试',
-      'wizard.testRetry': '重新测试',
-      'wizard.testing': '正在测试连接…',
-      'wizard.testDone': '连接成功，远端界面可用。',
-      'wizard.finishTitle': '远程主机已就绪',
-      'wizard.finishBody': '远端 DSH 界面已可以通过本地视窗打开。',
-      'wizard.versionLocal': '本机 DSH',
-      'wizard.versionRemote': '远端 DSH',
-      'wizard.versionMatch': '版本一致',
-      'wizard.versionMismatch': '版本不一致，远端界面可能与本机不同',
-      'wizard.bootstrapLevel': '启动方式',
-      'wizard.uiReady': '远端界面',
-      'wizard.uiReadyYes': '就绪',
-      'wizard.uiReadyNo': '未就绪',
-      'wizard.openRemote': '打开远程界面',
-      'wizard.finishLater': '稍后再说',
-      'wizard.errorTitle': '连接测试未通过',
-      'wizard.copyDiag': '复制诊断信息',
       'wizard.validationName': '请填写显示名',
       'wizard.validationAddress': '请填写 SSH 地址或别名',
       'wizard.validationAddressUrl': '请填写 SSH 地址或别名，不要填写网页地址',
@@ -415,7 +398,6 @@ window.__ModuleLoader__.load({
       disconnect: 'Disconnect',
       connecting: 'Connecting…',
       loading: 'Loading…',
-      unknown: 'Unknown',
       optional: 'optional',
       copy: 'Copy',
       copied: 'Copied',
@@ -472,6 +454,11 @@ window.__ModuleLoader__.load({
       viewportOverlayLoadFailed:
         'The remote UI failed to load. Pick “Local” in the sidebar switcher and open the host again.',
       desktopRequired: 'This window has no desktop guest seat; the remote UI only opens in the DSH desktop app.',
+      // -- connect window: the log the Host streams under the progress ----------
+      connectLogTitle: 'Connect log',
+      connectLogHint: 'Closing keeps it running',
+      connectLogCount: '{count} lines',
+      connectLogEmpty: 'Waiting for log output…',
       // -- host switcher row (drawn in the local sidebar and the remote one) ----
       switcherLocal: 'Local',
       switcherAddHost: 'Add host',
@@ -535,9 +522,6 @@ window.__ModuleLoader__.load({
       conflictCancel: 'Cancel connection',
       conflictBusy: 'Submitting…',
 
-      'wizard.step1': 'SSH details',
-      'wizard.step2': 'Connection test',
-      'wizard.step3': 'Finish',
       'wizard.name': 'Display name',
       'wizard.namePlaceholder': 'e.g. Tencent test server',
       'wizard.address': 'SSH address or alias',
@@ -563,31 +547,14 @@ window.__ModuleLoader__.load({
       'wizard.keepAliveIdle': 'Stop when idle',
       'wizard.idleMinutes': 'Idle minutes',
       'wizard.autoReconnect': 'Reconnect automatically',
-      'wizard.testHint': 'The connection is tested right after saving; confirm the host key on first use.',
-      'wizard.saveAndTest': 'Save and test',
+      'wizard.actionHint':
+        'Save only records the entry; Connect saves it and connects right away — the host key is confirmed on first use.',
+      'wizard.saved': 'Saved',
       'wizard.savingHost': 'Saving…',
       'wizard.aliases': 'Pick from SSH config',
       'wizard.aliasesLoading': 'Reading ~/.ssh/config…',
       'wizard.aliasesEmpty': 'No SSH aliases found',
       'wizard.knownHosts': '{count} known hosts',
-      'wizard.testTitle': 'Connection test',
-      'wizard.testRetry': 'Test again',
-      'wizard.testing': 'Testing the connection…',
-      'wizard.testDone': 'Connected; the remote UI is available.',
-      'wizard.finishTitle': 'Remote host is ready',
-      'wizard.finishBody': 'The remote DSH interface can now open in this local window.',
-      'wizard.versionLocal': 'Local DSH',
-      'wizard.versionRemote': 'Remote DSH',
-      'wizard.versionMatch': 'Versions match',
-      'wizard.versionMismatch': 'Versions differ; the remote UI may look different',
-      'wizard.bootstrapLevel': 'Launch mode',
-      'wizard.uiReady': 'Remote UI',
-      'wizard.uiReadyYes': 'Ready',
-      'wizard.uiReadyNo': 'Not ready',
-      'wizard.openRemote': 'Open remote UI',
-      'wizard.finishLater': 'Later',
-      'wizard.errorTitle': 'The connection test failed',
-      'wizard.copyDiag': 'Copy diagnostics',
       'wizard.validationName': 'Enter a display name',
       'wizard.validationAddress': 'Enter an SSH address or alias',
       'wizard.validationAddressUrl': 'Enter an SSH address or alias, not a web URL',
@@ -708,6 +675,9 @@ window.__ModuleLoader__.load({
         }
       }
       if (props && (props.localeId === 'en' || props.localeId === 'zh')) return props.localeId
+      // The overlay and the wizard hand the resolved id down as `locale`; without this a
+      // window opened from them resolved host-provided text as Chinese in an English UI.
+      if (props && (props.locale === 'en' || props.locale === 'zh')) return props.locale
       return 'zh'
     }
 
@@ -2317,6 +2287,136 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * Statuses whose window prints the connect log. The Host gates its `logs` tail the same way
+     * (docs/api.md HostView.logs), so the console and the payload cannot drift apart: connecting,
+     * the host-key question, and the failure it ended in.
+     * @param {string} status - HostStatus.
+     * @returns {boolean} true when the window is the connect window.
+     */
+    function connectWindowOpen(status) {
+      return status === 'connecting' || status === 'fingerprint-pending' || status === 'error'
+    }
+
+    /**
+     * Clock for a log line: HH:MM:SS in the viewer's own zone.
+     * @param {string} iso - entry timestamp.
+     * @returns {string} clock text, or '' when the timestamp is unusable.
+     */
+    function logClock(iso) {
+      const when = typeof iso === 'string' && iso !== '' ? new Date(iso) : null
+      if (when === null || Number.isNaN(when.getTime())) return ''
+      const pad = (value) => String(value).padStart(2, '0')
+      return pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' + pad(when.getSeconds())
+    }
+
+    /**
+     * Connect console: the Host's log tail (`HostView.logs`), newest last, printed as it arrives.
+     * It follows the bottom of the list unless the reader scrolled up to read something older.
+     * @param {{t: Function, host: object}} props - host carrying `logs`.
+     * @returns {object} section element.
+     */
+    function ConnectLog(props) {
+      const t = translatorOf(props)
+      const host = props.host || {}
+      const entries = Array.isArray(host.logs) ? host.logs : []
+      const bodyRef = useRef(null)
+      const follow = useRef(true)
+      const lastSeq = entries.length > 0 ? entries[entries.length - 1].seq : 0
+      useEffect(() => {
+        const body = bodyRef.current
+        if (!body || !follow.current) return
+        body.scrollTop = body.scrollHeight
+      }, [lastSeq, entries.length])
+      const onScroll = () => {
+        const body = bodyRef.current
+        if (!body) return
+        // 2px slack: fractional scroll heights never land exactly on the bottom.
+        follow.current = body.scrollHeight - body.scrollTop - body.clientHeight <= 2
+      }
+      return h(
+        'section',
+        { className: 'drg-connect-log', 'data-testid': 'connect-log' },
+        h(
+          'div',
+          { className: 'drg-connect-log-head' },
+          h('span', { className: 'drg-connect-log-title' }, t('connectLogTitle')),
+          // "Closing keeps it running" is only true while a connection is still in flight.
+          host.status === 'error' ? null : h('span', { className: 'drg-connect-log-hint' }, t('connectLogHint')),
+          h('span', { className: 'drg-connect-log-count' }, t('connectLogCount', { count: entries.length })),
+        ),
+        h(
+          'div',
+          {
+            className: 'drg-connect-log-body',
+            ref: bodyRef,
+            role: 'log',
+            tabIndex: 0,
+            onScroll,
+            'aria-label': t('connectLogTitle'),
+          },
+          entries.length === 0
+            ? h('p', { className: 'drg-connect-log-empty', 'data-testid': 'connect-log-empty' }, t('connectLogEmpty'))
+            : entries.map((entry) =>
+                h(
+                  'div',
+                  {
+                    key: String(entry.seq),
+                    className: 'drg-connect-log-line',
+                    'data-level': entry.level || 'info',
+                    'data-testid': 'connect-log-line',
+                  },
+                  h('span', { className: 'drg-connect-log-time', 'aria-hidden': 'true' }, logClock(entry.at)),
+                  h('span', { className: 'drg-connect-log-text' }, String(entry.message ?? '')),
+                ),
+              ),
+        ),
+      )
+    }
+
+    /**
+     * Where a connection watches itself: the staged progress — or the host-key question, or the
+     * failure it ended in — on top, the Host's own log lines streaming underneath. It takes the
+     * whole window for exactly as long as a connection is in flight; host management is a
+     * different body (and comes back the moment this window closes).
+     * @param {{t: Function, locale: string, host: object, fingerprintBusy?: boolean, onAcceptFingerprint: Function, onRejectFingerprint: Function, onRetry: Function, onDiagnose: Function, onBack: Function}} props - host plus callbacks.
+     * @returns {object} fragment with the progress block and the connect log.
+     */
+    function ConnectWindow(props) {
+      const t = translatorOf(props)
+      const locale = localeOf(props)
+      const host = props.host || {}
+      const status = host.status
+      return h(
+        React.Fragment,
+        null,
+        h(
+          'div',
+          { className: 'drg-manage-live', 'data-testid': 'manage-live' },
+          status === 'fingerprint-pending'
+            ? h(FingerprintCard, {
+                t,
+                locale,
+                host,
+                busy: props.fingerprintBusy === true,
+                onAccept: (remember) => props.onAcceptFingerprint(remember === true),
+                onReject: props.onRejectFingerprint,
+              })
+            : status === 'error'
+              ? h(ErrorCard, {
+                  t,
+                  locale,
+                  error: host.error,
+                  onRetry: props.onRetry,
+                  onDiagnose: props.onDiagnose,
+                  onBack: props.onBack,
+                })
+              : h(ConnectProgress, { t, host }),
+        ),
+        h(ConnectLog, { t, host }),
+      )
+    }
+
     //#region 9b. host switcher row + full-window remote carrier (DSH desktop only)
 
     /** How often the row re-places itself and refreshes its payload (ms). */
@@ -3626,7 +3726,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Three-step connect wizard (docs/design.md（接入向导）): SSH details → connection test
+     * Add / edit host dialog (docs/design.md（接入向导）). One step, two actions: the SSH form is
+     * the whole body, `保存` stores the entry and closes, and `连接` (add mode only) stores it and
+     * hands the connection to the connect window — staged progress, the host-key question and the
+     * live log — which takes the whole window once the host answers. There is no test step: a
+     * connection either happens for real, or it is not started at all.
      * @param {object} props - mode, host, live state, callbacks.
      * @returns {object} modal element.
      */
@@ -3635,27 +3739,22 @@ window.__ModuleLoader__.load({
       const locale = localeOf(props)
       const mode = props.mode === 'edit' ? 'edit' : 'add'
       const initialHost = props.initialHost || null
-      const [step, setStep] = useState(1)
       const [draft, setDraft] = useState(() =>
         initialDraft(mode, initialHost, pathValue(props.state, 'settings', null)),
       )
       const [password, setPassword] = useState('')
       const [authDirty, setAuthDirty] = useState(mode === 'add')
       const [nameTouched, setNameTouched] = useState(mode === 'edit')
-      const [hostId, setHostId] = useState(initialHost ? initialHost.id : '')
-      const [saving, setSaving] = useState(false)
+      const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
+      /** Which button is in flight: `'save' | 'connect' | null`. */
+      const [saving, setSaving] = useState(null)
       const [formError, setFormError] = useState(null)
-      const [testError, setTestError] = useState(null)
-      const [fingerprintBusy, setFingerprintBusy] = useState(false)
       const [aliases, setAliases] = useState([])
       const [knownHosts, setKnownHosts] = useState(null)
       const [aliasesLoading, setAliasesLoading] = useState(false)
-      const [copied, setCopied] = useState(false)
       // Key-file picker overlay (browsing lives in the Host; this is only dialog state).
       const [keyPicker, setKeyPicker] = useState(false)
 
-      const hosts = props.state && Array.isArray(props.state.hosts) ? props.state.hosts : []
-      const host = hostId ? hosts.find((item) => item && item.id === hostId) || null : null
       const onRefresh = typeof props.onRefresh === 'function' ? props.onRefresh : () => {}
 
       // Load SSH config aliases once, for the address datalist.
@@ -3677,11 +3776,6 @@ window.__ModuleLoader__.load({
           cancelled = true
         }
       }, [])
-
-      // A successful connect advances to the finish step.
-      useEffect(() => {
-        if (step === 2 && host && host.status === 'connected') setStep(3)
-      }, [step, host ? host.status : null])
 
       const patchDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
 
@@ -3708,460 +3802,302 @@ window.__ModuleLoader__.load({
         if (!nameTouched && mode === 'add') patchDraft({ name: alias.alias || alias.host || '' })
       }
 
-      const startConnect = async (id) => {
-        try {
-          await api.connect(id, password ? { password } : {})
-        } catch (error) {
-          setTestError(toErrorView(error))
-        }
-      }
-
-      const handleSave = async () => {
+      /**
+       * Finish the dialog with the button that was pressed. `save` only stores the entry;
+       * `connect` stores it and hands the connection to the overlay (which opens the connect
+       * window and takes the whole window over once the host is up).
+       * @param {'save' | 'connect'} intent - which action to finish with.
+       * @returns {Promise<void>} resolves once the action settled.
+       */
+      const submit = async (intent) => {
         const invalid = validateHostDraft(draft)
         if (invalid !== null) {
           setFormError(invalid)
-          setStep(1)
           return
         }
         if (draft.authType === 'password' && String(password).trim() === '') {
           setFormError('wizard.validationPassword')
-          setStep(1)
           return
         }
         setFormError(null)
-        setSaving(true)
+        setSaving(intent)
         try {
           const includeAuth = mode === 'add' || authDirty
           const saved = await api.saveHost(buildHostInput(draft, hostId || undefined, includeAuth))
-          const id = saved && saved.id ? saved.id : hostId
-          setHostId(id)
+          const id = saved && typeof saved.id === 'string' ? saved.id : hostId
           onRefresh()
-          setSaving(false)
-          setStep(2)
-          await startConnect(id)
+          if (intent === 'connect' && id) {
+            // The password typed here belongs to this one connection; the overlay starts it
+            // with that value, so the user is not asked for it a second time.
+            const oneTime = draft.authType === 'password' && String(password).trim() !== '' ? password : null
+            if (typeof props.onConnect === 'function') props.onConnect(saved && saved.id ? saved : { id }, oneTime)
+            return
+          }
+          if (typeof props.onSaved === 'function') props.onSaved(saved)
+          props.onClose()
         } catch (error) {
-          setSaving(false)
+          setSaving(null)
           setFormError(toErrorView(error))
         }
       }
 
-      const handleRetryTest = async () => {
-        if (!hostId) return
-        setTestError(null)
-        await startConnect(hostId)
-      }
-
-      const handleAcceptFingerprint = async (remember) => {
-        if (!host || !hostId) return
-        const sha256 = host.fingerprint && typeof host.fingerprint.sha256 === 'string' ? host.fingerprint.sha256 : ''
-        setFingerprintBusy(true)
-        setTestError(null)
-        try {
-          await api.acceptFingerprint(hostId, true, remember === true, sha256)
-          await onRefresh()
-        } catch (error) {
-          setTestError(toErrorView(error))
-        } finally {
-          setFingerprintBusy(false)
-        }
-      }
-
       const handleCancel = () => {
-        if (hostId && mode === 'add' && step === 2) {
-          api.disconnect(hostId, false).catch(() => {})
-        }
         props.onClose()
       }
 
-      const handleOpenRemote = () => {
-        if (hostId && typeof props.onOpenRemote === 'function') props.onOpenRemote(hostId)
-      }
-
-      const handleCopyDiagnostics = async () => {
-        if (!hostId) return
-        let text = ''
-        try {
-          const report = await api.diagnose(hostId)
-          text = formatDiagnoseText(report, host || { id: hostId, name: draft.name }, t, locale)
-        } catch (error) {
-          const view = toErrorView(error)
-          text = [t('diag.failed'), resolveText(view.title, locale), resolveText(view.detail, locale)]
-            .filter(Boolean)
-            .join('\n')
-        }
-        const ok = await copyText(text)
-        setCopied(ok === true)
-      }
-
-      const footer =
-        step === 1
+      const saveButton = h(
+        Button,
+        {
+          variant: mode === 'add' ? 'secondary' : 'primary',
+          testId: 'wizard-save',
+          busy: saving === 'save',
+          disabled: saving === 'connect',
+          onClick: () => submit('save'),
+        },
+        saving === 'save' ? t('wizard.savingHost') : t('save'),
+      )
+      // Connecting from the dialog is an add-mode action: saving an edit only changes the
+      // entry, and the host list is where a connection is (re)started.
+      const connectButton =
+        mode === 'add'
           ? h(
-              'div',
-              { className: 'drg-row drg-row-end' },
-              h(Button, { variant: 'ghost', testId: 'wizard-cancel', onClick: handleCancel }, t('cancel')),
-              h(
-                Button,
-                { variant: 'primary', testId: 'wizard-next', busy: saving, onClick: handleSave },
-                saving ? t('wizard.savingHost') : t('wizard.saveAndTest'),
-              ),
+              Button,
+              {
+                variant: 'primary',
+                testId: 'wizard-connect',
+                busy: saving === 'connect',
+                disabled: saving === 'save',
+                onClick: () => submit('connect'),
+              },
+              saving === 'connect' ? t('wizard.savingHost') : t('connect'),
             )
-          : step === 2
-            ? h(
-                'div',
-                { className: 'drg-row drg-row-spread' },
-                h(Button, { variant: 'ghost', testId: 'wizard-cancel', onClick: handleCancel }, t('cancel')),
-                h(
-                  'div',
-                  { className: 'drg-row' },
-                  h(
-                    Button,
-                    { variant: 'secondary', testId: 'wizard-retry', busy: fingerprintBusy, onClick: handleRetryTest },
-                    t('wizard.testRetry'),
-                  ),
-                  hostId
-                    ? h(
-                        Button,
-                        {
-                          variant: 'secondary',
-                          onClick: () => props.onDiagnose && props.onDiagnose(host || { id: hostId, name: draft.name }),
-                        },
-                        t('diagnose'),
-                      )
-                    : null,
-                ),
-              )
-            : h(
-                'div',
-                { className: 'drg-row drg-row-spread' },
-                h(Button, { variant: 'ghost', testId: 'wizard-later', onClick: handleCancel }, t('wizard.finishLater')),
-                h(
-                  'div',
-                  { className: 'drg-row' },
-                  h(
-                    Button,
-                    { variant: 'secondary', onClick: handleCopyDiagnostics },
-                    copied ? t('copied') : t('wizard.copyDiag'),
-                  ),
-                  h(
-                    Button,
-                    { variant: 'primary', testId: 'wizard-open', onClick: handleOpenRemote },
-                    t('wizard.openRemote'),
-                  ),
-                ),
-              )
-
-      const stepBadge = (index, label) =>
+          : null
+      const footer = h('div', { className: 'drg-row drg-row-end' }, saveButton, connectButton)
+      const addressOptions = aliases.filter((alias) => alias && typeof alias.alias === 'string')
+      const body = h(
+        'div',
+        { className: 'drg-wizard-form' },
+        formError
+          ? h(
+              Notice,
+              { tone: 'error' },
+              typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale),
+            )
+          : null,
         h(
-          'li',
-          {
-            className: 'drg-wizard-step',
-            'data-state': index < step ? 'done' : index === step ? 'current' : 'pending',
-          },
-          h('span', { className: 'drg-wizard-step-index' }, String(index)),
-          h('span', null, label),
-        )
-
-      let body
-      if (step === 1) {
-        const addressOptions = aliases.filter((alias) => alias && typeof alias.alias === 'string')
-        body = h(
           'div',
-          { className: 'drg-wizard-form' },
-          formError
-            ? h(
-                Notice,
-                { tone: 'error' },
-                typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale),
-              )
-            : null,
-          h(
-            'div',
-            { className: 'drg-form-grid' },
-            h(
-              Field,
-              { label: t('wizard.name') },
-              h(TextInput, {
-                value: draft.name,
-                placeholder: t('wizard.namePlaceholder'),
-                ariaLabel: t('wizard.name'),
-                testId: 'wizard-name',
-                onChange: (value) => {
-                  setNameTouched(true)
-                  patchDraft({ name: value })
-                },
-              }),
-            ),
-            h(Field, { label: t('wizard.address'), hint: t('wizard.addressHint') }, [
-              h(TextInput, {
-                key: 'address',
-                value: draft.address,
-                placeholder: t('wizard.addressPlaceholder'),
-                ariaLabel: t('wizard.address'),
-                list: 'drg-ssh-alias-list',
-                testId: 'wizard-address',
-                onChange: onAddressChange,
-              }),
-              h(
-                'datalist',
-                { key: 'aliases', id: 'drg-ssh-alias-list' },
-                addressOptions.map((alias) => h('option', { key: alias.alias, value: alias.alias }, alias.host || '')),
-              ),
-            ]),
-          ),
-          addressOptions.length > 0
-            ? h(
-                'div',
-                { className: 'drg-alias-row' },
-                h('span', { className: 'drg-alias-label' }, t('wizard.aliases')),
-                addressOptions.map((alias) =>
-                  h(
-                    'button',
-                    {
-                      key: alias.alias,
-                      type: 'button',
-                      className: 'drg-chip',
-                      title: [alias.user, alias.host, alias.port].filter(Boolean).join(' '),
-                      onClick: () => pickAlias(alias),
-                    },
-                    alias.alias,
-                  ),
-                ),
-                knownHosts && knownHosts.entries
-                  ? h('span', { className: 'drg-alias-known' }, t('wizard.knownHosts', { count: knownHosts.entries }))
-                  : null,
-              )
-            : aliasesLoading
-              ? h('p', { className: 'drg-field-hint' }, t('wizard.aliasesLoading'))
-              : h('p', { className: 'drg-field-hint' }, t('wizard.aliasesEmpty')),
-          h(
-            'div',
-            { className: 'drg-form-grid drg-form-grid-3' },
-            h(
-              Field,
-              { label: t('wizard.port') },
-              h(TextInput, {
-                type: 'number',
-                value: draft.port,
-                ariaLabel: t('wizard.port'),
-                testId: 'wizard-port',
-                onChange: (value) => patchDraft({ port: value }),
-              }),
-            ),
-            h(
-              Field,
-              { label: t('wizard.username') },
-              h(TextInput, {
-                value: draft.username,
-                placeholder: t('wizard.usernamePlaceholder'),
-                ariaLabel: t('wizard.username'),
-                testId: 'wizard-username',
-                onChange: (value) => patchDraft({ username: value }),
-              }),
-            ),
-            h(
-              Field,
-              { label: t('wizard.jumpHost') },
-              h(TextInput, {
-                value: draft.jumpHost,
-                placeholder: t('wizard.jumpHostPlaceholder'),
-                ariaLabel: t('wizard.jumpHost'),
-                testId: 'wizard-jump-host',
-                onChange: (value) => patchDraft({ jumpHost: value }),
-              }),
-            ),
-          ),
+          { className: 'drg-form-grid' },
           h(
             Field,
-            { label: t('wizard.auth'), hint: t('wizard.authHint') },
-            h(Select, {
-              value: draft.authType,
-              ariaLabel: t('wizard.auth'),
-              testId: 'wizard-auth',
-              options: [
-                { value: 'key', label: t('wizard.authKey') },
-                { value: 'password', label: t('wizard.authPassword') },
-              ],
+            { label: t('wizard.name') },
+            h(TextInput, {
+              value: draft.name,
+              placeholder: t('wizard.namePlaceholder'),
+              ariaLabel: t('wizard.name'),
+              testId: 'wizard-name',
               onChange: (value) => {
-                setAuthDirty(true)
-                patchDraft({ authType: value })
+                setNameTouched(true)
+                patchDraft({ name: value })
               },
             }),
           ),
-          draft.authType === 'key'
-            ? h(
-                Field,
-                { label: t('wizard.keyPath') },
+          h(Field, { label: t('wizard.address'), hint: t('wizard.addressHint') }, [
+            h(TextInput, {
+              key: 'address',
+              value: draft.address,
+              placeholder: t('wizard.addressPlaceholder'),
+              ariaLabel: t('wizard.address'),
+              list: 'drg-ssh-alias-list',
+              testId: 'wizard-address',
+              onChange: onAddressChange,
+            }),
+            h(
+              'datalist',
+              { key: 'aliases', id: 'drg-ssh-alias-list' },
+              addressOptions.map((alias) => h('option', { key: alias.alias, value: alias.alias }, alias.host || '')),
+            ),
+          ]),
+        ),
+        addressOptions.length > 0
+          ? h(
+              'div',
+              { className: 'drg-alias-row' },
+              h('span', { className: 'drg-alias-label' }, t('wizard.aliases')),
+              addressOptions.map((alias) =>
                 h(
-                  'div',
-                  { className: 'drg-field-inline' },
-                  h(TextInput, {
-                    value: draft.keyPath,
-                    placeholder: t('wizard.keyPathPlaceholder'),
-                    ariaLabel: t('wizard.keyPath'),
-                    testId: 'wizard-key-path',
-                    onChange: (value) => {
-                      setAuthDirty(true)
-                      patchDraft({ keyPath: value })
-                    },
-                  }),
-                  h(
-                    Button,
-                    {
-                      variant: 'secondary',
-                      testId: 'wizard-key-path-pick',
-                      onClick: () => setKeyPicker(true),
-                    },
-                    t('wizard.keyPathPick'),
-                  ),
+                  'button',
+                  {
+                    key: alias.alias,
+                    type: 'button',
+                    className: 'drg-chip',
+                    title: [alias.user, alias.host, alias.port].filter(Boolean).join(' '),
+                    onClick: () => pickAlias(alias),
+                  },
+                  alias.alias,
                 ),
-              )
-            : null,
-          draft.authType === 'password'
-            ? h(
-                Field,
-                { label: t('wizard.password'), hint: t('wizard.passwordPlaceholder') },
+              ),
+              knownHosts && knownHosts.entries
+                ? h('span', { className: 'drg-alias-known' }, t('wizard.knownHosts', { count: knownHosts.entries }))
+                : null,
+            )
+          : aliasesLoading
+            ? h('p', { className: 'drg-field-hint' }, t('wizard.aliasesLoading'))
+            : h('p', { className: 'drg-field-hint' }, t('wizard.aliasesEmpty')),
+        h(
+          'div',
+          { className: 'drg-form-grid drg-form-grid-3' },
+          h(
+            Field,
+            { label: t('wizard.port') },
+            h(TextInput, {
+              type: 'number',
+              value: draft.port,
+              ariaLabel: t('wizard.port'),
+              testId: 'wizard-port',
+              onChange: (value) => patchDraft({ port: value }),
+            }),
+          ),
+          h(
+            Field,
+            { label: t('wizard.username') },
+            h(TextInput, {
+              value: draft.username,
+              placeholder: t('wizard.usernamePlaceholder'),
+              ariaLabel: t('wizard.username'),
+              testId: 'wizard-username',
+              onChange: (value) => patchDraft({ username: value }),
+            }),
+          ),
+          h(
+            Field,
+            { label: t('wizard.jumpHost') },
+            h(TextInput, {
+              value: draft.jumpHost,
+              placeholder: t('wizard.jumpHostPlaceholder'),
+              ariaLabel: t('wizard.jumpHost'),
+              testId: 'wizard-jump-host',
+              onChange: (value) => patchDraft({ jumpHost: value }),
+            }),
+          ),
+        ),
+        h(
+          Field,
+          { label: t('wizard.auth'), hint: t('wizard.authHint') },
+          h(Select, {
+            value: draft.authType,
+            ariaLabel: t('wizard.auth'),
+            testId: 'wizard-auth',
+            options: [
+              { value: 'key', label: t('wizard.authKey') },
+              { value: 'password', label: t('wizard.authPassword') },
+            ],
+            onChange: (value) => {
+              setAuthDirty(true)
+              patchDraft({ authType: value })
+            },
+          }),
+        ),
+        draft.authType === 'key'
+          ? h(
+              Field,
+              { label: t('wizard.keyPath') },
+              h(
+                'div',
+                { className: 'drg-field-inline' },
                 h(TextInput, {
-                  type: 'password',
-                  value: password,
-                  placeholder: t('wizard.passwordPlaceholder'),
-                  ariaLabel: t('wizard.password'),
-                  testId: 'wizard-password',
+                  value: draft.keyPath,
+                  placeholder: t('wizard.keyPathPlaceholder'),
+                  ariaLabel: t('wizard.keyPath'),
+                  testId: 'wizard-key-path',
                   onChange: (value) => {
                     setAuthDirty(true)
-                    setPassword(value)
+                    patchDraft({ keyPath: value })
                   },
+                }),
+                h(
+                  Button,
+                  {
+                    variant: 'secondary',
+                    testId: 'wizard-key-path-pick',
+                    onClick: () => setKeyPicker(true),
+                  },
+                  t('wizard.keyPathPick'),
+                ),
+              ),
+            )
+          : null,
+        draft.authType === 'password'
+          ? h(
+              Field,
+              { label: t('wizard.password'), hint: t('wizard.passwordPlaceholder') },
+              h(TextInput, {
+                type: 'password',
+                value: password,
+                placeholder: t('wizard.passwordPlaceholder'),
+                ariaLabel: t('wizard.password'),
+                testId: 'wizard-password',
+                onChange: (value) => {
+                  setAuthDirty(true)
+                  setPassword(value)
+                },
+              }),
+            )
+          : null,
+        h(
+          'div',
+          { className: 'drg-form-grid drg-form-grid-3' },
+          h(
+            Field,
+            { label: t('wizard.keepAlive') },
+            h(Select, {
+              value: draft.keepAlive,
+              ariaLabel: t('wizard.keepAlive'),
+              testId: 'wizard-keep-alive',
+              options: [
+                { value: 'keep', label: t('wizard.keepAliveKeep') },
+                { value: 'stop', label: t('wizard.keepAliveStop') },
+                { value: 'idle', label: t('wizard.keepAliveIdle') },
+              ],
+              onChange: (value) => patchDraft({ keepAlive: value }),
+            }),
+          ),
+          draft.keepAlive === 'idle'
+            ? h(
+                Field,
+                { label: t('wizard.idleMinutes') },
+                h(TextInput, {
+                  type: 'number',
+                  value: draft.idleMinutes,
+                  ariaLabel: t('wizard.idleMinutes'),
+                  testId: 'wizard-idle-minutes',
+                  onChange: (value) => patchDraft({ idleMinutes: value }),
                 }),
               )
             : null,
           h(
-            'div',
-            { className: 'drg-form-grid drg-form-grid-3' },
-            h(
-              Field,
-              { label: t('wizard.keepAlive') },
-              h(Select, {
-                value: draft.keepAlive,
-                ariaLabel: t('wizard.keepAlive'),
-                testId: 'wizard-keep-alive',
-                options: [
-                  { value: 'keep', label: t('wizard.keepAliveKeep') },
-                  { value: 'stop', label: t('wizard.keepAliveStop') },
-                  { value: 'idle', label: t('wizard.keepAliveIdle') },
-                ],
-                onChange: (value) => patchDraft({ keepAlive: value }),
-              }),
-            ),
-            draft.keepAlive === 'idle'
-              ? h(
-                  Field,
-                  { label: t('wizard.idleMinutes') },
-                  h(TextInput, {
-                    type: 'number',
-                    value: draft.idleMinutes,
-                    ariaLabel: t('wizard.idleMinutes'),
-                    testId: 'wizard-idle-minutes',
-                    onChange: (value) => patchDraft({ idleMinutes: value }),
-                  }),
-                )
-              : null,
-            h(
-              Field,
-              { label: t('settings.hostKeyPolicy') },
-              h(Select, {
-                value: draft.hostKeyPolicy,
-                ariaLabel: t('settings.hostKeyPolicy'),
-                testId: 'wizard-host-key-policy',
-                options: [
-                  { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                  { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-                ],
-                onChange: (value) => patchDraft({ hostKeyPolicy: value }),
-              }),
-            ),
+            Field,
+            { label: t('settings.hostKeyPolicy') },
+            h(Select, {
+              value: draft.hostKeyPolicy,
+              ariaLabel: t('settings.hostKeyPolicy'),
+              testId: 'wizard-host-key-policy',
+              options: [
+                { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
+                { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
+              ],
+              onChange: (value) => patchDraft({ hostKeyPolicy: value }),
+            }),
           ),
-          h(CheckRow, {
-            checked: draft.autoReconnect !== false,
-            label: t('wizard.autoReconnect'),
-            testId: 'wizard-auto-reconnect',
-            onChange: (checked) => patchDraft({ autoReconnect: checked }),
-          }),
-          h('p', { className: 'drg-field-hint' }, t('wizard.testHint')),
-          !isLoopbackAddress(draft.address) ? h('p', { className: 'drg-field-hint' }, t('loopbackNote')) : null,
-        )
-      } else if (step === 2) {
-        body = h(
-          'div',
-          { className: 'drg-wizard-test' },
-          testError ? h(Notice, { tone: 'error' }, resolveText(toErrorView(testError).detail, locale)) : null,
-          host === null
-            ? h(LoadingBlock, { t, label: saving ? t('wizard.savingHost') : t('wizard.testing') })
-            : host.status === 'fingerprint-pending'
-              ? h(FingerprintCard, {
-                  t,
-                  locale,
-                  host,
-                  busy: fingerprintBusy,
-                  error: testError,
-                  onAccept: handleAcceptFingerprint,
-                  onReject: handleCancel,
-                })
-              : host.status === 'error' || host.status === 'limited'
-                ? h(ErrorCard, {
-                    t,
-                    locale,
-                    error: host.error || localErrorView('internal'),
-                    onRetry: handleRetryTest,
-                    onDiagnose: () => props.onDiagnose && props.onDiagnose(host),
-                    onBack: handleCancel,
-                  })
-                : h('div', null, h(ConnectProgress, { t, host })),
-        )
-      } else {
-        const remote = host && host.remote ? host.remote : {}
-        const localVersion = props.state && typeof props.state.hostVersion === 'string' ? props.state.hostVersion : ''
-        const remoteVersion = typeof remote.version === 'string' ? remote.version : ''
-        const versionsMatch = localVersion.length > 0 && remoteVersion.length > 0 && localVersion === remoteVersion
-        body = h(
-          'div',
-          { className: 'drg-wizard-done' },
-          h('div', { className: 'drg-done-icon', 'aria-hidden': 'true' }, h(IconCheck, { size: 28 })),
-          h('h2', { className: 'drg-done-title' }, t('wizard.finishTitle')),
-          h('p', { className: 'drg-done-body' }, t('wizard.finishBody')),
-          h(
-            'dl',
-            { className: 'drg-kv' },
-            h('div', null, h('dt', null, t('wizard.versionLocal')), h('dd', null, localVersion || t('unknown'))),
-            h('div', null, h('dt', null, t('wizard.versionRemote')), h('dd', null, remoteVersion || t('unknown'))),
-            h(
-              'div',
-              null,
-              h('dt', null, t('wizard.versionMatch')),
-              h(
-                'dd',
-                null,
-                h(
-                  Badge,
-                  { tone: versionsMatch ? 'success' : 'warn' },
-                  versionsMatch ? t('wizard.versionMatch') : t('wizard.versionMismatch'),
-                ),
-              ),
-            ),
-            h(
-              'div',
-              null,
-              h('dt', null, t('wizard.bootstrapLevel')),
-              h('dd', null, remote.bootstrapLevel || t('unknown')),
-            ),
-            h(
-              'div',
-              null,
-              h('dt', null, t('wizard.uiReady')),
-              h('dd', null, remote.uiReady === true ? t('wizard.uiReadyYes') : t('wizard.uiReadyNo')),
-            ),
-          ),
-          copied ? h(Notice, { tone: 'success' }, t('diag.copyDone')) : null,
-        )
-      }
+        ),
+        h(CheckRow, {
+          checked: draft.autoReconnect !== false,
+          label: t('wizard.autoReconnect'),
+          testId: 'wizard-auto-reconnect',
+          onChange: (checked) => patchDraft({ autoReconnect: checked }),
+        }),
+        h('p', { className: 'drg-field-hint' }, t('wizard.actionHint')),
+        !isLoopbackAddress(draft.address) ? h('p', { className: 'drg-field-hint' }, t('loopbackNote')) : null,
+      )
 
       return h(
         React.Fragment,
@@ -4176,18 +4112,7 @@ window.__ModuleLoader__.load({
             testId: 'host-wizard',
             footer,
           },
-          h(
-            'ol',
-            { className: 'drg-wizard-steps' },
-            stepBadge(1, t('wizard.step1')),
-            stepBadge(2, t('wizard.step2')),
-            stepBadge(3, t('wizard.step3')),
-          ),
-          h(
-            'div',
-            { className: 'drg-wizard-body', 'data-testid': 'wizard-step-' + step, 'data-step': String(step) },
-            body,
-          ),
+          h('div', { className: 'drg-wizard-body', 'data-testid': 'wizard-form' }, body),
         ),
         keyPicker
           ? h(KeyFilePicker, {
@@ -4924,6 +4849,62 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The floating window, with two bodies behind one shell. A host that is connecting — or
+     * waiting for its host key, or has just failed — gets the connect window: staged progress on
+     * top and the Host's log streaming underneath. That is the whole point of opening a host
+     * that is not up yet, so the host list is deliberately not part of it; management is what
+     * the window shows when nothing is connecting, and it is one close away.
+     * @param {object} props - window state, the active host, and every callback the bodies use.
+     * @returns {object|null} the window element, or null while it is closed.
+     */
+    function ManageWindow(props) {
+      const t = translatorOf(props)
+      const locale = localeOf(props)
+      if (props.open !== true) return null
+      const host = props.host || null
+      const connecting = props.view === 'connect' && host !== null && connectWindowOpen(host.status)
+      return h(
+        'div',
+        { className: 'drg-manage-window', 'data-testid': 'manage-window' },
+        h(
+          Modal,
+          { wide: true, onClose: props.onClose, closeLabel: t('cancel') },
+          connecting
+            ? h(ConnectWindow, {
+                t,
+                locale,
+                host,
+                fingerprintBusy: props.fingerprintBusy === true,
+                onAcceptFingerprint: (remember) => props.onAcceptFingerprint(host, remember),
+                onRejectFingerprint: () => props.onRejectFingerprint(host),
+                onRetry: () => props.onRetry(host),
+                onDiagnose: () => props.onDiagnose(host),
+                // Leaving a failure means going back to the list, inside the same window.
+                onBack: typeof props.onShowList === 'function' ? props.onShowList : props.onClose,
+              })
+            : h(HostListView, {
+                t,
+                locale,
+                state: props.state,
+                loading: props.loading,
+                error: props.error,
+                busyHostId: props.busyHostId,
+                onAdd: props.onAdd,
+                onRefresh: props.onRefresh,
+                onOpenSettings: props.onOpenSettings,
+                onOpenHost: props.onOpenHost,
+                onConnectHost: props.onConnectHost,
+                onDisconnectHost: props.onDisconnectHost,
+                onReconnectHost: props.onReconnectHost,
+                onEditHost: props.onEditHost,
+                onDeleteHost: props.onDeleteHost,
+                onDiagnoseHost: props.onDiagnoseHost,
+              }),
+        ),
+      )
+    }
+
+    /**
      * The plugin's overlay host, mounted once in the shell's overlay layer.
      *
      * It owns everything that is not the sidebar row: the host state, the remote window, the
@@ -4946,6 +4927,14 @@ window.__ModuleLoader__.load({
         return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
       })
       const [manageOpen, setManageOpen] = useState(false)
+      /**
+       * What the floating window shows: the host list (`'list'`, the explicit 管理界面 entry) or
+       * the window of a connection that is in flight (`'connect'`). Separate from the host's own
+       * status on purpose: after a failed connection the log stays on screen, but opening
+       * 管理界面 again must still bring the list back instead of the failure.
+       * @type {['list' | 'connect', Function]}
+       */
+      const [manageView, setManageView] = useState('list')
       // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
       // one-shot launch token, so it is fetched on demand and never persisted.
       const [remoteUrl, setRemoteUrl] = useState(null)
@@ -5059,11 +5048,12 @@ window.__ModuleLoader__.load({
         }
       }, [target, activeStatus, remoteUrl])
 
-      // When the host we asked for comes up, the window switches and the list gets out of
-      // the way; a failure leaves the list up so its error is readable.
+      // When the host we asked for comes up, the window switches and the connect window gets
+      // out of the way; a failure left it up (with its error and the log) until it is closed.
       useEffect(() => {
         if (target === null || activeStatus !== 'connected' || pendingSwitch.current !== target) return
         pendingSwitch.current = null
+        setManageView('list')
         setManageOpen(false)
       }, [target, activeStatus])
 
@@ -5130,36 +5120,31 @@ window.__ModuleLoader__.load({
       /**
        * Hand the window to one host: the management window steps aside for a host that is
        * up, and stays up while one that is not (connecting, waiting for a fingerprint, in
-       * conflict) gets there, so its progress or prompt is visible.
+       * conflict) gets there, so its progress, log or prompt is visible.
        * @param {object} host - HostView to open.
+       * @param {{password?: string}} [options] - a one-time password typed elsewhere (the
+       *   add-host dialog hands the one it collected here instead of asking again).
        * @returns {void}
        */
-      const openHost = (host) => {
+      const openHost = (host, options) => {
         if (!host) return
+        const opts = options || {}
+        const password = typeof opts.password === 'string' && opts.password !== '' ? opts.password : null
         const needsConnect = host.status === 'unconfigured' || host.status === 'disconnected' || host.status === 'error'
         const ready = host.status === 'connected'
-        if (needsConnect && host.authType === 'password') {
+        if (needsConnect && host.authType === 'password' && password === null) {
           pendingSwitch.current = host.id
+          setManageView('connect')
           setManageOpen(true)
           setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
           return
         }
         pendingSwitch.current = ready ? null : host.id
+        setManageView('connect')
         setManageOpen(!ready)
         setTarget(host.id)
         api.activate(host.id).catch(() => {})
-        if (needsConnect) performConnect(host)
-      }
-      const openHostById = (hostId) => {
-        const host = hostsRef.current.find((item) => item && item.id === hostId) || null
-        if (host === null) {
-          // The host may be newer than the last `/state` frame (just added by the wizard):
-          // aim at it and let the takeover effect pick it up when the state arrives.
-          setTarget(hostId)
-          return true
-        }
-        openHost(host)
-        return true
+        if (needsConnect) performConnect(host, password)
       }
 
       // The switcher and the Settings page name one target: open a host, leave one, show
@@ -5168,6 +5153,9 @@ window.__ModuleLoader__.load({
         if (!intent || typeof intent !== 'object') return
         if (intent.kind === 'manage') {
           pendingIntent.current = null
+          // The explicit entry always shows the list, even while a connection is running: the
+          // connect window is what a host pick opens, not what 管理界面 means.
+          setManageView('list')
           setManageOpen(true)
           remote.refresh()
           return
@@ -5235,6 +5223,7 @@ window.__ModuleLoader__.load({
         const host = pending.host
         const intent = pending.intent
         if (intent === 'open') {
+          setManageView('connect')
           setManageOpen(true)
           setTarget(host.id)
         }
@@ -5400,57 +5389,38 @@ window.__ModuleLoader__.load({
         if (store && typeof store.open === 'function') store.open(draft)
       }
 
-      /** A host that is connecting or waiting for its host key stays on screen here. */
-      const liveStatus = activeStatus === 'connecting' || activeStatus === 'fingerprint-pending'
-
       return h(
         'div',
         { className: 'drg-root drg-overlay', 'data-testid': 'dsh-remote-go-overlay-host' },
         h(StyleSheet),
-        manageOpen
-          ? h(
-              'div',
-              { className: 'drg-manage-window', 'data-testid': 'manage-window' },
-              h(
-                Modal,
-                { wide: true, onClose: () => setManageOpen(false), closeLabel: t('cancel') },
-                manageOpen && activeHost && liveStatus
-                  ? h(
-                      'div',
-                      { className: 'drg-manage-live', 'data-testid': 'manage-live' },
-                      activeStatus === 'fingerprint-pending'
-                        ? h(FingerprintCard, {
-                            t,
-                            locale,
-                            host: activeHost,
-                            busy: fingerprintBusy,
-                            onAccept: (remember) => answerFingerprint(activeHost, true, remember === true),
-                            onReject: () => answerFingerprint(activeHost, false, false),
-                          })
-                        : h(ConnectProgress, { t, host: activeHost }),
-                    )
-                  : null,
-                h(HostListView, {
-                  t,
-                  locale,
-                  state,
-                  loading: remote.loading,
-                  error: remote.error,
-                  busyHostId,
-                  onAdd: () => openWizard({ mode: 'add', host: null }),
-                  onRefresh: remote.refresh,
-                  onOpenSettings: () => setSettingsOpen(true),
-                  onOpenHost: openHost,
-                  onConnectHost: connectHost,
-                  onDisconnectHost: disconnectHost,
-                  onReconnectHost: reconnectHost,
-                  onEditHost: (host) => openWizard({ mode: 'edit', host }),
-                  onDeleteHost: (host) => setPendingDelete(host),
-                  onDiagnoseHost: runDiagnose,
-                }),
-              ),
-            )
-          : null,
+        h(ManageWindow, {
+          open: manageOpen,
+          view: manageView,
+          t,
+          locale,
+          host: activeHost,
+          state,
+          loading: remote.loading,
+          error: remote.error,
+          busyHostId,
+          fingerprintBusy,
+          onClose: () => setManageOpen(false),
+          onShowList: () => setManageView('list'),
+          onAdd: () => openWizard({ mode: 'add', host: null }),
+          onRefresh: remote.refresh,
+          onOpenSettings: () => setSettingsOpen(true),
+          onOpenHost: openHost,
+          onConnectHost: connectHost,
+          onDisconnectHost: disconnectHost,
+          onReconnectHost: reconnectHost,
+          onEditHost: (host) => openWizard({ mode: 'edit', host }),
+          onDeleteHost: (host) => setPendingDelete(host),
+          onDiagnoseHost: runDiagnose,
+          onAcceptFingerprint: (host, remember) => answerFingerprint(host, true, remember === true),
+          onRejectFingerprint: (host) => answerFingerprint(host, false, false),
+          onRetry: (host) => reconnectHost(host),
+          onDiagnose: (host) => runDiagnose(host),
+        }),
         wizard
           ? h(WizardDialog, {
               key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
@@ -5461,11 +5431,14 @@ window.__ModuleLoader__.load({
               state,
               onClose: closeWizard,
               onRefresh: remote.refresh,
-              onOpenRemote: (hostId) => {
+              onSaved: () => notify(t('wizard.saved'), 'success'),
+              // Connect from the dialog: it saved the entry, so hand the connection over here.
+              // The window is the connect window from the first frame on — progress, host key
+              // and log — and the remote takes over as soon as it is up.
+              onConnect: (host, password) => {
                 closeWizard()
-                openHostById(hostId)
+                openHost(host, password === null ? {} : { password })
               },
-              onDiagnose: runDiagnose,
             })
           : null,
         diagnose
@@ -5934,10 +5907,54 @@ window.__ModuleLoader__.load({
     .drg-modal[data-bare="true"] .drg-modal-body { display: flex; flex-direction: column; min-height: 0; padding: 0; }
     .drg-manage-window { display: flex; flex-direction: column; min-height: 0; }
     .drg-manage-window .drg-modal { height: min(86vh, 900px); }
+    /* The window is a fixed height, so its body has to take what the chrome leaves: the host
+       list scrolls in it, and the connect window's log grows to the bottom edge. */
+    .drg-manage-window .drg-modal-body { flex: 1; }
     .drg-manage-window .drg-page { padding-right: 60px; }
-    .drg-manage-live { padding: 18px 24px 14px; border-bottom: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); }
+    .drg-manage-live { padding: 18px 60px 14px 24px; border-bottom: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); }
     .drg-manage-live .drg-progress, .drg-manage-live .drg-fingerprint { margin: 0; padding: 0; width: 100%; }
     .drg-manage-live .drg-fingerprint { border-color: transparent; background: transparent; padding: 0; }
+    /* The connect log takes the rest of the window: a connection prints its progress in the
+       block above and every line the Host wrote underneath, exactly as it was written. */
+    .drg-manage-window .drg-connect-log { flex: 1; min-height: 0; }
+
+    /* ---- connect log -------------------------------------------------------- */
+    .drg-connect-log { display: flex; flex-direction: column; gap: 6px; min-height: 0; padding: 14px 24px 18px; }
+    .drg-connect-log-head { display: flex; align-items: baseline; gap: 8px; padding-right: 46px; }
+    .drg-connect-log-title { color: var(--dsw-alias-label-secondary); font-size: 12.5px; font-weight: 500; }
+    .drg-connect-log-hint { color: var(--dsw-alias-label-caption); font-size: 11.5px; }
+    .drg-connect-log-count {
+      margin-left: auto;
+      color: var(--dsw-alias-label-caption);
+      font-size: 11.5px;
+      font-variant-numeric: tabular-nums;
+    }
+    .drg-connect-log-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 10px 12px;
+      border: 0.5px solid var(--dsw-alias-border-l1);
+      border-radius: var(--dsw-radius-md);
+      background: var(--dsw-alias-bg-layer-1);
+      color: var(--dsw-alias-label-primary);
+      font-family: var(--dsw-font-markdown-code-font-family);
+      font-size: 11.5px;
+      line-height: 1.7;
+      overflow-wrap: anywhere;
+    }
+    .drg-connect-log-body:focus-visible { outline-offset: -2px; }
+    .drg-connect-log-line { display: flex; align-items: baseline; gap: 10px; }
+    .drg-connect-log-time { flex: none; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
+    .drg-connect-log-text { min-width: 0; white-space: pre-wrap; }
+    .drg-connect-log-line[data-level="debug"] .drg-connect-log-text { color: var(--dsw-alias-label-secondary); }
+    .drg-connect-log-line[data-level="warn"] .drg-connect-log-text { color: var(--dsw-alias-state-warn-primary); }
+    .drg-connect-log-line[data-level="error"] .drg-connect-log-text { color: var(--dsw-alias-state-error-primary); }
+    .drg-connect-log-empty { color: var(--dsw-alias-label-caption); font-family: var(--dsw-font-family); }
+    /* In the wizard the console is a fixed pane: the dialog scrolls, the log keeps its own box. */
+    .drg-wizard-test .drg-connect-log { padding: 6px 0 0; }
+    .drg-wizard-test .drg-connect-log-head { padding-right: 0; }
+    .drg-wizard-test .drg-connect-log-body { flex: none; height: 220px; }
 
     @keyframes drg-fade-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes drg-dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
@@ -6359,6 +6376,9 @@ window.__ModuleLoader__.load({
       HostListView,
       HostCard,
       EmptyHosts,
+      ManageWindow,
+      ConnectWindow,
+      ConnectLog,
       ConnectProgress,
       ErrorCard,
       FingerprintCard,

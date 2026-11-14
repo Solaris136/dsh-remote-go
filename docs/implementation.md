@@ -17,6 +17,7 @@ dsh-remote-go
 │  ├─ service.js            主机注册表、连接管线、公共 API facade（CRUD、设置、快照、诊断入口）
 │  ├─ host-runtime.js       每主机 runtime 对象的唯一形状（建/用分开）
 │  ├─ host-view.js          每主机对客户端的只读视图（HostView 投影）
+│  ├─ connect-log.js        连接日志：环形缓冲的下限、对外发送的日志尾与可见状态
 │  ├─ diagnostics.js        9 项诊断检查表（只读投影，不新建连接）
 │  ├─ ssh.js                ssh2 封装：指纹策略、认证回退、exec、forwardOut
 │  ├─ ssh-config.js         ~/.ssh/config 解析与别名发现
@@ -51,7 +52,7 @@ dsh-remote-go
 
 依赖方向是单向的：`index → service → (ssh / probe / node-runtime / bootstrap / webapp / tunnel / …)`；`service → (host-runtime / host-view / diagnostics / store / settings / …)`；低层模块不反向依赖 `service`。`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`。
 
-`host-runtime.js` 是 runtime 形状的唯一来源；`host-view.js` 是 `HostView` 的唯一投影；两者都不做 I/O，因此新增字段/视图只需要改一处。
+`host-runtime.js` 是 runtime 形状的唯一来源；`host-view.js` 是 `HostView` 的唯一投影，日志尾的长度与可见状态由 `connect-log.js` 决定；它们都不做 I/O，因此新增字段/视图只需要改一处。
 
 ## 2. Host 入口与装配
 
@@ -150,7 +151,7 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 - 接管：`showOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest，carrier 铺满整窗；`desktopCaption()` 读本地页面的 `<html data-windows-titlebar>` 与 `--dsh-windows-titlebar-height`，`applyGuestCaption` 在每个 `dom-ready` / `did-stop-loading` 把同一标记（含 `data-fullscreen`）注入 guest，`syncCarrierCaption` 据此决定 guest 自己让出标题栏还是退回「整体下移一条」（注入失败时），并同步 carrier 内的 `drg-carrier-grip`（标题栏区域的 `-webkit-app-region: drag` 拖拽条，左侧 84px 留给 guest 自己的固定控件）与 `<html class="drg-caption-live">`（把宿主标题栏菜单抬到 guest 之上）；本地页面的全屏状态由 `watchCaptionState` 的 MutationObserver 推给已加载的 guest。每次 `did-stop-loading` 在标题栏之后重新注入主机条；`__drgBridgeQueue` 轮询把点击（`{target}` / `{action:'add'|'manage'|'disconnect', hostId?}`）交回 `switcher.dispatch`。
 - 意图：`panelStore.requestIntent({kind:'open'|'disconnect'|'manage'|'local'})` 与 `wizardStore.open({mode,host})` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开某台、释放它的窗口并在 Host 确认后把窗口交回本地（主机条的当前目标随之回落到「本地」），`manage` 打开浮窗，`local` 隐藏远端窗口并清掉 Host 侧的 active。意图订阅在挂载时建立，回调里读不到最新的窗口状态，所以「窗口在哪台」的收尾一律走 ref 或 `setState(fn)` 这类实时更新。
 - 安全不变量（测试会读源码断言）：不打开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。
-- 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 主机条/远端窗口 → 向导 → 诊断 → 设置 → 密码/冲突 → 浮层宿主（`PluginOverlay`）→ 样式 → 注册。
+- 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 连接窗口（进度 + 连接日志）/远端窗口 → 主机条 → 添加/编辑主机 → 诊断 → 设置 → 密码/冲突 → 浮层宿主（`PluginOverlay`）→ 样式 → 注册。
 
 ## 9. 测试与结构守卫
 

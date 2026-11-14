@@ -5,6 +5,7 @@ import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, wa
 import { errors } from '../../src/errors.js'
 import { RemoteGoService, describePreflightEvent } from '../../src/service.js'
 import { HostStore } from '../../src/store.js'
+import { LOG_TAIL_LIMIT } from '../../src/connect-log.js'
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {
   const { service, store } = await makeTestService()
@@ -144,6 +145,77 @@ test('describePreflightEvent turns npm output into localized progress codes', ()
   })
 })
 
+test('the connect log streams to /state while connecting and stops once the host is up', async () => {
+  /** @type {() => void} */
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const { service } = await makeTestService({
+    ensureNode: async (_ssh, options) => {
+      // Hold the pipeline mid-connect so the log tail can be inspected in flight.
+      await gate
+      return managedNodeFixture(options.version)
+    },
+  })
+  /** @type {any[]} */
+  const frames = []
+  service.on('state', (state) => frames.push(state))
+  const host = await createHost(service)
+  const connecting = service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connecting', { label: 'connecting' })
+  await waitFor(() => (service.snapshot().hosts[0].logs ?? []).length >= 2, { label: 'two log lines' })
+
+  const live = service.snapshot().hosts[0]
+  assert.ok(live.logs.length > 0, 'a connecting host must carry its log tail')
+  for (const entry of live.logs) {
+    assert.equal(typeof entry.seq, 'number')
+    assert.equal(typeof entry.at, 'string')
+    assert.equal(typeof entry.level, 'string')
+    assert.equal(typeof entry.message, 'string')
+  }
+  const seqs = live.logs.map((entry) => entry.seq)
+  assert.deepEqual(
+    seqs,
+    [...seqs].sort((a, b) => a - b),
+    'the log keeps the order it was written in',
+  )
+  assert.equal(new Set(seqs).size, seqs.length, 'every line has its own seq')
+  // The lines are the real steps, not a synthetic summary.
+  const text = live.logs.map((entry) => entry.message).join('\n')
+  assert.match(text, /^connect: /m)
+  assert.match(text, /SSH connected to /)
+  assert.match(text, /probe: /)
+  // Some frame carried the log: that is what keeps the console live.
+  assert.ok(
+    frames.some((frame) => (frame.hosts[0]?.logs ?? []).length > 0),
+    'expected a /state frame carrying the connect log',
+  )
+
+  release()
+  await connecting
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  // The window is gone with the connection, so the tail is not shipped any more.
+  assert.deepEqual(service.snapshot().hosts[0].logs, [])
+  await service.shutdown()
+})
+
+test('the connect log is capped while the ring keeps the newest lines', async () => {
+  const { service } = await makeTestService({
+    ensureNode: async () => {
+      throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'blocked' })
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
+  const failed = service.snapshot().hosts[0]
+  // A failure keeps the log on screen: the reason and the lines before it are one story.
+  assert.ok(failed.logs.length > 0)
+  assert.ok(failed.logs.length <= LOG_TAIL_LIMIT)
+  assert.match(failed.error.code, /node-install-failed/)
+  await service.shutdown()
+})
 test('the npx preflight reports npm output as connect progress', async () => {
   const { service } = await makeTestService({
     preflight: async (_ssh, _plan, options) => {

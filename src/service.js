@@ -43,10 +43,19 @@ import { normalizeVersion, isNodeVersionSupported, versionParity, versionsEqual 
 import { listKeyFiles as listKeyFilesInHome } from './key-files.js'
 import { createHostRuntime, emptyRemote } from './host-runtime.js'
 import { hostView } from './host-view.js'
+import { appendConnectLog, connectLogVisible } from './connect-log.js'
 import { diagnoseHost } from './diagnostics.js'
 
 /** Milliseconds a paused host-key handshake waits for the user. */
 export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
+
+/**
+ * Coalescing window for shipping log lines: the connect console may print many
+ * lines a second (npx download, remote stdout), and every one of them would
+ * otherwise be its own `/state` frame. 150 ms keeps the console live and the
+ * stream cheap.
+ */
+const LOG_FLUSH_MS = 150
 
 /** @typedef {'unconfigured'|'connecting'|'fingerprint-pending'|'conflict-pending'|'connected'|'disconnected'|'error'|'limited'} HostStatus */
 /** @typedef {'ssh'|'probe'|'bootstrap'|'start'|'tunnel'|'ready'} ConnectPhase */
@@ -82,6 +91,18 @@ function stripAnsi(text) {
 }
 
 /**
+ * One line naming where a connection goes, for the connect log. Never the secret,
+ * only what the user typed plus the port the SSH client actually dials.
+ * @param {Record<string, any>} entry - host entry.
+ * @returns {string} `user@host:port`.
+ */
+function describeTarget(entry) {
+  const user = entry.username ? `${entry.username}@` : ''
+  const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
+  return `${user}${entry.address || '?'}${port}`
+}
+
+/**
  * Turn one npm/npx output line into a progress event for the connect line.
  * `npm_config_loglevel=http` makes npm report fetches without a TTY; known shapes
  * get a localized progress code, anything else is kept (truncated) as a detail.
@@ -106,6 +127,9 @@ export function describePreflightEvent(line, version) {
  * @param {any} runtime
  */
 export class RemoteGoService extends EventEmitter {
+  /** Coalesces a burst of log lines into one `/state` frame (see `#scheduleLogFlush`). */
+  #logFlushTimer = null
+
   /** @param {ServiceOptions} options */
   constructor(options) {
     super()
@@ -198,16 +222,34 @@ export class RemoteGoService extends EventEmitter {
   }
 
   #log(runtime, level, ...args) {
-    const line = `[dsh-remote-go:${runtime.id}] ${args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')}`
-    if (runtime.logs.length > 200) runtime.logs.shift()
-    runtime.logs.push({ at: nowIso(), level, line })
-    // `runtime.logs` above is the unfiltered ring an operator inspects. The logger below honours a
-    // threshold so verbosity is a runtime decision: `options.logLevel` (tests, diagnostics) or the
-    // configured `logLevel`.
+    const message = args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')
+    // The ring, the line tag and the tail all belong to `connect-log.js`; this method only
+    // writes the text and decides whether its own logger prints it too.
+    const entry = appendConnectLog(runtime, { at: nowIso(), level, message })
+    this.#scheduleLogFlush(runtime)
+    // The logger below honours a threshold so verbosity is a runtime decision: `options.logLevel`
+    // (tests, diagnostics) or the configured `logLevel`.
     const threshold = this.logLevel ?? this.store.getSettings()?.logLevel ?? 'info'
     if (!logVisible(level, threshold)) return
     const method = this.logger[level] ?? this.logger.info
-    method?.(line)
+    method?.(entry.line)
+  }
+
+  /**
+   * Ship the log tail to the Client's connect console without one `/state` frame per line.
+   * Only a host whose window prints the log pays for this; a connected host's lines stay in
+   * the ring for diagnostics.
+   * @param {any} runtime
+   */
+  #scheduleLogFlush(runtime) {
+    if (!connectLogVisible(runtime.status)) return
+    if (this.#logFlushTimer !== null) return
+    this.#logFlushTimer = setTimeout(() => {
+      this.#logFlushTimer = null
+      this.#emitState()
+    }, LOG_FLUSH_MS)
+    // A pending log frame must never keep the process alive on its own.
+    this.#logFlushTimer.unref?.()
   }
 
   #emitState() {
@@ -239,13 +281,19 @@ export class RemoteGoService extends EventEmitter {
   #nodeProgress(runtime, event) {
     if (event.step === 'check') return
     if (event.step === 'download') {
+      const mb = Math.max(0, Math.round(Number(event.bytes ?? 0) / (1024 * 1024)))
+      this.#log(runtime, 'info', `downloading managed Node v${event.version} (${mb} MB so far)`)
       this.#phase(runtime, 'bootstrap', 'downloading-node', {
         version: event.version,
-        mb: Math.max(0, Math.round(Number(event.bytes ?? 0) / (1024 * 1024))),
+        mb,
       })
       return
     }
-    if (event.step === 'ready') return
+    if (event.step === 'ready') {
+      this.#log(runtime, 'info', `managed Node v${event.version} is ready`)
+      return
+    }
+    this.#log(runtime, 'info', `installing managed Node v${event.version}`)
     this.#phase(runtime, 'bootstrap', 'installing-node', { version: event.version })
   }
 
@@ -266,6 +314,10 @@ export class RemoteGoService extends EventEmitter {
       const lines = buffer.split(/\r?\n/)
       buffer = lines.pop() ?? ''
       for (const rawLine of lines) {
+        const text = stripAnsi(rawLine).trim()
+        // npx is the slowest step on a cold cache and the one a stalled connect stalls in:
+        // print what it says, at debug level, instead of only its condensed progress codes.
+        if (text !== '') this.#log(runtime, 'debug', `npx: ${text}`)
         const event = describePreflightEvent(rawLine, version)
         if (!event) continue
         const key = `${event.code}:${event.params?.detail ?? ''}`
@@ -438,6 +490,13 @@ export class RemoteGoService extends EventEmitter {
     }
     runtime.desired = 'connected'
     this.#cancelReconnect(runtime)
+    this.#log(
+      runtime,
+      'info',
+      `connect: ${describeTarget(runtime.entry)} (auth=${runtime.entry.auth?.type ?? 'key'}${
+        runtime.entry.jumpHost ? `, jump=${runtime.entry.jumpHost}` : ''
+      })`,
+    )
     runtime.connectPromise = this.#connectPipeline(runtime).finally(() => {
       runtime.connectPromise = null
     })
@@ -477,6 +536,7 @@ export class RemoteGoService extends EventEmitter {
   async disconnect(id, options = {}) {
     await this.init()
     const runtime = this.#runtime(id)
+    this.#log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
     runtime.desired = 'idle'
     this.#cancelReconnect(runtime)
     const policy = runtime.entry.keepAlive
@@ -593,6 +653,13 @@ export class RemoteGoService extends EventEmitter {
     let remoteStarted = false
     try {
       const target = await this.#resolveTargetForRuntime(runtime)
+      this.#log(
+        runtime,
+        'debug',
+        `target resolved: ${target.username ?? '(default)'}@${target.host}:${target.port}${
+          target.jumpHost ? ` via ${target.jumpHost.host}` : ''
+        }`,
+      )
       // A password-auth host may have one remembered: load it before the transport
       // is opened, so reconnect and background retries work without a prompt.
       if (runtime.entry.auth?.type === 'password' && !runtime.password && this.secrets) {
@@ -612,6 +679,13 @@ export class RemoteGoService extends EventEmitter {
 
       this.#phase(runtime, 'probe', 'probing')
       let facts = await this.probe(runtime.ssh)
+      this.#log(
+        runtime,
+        'debug',
+        `probe: ${facts.os}/${facts.arch} · ${String(facts.osName ?? 'unknown OS')} · node ${
+          facts.nodeVersion ?? 'not found'
+        } · ${Math.round(Number(facts.diskFreeKb ?? 0) / 1_048_576)} GB free`,
+      )
       // The runtime always runs on a plugin-owned Node (`~/.dsh/remote-go/node`),
       // whether or not the remote already has one: a shared system/nvm Node is
       // exactly what makes "works for my other project" break the remote DSH.
@@ -619,9 +693,11 @@ export class RemoteGoService extends EventEmitter {
       // path, so this failure is the connection's failure.
       const profile = this.store.getSettings().bootstrap.profile
       const managedVersion = managedNodeVersionFromEngine(this.engineNodeRange)
+      const nodeLayout = remoteLayout(facts.home)
+      this.#log(runtime, 'info', `managed Node: expecting v${managedVersion} in ${nodeLayout.nodeDir}`)
       const managed = await this.ensureNode(runtime.ssh, {
         facts,
-        layout: remoteLayout(facts.home),
+        layout: nodeLayout,
         version: managedVersion,
         onProgress: (event) => this.#nodeProgress(runtime, event),
       })
@@ -652,6 +728,7 @@ export class RemoteGoService extends EventEmitter {
       // require registry access just to reconnect.
       try {
         const adopted = await this.adopt(runtime.ssh, layout, { profile })
+        if (!adopted) this.#log(runtime, 'debug', 'adopt: no running remote web to reuse')
         const adoptedVersion = adopted?.version ? normalizeVersion(adopted.version) : null
         if (adopted && (!adoptedVersion || versionsEqual(adoptedVersion, targetVersion))) {
           webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
@@ -693,9 +770,11 @@ export class RemoteGoService extends EventEmitter {
         // belongs in the connect error, not in a detached process that only leaves
         // a log behind. This also warms the cache for the real start below. There is
         // no deadline: a cold cache can take minutes, so its output becomes progress.
+        this.#log(runtime, 'info', `npx preflight: resolving @deepseek-ai/dsh@${plan.start.targetVersion}`)
         const reportStdout = this.#bootstrapReporter(runtime, plan.start.targetVersion)
         const reportStderr = this.#bootstrapReporter(runtime, plan.start.targetVersion)
         await this.preflight(runtime.ssh, plan, { onStdout: reportStdout, onStderr: reportStderr })
+        this.#log(runtime, 'info', `npx preflight ready: @deepseek-ai/dsh@${plan.start.targetVersion}`)
         this.#phase(runtime, 'start', 'starting-remote', { level: plan.level })
         webInfo = await this.startWeb(runtime.ssh, {
           plan,
@@ -704,6 +783,7 @@ export class RemoteGoService extends EventEmitter {
           timeoutMs: REMOTE_START_TIMEOUT_MS,
           onLine: (line) => this.#log(runtime, 'debug', `remote: ${line}`),
         })
+        this.#log(runtime, 'info', `remote DSH started: pid ${webInfo.pid ?? '?'}, port ${webInfo.port}`)
       }
       if (webInfo.browserCarrier === 'patched') {
         this.#log(
@@ -731,8 +811,10 @@ export class RemoteGoService extends EventEmitter {
       this.#phase(runtime, 'tunnel', 'tunneling')
       runtime.tunnel = await this.tunnelFactory({ ssh: runtime.ssh, remotePort: webInfo.port })
       runtime.remote.localPort = runtime.tunnel.localPort
+      this.#log(runtime, 'info', `tunnel open: 127.0.0.1:${runtime.tunnel.localPort} -> 127.0.0.1:${webInfo.port}`)
 
       this.#phase(runtime, 'verifying', 'verifying')
+      this.#log(runtime, 'debug', `verifying the remote UI on 127.0.0.1:${webInfo.port}`)
       const ui = await this.waitUi(runtime.ssh, webInfo.port, { attempts: 20, intervalMs: 500 })
       if (!ui.ok) {
         throw errors.remoteUiUnreachable({
@@ -740,6 +822,7 @@ export class RemoteGoService extends EventEmitter {
           en: `The remote DSH on 127.0.0.1:${webInfo.port} did not respond (HTTP ${ui.status ?? 'none'}).`,
         })
       }
+      this.#log(runtime, 'debug', `remote UI answered HTTP ${ui.status}; exchanging the launch token`)
       const exchange = await this.exchange(runtime.tunnel.localPort, webInfo.token, {
         timeoutMs: TUNNEL_PROBE_TIMEOUT_MS,
       })
@@ -830,6 +913,13 @@ export class RemoteGoService extends EventEmitter {
       return
     }
     if (found.processes.length === 0) return
+    this.#log(
+      runtime,
+      'warn',
+      `foreign DSH on the remote: ${found.processes.length} process(es) sharing this ~/.dsh (${found.processes
+        .map((entry) => `pid ${entry.pid}`)
+        .join(', ')})`,
+    )
 
     const decision = await this.#askConflict(runtime, found.processes)
     if (decision.action === 'cancel') throw errors.remoteDshRunning()
@@ -988,6 +1078,13 @@ export class RemoteGoService extends EventEmitter {
       status: pinned === info.fingerprint ? 'pinned' : pinned ? 'changed' : 'observed',
       pinned,
     }
+    this.#log(
+      runtime,
+      pinned === info.fingerprint ? 'debug' : 'info',
+      `host key ${info.keyType ?? 'unknown'}: ${info.fingerprint}${
+        pinned === info.fingerprint ? ' (matches the pinned key)' : pinned ? ' (CHANGED from the pinned key)' : ''
+      }`,
+    )
     this.#emitState()
   }
 
@@ -999,6 +1096,11 @@ export class RemoteGoService extends EventEmitter {
   async #onHostKey(runtime, info) {
     const policy = runtime.entry.hostKeyPolicy ?? this.store.getSettings().hostKeyPolicy
     if (policy === 'strict') throw errors.hostKeyUnknown(info.sha256)
+    this.#log(
+      runtime,
+      'info',
+      `waiting for the host key to be confirmed (${info.keyType} ${info.sha256}); the SSH handshake is paused`,
+    )
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         if (runtime.pendingHostKey?.resolve === resolve) runtime.pendingHostKey = null
@@ -1075,6 +1177,11 @@ export class RemoteGoService extends EventEmitter {
       settings.autoReconnect.baseDelayMs * 2 ** Math.min(runtime.reconnectAttempts, 4),
     )
     runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts, max: maxAttempts } }
+    this.#log(
+      runtime,
+      'warn',
+      `link lost; retrying in ${Math.round(delay / 100) / 10}s (attempt ${runtime.reconnectAttempts}/${maxAttempts})`,
+    )
     this.#emitState()
     runtime.reconnectTimer = setTimeout(() => {
       runtime.reconnectTimer = null
@@ -1219,6 +1326,10 @@ export class RemoteGoService extends EventEmitter {
 
   async shutdown() {
     this.disposed = true
+    if (this.#logFlushTimer !== null) {
+      clearTimeout(this.#logFlushTimer)
+      this.#logFlushTimer = null
+    }
     for (const runtime of this.runtimes.values()) {
       this.#cancelReconnect(runtime)
       this.#cancelIdleStop(runtime)
