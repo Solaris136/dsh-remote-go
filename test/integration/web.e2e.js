@@ -48,25 +48,8 @@ import {
   waitForRow,
 } from './activation.js'
 import {
-  assertBlockedIframe,
-  assertNoNonLoopbackIframes,
-  assertFrameRefresh,
-  assertLoopbackUrl,
-  assertPanelToolbar,
-  assertReadOnlyBadge,
-  SIMULATED_HISTORY,
-  connectSimulatedHost,
-  stubLateReplayMirrorsOnNewDocument,
-  describePanel,
-  openRemotePanel,
-  pluginCall,
-  startSimulatedRemote,
-  stubNonLoopbackIframeUrl,
-  switchPanelHost,
-  waitForRemoteFrame,
-} from './panel-support.js'
-import {
   assertPackedDependency,
+  describePage,
   makeTempRoot,
   packPlugin,
   pollUntil,
@@ -202,7 +185,7 @@ async function dismissFirstRunDialogs(page) {
     const closed = await dismissOpenDialog(page, { labels: DIALOG_DISMISS_LABELS })
     if (!closed) {
       throw new Error(
-        `the first-run dialog did not close after a verified click: ${JSON.stringify(await describePanel(page))}`,
+        `the first-run dialog did not close after a verified click: ${JSON.stringify(await describePage(page))}`,
       )
     }
   }
@@ -267,7 +250,7 @@ async function openRemoteHostsSection(page) {
     labels: REMOTE_HOSTS_LABELS,
     selector: '[data-testid="settings-remote-section"]',
     label: 'the Remote-hosts section',
-    describe: () => describePanel(page),
+    describe: () => describePage(page),
     within: SETTINGS_SURFACE,
   })
 }
@@ -294,22 +277,6 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
         previousBodyBackground,
       )
       .catch(() => {})
-  }
-}
-
-/**
- * Run one panel assertion and, on failure, append the panel's observable state to
- * the message: a timeout with no iframe src or toolbar dump is undiagnosable from
- * a CI log alone.
- * @param {import('puppeteer-core').Page} page
- * @param {() => Promise<any>} task
- */
-async function withPanelDiagnostics(page, task) {
-  try {
-    return await task()
-  } catch (error) {
-    const state = await describePanel(page).catch(() => null)
-    throw new Error(`${error?.message ?? error} — panel: ${JSON.stringify(state)}`)
   }
 }
 
@@ -346,16 +313,12 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
 
   /** @type {Awaited<ReturnType<typeof startWebChild>> | null} */
   let server = null
-  /** @type {Awaited<ReturnType<typeof startSimulatedRemote>> | null} */
-  let sim = null
   /** @type {import('puppeteer-core').Browser | null} */
   let browser = null
   /** @type {import('puppeteer-core').Page | null} */
   let page = null
   /** @type {any} */
   let lightMeasurement = null
-  /** @type {string | null} */
-  let simulatedHostId = null
   /** @type {string[]} */
   let consoleErrors = []
   const onSignal = (signal) => {
@@ -520,7 +483,6 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
     })
     throw error
   } finally {
-    if (sim) await sim.stop()
     if (browser) await browser.close().catch(() => {})
     if (server) await server.stop()
     process.removeListener('SIGINT', onSignal)

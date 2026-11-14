@@ -38,21 +38,8 @@ import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
 import { activateByAriaLabel, activateRow, activateRowAndWaitFor, rowPresent, waitForRow } from './activation.js'
 import {
-  assertBlockedIframe,
-  assertNoNonLoopbackIframes,
-  assertFrameRefresh,
-  assertLoopbackUrl,
-  assertPanelToolbar,
-  connectSimulatedHost,
-  describePanel,
-  openRemotePanel,
-  startSimulatedRemote,
-  stubNonLoopbackIframeUrl,
-  switchPanelHost,
-  waitForRemoteFrame,
-} from './panel-support.js'
-import {
   isWindows,
+  describePage,
   makeTempRoot,
   packPlugin,
   pollUntil,
@@ -395,41 +382,6 @@ async function openRemoteHostsSection(page) {
 }
 
 /**
- * A compact description of the renderer state, used in failure messages so a red
- * CI job is actionable without a re-run.
- * @param {import('puppeteer-core').Page} page
- */
-async function describePage(page) {
-  return await page
-    .evaluate(() => {
-      const strip = (value) => (value ?? '').replace(/\s+/g, ' ').trim()
-      const labels = [...document.querySelectorAll('button, [role="menuitem"], [role="tab"], a')]
-        .map((node) => strip(node.getAttribute('aria-label') ?? node.textContent))
-        .filter(Boolean)
-        .slice(0, 40)
-      return {
-        url: location.href,
-        dialogs: document.querySelectorAll('[role="dialog"]').length,
-        section: Boolean(document.querySelector('[data-testid="settings-remote-section"]')),
-        text: strip(document.body?.innerText).slice(0, 300),
-        labels,
-      }
-    })
-    .catch((error) => ({ error: String(error).slice(0, 200) }))
-}
-
-/**
- * Account menu -> Settings -> Remote hosts, bounded at every step and reporting
- * the renderer state when a step times out.
- *
- * One pass, every step a bounded wait on the state that must change. The retries
- * this used to carry existed only because the label comparison stripped whitespace
- * from the DOM text but not from the candidate, so `Remote hosts`/`Set up later`
- * could never match in English. Both sides are normalised now, so a loop would only
- * mask a real failure.
- * @param {import('puppeteer-core').Page} page
- */
-/**
  * Flip the shell's colour scheme and wait for the repaint.
  * @param {import('puppeteer-core').Page} page
  * @param {'light' | 'dark'} scheme
@@ -445,22 +397,6 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
         previousBodyBackground,
       )
       .catch(() => {})
-  }
-}
-
-/**
- * Run one panel assertion and, on failure, append the panel's observable state to
- * the message: a timeout with no iframe src or toolbar dump is undiagnosable from
- * a CI log alone.
- * @param {import('puppeteer-core').Page} page
- * @param {() => Promise<any>} task
- */
-async function withPanelDiagnostics(page, task) {
-  try {
-    return await task()
-  } catch (error) {
-    const state = await describePanel(page).catch(() => null)
-    throw new Error(`${error?.message ?? error} — panel: ${JSON.stringify(state)}`)
   }
 }
 
@@ -499,10 +435,6 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
   let page = null
   /** @type {any} */
   let lightMeasurement = null
-  /** @type {string | null} */
-  let simulatedHostId = null
-  /** @type {Awaited<ReturnType<typeof startSimulatedRemote>> | null} */
-  let sim = null
   /** @type {string[]} */
   const consoleErrors = []
   const onSignal = (signal) => {
@@ -610,7 +542,6 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
     })
     throw error
   } finally {
-    if (sim) await sim.stop()
     if (browser) await browser.disconnect().catch(() => {})
     if (app) await app.stop()
     process.removeListener('SIGINT', onSignal)
