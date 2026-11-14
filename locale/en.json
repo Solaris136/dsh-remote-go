@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "dsh remote go",
-    "description": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 32px bar under the title bar names the host and remote session, switches hosts, reloads and leaves). The remote Node is installed by the plugin at the lower bound of DSH's engines.node under ~/.dsh/remote-go/node (never the system one). Hosts live in Settings → Remote hosts."
+    "description": "Use a remote DSH over SSH inside the local DSH: the desktop client fills the whole window with the remote UI and injects a host row at the top of the remote sidebar (current host / remote session / switch / reload / leave). The plugin installs its own Node under ~/.dsh/remote-go/node at the lower bound of DSH engines.node (never the system one), then launches the remote DSH with npx pinned to the local version; its data stays in the user’s own ~/.dsh. Host list, connection wizard, diagnostics and exact version parity included."
   }
 }

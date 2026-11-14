@@ -617,18 +617,22 @@ test('progress code map covers every contract code', () => {
   const { dicts } = runApply(plugin)
   const codes = [
     'ssh-connecting',
-    'host-key-checking',
     'host-key-confirm',
     'auth-checking',
     'probing',
+    'downloading-node',
+    'installing-node',
     'bootstrapping',
+    'bootstrap-first-run',
+    'bootstrap-fetching',
+    'bootstrap-installed',
     'bootstrap-progress',
     'starting-remote',
-    'starting-remote-wait',
     'tunneling',
     'verifying',
     'ready',
     'reconnecting',
+    'remote-dsh-running',
   ]
   for (const code of codes) {
     assert.ok(dicts.zh['progress.' + code], 'missing zh progress.' + code)
@@ -908,7 +912,6 @@ test('settings modal renders contract fields and the save action', () => {
     autoReconnect: { enabled: true, maxAttempts: 3, baseDelayMs: 1000 },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
-    mirrorToSidebar: true,
     language: 'auto',
     logLevel: 'info',
     bootstrap: { profile: 'web' },
@@ -1030,29 +1033,6 @@ test('settings section offers open/connect actions per host', () => {
   assert.match(html, /data-testid="settings-host-connect"/)
   assert.match(html, /data-host-id="h_connected"/)
   assert.match(html, /data-host-id="h_offline"/)
-})
-
-test('mirror polling settles on a real signal and is bounded', () => {
-  const policy = plugin.mirrorPolling
-  assert.equal(typeof policy.settled, 'function')
-  /** @param {object} overrides */
-  const row = (overrides) => ({ level: 'L2', readOnly: false, workspaceId: 'ws-sim', ...overrides })
-
-  // Pre-replay list: descriptors planned at L2, none read-only yet -> keep polling.
-  assert.equal(policy.settled([row(), row()]), false)
-  // Replay landed (even one read-only mirror is enough): stop.
-  assert.equal(policy.settled([row(), row({ readOnly: true })]), true)
-  // Nothing planned at L2: replay is not in flight, so stop.
-  assert.equal(policy.settled([row({ level: 'L1' })]), true)
-  // An empty list is not settled: the descriptors may not be written yet.
-  assert.equal(policy.settled([]), false)
-  assert.equal(policy.settled(null), false)
-
-  // A real budget, not a single fixed delay: the deadline tolerates a slow replay
-  // but still ends (a host that never replays must stop polling).
-  assert.ok(policy.deadlineMs >= 30_000, `the poll deadline is too short: ${policy.deadlineMs}`)
-  assert.ok(policy.deadlineMs <= 60_000, `the poll deadline is unbounded in practice: ${policy.deadlineMs}`)
-  assert.ok(policy.intervalMs >= 500, `the poll interval is too aggressive: ${policy.intervalMs}`)
 })
 
 test('every automation data-testid required by acceptance is rendered', () => {

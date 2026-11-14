@@ -2,9 +2,9 @@
  * Remote directory layout.
  *
  * Everything the plugin writes on the remote lives inside the remote DSH home:
- * `$DSH_HOME/remote-go` holds logs, the run registry, lease/helper files and the
- * managed Node runtime, so a host only ever gets `~/.dsh` (the user's own DSH
- * data) plus this one subdirectory — no root, no global installs.
+ * `$DSH_HOME/remote-go` holds logs, the run registry and the managed Node runtime,
+ * so a host only ever gets `~/.dsh` (the user's own DSH data) plus this one
+ * subdirectory — no root, no global installs.
  *
  * `home` comes from the probe. Before the probe the tilde is preserved; callers
  * must expand it before any shell use (every connect-time caller has the facts).
@@ -30,11 +30,10 @@ export function remoteLayout(home = null) {
   const root = `${dshHome}/${REMOTE_STATE_DIR}`
   return {
     root,
-    // Lease records and the follower helper are plugin bookkeeping, stored as
-    // `<dshHome>/remote-go/...` — which is the same directory as `root`.
+    // Kept for callers that resolve the remote DSH home separately from the
+    // plugin's own state directory.
     stateHome: dshHome,
-    // The remote DSH is deliberately run with its real home, so credentials,
-    // sessions and workspaces are the user's own (`~/.dsh`).
+    // The remote DSH runs with its real home, so its data is the user's own.
     dshHome,
     nodeDir: `${root}/node`,
     downloadDir: `${root}/downloads`,

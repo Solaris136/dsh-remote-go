@@ -43,8 +43,6 @@ import {
   assertFrameRefresh,
   assertLoopbackUrl,
   assertPanelToolbar,
-  assertReadOnlyBadge,
-  SIMULATED_HISTORY,
   connectSimulatedHost,
   describePanel,
   openRemotePanel,

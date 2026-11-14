@@ -44,22 +44,18 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'dsh-remote-go'
     /** Base path of the Host HTTP API (same origin as the page). */
     const API_BASE = '/dsh-remote-go/api'
-    /** SSE endpoint carrying `state` events; see contract §1. */
+    /** SSE endpoint carrying `state` events; see docs/api.md. */
     const EVENT_PATH = '/dsh-remote-go/api/events'
-    /** Fallback polling cadence when SSE is unavailable (contract §1). */
+    /** Fallback polling cadence when SSE is unavailable (docs/api.md). */
     const POLL_INTERVAL_MS = 3000
-    /** LocalStorage flags (never store tokens or remote URLs). */
-    const CLOSE_HINT_KEY = 'dsh-remote-go.hint.remote-close'
-    /** The workspace rail's collapsed state (UI preference only). */
-    const RAIL_COLLAPSED_KEY = 'dsh-remote-go.rail.collapsed'
     /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
     const DESKTOP_BRIDGE_VERSION = 1
     /** DOM id of the full-window remote carrier, so a reload can drop a stale one. */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
-    /** Only loopback URLs may ever be handed to the guest (contract §3.5). */
+    /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /** Ordered connect phases (contract ConnectPhase). */
-    const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'ready']
+    const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready']
     /** Known diagnostic check ids, in the contract's fixed order. */
     const DIAGNOSE_IDS = [
       'ssh-reachable',
@@ -115,7 +111,6 @@ window.__ModuleLoader__.load({
       emptyTitle: '还没有远程主机',
       emptyBody: '还没有远程主机。添加一台，然后打开它的远端 DSH 界面。',
       refresh: '刷新状态',
-      refreshing: '刷新中…',
       settings: '设置',
       close: '关闭',
       cancel: '取消',
@@ -137,9 +132,7 @@ window.__ModuleLoader__.load({
       optional: '可选',
       copy: '复制',
       copied: '已复制',
-      copyFailed: '复制失败，请手动选择文本。',
       next: '下一步',
-      previous: '上一步',
       done: '完成',
       dismiss: '知道了',
       actions: '操作',
@@ -153,7 +146,6 @@ window.__ModuleLoader__.load({
       lastOpened: '上次打开',
       neverOpened: '尚未打开',
       remoteVersion: '远端 DSH',
-      remoteAddr: '远端地址',
       versionPending: '连接后显示',
       addHostTitle: '添加服务器',
       editHostTitle: '编辑服务器',
@@ -187,30 +179,19 @@ window.__ModuleLoader__.load({
       cardDelete: '删除',
       errorReason: '原因：{detail}',
       loopbackNote: '远端界面只经 SSH 隧道映射为 127.0.0.1 后嵌入；不会直接使用该地址，也不会暴露到公网。',
-      statusUnknownHostTitle: '读取不到这台主机的状态',
-      statusUnknownHostBody: '主机可能已被删除，或状态尚未同步。',
-
-      // -- workspace rail ------------------------------------------------------
-      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
-      mirrorReadOnlyBadge: '只读镜像',
-      mirrorReadOnlyTitle: '{level} 只读镜像：{reason}',
-      mirrorReadOnlyReasonDefault: '远端历史以只读方式回放，本地暂不支持输入',
 
       // -- viewport ------------------------------------------------------------
       viewportConnecting: '正在连接「{name}」…',
-      remoteEntryLabel: '远端',
       viewportOverlayLoadFailed: '远端界面加载失败，请刷新后重试，或从左侧主机栏回到主机管理。',
       // -- carrier bar (injected into the full-window takeover) ----------------
-      carrierBarLabel: '远端接管控制条',
       carrierSwitchHost: '切换远端主机',
       carrierRefresh: '刷新远端界面',
       carrierExit: '离开远端，回到主机管理',
       closeNoticeTitle: '远端任务会继续运行',
       closeNoticeBody: '已返回主机清单。远端 DSH 与正在运行的任务不会停止，再次打开会回到该主机。',
 
-      // -- connect progress (contract §2) -------------------------------------
+      // -- connect progress (docs/api.md 进度 code) -------------------------------------
       'progress.ssh-connecting': '正在连接 SSH…',
-      'progress.host-key-checking': '正在校验主机指纹…',
       'progress.host-key-confirm': '等待确认主机指纹…',
       'progress.auth-checking': '正在认证…',
       'progress.probing': '正在探测远端环境…',
@@ -223,7 +204,6 @@ window.__ModuleLoader__.load({
       'progress.bootstrap-installed': '依赖已安装，正在启动…',
       'progress.bootstrap-progress': '自举进度：{detail}',
       'progress.starting-remote': '正在启动远端 DSH…',
-      'progress.starting-remote-wait': '等待远端 DSH 就绪（{seconds} 秒）…',
       'progress.tunneling': '正在建立本地回环隧道…',
       'progress.verifying': '正在验证远端界面…',
       'progress.ready': '就绪',
@@ -248,7 +228,6 @@ window.__ModuleLoader__.load({
       fingerprintAccept: '接受并记住',
       fingerprintAcceptOnce: '仅本次接受',
       fingerprintReject: '取消',
-      fingerprintAccepting: '正在提交…',
       passwordPromptTitle: '输入 SSH 密码',
       passwordPromptBody: '「{name}」使用密码认证。密码只用于本次连接；勾选后存进 DSH 的凭据存储（不写进主机配置）。',
       passwordPromptRemember: '安全保存这个密码（DSH 凭据存储）',
@@ -394,9 +373,7 @@ window.__ModuleLoader__.load({
       'settings.saveFailed': '保存设置失败',
 
       // -- local errors --------------------------------------------------------
-      'error.readState': '读取状态失败',
       'error.actionFailed': '操作失败',
-      'error.detailSuffix': '（{detail}）',
     }
 
     /** English dictionary — complete parallel of `zh`. */
@@ -414,7 +391,6 @@ window.__ModuleLoader__.load({
       emptyTitle: 'No remote hosts yet',
       emptyBody: 'No remote hosts yet. Add one, then open its remote DSH interface.',
       refresh: 'Refresh status',
-      refreshing: 'Refreshing…',
       settings: 'Settings',
       close: 'Close',
       cancel: 'Cancel',
@@ -436,9 +412,7 @@ window.__ModuleLoader__.load({
       optional: 'optional',
       copy: 'Copy',
       copied: 'Copied',
-      copyFailed: 'Copy failed — select the text manually.',
       next: 'Next',
-      previous: 'Back',
       done: 'Done',
       dismiss: 'Got it',
       actions: 'Actions',
@@ -451,7 +425,6 @@ window.__ModuleLoader__.load({
       lastOpened: 'Last opened',
       neverOpened: 'Never opened',
       remoteVersion: 'Remote DSH',
-      remoteAddr: 'Remote address',
       versionPending: 'Shown after connecting',
       addHostTitle: 'Add server',
       editHostTitle: 'Edit server',
@@ -487,20 +460,11 @@ window.__ModuleLoader__.load({
       errorReason: 'Reason: {detail}',
       loopbackNote:
         'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
-      statusUnknownHostTitle: 'Cannot read this host',
-      statusUnknownHostBody: 'It may have been deleted, or its state has not synced yet.',
-
-      // Mirrored (replayed) remote sessions are read-only until L3 adds input.
-      mirrorReadOnlyBadge: 'Read-only mirror',
-      mirrorReadOnlyTitle: 'Read-only {level} mirror: {reason}',
-      mirrorReadOnlyReasonDefault: 'Remote history is replayed read-only; local input is not supported yet',
 
       viewportConnecting: 'Connecting to "{name}"…',
-      remoteEntryLabel: 'Remote',
       viewportOverlayLoadFailed:
         'The remote UI failed to load. Reload it, or use the bar to return to host management.',
       // -- carrier bar (injected into the full-window takeover) ----------------
-      carrierBarLabel: 'Remote takeover bar',
       carrierSwitchHost: 'Switch remote host',
       carrierRefresh: 'Reload the remote UI',
       carrierExit: 'Leave the remote and return to host management',
@@ -509,7 +473,6 @@ window.__ModuleLoader__.load({
         'Back to the host list. The remote DSH and its running tasks keep running; open the host again to return to it.',
 
       'progress.ssh-connecting': 'Connecting over SSH…',
-      'progress.host-key-checking': 'Verifying the host key…',
       'progress.host-key-confirm': 'Waiting for you to confirm the host key…',
       'progress.auth-checking': 'Authenticating…',
       'progress.probing': 'Probing the remote environment…',
@@ -522,7 +485,6 @@ window.__ModuleLoader__.load({
       'progress.bootstrap-installed': 'Packages installed; starting…',
       'progress.bootstrap-progress': 'Bootstrap: {detail}',
       'progress.starting-remote': 'Starting the remote DSH…',
-      'progress.starting-remote-wait': 'Waiting for the remote DSH ({seconds}s)…',
       'progress.tunneling': 'Opening the loopback tunnel…',
       'progress.verifying': 'Verifying the remote UI…',
       'progress.ready': 'Ready',
@@ -547,7 +509,6 @@ window.__ModuleLoader__.load({
       fingerprintAccept: 'Accept and remember',
       fingerprintAcceptOnce: 'Accept once',
       fingerprintReject: 'Cancel',
-      fingerprintAccepting: 'Submitting…',
       passwordPromptTitle: 'Enter the SSH password',
       passwordPromptBody:
         '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
@@ -693,9 +654,7 @@ window.__ModuleLoader__.load({
       'settings.saved': 'Settings saved.',
       'settings.saveFailed': 'Failed to save settings',
 
-      'error.readState': 'Failed to read state',
       'error.actionFailed': 'Action failed',
-      'error.detailSuffix': ' ({detail})',
     }
 
     //#endregion
@@ -717,7 +676,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Build a translate function over the local dictionaries. Only used when the
-     * slot framework did not seat a `t` prop (e.g. a unit-test render).
      * @param {string} locale - `'zh'` or `'en'`.
      * @returns {(key: string, params?: object) => string} translate function.
      */
@@ -759,7 +717,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Resolve a host-provided bilingual text (`{zh, en}`) for the active locale.
-     * Plain strings pass through unchanged (contract §0 I18nText).
      * @param {unknown} text - I18nText, string, or nothing.
      * @param {string} locale - `'zh'` or `'en'`.
      * @returns {string} display text.
@@ -792,7 +749,6 @@ window.__ModuleLoader__.load({
 
     /**
      * True when the address is a loopback literal (`127.0.0.0/8`, `localhost`, `::1`).
-     * Everything else — including SSH aliases — is non-loopback by definition.
      * @param {unknown} address - SSH address or alias.
      * @returns {boolean} whether the address names the local machine.
      */
@@ -819,8 +775,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Validate a URL returned by `GET /hosts/:id/open` before it may become an
-     * guest. The Host guarantees loopback, and the client re-checks it
-     * (contract §3.5); anything else is refused rather than embedded.
      * @param {unknown} url - candidate URL.
      * @returns {boolean} whether the URL is a loopback http URL.
      */
@@ -852,7 +806,6 @@ window.__ModuleLoader__.load({
 
     /**
      * The masked address shown on cards: `user@host:port` when the Host
-     * supplied it, otherwise the raw address (contract HostView.addressMasked).
      * @param {object} host - HostView.
      * @returns {string} display address.
      */
@@ -881,41 +834,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Read the browser's localStorage without assuming it is available.
-     * @returns {Storage|null} storage handle or null.
-     */
-    function localStore() {
-      try {
-        if (typeof window === 'undefined' || !window.localStorage) return null
-        return window.localStorage
-      } catch (_error) {
-        return null
-      }
-    }
-
-    /** @param {string} key - flag key. @returns {boolean} whether the flag is set. */
-    function readFlag(key) {
-      try {
-        const store = localStore()
-        return store !== null && store.getItem(key) === '1'
-      } catch (_error) {
-        return false
-      }
-    }
-
-    /** @param {string} key - flag key. */
-    function writeFlag(key) {
-      try {
-        const store = localStore()
-        if (store !== null) store.setItem(key, '1')
-      } catch (_error) {
-        // a full/blocked storage must never break the panel
-      }
-    }
-
-    /**
      * Copy text with the Clipboard API, falling back to a hidden textarea plus
-     * `execCommand('copy')` for insecure contexts.
      * @param {string} text - text to copy.
      * @returns {Promise<boolean>} whether the copy succeeded.
      */
@@ -962,7 +881,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Localized progress line for a host (contract §2 progress codes).
+     * Localized progress line for a host (docs/api.md 进度 code).
      * @param {(key: string, params?: object) => string} t - translate function.
      * @param {object|null} progress - host.progress.
      * @returns {string} progress text.
@@ -1078,32 +997,12 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** @returns {boolean} whether the workspace rail was left collapsed. */
-    function readRailCollapsed() {
-      try {
-        const store = localStore()
-        return store !== null && store.getItem(RAIL_COLLAPSED_KEY) === '1'
-      } catch (_error) {
-        return false
-      }
-    }
-
-    /** @param {boolean} collapsed - collapse state to remember. */
-    function writeRailCollapsed(collapsed) {
-      try {
-        const store = localStore()
-        if (store !== null) store.setItem(RAIL_COLLAPSED_KEY, collapsed === true ? '1' : '0')
-      } catch (_error) {
-        // storage is an optional preference; never break the rail
-      }
-    }
-
     //#endregion
 
     //#region 5. local error views
 
     /**
-     * Local fallback ErrorViews (contract §0 ErrorView). Host responses carry
+     * Local fallback ErrorViews (docs/api.md ErrorView). Host responses carry
      * their own ErrorView; these describe client-side and transport failures.
      */
     const LOCAL_ERRORS = {
@@ -1222,7 +1121,7 @@ window.__ModuleLoader__.load({
 
     /**
      * One JSON request against the Host API. All requests carry the plugin
-     * marker header and same-origin credentials (contract §3.4).
+     * marker header and same-origin credentials (docs/api.md 安全约束).
      * @param {string} path - path below `/dsh-remote-go/api`.
      * @param {{method?: string, body?: object, signal?: AbortSignal}} [options] - request options.
      * @returns {Promise<object>} `{ok:true, ...}` payload.
@@ -1261,7 +1160,7 @@ window.__ModuleLoader__.load({
 
     /** Host API surface used by the UI. */
     const api = {
-      /** @returns {Promise<object>} StateView (contract §1 GET /state). */
+      /** @returns {Promise<object>} StateView (docs/api.md `GET /state`). */
       async getState() {
         const payload = await apiRequest('/state')
         return payload.state
@@ -1305,8 +1204,7 @@ window.__ModuleLoader__.load({
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
       },
       /**
-       * Fetch the one-time loopback URL for the guest (contract §1 GET /open).
-       * The URL stays in memory only — never logged, never stored.
+       * Fetch the one-time loopback URL for the guest (docs/api.md `GET /hosts/:id/open`).
        * @param {string} hostId - host id.
        * @returns {Promise<string>} validated loopback URL.
        */
@@ -1344,54 +1242,15 @@ window.__ModuleLoader__.load({
         const payload = await apiRequest('/settings', { method: 'POST', body: { patch } })
         return payload.settings
       },
-      /** @returns {Promise<object>} local workspace registry (contract §1 GET /local/workspaces). */
-      async getLocalWorkspaces() {
-        const payload = await apiRequest('/local/workspaces')
-        return {
-          workspaces: Array.isArray(payload.workspaces) ? payload.workspaces : [],
-          defaultWorkspaceId: typeof payload.defaultWorkspaceId === 'string' ? payload.defaultWorkspaceId : null,
-          initialized: payload.initialized !== false,
-          source: typeof payload.source === 'string' ? payload.source : null,
-        }
-      },
-      /**
-       * Workspace list of one remote host (contract §1 GET /hosts/:id/workspaces).
-       * Reports `connected:false` instead of failing when the tunnel is down.
-       * @param {string} hostId - host id.
-       * @returns {Promise<object>} workspace payload.
-       */
-      async getHostWorkspaces(hostId) {
-        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/workspaces')
-        return {
-          connected: payload.connected === true,
-          hostId: typeof payload.hostId === 'string' ? payload.hostId : hostId,
-          hostName: typeof payload.hostName === 'string' ? payload.hostName : '',
-          workspaces: Array.isArray(payload.workspaces) ? payload.workspaces : [],
-          defaultWorkspaceId: typeof payload.defaultWorkspaceId === 'string' ? payload.defaultWorkspaceId : null,
-          initialized: payload.initialized !== false,
-        }
-      },
-      /**
-       * Mirrored sessions of one remote host (contract §1 GET /hosts/:id/mirrors).
-       * The rail only needs `readOnly` to mark replayed sessions; a failure is
-       * tolerated by the caller, which then shows no badge instead of a guess.
-       * @param {string} hostId - host id.
-       * @returns {Promise<{mirrors: object[]}>} mirror payload.
-       */
-      async getHostMirrors(hostId) {
-        const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/mirrors')
-        return { mirrors: Array.isArray(payload.mirrors) ? payload.mirrors : [] }
-      },
       /**
        * Point the Host's active host at `hostId` so a reload reopens the same
-       * remote panel (POST /hosts/:id/activate).
        * @param {string} hostId - host id.
        * @returns {Promise<object>} acknowledgement.
        */
       async activate(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
       },
-      /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (contract §1). */
+      /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (docs/api.md). */
       async getAliases() {
         const payload = await apiRequest('/ssh/aliases')
         return {
@@ -1400,7 +1259,7 @@ window.__ModuleLoader__.load({
         }
       },
       /**
-       * Browse the user's home for a private-key file (contract §1 GET /keyfile/list).
+       * Browse the user's home for a private-key file (docs/api.md `GET /keyfile/list`).
        * @param {string} [dir] absolute directory to list; empty means the default one.
        * @returns {Promise<{path: string, parent: string | null, entries: Array<{name: string, path: string, isDirectory: boolean}>, truncated: boolean, defaultKeyPath: string, defaultDir: string}>}
        */
@@ -1420,7 +1279,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Subscribe to live state: SSE first, 3s polling once the stream fails
-     * (contract §1). Always resolves the current state once up front.
+     * (docs/api.md). Always resolves the current state once up front.
      * @param {{onState: (state: object) => void, onStatus?: (mode: string) => void, onError?: (error: unknown) => void}} handlers - callbacks.
      * @returns {() => void} dispose function.
      */
@@ -1573,26 +1432,9 @@ window.__ModuleLoader__.load({
     const IconEdit = strokeIcon(['M4 20h4.5L20 8.5a2.12 2.12 0 0 0-3-3L5.5 17V20Z', 'M14.5 7l2.5 2.5'])
     const IconTrash = strokeIcon(['M4 7h16', 'M9 7V5h6v2', 'M6.5 7l1 13h9l1-13', 'M10 11v5', 'M14 11v5'])
     const IconPulse = strokeIcon(['M3 12h4l2.5-6 4 12 2.5-6H21'])
-    const IconBack = strokeIcon(['M15 5l-7 7 7 7'])
-    const IconExternal = strokeIcon([
-      'M14 4h6v6',
-      'M20 4l-9 9',
-      'M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5',
-    ])
     const IconClose = strokeIcon(['M6 6l12 12', 'M18 6L6 18'])
     const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
     const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
-    const IconWifi = strokeIcon([
-      'M3.5 9.5a13 13 0 0 1 17 0',
-      'M6.5 13a8.5 8.5 0 0 1 11 0',
-      'M9.5 16.5a4 4 0 0 1 5 0',
-      'M12 20h.01',
-    ])
-    const IconFolder = strokeIcon([
-      'M3.5 7A1.5 1.5 0 0 1 5 5.5h4.2l1.8 2H19a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17V7Z',
-    ])
-    const IconChevronLeft = strokeIcon(['M14.5 6.5 8.5 12l6 5.5'])
-    const IconChevronRight = strokeIcon(['M9.5 6.5l6 5.5-6 5.5'])
 
     /**
      * Status dot. Color comes from theme tokens with stable fallbacks.
@@ -2093,8 +1935,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Main-panel host list (design §4.1). Pure presentation: all actions rise
-     * through callbacks, all data comes from `/state`.
+     * Main-panel host list (docs/design.md（主机清单）). Pure presentation: all actions rise
      * @param {object} props - state, errors, and callbacks.
      * @returns {object} div element.
      */
@@ -2222,7 +2063,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Staged connect progress: current progress line plus the phase checklist
-     * (contract ConnectPhase / §2 progress codes).
+     * (docs/api.md 的 ConnectPhase / 进度 code).
      * @param {{t: Function, host: object}} props - host being connected.
      * @returns {object} div element.
      */
@@ -2267,7 +2108,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Host-key confirmation card. Used by both the wizard's test step and the
-     * viewport when an existing host reconnects to an unknown/changed key.
      * @param {object} props - host, busy flag, error, callbacks.
      * @returns {object} div element.
      */
@@ -2360,7 +2200,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Error card: localized title/detail/next steps + retry/diagnose/back.
-     * Never renders an empty viewport (design §8.2).
      * @param {object} props - ErrorView plus callbacks.
      * @returns {object} div element.
      */
@@ -2412,22 +2251,6 @@ window.__ModuleLoader__.load({
 
     /**
      * The DSH desktop shell exposes a browser-guest bridge on the page:
-     * `window.dshDesktop` (protocol v1) -> `browser.acquire(workspace)` reserves a
-     * Chromium guest in a per-workspace partition, and a `<webview>` whose src is
-     * "about:blank#<lease>" attaches it. The guest is a real browser context (own
-     * cookies, real downloads pipeline), never an embedded frame.
-     *
-     * The carrier takes the whole window. Leaving the local sidebar visible next to
-     * the main column put two DSH sidebars of the same app side by side, so the window
-     * read as two applications glued together. Everything local is therefore reduced
-     * to a 32px bar pinned right below the window's title bar: it names the current
-     * host (full name, switchable when there is more than one), echoes the remote
-     * page's own title (the open session), and carries reload and leave. No vertical
-     * column is stolen from the remote UI.
-     *
-     * The carrier lives on `document.body` outside the React tree so a panel
-     * re-render never tears the guest down. Keyboard focus belongs to the guest while
-     * it is up, which is why leaving goes through the bar, not a shortcut.
      */
     const overlayCarrier = {
       hostId: null,
@@ -2456,8 +2279,6 @@ window.__ModuleLoader__.load({
 
     /**
      * The carrier's own CSS. There is no local chrome left to style: the host switcher
-     * is injected into the remote page itself (see HOST_ROW_SCRIPT), so this only
-     * sizes the guest surface and the main-frame load error line.
      */
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:#fff;pointer-events:auto}
@@ -2466,21 +2287,6 @@ window.__ModuleLoader__.load({
 
     /**
      * The host switcher, drawn inside the remote page itself.
-     *
-     * A local overlay always reads as an add-on: it sits above the guest, so a modal
-     * inside the remote page dims everything except our strip, and the guest's own
-     * surface ends where ours begins. Injecting the row into the remote DOM instead
-     * gives it the remote page's theme variables, its fonts, its dimming and its
-     * layout: the row is inserted as the second child of the sidebar column (right
-     * under the brand row), so the sidebar itself makes room for it and nothing is
-     * covered. There is deliberately no local fallback UI: a fallback is what looks
-     * like an add-on, and it also hides the fact that the injection broke.
-     *
-     * The anchor is geometric (a left-docked, full-height column), not a class name,
-     * because the remote page is the product UI we do not own the markup of. The
-     * script is self-contained (no interpolation, no backticks) and idempotent. It
-     * returns 'installed' | 'no-anchor' | 'error'; the bridge back to the host is
-     * `window.__drgBridge`, polled by `startHostRowPoll`.
      */
     const HOST_ROW_SCRIPT = `
 (function () {
@@ -2621,7 +2427,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Push the host list, the active host, the remote title and the menu labels into
-     * the injected row.
      * @returns {void}
      */
     function pushHostRowState() {
@@ -2648,8 +2453,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Poll the injected row's bridge. A plain polling loop is the only channel a
-     * renderer-side <webview> has without a preload script; it is cheap (one tiny
-     * evaluation per 400ms) and only runs while the carrier is up.
      * @returns {void}
      */
     function startHostRowPoll() {
@@ -2851,7 +2654,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Remove the carrier and release its lease. The SSH link, the tunnel and the
-     * remote DSH keep running: leaving only ends the window takeover.
      * @returns {Promise<void>}
      */
     async function closeOverlay() {
@@ -2895,10 +2697,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Browse the user's home and pick a private-key file.
-     *
-     * DSH ships a directory picker, not a file picker, so the Host lists directories
-     * itself (`GET /keyfile/list`) and this dialog walks them: folders open, files
-     * become selectable. The path is what the SSH layer needs; contents are never read.
      * @param {object} props - t, locale, initialDir, onPick(path), onClose().
      * @returns {object} modal element.
      */
@@ -3029,7 +2827,7 @@ window.__ModuleLoader__.load({
       return result
     }
 
-    /** Build the `POST /hosts` body from the wizard draft (contract §1). */
+    /** Build the `POST /hosts` body from the wizard draft (docs/api.md). */
     function buildHostInput(draft, hostId, includeAuth) {
       const host = {
         name: String(draft.name || '').trim(),
@@ -3116,8 +2914,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Three-step connect wizard (design §4.2): SSH details → connection test
-     * (including host-key confirmation) → finish / open the remote entry.
+     * Three-step connect wizard (docs/design.md（接入向导）): SSH details → connection test
      * @param {object} props - mode, host, live state, callbacks.
      * @returns {object} modal element.
      */
@@ -3746,8 +3543,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Diagnostics drawer (design §4.4): a redacted checklist with re-run and
-     * copy actions.
+     * Diagnostics drawer (docs/design.md（诊断）): a redacted checklist with re-run and
      * @param {object} props - host, status, report, callbacks.
      * @returns {object|null} drawer elements.
      */
@@ -3898,7 +3694,7 @@ window.__ModuleLoader__.load({
 
     //#region 12. settings modal
 
-    /** Build the partial SettingsView sent by `POST /settings` (contract §1). */
+    /** Build the partial SettingsView sent by `POST /settings` (docs/api.md). */
     function settingsPatchFromDraft(draft) {
       return {
         defaultPort: toInt(draft.defaultPort, 22),
@@ -3942,7 +3738,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Settings modal (design §4.5 / contract SettingsView).
+     * Settings modal (docs/design.md（设置） / contract SettingsView).
      * @param {object} props - settings, onSave(patch), onClose.
      * @returns {object} modal element.
      */
@@ -4195,9 +3991,6 @@ window.__ModuleLoader__.load({
 
     /**
      * SSH password prompt for hosts whose `authType` is `password`. The value stays
-     * in component state unless the user ticks "remember", in which case the Host
-     * stores it in DSH's credential store (never in hosts.json); cancelling sends no
-     * request.
      * @param {object} props - host, busy flag, error, submit({password, remember})/cancel callbacks.
      * @returns {object} modal element.
      */
@@ -4363,9 +4156,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Icon for the sidebar's global-panel row.
-     *
-     * The sidebar owns the button and the label; an occupant only draws the glyph,
-     * sized and highlighted by the row it sits in.
      * @param {object} props - size (square edge in px), active (row is selected).
      * @returns {object} svg element.
      */
@@ -4382,7 +4172,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Owns the panel's live state: one initial `/state` read, then SSE with a
-     * 3s polling fallback (contract §1). Disposal closes the stream and timers.
+     * 3s polling fallback (docs/api.md). Disposal closes the stream and timers.
      * An optional `initialState` is a test/preview seam; production callers omit it.
      * @param {object|undefined} [initialState] - state used for the first render.
      * @returns {{state: object|null, error: object|null, loading: boolean, mode: string, refresh: Function, patch: Function}} remote state handle.
@@ -4441,8 +4231,6 @@ window.__ModuleLoader__.load({
 
     /**
      * The main panel: routes between the host list and the remote viewport,
-     * owns the wizard / diagnostics / settings layers, and performs every Host
-     * mutation. Host status itself always comes from `/state`.
      * @param {object} props - slot props (`t`) plus injected `openPanel`/`getLocaleId`.
      * @returns {object} panel root element.
      */
@@ -4496,7 +4284,7 @@ window.__ModuleLoader__.load({
       const activeHost = activeHostId ? hosts.find((host) => host && host.id === activeHostId) || null : null
       const activeStatus = activeHost ? activeHost.status : null
 
-      // The panel always lands on host management (docs/design.md §4.3): the sidebar
+      // The panel always lands on host management (docs/design.md（主机管理页）): the sidebar
       // row opens the host page, and "Open" on a host is the only action that hands
       // the window to a remote. V1.0 auto-opened the preferred host here; that covered
       // this page on mount, so adding, switching, diagnosing or deleting a host had
@@ -4698,14 +4486,11 @@ window.__ModuleLoader__.load({
       }
 
       const dismissCloseNotice = () => {
-        writeFlag(CLOSE_HINT_KEY)
         setShowCloseNotice(false)
       }
 
       /**
        * Leave the remote: drop the carrier, keep the SSH link and the remote task,
-       * and hand the window back to the host page (where another host can be opened
-       * and the disconnected one reconnected).
        */
       const leaveCarrier = () => {
         closeOverlay().catch(() => {})
@@ -4916,43 +4701,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#region 16. workspace rail and settings section
-
-    /** Local workspace payload used before the first `/local/workspaces` read. */
-    const EMPTY_LOCAL_WORKSPACES = {
-      status: 'loading',
-      workspaces: [],
-      defaultWorkspaceId: null,
-      error: null,
-    }
-
-    /**
-     * Mirror-list polling policy.
-     *
-     * Replay settles asynchronously *after* the panel mounts, and the slot props
-     * carry no mirror/sync progress signal (`HostView` has host status only), so
-     * the list is polled **until it settles** rather than a fixed number of times:
-     * a fixed attempt budget silently missed the badge whenever replay outran it.
-     *
-     * - `settled()` says when to stop: a read-only mirror exists, or descriptors
-     *   exist and none is planned at L2 (nothing left to replay). An empty list is
-     *   not settled — the descriptors may not have been written yet.
-     * - The deadline bounds the whole loop, so a host that never replays stops
-     *   polling (and simply shows no badge) instead of spinning forever.
-     */
-    const MIRROR_POLL_INTERVAL_MS = 1000
-    const MIRROR_POLL_DEADLINE_MS = 45_000
-
-    /**
-     * @param {readonly any[] | null | undefined} mirrors - `/hosts/:id/mirrors` rows.
-     * @returns {boolean} whether polling can stop.
-     */
-    function mirrorsSettled(mirrors) {
-      if (!Array.isArray(mirrors) || mirrors.length === 0) return false
-      if (mirrors.some((mirror) => mirror && mirror.readOnly === true)) return true
-      // Nothing planned at L2: replay is not in flight for this host.
-      return !mirrors.some((mirror) => mirror && mirror.level === 'L2')
-    }
+    //#region 16. settings section
 
     function SettingsSection(props) {
       const t = translatorOf(props)
@@ -5272,9 +5021,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Panel styles. Everything inherits from the DSH theme: labels use
-     * `currentColor`, surfaces/borders use `var(--dsw-alias-*, fallback)`.
-     * System colors (`Canvas`, `CanvasText`) keep the fallback neutral in
-     * either theme when a token is absent.
      */
     const CSS = `
 .drg-root {
@@ -5360,7 +5106,6 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion: reduce) { .drg-spinner { animation-duration: 2.4s; } }
 
 .drg-loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 40px 16px; color: var(--drg-label-2); }
-.drg-loading-viewport { flex: 1; }
 
 .drg-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 64px 24px; text-align: center; border: 1px dashed var(--drg-border); border-radius: var(--drg-radius); }
 .drg-empty-icon { color: var(--drg-label-3); }
@@ -5368,7 +5113,6 @@ window.__ModuleLoader__.load({
 .drg-empty-body { color: var(--drg-label-2); max-width: 440px; }
 
 .drg-summary { display: flex; align-items: center; gap: 8px; color: var(--drg-label-2); font-size: 13px; }
-.drg-summary-note { margin-left: auto; font-size: 11px; color: var(--drg-label-3); font-family: var(--ds-font-family-code, monospace); }
 .drg-host-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
 .drg-host-card { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid var(--drg-border); border-radius: var(--drg-radius); background: var(--drg-surface); min-width: 0; }
 .drg-card-strip { display: flex; align-items: center; gap: 6px; margin: -14px -14px 0; padding: 6px 12px; color: var(--dsw-alias-state-error-primary, #d64545); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d64545) 10%, transparent); border-radius: var(--drg-radius) var(--drg-radius) 0 0; font-size: 12px; }
@@ -5394,28 +5138,6 @@ window.__ModuleLoader__.load({
 .drg-notice[data-tone="error"] { border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d64545) 45%, var(--drg-border)); background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d64545) 8%, var(--drg-surface)); }
 .drg-notice[data-tone="error"] .drg-notice-icon { color: var(--dsw-alias-state-error-primary, #d64545); }
 .drg-notice[data-tone="success"] .drg-notice-icon { color: var(--dsw-alias-state-success-primary, #22a06b); }
-
-.drg-toolbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--drg-border); background: var(--drg-surface); flex-wrap: wrap; }
-.drg-toolbar-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.drg-toolbar-host { font-weight: 600; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drg-toolbar-status { color: var(--drg-label-2); font-size: 12px; }
-.drg-toolbar-status[data-status="error"] { color: var(--dsw-alias-state-error-primary, #d64545); }
-.drg-toolbar-status[data-status="disconnected"], .drg-toolbar-status[data-status="fingerprint-pending"] { color: var(--dsw-alias-state-warn-primary, #a97400); }
-.drg-toolbar-status[data-status="connected"] { color: var(--dsw-alias-state-success-primary, #22a06b); }
-.drg-toolbar-center { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1; }
-.drg-toolbar-address { font-family: var(--ds-font-family-code, monospace); font-size: 12px; color: var(--drg-label-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.drg-toolbar-right { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-.drg-toolbar-right .drg-select { max-width: 150px; }
-
-.drg-viewport { display: flex; flex-direction: column; height: 100%; min-height: 0; flex: 1; }
-.drg-viewport-notice { padding: 8px 12px 0; }
-.drg-viewport-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 12px; }
-.drg-frame-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid var(--drg-border); border-radius: var(--drg-radius-sm); overflow: hidden; }
-.drg-frame { display: block; width: 100%; height: 100%; border: 0; background: transparent; }
-.drg-frame-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--drg-label-2); background: var(--drg-surface); z-index: 1; }
-.drg-connect-prompt { margin: auto; text-align: center; display: flex; flex-direction: column; gap: 10px; align-items: center; max-width: 420px; padding: 32px 16px; color: var(--drg-label-2); }
-.drg-connect-prompt h2 { font-size: 16px; color: var(--drg-label); }
-.drg-connect-prompt-icon { color: var(--drg-label-3); }
 
 .drg-progress { margin: auto; width: min(560px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 24px 8px; }
 .drg-progress-head { display: flex; align-items: center; gap: 10px; }
@@ -5523,7 +5245,7 @@ window.__ModuleLoader__.load({
 .drg-section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--drg-label-3); }
 .drg-divider { height: 1px; background: var(--drg-border-soft); margin: 8px 0; }
 
-/* main-panel layout + workspace rail */
+/* main-panel layout */
 .drg-panel-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .drg-settings-remote { display: flex; flex-direction: column; height: auto; min-height: 0; background: transparent; }
 .drg-settings-remote .drg-page { padding: 0; overflow: visible; }
@@ -5544,8 +5266,6 @@ window.__ModuleLoader__.load({
 
     /**
      * Register dictionaries, the remote main panel, and the Settings →
-     * "Remote hosts" section. There is intentionally no sidebar entry: host
-     * management lives in Settings, and the remote UI opens in the main panel.
      * @param {object} ctx - browser plugin context.
      * @returns {void}
      */
@@ -5554,7 +5274,7 @@ window.__ModuleLoader__.load({
       const t = ctx.locale.bind(NS)
 
       // Backfill the Host's local-version probe when the page exposes it, and
-      // start the authoritative `/state` read in parallel (contract §1/§6).
+      // start the authoritative `/state` read in parallel (docs/api.md).
       ctx.effect(() => {
         const version = readBootVersion()
         if (version) api.reportLocalVersion(version)
@@ -5590,8 +5310,6 @@ window.__ModuleLoader__.load({
       }
       /**
        * Leave the remote panel for the local conversation and switch the local
-       * workspace. The uiWorkspace service is declared in `inject`; the lookup
-       * stays guarded so a missing implementation never throws.
        * @param {string} workspaceId - local workspace id.
        */
       const openLocalWorkspace = (workspaceId) => {
@@ -5688,26 +5406,10 @@ window.__ModuleLoader__.load({
       components,
       /**
        * The Host-API client, exposed so unit tests can exercise the real security
-       * guards on the real code path (`openHost`) instead of matching source text.
-       * Not part of the plugin contract: the loader only consumes
-       * `inject`/`apply`/`components`.
        */
       api,
       /**
-       * Mirror-list polling policy, exposed like `api` so unit tests can assert the
-       * settlement rules and the deadline/interval bounds directly. Inert at
-       * runtime: the loader consumes only `inject`/`apply`/`components`.
-       */
-      mirrorPolling: {
-        settled: mirrorsSettled,
-        intervalMs: MIRROR_POLL_INTERVAL_MS,
-        deadlineMs: MIRROR_POLL_DEADLINE_MS,
-      },
-      /**
        * The takeover carrier's seams, exposed for unit tests: the injected DOM is
-       * imperative (it lives outside React), but it can be built against a minimal
-       * fake document. Inert at runtime: the loader consumes only
-       * `inject`/`apply`/`components`.
        */
       carrier: {
         barHeight: CARRIER_BAR_HEIGHT,

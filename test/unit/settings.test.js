@@ -2,17 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from '../../src/settings.js'
 
-test('mirrorMaxSessions defaults to 200, accepts 0 (unlimited) and clamps junk', () => {
-  assert.equal(defaultSettings().mirrorMaxSessions, 200)
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: 0 }).mirrorMaxSessions, 0)
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: 42 }).mirrorMaxSessions, 42)
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: 'nope' }).mirrorMaxSessions, 200)
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: -5 }).mirrorMaxSessions, 0)
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: 1e9 }).mirrorMaxSessions, 5000)
-  // `null` means "unset", not "unlimited": only an explicit 0 disables the cap.
-  assert.equal(sanitizeSettings({ mirrorMaxSessions: null }).mirrorMaxSessions, 200)
-})
-
 test('defaultSettings matches the documented defaults', () => {
   const settings = defaultSettings()
   assert.equal(settings.defaultPort, 22)
@@ -20,8 +9,6 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.defaultKeyPath, '~/.ssh/id_ed25519')
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
-  assert.equal(settings.mirrorToSidebar, false)
-  assert.equal(settings.mirrorMaxSessions, 200)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.profile, 'web')
   // The remote state directory is fixed (`~/.dsh/remote-go`), so it is no longer
@@ -58,8 +45,6 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal('remoteDir' in settings.bootstrap, false)
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
   // A malformed value falls back to the documented default (off since 0.1.0).
-  assert.equal(sanitizeSettings({ mirrorToSidebar: 'no' }).mirrorToSidebar, false)
-  assert.equal(sanitizeSettings({ mirrorToSidebar: false }).mirrorToSidebar, false)
 })
 
 test('sanitizeHostEntry validates and normalizes a first host', () => {

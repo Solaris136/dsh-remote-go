@@ -1,7 +1,7 @@
 /**
  * Shared atomic JSON persistence for the plugin's own state files.
  *
- * Both `HostStore` (hosts/settings/secrets) and `MirrorStore` (mirrors) use this
+ * `HostStore` (hosts/settings/secrets) uses this
  * module, so every file the plugin writes gets the same protections (design §8):
  *
  * - directory created 0700, file written 0600;

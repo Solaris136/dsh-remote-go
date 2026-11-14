@@ -22,7 +22,7 @@ export const PLUGIN_ID = 'dsh-remote-go'
 export const PLUGIN_VERSION = '0.1.0'
 
 /** Host↔Client contract version served by `GET /version` (docs/api.md v1.3). */
-export const API_VERSION = '1.3'
+export const API_VERSION = '2.0'
 
 /**
  * Default private-key path offered for key-file authentication. Key-only SSH is

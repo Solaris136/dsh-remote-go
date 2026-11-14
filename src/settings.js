@@ -15,10 +15,6 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   autoReconnect: { enabled: boolean, maxAttempts: number, baseDelayMs: number },
  *   hostKeyPolicy: 'first-use' | 'strict',
  *   saveTokens: boolean,
- *   mirrorToSidebar: boolean,
- *   mirrorMaxSessions: number,
- *   mirrorMaxEvents: number,
- *   mirrorHistory: boolean,
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
  *   bootstrap: { profile: string },
@@ -37,22 +33,6 @@ export function defaultSettings() {
     autoReconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 800 },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
-    // Mirrored remote sessions stay OUT of the sidebar by default: the window
-    // takeover already presents the remote host as-is, and the extra
-    // "Remote: <host>" workspace only duplicates it. Opt in to get it back.
-    mirrorToSidebar: false,
-    // Upper bound on local mirror sessions created per sync; 0 means unlimited.
-    // It only limits creation: a session a previous sync created is never removed.
-    mirrorMaxSessions: 200,
-    // Upper bound on replayed history events per mirror session (0 = unlimited).
-    // L2 keeps the NEWEST window and announces the folded prefix, so a session
-    // whose remote log is long still lands with a contiguous cursor.
-    mirrorMaxEvents: 200,
-    // L2 toggle: false keeps every mirror at L1 (directory only).
-    mirrorHistory: true,
-    // L3 polled follower (design §6.4). **Off by default**: with it false the plugin behaves
-    // exactly as it did before the follower existed, so a regression cannot break anyone.
-    mirrorStream: false,
     language: 'auto',
     logLevel: 'info',
     bootstrap: {
@@ -121,20 +101,6 @@ export function sanitizeSettings(raw) {
     },
     hostKeyPolicy: oneOf(input.hostKeyPolicy, ['first-use', 'strict'], defaults.hostKeyPolicy),
     saveTokens: boolean(input.saveTokens, defaults.saveTokens),
-    mirrorToSidebar: boolean(input.mirrorToSidebar, defaults.mirrorToSidebar),
-    // `null` is not a value the user can choose: it means "unset", so it falls
-    // back to the default. Only an explicit 0 means unlimited.
-    mirrorMaxSessions:
-      input.mirrorMaxSessions === null
-        ? defaults.mirrorMaxSessions
-        : numberIn(input.mirrorMaxSessions, 0, 5000, defaults.mirrorMaxSessions),
-    // Same "null means unset, 0 means unlimited" rule as `mirrorMaxSessions`.
-    mirrorMaxEvents:
-      input.mirrorMaxEvents === null
-        ? defaults.mirrorMaxEvents
-        : numberIn(input.mirrorMaxEvents, 0, 5000, defaults.mirrorMaxEvents),
-    mirrorHistory: boolean(input.mirrorHistory, defaults.mirrorHistory),
-    mirrorStream: boolean(input.mirrorStream, defaults.mirrorStream),
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
     bootstrap: {
