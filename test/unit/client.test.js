@@ -507,6 +507,8 @@ function hostView(overrides) {
     progress: null,
     error: null,
     fingerprint: null,
+    /** Connect log tail (docs/api.md HostView.logs); empty unless a connection is on screen. */
+    logs: [],
     remote: {
       version: '0.2.2-rc.1',
       uiReady: true,
@@ -802,6 +804,226 @@ test('connecting host renders staged progress text', () => {
   assert.match(html, /隧道/)
 })
 
+/**
+ * Every prop the connect window's callbacks need, so each test states only the host and the
+ * window state it is about.
+ * @param {object} overrides - host and window fields to override.
+ * @returns {object} props for ManageWindow.
+ */
+function manageWindowProps(overrides = {}) {
+  return {
+    open: true,
+    view: 'connect',
+    t,
+    getLocaleId: () => 'zh',
+    host: null,
+    state: null,
+    loading: false,
+    error: null,
+    busyHostId: null,
+    fingerprintBusy: false,
+    onClose: () => {},
+    onAdd: () => {},
+    onRefresh: () => {},
+    onOpenSettings: () => {},
+    onOpenHost: () => {},
+    onConnectHost: () => {},
+    onDisconnectHost: () => {},
+    onReconnectHost: () => {},
+    onEditHost: () => {},
+    onDeleteHost: () => {},
+    onDiagnoseHost: () => {},
+    onAcceptFingerprint: () => {},
+    onRejectFingerprint: () => {},
+    onRetry: () => {},
+    onDiagnose: () => {},
+    ...overrides,
+  }
+}
+
+test('a connecting host prints the connect log instead of the host list', () => {
+  const host = hostView({
+    status: 'connecting',
+    phase: 'bootstrap',
+    progress: { code: 'bootstrapping', params: {} },
+    remote: { ...hostView().remote, version: null, uiReady: false },
+    logs: [
+      {
+        seq: 1,
+        at: '2026-11-14T16:03:12.000Z',
+        level: 'info',
+        message: 'SSH connected to 10.0.0.5:22 as ubuntu (fingerprint SHA256:abc)',
+      },
+      {
+        seq: 2,
+        at: '2026-11-14T16:03:13.000Z',
+        level: 'debug',
+        message: 'remote: dsh web listening on 127.0.0.1:38123',
+      },
+      { seq: 3, at: '2026-11-14T16:03:14.000Z', level: 'warn', message: 'adopt check failed: no registry' },
+    ],
+  })
+  const html = render(React.createElement(plugin.components.ManageWindow, manageWindowProps({ host })))
+  assert.match(html, /data-testid="manage-window"/)
+  assert.match(html, /data-testid="manage-live"/)
+  assert.match(html, /正在连接「测试机」/)
+  assert.match(html, /data-testid="connect-log"/)
+  assert.match(html, /连接日志/)
+  assert.match(html, /3 行/)
+  // The Host's own lines, in the order they happened, with their levels intact.
+  const lines = [...html.matchAll(/data-level="(\w+)"[^>]*>(?:<!-- -->)?/g)].map((match) => match[1])
+  assert.deepEqual(lines, ['info', 'debug', 'warn'])
+  const infoAt = html.indexOf('SSH connected to 10.0.0.5:22')
+  const debugAt = html.indexOf('remote: dsh web listening')
+  const warnAt = html.indexOf('adopt check failed')
+  assert.ok(infoAt > 0 && debugAt > infoAt && warnAt > debugAt, 'the log must keep the order it was written in')
+  // A connection is not management: the list and its header actions are not in this window.
+  assert.doesNotMatch(html, /data-testid="host-list"/)
+  assert.doesNotMatch(html, /data-testid="host-add"/)
+  assert.doesNotMatch(html, /data-testid="host-refresh"/)
+  assert.doesNotMatch(html, /data-testid="host-settings"/)
+  assert.doesNotMatch(html, /管理远程主机/)
+})
+
+test('a failed connection keeps its log and offers retry instead of the list', () => {
+  const host = hostView({
+    status: 'error',
+    error: {
+      code: 'auth',
+      title: { zh: 'SSH 认证没有通过', en: 'SSH authentication failed' },
+      detail: { zh: '请检查用户名与密钥。', en: 'Check the user name and key.' },
+      nextSteps: [],
+      retryable: true,
+    },
+    logs: [{ seq: 1, at: '2026-11-14T16:03:12.000Z', level: 'warn', message: 'connect failed: auth' }],
+  })
+  const html = render(React.createElement(plugin.components.ManageWindow, manageWindowProps({ host })))
+  assert.match(html, /data-testid="error-card"/)
+  assert.match(html, /data-testid="error-retry"/)
+  assert.match(html, /connect failed: auth/)
+  assert.match(html, /data-testid="connect-log"/)
+  assert.doesNotMatch(html, /data-testid="host-list"/)
+})
+
+test('the host-key question also prints the log that led to it', () => {
+  const host = hostView({
+    status: 'fingerprint-pending',
+    fingerprint: { sha256: 'SHA256:abc', keyType: 'ssh-ed25519', status: 'pending', pinned: null },
+    logs: [{ seq: 1, at: '2026-11-14T16:03:12.000Z', level: 'info', message: 'SSH key SHA256:abc' }],
+  })
+  const html = render(React.createElement(plugin.components.ManageWindow, manageWindowProps({ host })))
+  assert.match(html, /data-testid="fingerprint-card"/)
+  assert.match(html, /data-testid="connect-log"/)
+  assert.match(html, /SSH key SHA256:abc/)
+  assert.doesNotMatch(html, /data-testid="host-list"/)
+})
+
+test('a host that is not connecting gets the management list back', () => {
+  const host = hostView({ status: 'disconnected', logs: [] })
+  const state = {
+    hostVersion: '0.2.2-rc.1',
+    targetVersion: '0.2.2-rc.1',
+    hosts: [host],
+    settings: {},
+    activeHostId: null,
+    firstRun: false,
+  }
+  const html = render(React.createElement(plugin.components.ManageWindow, manageWindowProps({ host, state })))
+  assert.match(html, /data-testid="host-list"/)
+  assert.match(html, /data-testid="host-add"/)
+  assert.match(html, /远程主机/)
+  assert.doesNotMatch(html, /data-testid="connect-log"/)
+  assert.doesNotMatch(html, /data-testid="manage-live"/)
+})
+
+test('opening 管理界 interface shows the list even for a host that just failed', () => {
+  // The failure keeps its log in the connect window, but the explicit management entry must
+  // not be hijacked by it: one 返回 (or a fresh open) brings the host list back.
+  const host = hostView({
+    status: 'error',
+    error: {
+      code: 'auth',
+      title: { zh: '认证失败', en: 'Authentication failed' },
+      detail: { zh: '', en: '' },
+      nextSteps: [],
+    },
+    logs: [{ seq: 1, at: '2026-11-14T16:03:12.000Z', level: 'warn', message: 'connect failed: auth' }],
+  })
+  const state = {
+    hostVersion: '0.2.2-rc.1',
+    targetVersion: '0.2.2-rc.1',
+    hosts: [host],
+    settings: {},
+    activeHostId: null,
+    firstRun: false,
+  }
+  const html = render(
+    React.createElement(plugin.components.ManageWindow, manageWindowProps({ host, state, view: 'list' })),
+  )
+  assert.match(html, /data-testid="host-list"/)
+  assert.match(html, /data-testid="host-card"/)
+  assert.doesNotMatch(html, /data-testid="connect-log"/)
+  assert.doesNotMatch(html, /data-testid="error-card"/)
+})
+test('the closed window renders nothing', () => {
+  const html = render(
+    React.createElement(plugin.components.ManageWindow, manageWindowProps({ open: false, host: hostView() })),
+  )
+  assert.equal(html, '')
+})
+
+test('the connect console prints raw lines and says so when the Host has none yet', () => {
+  const empty = render(
+    React.createElement(plugin.components.ConnectLog, { t, host: hostView({ status: 'connecting', logs: [] }) }),
+  )
+  assert.match(empty, /data-testid="connect-log-empty"/)
+  assert.match(empty, /等待日志输出/)
+  assert.match(empty, /关闭窗口|关窗不中断连接/)
+
+  const html = render(
+    React.createElement(plugin.components.ConnectLog, {
+      t,
+      host: hostView({
+        status: 'connecting',
+        logs: [
+          {
+            seq: 9,
+            at: '2026-11-14T16:03:12.000Z',
+            level: 'debug',
+            message: 'remote: installing @deepseek-ai/dsh@0.2.2-rc.3 with a token=secret query string',
+          },
+        ],
+      }),
+    }),
+  )
+  // Everything the Host wrote is printed as it was written: no trimming, no rewriting, no
+  // tag of this plugin added in front of it.
+  assert.match(html, /installing @deepseek-ai\/dsh@0\.2\.2-rc\.3 with a token=secret query string/)
+  assert.match(html, /data-level="debug"/)
+  assert.match(html, /1 行/)
+  assert.match(html, /role="log"/)
+  assert.doesNotMatch(html, /dsh-remote-go:/)
+})
+
+test('the connect window resolves host-provided text in English', () => {
+  const host = hostView({
+    status: 'error',
+    error: {
+      code: 'auth',
+      title: { zh: 'SSH 认证没有通过', en: 'SSH authentication failed' },
+      detail: { zh: '请检查用户名与密钥。', en: 'Check the user name and key.' },
+      nextSteps: [],
+      retryable: true,
+    },
+    logs: [],
+  })
+  const html = render(
+    React.createElement(plugin.components.ManageWindow, manageWindowProps({ host, t: enT, getLocaleId: () => 'en' })),
+  )
+  assert.match(html, /SSH authentication failed/)
+  assert.match(html, /Check the user name and key/)
+})
+
 test('progress code map covers every contract code', () => {
   const { dicts } = runApply(plugin)
   const codes = [
@@ -901,7 +1123,7 @@ test('the plugin never selects a main panel or renders the remote page itself', 
   assert.doesNotMatch(SOURCE, /'main'/, 'the plugin must not register the main slot')
   assert.doesNotMatch(SOURCE, /<iframe|h\(\s*'iframe'/, 'no iframe may be rendered')
   // The takeover still has one explicit trigger: opening a host from the row or the list.
-  assert.match(SOURCE, /const openHost = \(host\) => \{[\s\S]*?setTarget\(host\.id\)/)
+  assert.match(SOURCE, /const openHost = \(host(?:, options)?\) => \{[\s\S]*?setTarget\(host\.id\)/)
 })
 
 test('the warm pool keeps every opened host and the last request wins a race', async () => {
@@ -1481,7 +1703,7 @@ test('fingerprint card shows SHA256 and accept / remember actions', () => {
   assert.match(html, /仅本次接受/)
 })
 
-test('wizard step 1 renders the SSH form', () => {
+test('the add-host dialog is one form with save and connect, and no test step', () => {
   const state = {
     hostVersion: '0.2.2-rc.1',
     hosts: [],
@@ -1501,7 +1723,15 @@ test('wizard step 1 renders the SSH form', () => {
   assert.match(html, /添加服务器/)
   assert.match(html, /显示名/)
   assert.match(html, /SSH 地址或别名/)
-  assert.match(html, /保存并测试/)
+  // Two actions, both about the host itself: saving stores the entry, connecting does that
+  // and then hands the connection to the connect window. There is no test step any more.
+  assert.match(html, /data-testid="wizard-save"/)
+  assert.match(html, /data-testid="wizard-connect"/)
+  assert.match(html, />保存</)
+  assert.match(html, />连接</)
+  assert.doesNotMatch(html, /保存并测试|保存和测试/)
+  assert.doesNotMatch(html, /wizard-step-|连接测试|稍后再说/)
+  assert.doesNotMatch(html, /data-testid="wizard-cancel"/)
   // Key files and passwords are the only methods; the agent choice is gone.
   assert.match(html, /密钥文件/)
   assert.doesNotMatch(html, /SSH Agent/)
@@ -1752,6 +1982,19 @@ test('every automation data-testid required by acceptance is rendered', () => {
         onClose: () => {},
       }),
     ),
+    connectWindow: render(
+      React.createElement(
+        plugin.components.ManageWindow,
+        manageWindowProps({
+          host: hostView({
+            status: 'connecting',
+            phase: 'ssh',
+            progress: { code: 'ssh-connecting' },
+            logs: [{ seq: 1, at: '2026-11-14T16:03:12.000Z', level: 'info', message: 'SSH connected' }],
+          }),
+        }),
+      ),
+    ),
     wizardPassword: render(
       React.createElement(plugin.components.WizardDialog, {
         t,
@@ -1833,13 +2076,16 @@ test('every automation data-testid required by acceptance is rendered', () => {
     'host-edit',
     'host-delete',
     'host-wizard',
-    'wizard-step-1',
-    'wizard-next',
+    'wizard-form',
+    'wizard-save',
+    'wizard-connect',
     'wizard-name',
     'wizard-address',
     'wizard-auth',
-    'wizard-cancel',
     'wizard-password',
+    'connect-log',
+    'connect-log-line',
+    'manage-live',
     'diagnostics',
     'diagnose-rerun',
     'diagnose-copy',

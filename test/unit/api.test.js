@@ -323,7 +323,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
     // v2.0 removes mirror/workspace endpoints; an unknown settings field is ignored.
-    assert.equal(result.json.apiVersion, '2.0')
+    assert.equal(result.json.apiVersion, '2.1')
   } finally {
     await api.close()
     await service.shutdown()

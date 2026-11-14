@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.0）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.1）
 
 > 本文件是 Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议。两侧都不得依赖对方的内部实现。
 >
@@ -9,6 +9,8 @@
 >
 > **v2.0 变更**：移除镜像/工作区相关端点（`GET /local/workspaces`、`GET /hosts/:id/workspaces`、
 > `GET /hosts/:id/mirrors`、`POST /hosts/:id/mirrors/sync`）。主机、连接、诊断与设置端点保持不变。
+>
+> **v2.1 变更**：`HostView` 增加 `logs`（连接窗口的日志尾），随 `/state` 与 SSE 一起下发；没有新增端点。
 
 ## 0. 通用类型
 
@@ -50,6 +52,13 @@ interface FingerprintView {
   pinned?: string | null
 }
 
+interface ConnectLogEntry {
+  seq: number     // 每台主机内单调递增，用于稳定渲染与去重
+  at: string      // ISO 时间戳
+  level: 'debug' | 'info' | 'warn' | 'error'
+  message: string // 原始一行（SSH / npx / 远端 stdout / 连接步骤）
+}
+
 interface RemoteView {
   version: string | null        // 远端 DSH 版本（= 本机版本）
   uiReady: boolean
@@ -83,6 +92,12 @@ interface HostView {
     detectedAt: string
     processes: { pid: number; command: string }[]
   } | null
+  /**
+   * 连接窗口的日志尾（Client 原样打印）。仅当 status 是 `connecting` / `fingerprint-pending` /
+   * `error` 时非空——也就是屏幕上确实有连接窗口的时候；其余状态为 `[]`，避免每帧都携带历史日志。
+   * 最多 120 条，旧的先掉；每条是 Host 写下的原始一行（本机内容，不加前缀、不改写、不脱敏）。
+   */
+  logs: ConnectLogEntry[]
   remote: RemoteView
   keepAlive: 'keep' | 'stop' | 'idle'
   idleMinutes: number
@@ -173,7 +188,7 @@ data: {}
 ### `GET /version`
 
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.0", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.1", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
