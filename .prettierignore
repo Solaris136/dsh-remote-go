@@ -4,6 +4,7 @@ vendor/
 artifacts/
 coverage/
 .pnpm-store/
+.agents/
 
 # Packed/published output and captured evidence keep their byte-level form.
 e2e/artifacts/
