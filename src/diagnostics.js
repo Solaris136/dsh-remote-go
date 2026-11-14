@@ -5,12 +5,7 @@ import { remoteHttpStatus } from './webapp.js'
 import { isNodeVersionSupported, versionParity } from './version.js'
 import { nowIso } from './util.js'
 
-/**
- * @param {any} runtime
- * @param {{ targetVersion: string | null }} ctx
- */
 export async function diagnoseHost(runtime, ctx) {
-  /** @type {{ id: string, title: { zh: string, en: string }, status: 'pass'|'fail'|'unknown', detail: { zh: string, en: string } }[]} */
   const checks = []
   const push = (checkId, title, status, detail) => checks.push({ id: checkId, title, status, detail })
   const sshLive = Boolean(runtime.ssh?.connected)

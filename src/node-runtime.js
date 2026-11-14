@@ -23,29 +23,10 @@ import { errors } from './errors.js'
 import { headTail, shellQuote } from './util.js'
 import { MIN_NODE_VERSION, normalizeVersion, parseVersion } from './version.js'
 
-/** Official build hosts, tried in order: nodejs.org first, npmmirror when it is unreachable. */
 export const NODE_DIST_BASES = Object.freeze(['https://nodejs.org/dist', 'https://npmmirror.com/mirrors/node'])
 
-/**
- * The version whose `engines.node` drives the managed build. DSH itself declares
- * the requirement (`@deepseek-ai/dsh` package.json → `engines.node`), so the
- * plugin reads it at runtime instead of hard-coding a number: the managed Node
- * is the lowest version that satisfies that declaration. When the declaration
- * cannot be read, fall back to the same floor the plugin has always used.
- */
 export const MANAGED_NODE_VERSION_FALLBACK = MIN_NODE_VERSION
 
-/**
- * Turn an `engines.node` range into the exact version to install — the lowest
- * version satisfying the range. Only the lower bound matters: the plugin pins
- * that build rather than chasing the newest patch.
- *
- * Handles the shapes `engines` actually uses: `>=24.9.0`, `^24.9.0`, `~24.9.0`,
- * `24.9.0`, `>24.8.0`, and ranges like `>=24.9.0 <25`.
- * @param {string | null | undefined} range
- * @param {string} [fallback]
- * @returns {string}
- */
 export function managedNodeVersionFromEngine(range, fallback = MANAGED_NODE_VERSION_FALLBACK) {
   const text = String(range ?? '').trim()
   if (text === '') return normalizeVersion(fallback)
@@ -62,22 +43,14 @@ export function managedNodeVersionFromEngine(range, fallback = MANAGED_NODE_VERS
   return normalizeVersion(`${Number(match[1])}.${Number(match[2] ?? 0)}.${Number(match[3] ?? 0)}`)
 }
 
-/** Bounds for the remote steps; each one is a single `ssh.exec`. */
 export const NODE_SCAN_TIMEOUT_MS = 30_000
 export const NODE_CHECKSUM_TIMEOUT_MS = 240_000
 export const NODE_INSTALL_TIMEOUT_MS = 30 * 60_000
 
-/** The tarball plus its unpacked copy need roughly this much free space. */
 export const NODE_MIN_FREE_KB = 400 * 1024
 
-/**
- * Official Linux builds of Node 20+ need glibc 2.28 or newer. Older distros
- * (CentOS 7/8, Ubuntu 18.04) cannot run the binary we would download, so fail
- * with that reason instead of a generic "verify" error.
- */
 export const NODE_MIN_GLIBC = '2.28'
 
-/** `uname -m` values that have an official Linux build, mapped to the dist name. */
 const DIST_ARCH = new Map([
   ['x86_64', 'x64'],
   ['amd64', 'x64'],
@@ -89,22 +62,10 @@ const DIST_ARCH = new Map([
   ['s390x', 's390x'],
 ])
 
-/**
- * @typedef {{ version: string, dir: string }} ManagedNode
- * @typedef {{ step: string, version?: string, source?: string, bytes?: number }} NodeProgress
- * @typedef {{ base: string, version: string, sha256: string, file: string }} NodeRelease
- */
-
-/** @param {unknown} arch @returns {string | null} */
 export function nodeDistArch(arch) {
   return DIST_ARCH.get(String(arch ?? '').toLowerCase()) ?? null
 }
 
-/**
- * Compare dotted numeric versions (`2.39` vs `2.28`); missing components count as 0.
- * @param {string} left @param {string} right
- * @returns {-1 | 0 | 1}
- */
 function compareGlibc(left, right) {
   const a = String(left ?? '').split('.')
   const b = String(right ?? '').split('.')
@@ -119,11 +80,6 @@ function compareGlibc(left, right) {
   return 0
 }
 
-/**
- * The listing of installed managed builds.
- * @param {{ nodeDir: string }} layout
- * @returns {string}
- */
 export function buildNodeScanScript(layout) {
   return `set -u
 NODE_DIR=${shellQuote(layout.nodeDir)}
@@ -141,12 +97,7 @@ fi
 `
 }
 
-/**
- * @param {string} stdout
- * @returns {ManagedNode[]}
- */
 export function parseNodeScanOutput(stdout) {
-  /** @type {ManagedNode[]} */
   const versions = []
   for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
     const parts = rawLine.split('\t')
@@ -159,12 +110,6 @@ export function parseNodeScanOutput(stdout) {
   return versions
 }
 
-/**
- * Fetch the pinned build's SHA-256 from the first reachable dist host. The
- * checksum file is tiny; the tarball is verified against it before unpacking.
- * @param {{ downloadDir: string, version: string, arch: string, bases?: readonly string[] }} input
- * @returns {string}
- */
 export function buildNodeChecksumScript(input) {
   const bases = (input.bases ?? NODE_DIST_BASES).map((base) => shellQuote(base)).join(' ')
   return `set -u
@@ -208,11 +153,6 @@ exit 5
 `
 }
 
-/**
- * @param {string} stdout
- * @param {{ version: string, arch: string, bases?: readonly string[] }} input
- * @returns {{ base: string, version: string, sha256: string, file: string } | null}
- */
 export function parseNodeChecksumOutput(stdout, input) {
   const file = `node-v${input.version}-linux-${input.arch}.tar.gz`
   const allowed = input.bases ?? NODE_DIST_BASES
@@ -227,13 +167,6 @@ export function parseNodeChecksumOutput(stdout, input) {
   return null
 }
 
-/**
- * Download (with the other host as fallback), verify, extract and swap the build
- * into place. Prints `STEP`/`BYTES`/`READY` lines for progress, and `FAILED` with
- * a reason on error.
- * @param {{ layout: { nodeDir: string, downloadDir: string }, release: NodeRelease, bases?: readonly string[] }} input
- * @returns {string}
- */
 export function buildNodeInstallScript(input) {
   const bases = (input.bases ?? NODE_DIST_BASES).map((base) => shellQuote(base)).join(' ')
   const { release } = input
@@ -334,23 +267,14 @@ printf 'READY\\t%s\\n' "$BINDIR"
 `
 }
 
-/** @param {unknown} error */
 function technicalOf(error) {
   return error instanceof Error ? error.message : String(error ?? '')
 }
 
-/**
- * @param {{ zh: string, en: string }} detail
- * @param {string | undefined} technical
- */
 function nodeError(detail, technical) {
   return errors.nodeInstallFailed(detail, technical ? { technical } : undefined)
 }
 
-/**
- * @param {any} result
- * @returns {{ code: number, stdout: string, stderr: string }}
- */
 function normalizeExecResult(result) {
   return {
     code: typeof result?.code === 'number' ? result.code : 0,
@@ -359,11 +283,6 @@ function normalizeExecResult(result) {
   }
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<any> }} ssh
- * @param {{ nodeDir: string }} layout
- * @returns {Promise<ManagedNode[]>}
- */
 async function scanManagedNode(ssh, layout) {
   let result
   try {
@@ -388,14 +307,6 @@ async function scanManagedNode(ssh, layout) {
   return parseNodeScanOutput(result.stdout)
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<any> }} ssh
- * @param {{ layout: { downloadDir: string }, version: string, arch: string, bases?: readonly string[] }} input
- * @returns {Promise<
- *   | { ok: true, release: NodeRelease }
- *   | { ok: false, reason: 'no-fetch' | 'unreachable' | 'no-checksum', technical?: string }
- * >}
- */
 async function resolveNodeRelease(ssh, input) {
   let result
   try {
@@ -433,16 +344,6 @@ async function resolveNodeRelease(ssh, input) {
   return { ok: false, reason: 'unreachable', technical: headTail(`${result.stdout}\n${result.stderr}`, 600) }
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<any> }} ssh
- * @param {{
- *   layout: { nodeDir: string, downloadDir: string },
- *   release: NodeRelease,
- *   bases?: readonly string[],
- *   onProgress: (event: NodeProgress) => void,
- * }} input
- * @returns {Promise<{ ok: true, dir: string } | { ok: false, reason: string, technical?: string }>}
- */
 async function installNodeRelease(ssh, input) {
   const expectedDir = `${input.layout.nodeDir}/v${input.release.version}`
   let buffered = ''
@@ -511,31 +412,6 @@ async function installNodeRelease(ssh, input) {
   return { ok: true, dir }
 }
 
-/**
- * Ensure the pinned managed Node build is installed, installing (or replacing a
- * stale build) when it is not. Returns the paths the launch plan should use.
- *
- * The caller always uses the managed runtime: there is no system-Node fallback,
- * so a failure here is the connection's failure.
- *
- * @param {{ exec: (command: string, options?: any) => Promise<any> }} ssh
- * @param {{
- *   facts: import('./probe.js').ProbeFacts,
- *   layout: { nodeDir: string, downloadDir: string, root: string },
- *   version?: string,
- *   bases?: readonly string[],
- *   onProgress?: (event: NodeProgress) => void,
- * }} options
- * @returns {Promise<{
- *   managed: true,
- *   version: string,
- *   nodePath: string,
- *   npmPath: string,
- *   npxPath: string,
- *   nodeBinDir: string,
- *   installed: boolean,
- * }>}
- */
 export async function ensureRemoteNode(ssh, options) {
   const facts = options.facts ?? {}
   const layout = options.layout
@@ -629,11 +505,6 @@ export async function ensureRemoteNode(ssh, options) {
   }
 }
 
-/**
- * @param {'no-fetch' | 'unreachable' | 'no-checksum'} reason
- * @param {string} version
- * @returns {{ zh: string, en: string }}
- */
 function resolveFailureDetail(reason, version) {
   if (reason === 'no-fetch') {
     return {
@@ -653,13 +524,6 @@ function resolveFailureDetail(reason, version) {
   }
 }
 
-/**
- * The probe facts with the managed Node substituted in, so the launch plan uses
- * the provisioned binaries without a second probe round-trip.
- * @param {import('./probe.js').ProbeFacts} facts
- * @param {{ version: string, nodePath: string, npmPath?: string, npxPath: string }} managed
- * @returns {import('./probe.js').ProbeFacts}
- */
 export function applyManagedNodeFacts(facts, managed) {
   return {
     ...facts,

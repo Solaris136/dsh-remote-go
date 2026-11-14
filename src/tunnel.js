@@ -6,21 +6,6 @@
  */
 import net from 'node:net'
 
-/**
- * @typedef {{
- *   ssh: { forwardOut: (destHost: string, destPort: number, srcHost?: string, srcPort?: number) => Promise<import('node:stream').Duplex> },
- *   remoteHost?: string,
- *   remotePort: number,
- *   listenHost?: string,
- *   listenPort?: number,
- *   onError?: (error: Error) => void,
- * }} TunnelOptions
- */
-
-/**
- * @param {TunnelOptions} options
- * @returns {Promise<{ localPort: number, listenHost: string, urlHost: string, connections: number, close: () => Promise<void> }>}
- */
 export async function createTunnel(options) {
   const remoteHost = options.remoteHost ?? '127.0.0.1'
   const listenHost = options.listenHost ?? '127.0.0.1'

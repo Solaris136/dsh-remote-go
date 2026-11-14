@@ -21,7 +21,6 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  * }} Settings
  */
 
-/** @returns {Settings} */
 export function defaultSettings() {
   return {
     defaultPort: 22,
@@ -54,28 +53,20 @@ export function normalizeProfileName(value) {
   return text
 }
 
-/** @param {unknown} value @param {unknown[]} allowed @param {any} fallback */
 function oneOf(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback
 }
 
-/** @param {unknown} value @param {number} min @param {number} max @param {number} fallback */
 function numberIn(value, min, max, fallback) {
   const num = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(num)) return fallback
   return clamp(Math.round(num), min, max)
 }
 
-/** @param {unknown} value @param {boolean} fallback */
 function boolean(value, fallback) {
   return typeof value === 'boolean' ? value : fallback
 }
 
-/**
- * Merge a saved/partial settings object over defaults with validation.
- * @param {unknown} raw
- * @returns {Settings}
- */
 export function sanitizeSettings(raw) {
   const defaults = defaultSettings()
   if (!isPlainObject(raw)) return defaults
@@ -109,12 +100,6 @@ export function sanitizeSettings(raw) {
   }
 }
 
-/**
- * Validate and normalize a host entry coming from the Client.
- * @param {unknown} raw
- * @param {{ settings?: Settings, existing?: Record<string, any> | null, idFactory?: () => string }} [options]
- * @returns {Record<string, any>}
- */
 export function sanitizeHostEntry(raw, options = {}) {
   const settings = options.settings ?? defaultSettings()
   const existing = options.existing ?? null

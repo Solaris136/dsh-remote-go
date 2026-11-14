@@ -13,24 +13,12 @@
  * client can say so instead of promising storage it cannot deliver.
  */
 
-/** Record tag for one host's saved password. */
 const RECORD_PREFIX = 'dsh-remote-go:ssh-password:'
 const PAYLOAD_VERSION = 1
 
-/**
- * @param {{ ctx?: any, logger?: { warn: (...args: any[]) => void } }} options
- * @returns {{
- *   available(): boolean,
- *   async get(hostId: string): Promise<string | null>,
- *   async set(hostId: string, password: string): Promise<boolean>,
- *   async remove(hostId: string): Promise<void>,
- *   async has(hostId: string): Promise<boolean>,
- * }}
- */
 export function createSecretStore(options = {}) {
   const logger = options.logger ?? console
 
-  /** The plugin-owned record space, when the composition provides it. */
   function credentials() {
     try {
       const ctx = options.ctx
@@ -46,11 +34,6 @@ export function createSecretStore(options = {}) {
     }
   }
 
-  /**
-   * A CredentialKey is a branded string; the brand exists only in types, so the
-   * plain string is what the service receives at runtime.
-   * @param {string} hostId
-   */
   function keyFor(hostId) {
     return RECORD_PREFIX + String(hostId)
   }
@@ -79,12 +62,6 @@ export function createSecretStore(options = {}) {
       return (await this.get(hostId)) !== null
     },
 
-    /**
-     * Store one password. Returns false when no credential store exists, so the
-     * caller can tell the user instead of pretending it was saved.
-     * @param {string} hostId
-     * @param {string} password
-     */
     async set(hostId, password) {
       const service = credentials()
       if (!service || !hostId || typeof password !== 'string' || password === '') return false
@@ -100,7 +77,6 @@ export function createSecretStore(options = {}) {
       }
     },
 
-    /** @param {string} hostId */
     async remove(hostId) {
       const service = credentials()
       if (!service || typeof service.deleteRecord !== 'function' || !hostId) return

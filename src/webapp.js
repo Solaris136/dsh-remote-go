@@ -14,27 +14,10 @@ import { remoteLayout } from './layout.js'
 import { headTail, isLoopbackHost, shellQuote } from './util.js'
 import { normalizeVersion } from './version.js'
 
-/**
- * @typedef {{
- *   url: string,
- *   host: string,
- *   port: number,
- *   token: string,
- *   rawLine: string,
- * }} ParsedWebLine
- */
-
 const WEB_LINE_RE = /dsh web:\s*(https?:\/\/[^\s]+)/
 
-/**
- * Version tag written into the run registry. Bumping it invalidates adoption of
- * instances started by an older launch path (they may lack the browser-carrier
- * overlay, which would leave the in-window page stuck at "failed to load
- * plugins"). One restart after a plugin upgrade is the cost of correctness.
- */
 export const LAUNCH_MARKER = 'browser-carrier-v1'
 
-/** Overlay file the launch passes with `--patch` when the profile disables the carrier. */
 export const BROWSER_CARRIER_PATCH_FILE = 'browser-carrier.patch.yml'
 
 /**
@@ -51,13 +34,6 @@ const BROWSER_CARRIER_PATCH = `# Written by dsh-remote-go. The remote window is 
 - id: api-remotes
   disabled: false`
 
-/**
- * Parse the readiness line printed by `dsh web` (design §15.2 P3): the plugin
- * owns the remote process, so it reads the URL from stdout instead of guessing
- * a systemd unit.
- * @param {string} text
- * @returns {ParsedWebLine | null}
- */
 export function parseWebLine(text) {
   const match = WEB_LINE_RE.exec(String(text ?? ''))
   if (!match) return null
@@ -75,11 +51,6 @@ export function parseWebLine(text) {
   return { url: rawUrl, host, port, token, rawLine: match[0] }
 }
 
-/**
- * @param {import('./bootstrap.js').RuntimePlan} plan
- * @param {ReturnType<typeof remoteLayout>} layout
- * @param {{ profile?: string }} [options]
- */
 export function buildStartCommand(plan, layout, options = {}) {
   const profile = options.profile ?? plan.profile ?? DEFAULT_REMOTE_PROFILE
   const patch = options.patchPath ? `--patch ${shellQuote(options.patchPath)} ` : ''
@@ -88,16 +59,6 @@ export function buildStartCommand(plan, layout, options = {}) {
   return `env DSH_HOME=${shellQuote(layout.dshHome)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} ${args}`
 }
 
-/**
- * Compose the profile without booting it and check whether a bundle disabled the
- * browser carrier. When it did, write the launch-only overlay and report PATCH;
- * a profile that composes cleanly reports CLEAR. A failed compose (e.g. the
- * profile does not exist yet) reports DUMP-FAILED and the launch proceeds
- * without an overlay, leaving the real error to the start step.
- * @param {import('./bootstrap.js').RuntimePlan} plan
- * @param {ReturnType<typeof remoteLayout>} layout
- * @param {string} profile
- */
 export function buildBrowserCarrierProbe(plan, layout, profile) {
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
   const dumpFile = shellQuote(`${layout.root}/profile-dump.yml`)
@@ -119,11 +80,6 @@ else
 fi`
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout: ReturnType<typeof remoteLayout>, profile: string, onLine?: (line: string) => void }} options
- * @returns {Promise<{ status: 'patched' | 'clear' | 'unknown', patchPath: string | null }>}
- */
 export async function ensureBrowserCarrier(ssh, options) {
   try {
     const result = await ssh.exec(buildBrowserCarrierProbe(options.plan, options.layout, options.profile), {
@@ -151,13 +107,6 @@ export async function ensureBrowserCarrier(ssh, options) {
   }
 }
 
-/**
- * Detached start script: setsid + nohup, waits for the readiness line, logs to
- * the plugin's remote log directory, and records a pid/port/profile registry file.
- * @param {string} startCommand
- * @param {ReturnType<typeof remoteLayout>} layout
- * @param {{ waitSeconds?: number, version?: string, profile?: string }} [options]
- */
 export function buildStartScript(startCommand, layout, options = {}) {
   const waitSeconds = options.waitSeconds ?? Math.ceil(REMOTE_START_TIMEOUT_MS / 1000)
   const version = normalizeVersion(options.version ?? '')
@@ -200,27 +149,6 @@ echo "DONE:$PID:$PORT"
 `
 }
 
-/**
- * @typedef {{
- *   pid: number,
- *   port: number,
- *   token: string,
- *   url: string,
- *   logPath: string,
- *   startedAt: string,
- *   rawLine: string,
- *   profile: string,
- *   dshHome: string,
- *   browserCarrier: 'patched' | 'clear' | 'unknown',
- * }} RemoteWebInfo
- */
-
-/**
- * Start the remote web app and parse its readiness line.
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout?: ReturnType<typeof remoteLayout>, home?: string | null, profile?: string, timeoutMs?: number, onLine?: (line: string) => void }} options
- * @returns {Promise<RemoteWebInfo>}
- */
 export async function startRemoteWeb(ssh, options) {
   const layout = options.layout ?? remoteLayout(options.home ?? null)
   const profile = options.profile ?? options.plan.profile ?? DEFAULT_REMOTE_PROFILE
@@ -231,7 +159,6 @@ export async function startRemoteWeb(ssh, options) {
     version: options.plan.start.targetVersion,
     profile,
   })
-  /** @type {string[]} */
   const lines = []
   const result = await ssh.exec(script, {
     timeoutMs: (options.timeoutMs ?? REMOTE_START_TIMEOUT_MS) + 30_000,
@@ -274,11 +201,6 @@ export async function startRemoteWeb(ssh, options) {
   }
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {ReturnType<typeof remoteLayout>} layout
- * @param {{ pid?: number }} [options]
- */
 export async function stopRemoteWeb(ssh, layout, options = {}) {
   const pid = Number(options.pid ?? 0)
   const script = `set -u
@@ -307,10 +229,6 @@ echo "STOPPED"
   }
 }
 
-/**
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {ReturnType<typeof remoteLayout>} layout
- */
 export async function readRunRegistry(ssh, layout) {
   try {
     const result = await ssh.exec(`cat ${shellQuote(layout.runFile)} 2>/dev/null || true`, { timeoutMs: 10_000 })
@@ -322,13 +240,6 @@ export async function readRunRegistry(ssh, layout) {
   }
 }
 
-/**
- * Read the last `dsh web:` line from the remote log. Used to adopt an instance
- * started by an earlier local DSH process (design §15.1 tunnel adoption).
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {ReturnType<typeof remoteLayout>} layout
- * @returns {Promise<ParsedWebLine | null>}
- */
 export async function readWebLineFromLog(ssh, layout) {
   try {
     const result = await ssh.exec(`grep 'dsh web:' ${shellQuote(layout.logFile)} 2>/dev/null | tail -n 1 || true`, {
@@ -341,11 +252,6 @@ export async function readWebLineFromLog(ssh, layout) {
   }
 }
 
-/**
- * Is a remote pid still alive?
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {number} pid
- */
 export async function remotePidAlive(ssh, pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -402,17 +308,6 @@ export async function adoptRemoteWeb(ssh, layout, options = {}) {
   }
 }
 
-/**
- * The shell probe for DSH processes the plugin did not start.
- *
- * It deliberately scans `ps` instead of `pgrep`: the command string itself lives
- * in the `bash -lc` process, and a naive `pgrep -f` would match its own shell.
- * Only real runtime executables (`node`, `dsh`, `npm`, `npx`) are considered,
- * and a process whose `DSH_HOME` points somewhere other than `~/.dsh` is not a
- * conflict for this connection.
- * @param {number[]} [ignorePids]
- * @returns {string}
- */
 export function buildForeignDshCommand(ignorePids = []) {
   const ignore = (Array.isArray(ignorePids) ? ignorePids : [])
     .map((pid) => Number(pid))
@@ -444,12 +339,7 @@ printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
 done`
 }
 
-/**
- * @param {string} stdout
- * @returns {{ pid: number, command: string }[]}
- */
 export function parseForeignDshOutput(stdout) {
-  /** @type {{ pid: number, command: string }[]} */
   const processes = []
   for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
     const tab = rawLine.indexOf('\t')
@@ -492,14 +382,6 @@ export async function findForeignDshProcesses(ssh, options = {}) {
   }
 }
 
-/**
- * Stop the processes the user explicitly approved. Numeric pids only, SIGTERM
- * first, SIGKILL after a bounded wait, then confirm they are gone.
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ pid: number }[]} processes
- * @param {{ timeoutMs?: number }} [options]
- * @returns {Promise<{ ok: boolean, alive: number[], output: string }>}
- */
 export async function stopForeignDshProcesses(ssh, processes, options = {}) {
   const pids = [
     ...new Set(
@@ -542,12 +424,6 @@ echo "STOPPED"
   }
 }
 
-/**
- * Check the remote UI locally on the remote loopback (server alive check).
- * `curl` is preferred; `wget` is the fallback so a minimal host still works.
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {number} port
- */
 export async function remoteHttpStatus(ssh, port) {
   if (!Number.isInteger(port) || port <= 0) return null
   const script = `URL="http://127.0.0.1:${port}/"
@@ -566,13 +442,6 @@ fi
   }
 }
 
-/**
- * Poll until the remote web answers (200 on the root means the server is up;
- * 401 without a cookie is also expected and proves the listener is alive).
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {number} port
- * @param {{ attempts?: number, intervalMs?: number }} [options]
- */
 export async function waitForRemoteUi(ssh, port, options = {}) {
   const attempts = options.attempts ?? 20
   const intervalMs = options.intervalMs ?? 500
@@ -585,30 +454,6 @@ export async function waitForRemoteUi(ssh, port, options = {}) {
   return { ok: false, status: last }
 }
 
-/**
- * @typedef {{
- *   ok: boolean,
- *   firstStatus: number,
- *   cookieNames: string[],
- *   location: string | null,
- *   status: number,
- *   title: string | null,
- *   frameBlocked: boolean,
- *   xFrameOptions: string | null,
- *   csp: string | null,
- *   bodyLength: number,
- * }} TokenExchangeResult
- */
-
-/**
- * Exchange the launch token for the authority-bound signing cookie through the
- * local tunnel, then fetch the clean root with that cookie. This proves the
- * loopback same-site path the guest will use (design §7.0 / §9.2).
- * @param {number} localPort
- * @param {string} token
- * @param {{ timeoutMs?: number, path?: string }} [options]
- * @returns {Promise<TokenExchangeResult>}
- */
 export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
   const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS
   const basePath = options.path ?? '/'
@@ -646,10 +491,6 @@ export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
   }
 }
 
-/**
- * @param {{ port: number, path: string, headers?: Record<string, string>, timeoutMs: number }} options
- * @returns {Promise<{ status: number, headers: http.IncomingHttpHeaders, body: string }>}
- */
 function httpRequest(options) {
   return new Promise((resolve, reject) => {
     const request = http.request(
@@ -662,7 +503,6 @@ function httpRequest(options) {
         timeout: options.timeoutMs,
       },
       (response) => {
-        /** @type {Buffer[]} */
         const chunks = []
         response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
         response.on('end', () => {

@@ -118,15 +118,6 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     assert.match(open.json.url, /^http:\/\/127\.0\.0\.1:45123\/\?token=/)
     assert.equal(open.json.localPort, 45123)
 
-    const keepalive = await call(api.base, `/hosts/${hostId}/keepalive`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ keepAlive: 'idle', idleMinutes: 20 }),
-    })
-    assert.equal(keepalive.status, 200)
-    assert.equal(keepalive.json.host.keepAlive, 'idle')
-    assert.equal(keepalive.json.host.idleMinutes, 20)
-
     const disconnected = await call(api.base, `/hosts/${hostId}/disconnect`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

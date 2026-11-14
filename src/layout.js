@@ -11,20 +11,6 @@
  */
 import { REMOTE_DSH_DIR, REMOTE_STATE_DIR } from './constants.js'
 
-/**
- * @param {string | null} [home] remote user home directory reported by the probe
- * @returns {{
- *   root: string,
- *   stateHome: string,
- *   dshHome: string,
- *   nodeDir: string,
- *   downloadDir: string,
- *   logsDir: string,
- *   logFile: string,
- *   runDir: string,
- *   runFile: string,
- * }}
- */
 export function remoteLayout(home = null) {
   const dshHome = expandRemoteTilde(`~/${REMOTE_DSH_DIR}`, home).replace(/\/+$/, '')
   const root = `${dshHome}/${REMOTE_STATE_DIR}`

@@ -18,13 +18,8 @@ import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 export const name = PLUGIN_ID
 export const inject = ['webServer']
 
-/** Services the plugin can use when the composition provides them. */
 export const optional = ['connection', 'credentials']
 
-/**
- * @param {any} ctx Cordis context.
- * @param {Record<string, any>} [config]
- */
 export function apply(ctx, config = {}) {
   const logger = createLogger()
   const home = config.home ? String(config.home) : resolveDshHome(process.env)
@@ -99,20 +94,11 @@ export function apply(ctx, config = {}) {
   return service
 }
 
-/**
- * Live self-description for diagnostics and end-to-end acceptance: proves the
- * host row is loaded and whether the browser half is registered in the client
- * module graph (with a readable bundle path).
- * @param {any} ctx
- * @param {{ home: string, stateDir: string, localVersion: string | null, engineNodeRange?: string | null }} info
- */
 export function describeSelf(ctx, info) {
-  /** @type {Record<string, unknown>} */
   const out = {
     home: info.home,
     stateDir: info.stateDir,
     hostVersion: info.localVersion,
-    /** Local DSH `engines.node`; the managed Node version is its lower bound. */
     engineNodeRange: info.engineNodeRange ?? null,
     entry: null,
     client: null,
@@ -131,7 +117,6 @@ export function describeSelf(ctx, info) {
     const graph = clientModules?.graph?.()
     const clientPath = clientModules?.clientPath?.(PLUGIN_ID) ?? null
     const row = Array.isArray(graph?.entries) ? (graph.entries.find((item) => item.id === PLUGIN_ID) ?? null) : null
-    /** @type {Record<string, unknown> | null} */
     let bundle = null
     if (clientPath) {
       try {
@@ -155,7 +140,6 @@ export function describeSelf(ctx, info) {
   return out
 }
 
-/** @returns {Record<string, (...args: any[]) => void>} */
 function createLogger() {
   const tag = '[dsh-remote-go]'
   const write = (/** @type {'info'|'warn'|'error'|'debug'} */ level, /** @type {any[]} */ args) => {

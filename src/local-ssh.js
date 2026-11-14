@@ -6,10 +6,6 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
-/**
- * @param {{ home: string, readFileImpl?: typeof readFile, exists?: (path: string) => boolean }} input
- * @returns {Promise<{ sshDir: string, configText: string, knownHostsText: string, configPath: string, knownHostsPath: string }>}
- */
 export async function loadLocalSshMaterial(input) {
   const sshDir = path.join(input.home, '.ssh')
   const configPath = path.join(sshDir, 'config')

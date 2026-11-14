@@ -1,56 +1,28 @@
 /**
- * Shared atomic JSON persistence for the plugin's own state files.
- *
- * `HostStore` (hosts/settings/secrets) uses this
- * module, so every file the plugin writes gets the same protections (design §8):
- *
- * - directory created 0700, file written 0600;
- * - unique `crypto.randomUUID()` temp file opened with `wx` (a temp name can
- *   never be reused or shared), fsynced, then renamed;
- * - the rename is retried on `EPERM`/`EBUSY`/`EACCES` (Windows throws these when
- *   another process briefly holds or replaces the target), and any failure
- *   removes the temp file so no `.tmp` is ever left behind;
- * - the containing directory is fsynced where the platform allows it;
- * - writers serialize across processes on a `wx` lock file (stale locks from a
- *   crashed writer are broken after `LOCK_STALE_MS`), plus an in-process chain
- *   keyed by the lock path so two store instances cannot interleave.
- *
- * Reads are tolerant and never throw: a missing file is `missing`, unparseable
- * content is `corrupt`; each store decides what that means for it (fallback vs.
- * quarantine), which keeps their error/typing behaviour their own.
+ * Atomic JSON persistence for the plugin's own state files (design §8):
+ * 0700 directory, 0600 file, `wx` random temp file + fsync + rename retry, and a
+ * cross-process `wx` lock. Reads are tolerant: missing or unparseable files are
+ * reported, never thrown.
  */
 import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
-/** Rename attempts when another process holds/replaces the target (Windows). */
 export const RENAME_RETRY_ATTEMPTS = 5
-
-/** Base backoff for a busy rename; multiplied by the attempt number. */
 export const RENAME_RETRY_BASE_MS = 20
-
-/** A lock file older than this is stale (the writer crashed). */
 export const LOCK_STALE_MS = 10_000
-
-/** How long to wait for another process to release the lock before failing. */
 export const LOCK_WAIT_MS = 20_000
-
-/** Poll interval while waiting for the cross-process lock. */
 export const LOCK_RETRY_MS = 10
-
 /**
- * How long a non-`EEXIST` lock error is trusted as contention without the lock being
- * present. Windows reports a mid-create/mid-delete race as EPERM/EACCES, but the same
- * codes also describe a lock that can never be created (ACL denial, read-only mount);
- * past this window the original error is surfaced instead of a misleading timeout.
+ * How long a non-`EEXIST` lock error counts as contention without the lock present.
+ * Windows reports mid-create/mid-delete races as EPERM/EACCES, but those codes also
+ * mean a lock that can never be created (ACL denial, read-only mount); past this
+ * window the original error is surfaced instead of a misleading timeout.
  */
 export const LOCK_TRANSIENT_MS = 250
-
-/** Attempts to unlink a lock on release before giving up (a leaked lock costs a stale wait). */
 export const LOCK_UNLINK_ATTEMPTS = 3
 
-/** @param {number} ms @returns {Promise<void>} */
 export function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
@@ -58,24 +30,18 @@ export function sleep(ms) {
 }
 
 /**
- * In-process chains, keyed by lock path. The value is the tail of the chain
- * (always settled), so a rejected write never poisons the next waiter.
+ * In-process chains keyed by lock path; the value is the always-settled tail so a
+ * rejected write never poisons the next waiter.
  * @type {Map<string, Promise<unknown>>}
  */
 const LOCAL_CHAINS = new Map()
 
 /**
- * Run `task` while holding the cross-process lock, serialized with every other
- * in-process holder of the same lock path.
+ * Run `task` under the cross-process lock, serialized with every in-process holder
+ * of the same lock path.
  * @template T
  * @param {string} lockFile
- * @param {{
- *   fs?: typeof fs,
- *   logger?: { warn?: (...args: any[]) => void },
- *   staleMs?: number,
- *   waitMs?: number,
- *   retryMs?: number,
- * }} [options]
+ * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void }, staleMs?: number, waitMs?: number, retryMs?: number }} [options]
  * @param {() => Promise<T>} task
  * @returns {Promise<T>}
  */
@@ -92,13 +58,7 @@ export function withProcessLock(lockFile, options, task) {
   return run
 }
 
-/**
- * @template T
- * @param {string} lockFile
- * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void }, staleMs?: number, waitMs?: number, retryMs?: number }} options
- * @param {() => Promise<T>} task
- * @returns {Promise<T>}
- */
+/** @template T @param {string} lockFile @param {any} options @param {() => Promise<T>} task */
 async function runExclusive(lockFile, options, task) {
   const release = await acquireLock(lockFile, options)
   try {
@@ -108,23 +68,15 @@ async function runExclusive(lockFile, options, task) {
   }
 }
 
-/**
- * Create the exclusive lock file and return its release function.
- * @param {string} lockFile
- * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void }, staleMs?: number, waitMs?: number, retryMs?: number }} options
- * @returns {Promise<() => Promise<void>>}
- */
 async function acquireLock(lockFile, options) {
   const fsImpl = options.fs ?? fs
   const staleMs = options.staleMs ?? LOCK_STALE_MS
   const waitMs = options.waitMs ?? LOCK_WAIT_MS
   const retryMs = options.retryMs ?? LOCK_RETRY_MS
   const started = Date.now()
-  // Whether this acquisition has ever seen the lock in place. Under real contention the
-  // lock is created and unlinked constantly, so it can be momentarily absent exactly when
-  // a wait begins; only a lock we never once observed can be a permanent permission error.
+  // Only a lock we never once observed can be a permanent permission error: under
+  // real contention the lock is created and unlinked constantly.
   let sawLock = false
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       const handle = await fsImpl.open(lockFile, 'wx', 0o600)
@@ -134,8 +86,8 @@ async function acquireLock(lockFile, options) {
         } catch {
           /* already closed */
         }
-        // A close-then-unlink can be held briefly on Windows (Defender, indexing), and a
-        // leaked lock costs the next writer a full stale wait, so retry before giving up.
+        // A leaked lock costs the next writer a full stale wait, so retry the unlink
+        // (Windows can hold it briefly after close).
         for (let attempt = 0; attempt < LOCK_UNLINK_ATTEMPTS; attempt += 1) {
           try {
             await fsImpl.unlink(lockFile)
@@ -149,16 +101,10 @@ async function acquireLock(lockFile, options) {
         }
       }
     } catch (error) {
-      // Windows reports contention on an exclusive create as EPERM/EACCES (and sometimes
-      // EBUSY) rather than EEXIST when the other process is mid-create or mid-delete, so
-      // treat those as "someone else holds it" and retry instead of failing the write.
+      // Windows reports contention on an exclusive create as EPERM/EACCES/EBUSY
+      // rather than EEXIST when the other process is mid-create or mid-delete.
       const code = /** @type {any} */ (error)?.code
-      const contended = code === 'EEXIST' || code === 'EPERM' || code === 'EACCES' || code === 'EBUSY'
-      if (!contended) throw error
-      // Only EEXIST is unambiguous. Anything else is contention while the lock is there, or
-      // after it was there (the create/delete window). A lock we have never seen existing
-      // and that still cannot be created (ACL denial, read-only mount) must fail fast with
-      // its own error instead of becoming a misleading ELOCKTIMEOUT after a full wait.
+      if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error
       if (code !== 'EEXIST' && !sawLock && Date.now() - started > LOCK_TRANSIENT_MS) {
         if (!(await lockExists(fsImpl, lockFile))) throw error
       }
@@ -174,35 +120,15 @@ async function acquireLock(lockFile, options) {
   }
 }
 
-/**
- * @param {typeof fs} fsImpl
- * @param {string} lockFile
- * @param {number} staleMs
- */
 async function breakStaleLock(fsImpl, lockFile, staleMs) {
   try {
     const info = await fsImpl.stat(lockFile)
     if (Date.now() - info.mtimeMs > staleMs) await removeQuietly(fsImpl, lockFile)
   } catch {
-    /* the lock disappeared or cannot be inspected: just retry the create */
+    /* the lock disappeared or cannot be inspected: retry the create */
   }
 }
 
-/**
- * Write `value` as pretty JSON through a fsynced temp file and an atomic rename.
- * The caller is responsible for holding the lock (see `withProcessLock`) when the
- * write is part of a read-modify-write cycle.
- * @param {string} file
- * @param {unknown} value
- * @param {{
- *   dir?: string,
- *   fs?: typeof fs,
- *   logger?: { warn?: (...args: any[]) => void },
- *   dirMode?: number,
- *   fileMode?: number,
- * }} [options]
- * @returns {Promise<void>}
- */
 export async function writeJsonAtomic(file, value, options = {}) {
   const fsImpl = options.fs ?? fs
   const logger = options.logger ?? console
@@ -238,11 +164,6 @@ export async function writeJsonAtomic(file, value, options = {}) {
   await syncDir(fsImpl, dir)
 }
 
-/**
- * @param {typeof fs} fsImpl
- * @param {string} tmp
- * @param {string} file
- */
 async function renameWithRetry(fsImpl, tmp, file) {
   for (let attempt = 1; attempt <= RENAME_RETRY_ATTEMPTS; attempt += 1) {
     try {
@@ -261,7 +182,6 @@ async function renameWithRetry(fsImpl, tmp, file) {
   }
 }
 
-/** Best effort: some platforms (Windows) cannot fsync a directory. */
 async function syncDir(fsImpl, dir) {
   let handle = null
   try {
@@ -280,13 +200,6 @@ async function syncDir(fsImpl, dir) {
   }
 }
 
-/**
- * Read and parse a JSON file without throwing. A missing file is `missing`, a
- * read/parse failure is `corrupt` (the caller decides fallback vs quarantine).
- * @param {string} file
- * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void } }} [options]
- * @returns {Promise<{ status: 'missing' | 'ok' | 'corrupt', value: unknown }>}
- */
 export async function readJsonFile(file, options = {}) {
   const fsImpl = options.fs ?? fs
   const logger = options.logger ?? console
@@ -300,14 +213,6 @@ export async function readJsonFile(file, options = {}) {
   }
 }
 
-/**
- * Move an uninterpretable file aside as `<file>.<kind>-<timestamp>` so it is never
- * overwritten in place. Returns the new path, or `null` when the rename failed.
- * @param {string} file
- * @param {string} kind
- * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void } }} [options]
- * @returns {Promise<string | null>}
- */
 export async function quarantineFile(file, kind, options = {}) {
   const fsImpl = options.fs ?? fs
   const logger = options.logger ?? console
@@ -322,10 +227,6 @@ export async function quarantineFile(file, kind, options = {}) {
   }
 }
 
-/**
- * @param {typeof fs} fsImpl
- * @param {string} target
- */
 async function removeQuietly(fsImpl, target) {
   try {
     await fsImpl.unlink(target)
@@ -334,13 +235,6 @@ async function removeQuietly(fsImpl, target) {
   }
 }
 
-/**
- * Whether the lock file is present right now. Any stat failure counts as "absent", so a
- * lock that cannot be read never turns a permanent error into an endless retry.
- * @param {typeof fs} fsImpl
- * @param {string} lockFile
- * @returns {Promise<boolean>}
- */
 async function lockExists(fsImpl, lockFile) {
   try {
     await fsImpl.stat(lockFile)

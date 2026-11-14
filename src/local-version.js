@@ -8,10 +8,6 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { normalizeVersion, parseVersion } from './version.js'
 
-/**
- * @param {{ ctx?: any, env?: NodeJS.ProcessEnv, resourcesPath?: string, argv1?: string }} [input]
- * @returns {Promise<{ version: string | null, source: string }>}
- */
 export async function detectLocalVersion(input = {}) {
   const env = input.env ?? process.env
   const explicit = env.DSH_VERSION || env.DSH_RUNTIME_VERSION
@@ -72,10 +68,6 @@ export async function detectLocalEnginesNode(input = {}) {
   return { range: null, source: 'unknown' }
 }
 
-/**
- * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} input
- * @returns {string[]}
- */
 export function candidatePackageJsons(input = {}) {
   const out = []
   const argv1 = input.argv1 ?? process.argv[1] ?? ''

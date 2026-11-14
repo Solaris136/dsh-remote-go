@@ -8,7 +8,6 @@
  * as unsupported rather than guessed at.
  */
 
-/** Options this parser understands (lowercased). */
 const KNOWN_OPTIONS = new Set([
   'hostname',
   'user',
@@ -24,13 +23,6 @@ const KNOWN_OPTIONS = new Set([
   'preferredauthentications',
 ])
 
-/** @typedef {{ patterns: string[], negated: string[], options: Record<string, string[]>, line: number }} ConfigEntry */
-
-/**
- * Tokenize one config line into keyword + value (value keeps inner spaces).
- * @param {string} line
- * @returns {{ keyword: string, value: string } | null}
- */
 function parseLine(line) {
   const trimmed = line.trim()
   if (trimmed === '' || trimmed.startsWith('#')) return null
@@ -58,10 +50,6 @@ function parseLine(line) {
   return { keyword: keyword.trim(), value }
 }
 
-/**
- * Split a Host directive's value into positive and negated patterns.
- * @param {string} value
- */
 function splitPatterns(value) {
   const patterns = []
   const negated = []
@@ -73,18 +61,10 @@ function splitPatterns(value) {
   return { patterns, negated }
 }
 
-/**
- * @param {string} text
- * @returns {{ entries: ConfigEntry[], globals: Record<string, string[]>, unsupported: {line: number, keyword: string}[], malformed: {line: number, text: string}[] }}
- */
 export function parseSshConfig(text) {
-  /** @type {ConfigEntry[]} */
   const entries = []
-  /** @type {Record<string, string[]>} */
   const globals = {}
-  /** @type {{line: number, keyword: string}[]} */
   const unsupported = []
-  /** @type {{line: number, text: string}[]} */
   const malformed = []
   let current = null
 
@@ -135,11 +115,6 @@ export function parseSshConfig(text) {
   return { entries, globals, unsupported, malformed }
 }
 
-/**
- * Match one OpenSSH host pattern (`*`, `?`, case-insensitive).
- * @param {string} pattern
- * @param {string} value
- */
 export function matchHostPattern(pattern, value) {
   if (pattern === '*') return true
   const escaped = pattern
@@ -149,10 +124,6 @@ export function matchHostPattern(pattern, value) {
   return new RegExp(`^${escaped}$`, 'i').test(value)
 }
 
-/**
- * @param {ConfigEntry} entry
- * @param {string} alias
- */
 export function entryMatches(entry, alias) {
   if (entry.patterns.includes('__dsh_remote_go_match_block__')) return false
   const positive = entry.patterns.some((pattern) => matchHostPattern(pattern, alias))
@@ -160,18 +131,9 @@ export function entryMatches(entry, alias) {
   return !entry.negated.some((pattern) => matchHostPattern(pattern, alias))
 }
 
-/** Options that accumulate across matching blocks instead of first-wins. */
 const ADDITIVE_OPTIONS = new Set(['identityfile', 'certificatefile'])
 
-/**
- * @param {Record<string, string[]>} globals
- * @param {ConfigEntry[]} entries
- * @param {string} alias
- * @param {Record<string, string>} tokens
- * @returns {Record<string, string[]>}
- */
 function effectiveOptions(globals, entries, alias, tokens) {
-  /** @type {Record<string, string[]>} */
   const out = {}
   const apply = (/** @type {Record<string, string[]>} */ options) => {
     for (const [key, values] of Object.entries(options)) {
@@ -191,11 +153,6 @@ function effectiveOptions(globals, entries, alias, tokens) {
   return out
 }
 
-/**
- * Expand `%h`, `%r`, `%p`, `%d`, `%%` in a config value.
- * @param {string} value
- * @param {Record<string, string>} tokens
- */
 export function expandTokens(value, tokens) {
   return String(value).replace(/%([hprd%])/g, (match, token) => {
     if (token === '%') return '%'
@@ -203,20 +160,12 @@ export function expandTokens(value, tokens) {
   })
 }
 
-/** @param {string} value @param {string} home */
 function expandTilde(value, home) {
   if (value === '~') return home
   if (value.startsWith('~/')) return `${home.replace(/[\\/]+$/, '')}/${value.slice(2)}`
   return value
 }
 
-/**
- * Resolve one alias through the parsed config.
- * @param {ReturnType<typeof parseSshConfig>} parsed
- * @param {string} alias
- * @param {{ home?: string }} [options]
- * @returns {{ alias: string, host: string, user: string | null, port: number, identityFiles: string[], proxyJump: string | null, source: 'config' }}
- */
 export function resolveSshAlias(parsed, alias, options = {}) {
   const home = options.home ?? '~'
   const baseTokens = { h: alias, r: '~', p: '22', d: home }
@@ -248,7 +197,6 @@ export function resolveSshAlias(parsed, alias, options = {}) {
  * @param {{ home?: string }} [options]
  */
 export function discoverSshAliases(parsed, options = {}) {
-  /** @type {{ alias: string, host: string, user: string | null, port: number, source: 'config' }[]} */
   const out = []
   const seen = new Set()
   for (const entry of parsed.entries) {
@@ -263,13 +211,6 @@ export function discoverSshAliases(parsed, options = {}) {
   return out
 }
 
-/**
- * Convenience: resolve a destination the user typed. When it matches a config
- * alias it gets that alias's host/user/port/keys; a literal `user@host:port`
- * keeps its own values and only inherits matching globals.
- * @param {string} destination
- * @param {{ configText?: string, home?: string }} [options]
- */
 export function resolveDestination(destination, options = {}) {
   const text = String(destination ?? '').trim()
   /** @type {import('./util.js').parseSshDestination extends never ? never : { user: string | null, host: string, port: number | null }} */
@@ -308,11 +249,6 @@ export function resolveDestination(destination, options = {}) {
   }
 }
 
-/**
- * Local copy of the `[user@]host[:port]` parser to keep this module testable
- * without importing util in a cycle-free way.
- * @param {string} text
- */
 function parseDestinationLiteral(text) {
   let user = null
   let rest = text

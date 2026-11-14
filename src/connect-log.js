@@ -12,34 +12,16 @@
  * not this one's.
  */
 
-/** Statuses whose window prints the connect log, in the order they occur. */
 export const CONNECT_LOG_STATUSES = Object.freeze(['connecting', 'fingerprint-pending', 'error'])
 
-/** Entries kept per host in the ring; older lines fall out. */
 export const LOG_RING_LIMIT = 200
 
-/** Entries shipped to the Client per `/state` frame (the console scrolls, it does not keep history). */
 export const LOG_TAIL_LIMIT = 120
 
-/**
- * Whether this status has a window that prints the log.
- * @param {string | null | undefined} status - HostStatus.
- * @returns {boolean} true when the connect window is the surface on screen.
- */
 export function connectLogVisible(status) {
   return typeof status === 'string' && CONNECT_LOG_STATUSES.includes(status)
 }
 
-/**
- * Append one line to a runtime's ring and return the stored entry.
- *
- * `seq` is monotonic per host so the Client can key lines and notice new ones;
- * `line` is the same text tagged for this process's own logger and the
- * diagnostics bundle, while `message` is what the connect window prints.
- * @param {any} runtime - host runtime (owns `logs` / `logSeq`).
- * @param {{ at: string, level: string, message: string }} input - the new line.
- * @returns {{ seq: number, at: string, level: string, message: string, line: string }} stored entry.
- */
 export function appendConnectLog(runtime, input) {
   const message = typeof input.message === 'string' ? input.message : String(input.message ?? '')
   const entry = {
@@ -56,11 +38,6 @@ export function appendConnectLog(runtime, input) {
   return entry
 }
 
-/**
- * The bounded tail a HostView carries, newest last.
- * @param {any} runtime - host runtime.
- * @returns {{seq: number, at: string, level: string, message: string}[]} log entries.
- */
 export function connectLogTail(runtime) {
   const entries = runtime && Array.isArray(runtime.logs) ? runtime.logs : []
   return entries.slice(-LOG_TAIL_LIMIT).map((entry) => ({

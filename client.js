@@ -45,33 +45,16 @@ window.__ModuleLoader__.load({
 
     //#region 1. constants
 
-    /** Dictionary namespace owned by this plugin. */
     const NS = 'dsh-remote-go'
-    /** The plugin's id: namespace for its overlay seat and locale dictionary. */
     const PANEL_ID = 'dsh-remote-go'
-    /** Base path of the Host HTTP API (same origin as the page). */
     const API_BASE = '/dsh-remote-go/api'
-    /** SSE endpoint carrying `state` events; see docs/api.md. */
     const EVENT_PATH = '/dsh-remote-go/api/events'
-    /** Fallback polling cadence when SSE is unavailable (docs/api.md). */
     const POLL_INTERVAL_MS = 3000
-    /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
     const DESKTOP_BRIDGE_VERSION = 1
-    /** DOM id prefix of the full-window remote carriers (one per warm host). */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
-    /**
-     * Caption band this window's page reserves when the desktop shell does not publish
-     * one (`--dsh-windows-titlebar-height`). Only a fallback: the published value wins.
-     */
     const CAPTION_FALLBACK_HEIGHT = 40
-    /** `<html>` marker the desktop preload sets on the window that owns the caption row. */
     const CAPTION_MARKER = 'data-windows-titlebar'
-    /** Set on `<html>` while a guest owns the caption band, so the shell's caption menus stay clickable. */
     const CAPTION_LIVE_CLASS = 'drg-caption-live'
-    /**
-     * Left inset of the carrier's drag strip: the band's first pixels belong to the guest
-     * page's own fixed caption controls (collapse toggle 12–40, collapsed new session 48–76).
-     */
     const CAPTION_GRIP_LEFT = 84
     /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
@@ -89,7 +72,6 @@ window.__ModuleLoader__.load({
       'model-credentials',
       'desktop-guard',
     ]
-    /** Status dot colours: the host theme's state aliases, nothing of our own. */
     const TONE_VARS = {
       idle: 'var(--dsw-alias-state-idle-primary)',
       info: 'var(--dsw-alias-state-business-primary)',
@@ -113,10 +95,6 @@ window.__ModuleLoader__.load({
 
     //#region 2. i18n dictionaries
 
-    /**
-     * Simplified-Chinese dictionary. Every visible string in this file goes
-     * through a key in `zh`/`en`; the unit test asserts both sides match.
-     */
     const zh = {
       // -- navigation / common -------------------------------------------------
       panelSubtitle: '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
@@ -373,7 +351,6 @@ window.__ModuleLoader__.load({
       'error.actionFailed': '操作失败',
     }
 
-    /** English dictionary — complete parallel of `zh`. */
     const en = {
       panelSubtitle: 'Manage remote hosts and hand the whole window to one of their DSH instances.',
       addHost: 'Add host',
@@ -634,12 +611,6 @@ window.__ModuleLoader__.load({
 
     //#region 3. i18n helpers
 
-    /**
-     * Replace `{name}` placeholders with values from `params`.
-     * @param {string} template - template text from a dictionary entry.
-     * @param {Record<string, unknown>|undefined} params - interpolation values.
-     * @returns {string} interpolated text.
-     */
     function interpolate(template, params) {
       if (params === undefined || params === null) return String(template)
       return String(template).replace(/\{(\w+)\}/g, (match, key) =>
@@ -647,11 +618,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Build a translate function over the local dictionaries. Only used when the
-     * @param {string} locale - `'zh'` or `'en'`.
-     * @returns {(key: string, params?: object) => string} translate function.
-     */
     function makeFallbackT(locale) {
       const dict = locale === 'en' ? en : zh
       return (key, params) => {
@@ -660,11 +626,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Resolve the active locale id from the injected props.
-     * @param {object} props - component props.
-     * @returns {string} `'zh'` or `'en'`.
-     */
     function localeOf(props) {
       if (props && typeof props.getLocaleId === 'function') {
         try {
@@ -681,22 +642,11 @@ window.__ModuleLoader__.load({
       return 'zh'
     }
 
-    /**
-     * Resolve the translate function from props, falling back to the local dict.
-     * @param {object} props - component props.
-     * @returns {(key: string, params?: object) => string} translate function.
-     */
     function translatorOf(props) {
       if (props && typeof props.t === 'function') return props.t
       return makeFallbackT(localeOf(props))
     }
 
-    /**
-     * Resolve a host-provided bilingual text (`{zh, en}`) for the active locale.
-     * @param {unknown} text - I18nText, string, or nothing.
-     * @param {string} locale - `'zh'` or `'en'`.
-     * @returns {string} display text.
-     */
     function resolveText(text, locale) {
       if (text === undefined || text === null) return ''
       if (typeof text === 'string') return text
@@ -708,12 +658,6 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /**
-     * Resolve a list of bilingual texts.
-     * @param {unknown} list - array of I18nText.
-     * @param {string} locale - active locale.
-     * @returns {string[]} display texts, empty strings removed.
-     */
     function resolveTextList(list, locale) {
       if (!Array.isArray(list)) return []
       return list.map((item) => resolveText(item, locale)).filter((item) => item.length > 0)
@@ -723,11 +667,6 @@ window.__ModuleLoader__.load({
 
     //#region 4. misc utilities
 
-    /**
-     * True when the address is a loopback literal (`127.0.0.0/8`, `localhost`, `::1`).
-     * @param {unknown} address - SSH address or alias.
-     * @returns {boolean} whether the address names the local machine.
-     */
     function isLoopbackAddress(address) {
       const value = String(address === undefined || address === null ? '' : address)
         .trim()
@@ -739,31 +678,15 @@ window.__ModuleLoader__.load({
       return false
     }
 
-    /**
-     * True when the address looks like a web URL rather than an SSH target.
-     * @param {string} address - candidate address text (already trimmed).
-     * @returns {boolean} whether a scheme or path was supplied by mistake.
-     */
     function looksLikeWebAddress(address) {
       const value = address.trim()
       return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
     }
 
-    /**
-     * Validate a URL returned by `GET /hosts/:id/open` before it may become an
-     * @param {unknown} url - candidate URL.
-     * @returns {boolean} whether the URL is a loopback http URL.
-     */
     function isValidLoopbackUrl(url) {
       return typeof url === 'string' && url.startsWith(LOOPBACK_PREFIX)
     }
 
-    /**
-     * Format an ISO timestamp for display.
-     * @param {string|null|undefined} iso - ISO timestamp.
-     * @param {string} locale - active locale.
-     * @returns {string} localized short date/time, or an empty string.
-     */
     function formatTime(iso, locale) {
       if (!iso) return ''
       const date = new Date(iso)
@@ -780,11 +703,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * The masked address shown on cards: `user@host:port` when the Host
-     * @param {object} host - HostView.
-     * @returns {string} display address.
-     */
     function displayAddress(host) {
       if (!host) return ''
       if (typeof host.addressMasked === 'string' && host.addressMasked.length > 0) return host.addressMasked
@@ -792,23 +710,12 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /**
-     * Detach a timer from the process lifetime where the platform allows it. In the
-     * browser `setInterval` returns a number and this is a no-op; under Node (unit tests
-     * and tooling) it keeps a background refresh from holding the process open.
-     * @param {unknown} timer - handle returned by setInterval/setTimeout.
-     * @returns {void}
-     */
     function unrefTimer(timer) {
       if (timer === null || typeof timer !== 'object') return
       if (typeof timer.unref !== 'function') return
       timer.unref()
     }
 
-    /**
-     * Read the local DSH release version from the page boot payload.
-     * @returns {string|undefined} release version, when available.
-     */
     function readBootVersion() {
       try {
         if (typeof window === 'undefined') return undefined
@@ -822,11 +729,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Copy text with the Clipboard API, falling back to a hidden textarea plus
-     * @param {string} text - text to copy.
-     * @returns {Promise<boolean>} whether the copy succeeded.
-     */
     async function copyText(text) {
       try {
         if (
@@ -858,23 +760,11 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Bilingual name of a connect phase.
-     * @param {(key: string, params?: object) => string} t - translate function.
-     * @param {string|null|undefined} phase - ConnectPhase.
-     * @returns {string} phase label.
-     */
     function phaseLabel(t, phase) {
       if (!phase) return ''
       return t('phase.' + phase)
     }
 
-    /**
-     * Localized progress line for a host (docs/api.md 进度 code).
-     * @param {(key: string, params?: object) => string} t - translate function.
-     * @param {object|null} progress - host.progress.
-     * @returns {string} progress text.
-     */
     function progressText(t, progress) {
       if (!progress || typeof progress.code !== 'string' || progress.code.length === 0) {
         return t('progress.default')
@@ -886,16 +776,10 @@ window.__ModuleLoader__.load({
       return text === key ? t('progress.default') : text
     }
 
-    /**
-     * Index of the current connect phase, for the progress checklist.
-     * @param {string|null|undefined} phase - ConnectPhase.
-     * @returns {number} 0..PHASES.length-1, or -1 when unknown.
-     */
     function phaseIndex(phase) {
       return phase ? PHASES.indexOf(phase) : -1
     }
 
-    /** Explicit status → dictionary-key map (status ids contain dashes). */
     const STATUS_KEYS = {
       unconfigured: { label: 'statusUnconfigured', hint: 'statusHintUnconfigured' },
       connecting: { label: 'statusConnecting', hint: 'statusHintConnecting' },
@@ -907,11 +791,6 @@ window.__ModuleLoader__.load({
       limited: { label: 'statusLimited', hint: 'statusHintLimited' },
     }
 
-    /**
-     * Status presentation: dictionary key and tone.
-     * @param {string} status - HostStatus.
-     * @returns {{labelKey: string, hintKey: string, tone: string}} presentation.
-     */
     function statusMeta(status) {
       const keys = STATUS_KEYS[status] || STATUS_KEYS.unconfigured
       return {
@@ -921,13 +800,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Value at a dotted path, or a fallback.
-     * @param {object|undefined} source - object to read.
-     * @param {string} path - dotted path.
-     * @param {unknown} fallback - value when the path is missing.
-     * @returns {unknown} resolved value.
-     */
     function pathValue(source, path, fallback) {
       let current = source
       for (const part of String(path).split('.')) {
@@ -937,11 +809,6 @@ window.__ModuleLoader__.load({
       return current === undefined ? fallback : current
     }
 
-    /**
-     * Pick the hosts that are currently connected.
-     * @param {object[]} hosts - HostView list.
-     * @returns {number} connected count.
-     */
     function connectedCount(hosts) {
       if (!Array.isArray(hosts)) return 0
       let count = 0
@@ -949,13 +816,6 @@ window.__ModuleLoader__.load({
       return count
     }
 
-    /**
-     * One-shot request channel into the panel: the switcher row (and the settings page)
-     * ask the panel for one target — open a host, or start the add-host wizard — and then
-     * switch the layout to it. The panel consumes the request on mount or on subscribe,
-     * and an "open" waits for `/state` so it knows the host's status and auth type.
-     * @returns {{request: Function, requestIntent: Function, take: Function, subscribe: Function}} store handle.
-     */
     function createPanelRequestStore() {
       let pending = null
       const listeners = new Set()
@@ -969,22 +829,12 @@ window.__ModuleLoader__.load({
         }
       }
       return {
-        /**
-         * Ask for one host by id (settings page shorthand).
-         * @param {string} hostId - host to open.
-         * @returns {void}
-         */
         request(hostId) {
           if (typeof hostId === 'string' && hostId.length > 0) {
             pending = { kind: 'open', hostId }
             emit()
           }
         },
-        /**
-         * Ask for a target directly.
-         * @param {{kind: string, hostId?: string}} intent - `open` one host, `disconnect` one host, `manage` the list, or `local`.
-         * @returns {void}
-         */
         requestIntent(intent) {
           if (!intent || typeof intent !== 'object') return
           const kinds = ['open', 'disconnect', 'manage', 'local']
@@ -1027,27 +877,19 @@ window.__ModuleLoader__.load({
         }
       }
       return {
-        /**
-         * Open the wizard on one draft.
-         * @param {{mode?: string, host?: object|null}} next - add or edit this host.
-         * @returns {void}
-         */
         open(next) {
           if (!next || typeof next !== 'object') return
           draft = { mode: next.mode === 'edit' ? 'edit' : 'add', host: next.host || null }
           emit()
         },
-        /** @returns {void} */
         close() {
           if (draft === null) return
           draft = null
           emit()
         },
-        /** @returns {{mode: string, host: object|null}|null} the open draft. */
         current() {
           return draft
         },
-        /** @returns {() => void} unsubscribe. */
         subscribe(listener) {
           listeners.add(listener)
           return () => listeners.delete(listener)
@@ -1059,10 +901,6 @@ window.__ModuleLoader__.load({
 
     //#region 5. local error views
 
-    /**
-     * Local fallback ErrorViews (docs/api.md ErrorView). Host responses carry
-     * their own ErrorView; these describe client-side and transport failures.
-     */
     const LOCAL_ERRORS = {
       network: {
         code: 'network',
@@ -1111,12 +949,6 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /**
-     * Build a local ErrorView with optional technical detail.
-     * @param {string} code - key into LOCAL_ERRORS.
-     * @param {string|undefined} technical - optional technical detail.
-     * @returns {object} ErrorView.
-     */
     function localErrorView(code, technical) {
       const base = LOCAL_ERRORS[code] || LOCAL_ERRORS.internal
       const view = {
@@ -1130,11 +962,6 @@ window.__ModuleLoader__.load({
       return view
     }
 
-    /**
-     * Normalize anything thrown by the API layer into an ErrorView.
-     * @param {unknown} error - caught value.
-     * @returns {object} ErrorView.
-     */
     function toErrorView(error) {
       if (error && typeof error === 'object') {
         if (error.view && typeof error.view === 'object') return error.view
@@ -1148,7 +975,6 @@ window.__ModuleLoader__.load({
 
     //#region 6. HTTP + SSE API client
 
-    /** @returns {Function|null} fetch implementation or null when unavailable. */
     function getFetch() {
       try {
         if (typeof fetch === 'function') return fetch
@@ -1159,12 +985,6 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /**
-     * Wrap an ErrorView in an Error so callers can `catch`/`throw` it.
-     * @param {object} view - ErrorView.
-     * @param {unknown} [cause] - underlying cause.
-     * @returns {Error} error carrying `.view`.
-     */
     function apiError(view, cause) {
       const text =
         resolveText(view && view.detail, 'zh') ||
@@ -1216,18 +1036,11 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** Host API surface used by the UI. */
     const api = {
-      /** @returns {Promise<object>} StateView (docs/api.md `GET /state`). */
       async getState() {
         const payload = await apiRequest('/state')
         return payload.state
       },
-      /**
-       * Tell the Host the version the page booted with (tolerant, optional).
-       * @param {string|undefined} version - local DSH release version.
-       * @returns {Promise<void>} resolves even when the call fails.
-       */
       async reportLocalVersion(version) {
         if (typeof version !== 'string' || version.length === 0) return
         try {
@@ -1236,58 +1049,45 @@ window.__ModuleLoader__.load({
           // Tolerated by contract: this only backfills the Host's probe.
         }
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} connect acknowledgement. */
       async connect(hostId, options) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/connect', {
           method: 'POST',
           body: options || {},
         })
       },
-      /** Answer the "manual DSH already running" prompt: stop | alongside | cancel. */
       async confirmConflict(hostId, action) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/conflict', {
           method: 'POST',
           body: { action },
         })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async disconnect(hostId, stopRemote) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/disconnect', {
           method: 'POST',
           body: { stopRemote: stopRemote === true },
         })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async reconnect(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
       },
-      /**
-       * Fetch the one-time loopback URL for the guest (docs/api.md `GET /hosts/:id/open`).
-       * @param {string} hostId - host id.
-       * @returns {Promise<string>} validated loopback URL.
-       */
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
         if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
         return payload.url
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async acceptFingerprint(hostId, accept, remember, sha256) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/fingerprint', {
           method: 'POST',
           body: { accept: accept === true, remember: remember === true, sha256: sha256 || '' },
         })
       },
-      /** @param {object} host - HostInput. @returns {Promise<object>} saved HostView. */
       async saveHost(host) {
         const payload = await apiRequest('/hosts', { method: 'POST', body: { host } })
         return payload.host
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async deleteHost(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId), { method: 'DELETE' })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} diagnose report. */
       async diagnose(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
           method: 'POST',
@@ -1295,27 +1095,16 @@ window.__ModuleLoader__.load({
         })
         return payload.report
       },
-      /** @param {object} patch - partial SettingsView. @returns {Promise<object>} full SettingsView. */
       async saveSettings(patch) {
         const payload = await apiRequest('/settings', { method: 'POST', body: { patch } })
         return payload.settings
       },
-      /**
-       * Point the Host's active host at `hostId` so a reload reopens the same
-       * @param {string} hostId - host id.
-       * @returns {Promise<object>} acknowledgement.
-       */
       async activate(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
       },
-      /**
-       * Tell the Host that no host fills the window any more (docs/api.md `POST /active`).
-       * @returns {Promise<object>} acknowledgement.
-       */
       async clearActive() {
         return apiRequest('/active', { method: 'POST', body: { id: null } })
       },
-      /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (docs/api.md). */
       async getAliases() {
         const payload = await apiRequest('/ssh/aliases')
         return {
@@ -1323,11 +1112,6 @@ window.__ModuleLoader__.load({
           knownHosts: payload.knownHosts && typeof payload.knownHosts === 'object' ? payload.knownHosts : null,
         }
       },
-      /**
-       * Browse the user's home for a private-key file (docs/api.md `GET /keyfile/list`).
-       * @param {string} [dir] absolute directory to list; empty means the default one.
-       * @returns {Promise<{path: string, parent: string | null, entries: Array<{name: string, path: string, isDirectory: boolean}>, truncated: boolean, defaultKeyPath: string, defaultDir: string}>}
-       */
       async listKeyFiles(dir) {
         const query = dir ? '?path=' + encodeURIComponent(dir) : ''
         const payload = await apiRequest('/keyfile/list' + query)
@@ -1342,12 +1126,6 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /**
-     * Subscribe to live state: SSE first, 3s polling once the stream fails
-     * (docs/api.md). Always resolves the current state once up front.
-     * @param {{onState: (state: object) => void, onStatus?: (mode: string) => void, onError?: (error: unknown) => void}} handlers - callbacks.
-     * @returns {() => void} dispose function.
-     */
     function subscribeState(handlers) {
       const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
       const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
@@ -1433,12 +1211,6 @@ window.__ModuleLoader__.load({
 
     //#region 7. icons and small UI primitives
 
-    /**
-     * Sidebar/main-entry glyph: a local display with a tunnel arrow leaving it.
-     * Original artwork, drawn in `currentColor` only.
-     * @param {{size?: number, active?: boolean}} props - sidebar share (size, active).
-     * @returns {object} svg element.
-     */
     function RemoteIcon(props) {
       const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 18
       const active = props && props.active === true
@@ -1465,7 +1237,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Generic stroke icon factory: paths only, currentColor. */
     function strokeIcon(paths, viewBox) {
       return function Icon(props) {
         const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
@@ -1502,11 +1273,6 @@ window.__ModuleLoader__.load({
     const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
     const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
 
-    /**
-     * Status dot. Color comes from theme tokens with stable fallbacks.
-     * @param {{status?: string, title?: string}} props - host status.
-     * @returns {object} span element.
-     */
     function StatusDot(props) {
       const status = props && typeof props.status === 'string' ? props.status : 'unconfigured'
       const tone = STATUS_TONE[status] || 'idle'
@@ -1520,11 +1286,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Small text badge.
-     * @param {{children?: unknown, tone?: string, title?: string}} props - badge props.
-     * @returns {object} span element.
-     */
     function Badge(props) {
       const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
       return h(
@@ -1539,11 +1300,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Button. Variants: primary | secondary | ghost | danger.
-     * @param {object} props - button props.
-     * @returns {object} button element.
-     */
     function Button(props) {
       const variant = props.variant || 'secondary'
       const className = ['drg-btn', 'drg-btn-' + variant].join(' ')
@@ -1565,11 +1321,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Icon-only button with an accessible label.
-     * @param {object} props - icon button props.
-     * @returns {object} button element.
-     */
     function IconButton(props) {
       return h(
         'button',
@@ -1586,11 +1337,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Spinner.
-     * @param {{size?: number}} props - size in px.
-     * @returns {object} span element.
-     */
     function Spinner(props) {
       return h('span', {
         className: 'drg-spinner',
@@ -1602,11 +1348,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Labeled form field wrapper.
-     * @param {{label?: string, hint?: string, error?: string, htmlFor?: string, children?: unknown}} props - field props.
-     * @returns {object} div element.
-     */
     function Field(props) {
       return h(
         'label',
@@ -1621,11 +1362,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Text/number/password input styled for the theme.
-     * @param {object} props - input props.
-     * @returns {object} input element.
-     */
     function TextInput(props) {
       return h('input', {
         className: 'drg-input',
@@ -1644,11 +1380,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Select control.
-     * @param {{value?: string, options?: Array<{value: string, label: string}>, onChange?: (value: string) => void, disabled?: boolean, ariaLabel?: string}} props - select props.
-     * @returns {object} select element.
-     */
     function Select(props) {
       const options = Array.isArray(props.options) ? props.options : []
       return h(
@@ -1665,11 +1396,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Checkbox row.
-     * @param {{checked?: boolean, label?: string, onChange?: (checked: boolean) => void, disabled?: boolean}} props - checkbox props.
-     * @returns {object} label element.
-     */
     function CheckRow(props) {
       return h(
         'label',
@@ -1685,11 +1411,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Notice banner. Tones: info | warn | error | success.
-     * @param {{tone?: string, title?: string, children?: unknown, onDismiss?: () => void, dismissLabel?: string}} props - notice props.
-     * @returns {object} div element.
-     */
     function Notice(props) {
       const tone = props.tone || 'info'
       return h(
@@ -1718,11 +1439,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Modal shell: backdrop + centered card. Closes on backdrop click and Esc.
-     * @param {{title?: string, subtitle?: string, onClose?: () => void, footer?: unknown, children?: unknown, wide?: boolean, closeLabel?: string}} props - modal props.
-     * @returns {object} div element.
-     */
     function Modal(props) {
       const onClose = props.onClose
       // A dialog whose title is drawn by its own body (the host-management window) still
@@ -1773,11 +1489,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Confirmation dialog for destructive actions.
-     * @param {{title: string, body: unknown, confirmLabel: string, cancelLabel: string, busy?: boolean, onConfirm: () => void, onCancel: () => void}} props - dialog props.
-     * @returns {object} modal element.
-     */
     function ConfirmDialog(props) {
       return h(
         Modal,
@@ -1804,11 +1515,6 @@ window.__ModuleLoader__.load({
 
     //#region 8. host list view
 
-    /**
-     * Loading placeholder used before the first `/state` response arrives.
-     * @param {{t: Function}} props - translate props.
-     * @returns {object} div element.
-     */
     function LoadingBlock(props) {
       const t = translatorOf(props)
       return h(
@@ -1819,11 +1525,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Empty-state block shown when no hosts are configured.
-     * @param {{t: Function, onAdd: () => void}} props - callbacks.
-     * @returns {object} div element.
-     */
     function EmptyHosts(props) {
       const t = translatorOf(props)
       return h(
@@ -1844,11 +1545,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * One host card: status, address, remote version, last opened, and actions.
-     * @param {object} props - host and callbacks.
-     * @returns {object} li element.
-     */
     function HostCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -1990,12 +1686,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Host list for the floating management window (docs/design.md（主机清单）). Pure
-     * presentation: all actions rise through callbacks.
-     * @param {object} props - state, errors, and callbacks.
-     * @returns {object} div element.
-     */
     function HostListView(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2104,12 +1794,6 @@ window.__ModuleLoader__.load({
 
     //#region 9. takeover surface and carrier helpers
 
-    /**
-     * Staged connect progress: current progress line plus the phase checklist
-     * (docs/api.md 的 ConnectPhase / 进度 code).
-     * @param {{t: Function, host: object}} props - host being connected.
-     * @returns {object} div element.
-     */
     function ConnectProgress(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -2149,11 +1833,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Host-key confirmation card. Used by both the wizard's test step and the
-     * @param {object} props - host, busy flag, error, callbacks.
-     * @returns {object} div element.
-     */
     function FingerprintCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2241,11 +1920,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Error card: localized title/detail/next steps + retry/diagnose/back.
-     * @param {object} props - ErrorView plus callbacks.
-     * @returns {object} div element.
-     */
     function ErrorCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2287,22 +1961,10 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Statuses whose window prints the connect log. The Host gates its `logs` tail the same way
-     * (docs/api.md HostView.logs), so the console and the payload cannot drift apart: connecting,
-     * the host-key question, and the failure it ended in.
-     * @param {string} status - HostStatus.
-     * @returns {boolean} true when the window is the connect window.
-     */
     function connectWindowOpen(status) {
       return status === 'connecting' || status === 'fingerprint-pending' || status === 'error'
     }
 
-    /**
-     * Clock for a log line: HH:MM:SS in the viewer's own zone.
-     * @param {string} iso - entry timestamp.
-     * @returns {string} clock text, or '' when the timestamp is unusable.
-     */
     function logClock(iso) {
       const when = typeof iso === 'string' && iso !== '' ? new Date(iso) : null
       if (when === null || Number.isNaN(when.getTime())) return ''
@@ -2310,12 +1972,6 @@ window.__ModuleLoader__.load({
       return pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' + pad(when.getSeconds())
     }
 
-    /**
-     * Connect console: the Host's log tail (`HostView.logs`), newest last, printed as it arrives.
-     * It follows the bottom of the list unless the reader scrolled up to read something older.
-     * @param {{t: Function, host: object}} props - host carrying `logs`.
-     * @returns {object} section element.
-     */
     function ConnectLog(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -2374,14 +2030,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Where a connection watches itself: the staged progress — or the host-key question, or the
-     * failure it ended in — on top, the Host's own log lines streaming underneath. It takes the
-     * whole window for exactly as long as a connection is in flight; host management is a
-     * different body (and comes back the moment this window closes).
-     * @param {{t: Function, locale: string, host: object, fingerprintBusy?: boolean, onAcceptFingerprint: Function, onRejectFingerprint: Function, onRetry: Function, onDiagnose: Function, onBack: Function}} props - host plus callbacks.
-     * @returns {object} fragment with the progress block and the connect log.
-     */
     function ConnectWindow(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2419,7 +2067,6 @@ window.__ModuleLoader__.load({
 
     //#region 9b. host switcher row + full-window remote carrier (DSH desktop only)
 
-    /** How often the row re-places itself and refreshes its payload (ms). */
     const SWITCHER_TICK_MS = 1500
 
     /**
@@ -2428,23 +2075,14 @@ window.__ModuleLoader__.load({
      * through React and keeps working while the local UI is behind a remote guest.
      */
     const switcher = {
-      /** `'local'` or a host id: where the window is right now. */
       current: 'local',
-      /** HostView list from `/state`, trimmed to what the row needs. */
       hosts: [],
-      /** Localized row text, refreshed on every push. */
       labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
-      /** Set by `apply`: turns a row intent into a plugin action. */
       dispatch: null,
-      /** Set by `apply`: current localized labels, so a language switch lands on the next push. */
       labelsOf: null,
-      /** Whether the local copy of the row is currently on screen. */
       installed: false,
     }
 
-    /**
-     * @returns {{current: string, hosts: object[], labels: object}} the payload both copies of the row render from.
-     */
     function switcherPayload() {
       const hosts = []
       for (const host of switcher.hosts) {
@@ -2471,12 +2109,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Push the switcher state into every live copy of the row: the local page's sidebar
-     * and, while a remote owns the window, the row injected into the guest.
-     * @param {{current?: string, hosts?: object[], labels?: object}} [patch] - merged into the state first.
-     * @returns {object} the payload that was pushed.
-     */
     function updateSwitcher(patch) {
       if (patch && typeof patch === 'object') {
         if (Array.isArray(patch.hosts)) {
@@ -2493,20 +2125,12 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** @returns {Window|null} this page's window, or null when the module runs outside a document. */
     function localWindow() {
       if (typeof window === 'undefined' || window === null) return null
       if (typeof window.document === 'undefined' || window.document === null) return null
       return window
     }
 
-    /**
-     * Draw (or refresh) the row in the local page's own sidebar. It is plain DOM beside
-     * React's children, so the shell may drop it on a re-render; this re-places it and
-     * refreshes the payload, and is cheap enough to call on every state push.
-     * @param {object} payload - state to render.
-     * @returns {boolean} whether the row is on screen.
-     */
     function pushLocalHostRow(payload) {
       const win = localWindow()
       if (win === null) return false
@@ -2533,11 +2157,6 @@ window.__ModuleLoader__.load({
       return switcher.installed
     }
 
-    /**
-     * Push the same payload into the shown remote guest's copy of the row.
-     * @param {object} payload - state to render.
-     * @returns {void}
-     */
     function pushGuestHostRow(payload) {
       const entry = shownCarrier()
       if (entry === null || entry.rowInstalled !== true || entry.view === null) return
@@ -2550,12 +2169,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Turn the row's intent into the plugin's action. The local row calls this straight
-     * from the click handler; the guest reaches it through the carrier's poll.
-     * @param {{target?: string, action?: string, hostId?: string}} intent - sidebar entry, an action, or one host's exit.
-     * @returns {void}
-     */
     function dispatchSwitcherIntent(intent) {
       if (!intent || typeof intent !== 'object') return
       if (typeof switcher.dispatch === 'function') switcher.dispatch(intent)
@@ -2910,7 +2523,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The same row, as the script the carrier evaluates inside the remote guest. */
     const HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'
 
     /**
@@ -2922,17 +2534,9 @@ window.__ModuleLoader__.load({
      * only when its host disconnects or is deleted, or when the plugin is disposed.
      */
     const carrierPool = {
-      /** @type {object[]} live guests, most recent first. */
       entries: [],
-      /** Host id filling the window right now, or null when the local page is up. */
       current: null,
-      /**
-       * Host id the window should end up on. A window is created asynchronously (the
-       * bridge hands out a lease), so this is what makes the *last* request win: a
-       * creation that finishes after the user picked something else is dropped.
-       */
       wanted: null,
-      /** The one intent poll, owned by the shown guest. */
       poll: null,
     }
 
@@ -2943,14 +2547,8 @@ window.__ModuleLoader__.load({
      */
     let carrierQueue = Promise.resolve()
 
-    /** Watches the local page's fullscreen flag while a caption-aware guest exists. */
     let captionStateWatcher = null
 
-    /**
-     * Serialize one carrier operation behind the previous one.
-     * @param {Function} task - async work to run when the queue is free.
-     * @returns {Promise<unknown>} that task's result.
-     */
     function whenCarrierIdle(task) {
       const run = carrierQueue.then(task, task)
       carrierQueue = run.then(
@@ -2960,26 +2558,19 @@ window.__ModuleLoader__.load({
       return run
     }
 
-    /**
-     * @param {string} hostId - host to look up.
-     * @returns {object|null} that host's warm guest, if any.
-     */
     function carrierOf(hostId) {
       if (typeof hostId !== 'string' || hostId === '') return null
       return carrierPool.entries.find((entry) => entry.hostId === hostId) || null
     }
 
-    /** @returns {object|null} the guest filling the window, if any. */
     function shownCarrier() {
       return carrierPool.current === null ? null : carrierOf(carrierPool.current)
     }
 
-    /** @returns {boolean} whether this host already has a warm window (switching is instant). */
     function carrierWarm(hostId) {
       return carrierOf(hostId) !== null
     }
 
-    /** @returns {object|null} the desktop browser bridge, or null outside the desktop app. */
     function desktopBrowserBridge() {
       if (typeof window === 'undefined') return null
       const carrier = window.dshDesktop
@@ -2989,20 +2580,11 @@ window.__ModuleLoader__.load({
       return browser
     }
 
-    /**
-     * The carrier's own CSS. There is no local chrome left to style: the host switcher is
-     * drawn inside whichever page owns the window.
-     */
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:var(--dsw-alias-bg-base);pointer-events:auto}
       .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
     `
 
-    /**
-     * Install the switcher row inside one guest.
-     * @param {object} entry - warm guest to inject into.
-     * @returns {Promise<boolean>} whether that guest's copy of the row is live.
-     */
     async function installHostRow(entry) {
       const view = entry === null ? null : entry.view
       if (view === null || typeof view.executeJavaScript !== 'function') return false
@@ -3020,12 +2602,6 @@ window.__ModuleLoader__.load({
       return live
     }
 
-    /**
-     * Poll the shown guest's row for a click, then hand the intent to the plugin. A plain
-     * poll is the only channel a cross-origin guest offers without a preload script.
-     * @param {object} entry - warm guest to poll.
-     * @returns {void}
-     */
     function startHostRowPoll(entry) {
       stopHostRowPoll()
       const view = entry === null ? null : entry.view
@@ -3062,7 +2638,6 @@ window.__ModuleLoader__.load({
       unrefTimer(entry.timer)
     }
 
-    /** @returns {void} */
     function stopHostRowPoll() {
       const entry = carrierPool.poll
       carrierPool.poll = null
@@ -3102,13 +2677,6 @@ window.__ModuleLoader__.load({
       return { height }
     }
 
-    /**
-     * Teach one guest page the desktop layout: same marker, same band height, same frame.
-     * Idempotent, and re-run after every navigation — a fresh document drops the marker,
-     * and the marker is the only thing that keeps both pages on one grid.
-     * @param {object} entry - warm guest.
-     * @returns {Promise<boolean>} whether the guest now lays out as the desktop build.
-     */
     async function applyGuestCaption(entry) {
       const caption = entry === null || entry === undefined ? null : entry.caption
       if (caption === null || caption === undefined) return false
@@ -3143,11 +2711,6 @@ window.__ModuleLoader__.load({
       return status === 'ok'
     }
 
-    /**
-     * Watch the local page's fullscreen flag: a guest that is already loaded cannot learn
-     * about the transition any other way, and its overlays would keep the band's inset.
-     * @returns {void}
-     */
     function watchCaptionState() {
       if (captionStateWatcher !== null || typeof MutationObserver !== 'function') return
       if (typeof document === 'undefined' || !document.documentElement) return
@@ -3181,13 +2744,6 @@ window.__ModuleLoader__.load({
       if (carrierPool.current === entry.hostId) setCaptionLive(entry.captionApplied)
     }
 
-    /**
-     * Raise or drop the shell's caption menus above the guest. While a remote window owns
-     * the caption band, the band's menus belong to the local page and only this class keeps
-     * them above the guest (see the stylesheet's `html.drg-caption-live` rule).
-     * @param {boolean} live - whether a guest currently owns the caption band.
-     * @returns {void}
-     */
     function setCaptionLive(live) {
       if (typeof document === 'undefined' || !document.documentElement) return
       const classes = document.documentElement.classList
@@ -3196,13 +2752,6 @@ window.__ModuleLoader__.load({
       else classes.remove(CAPTION_LIVE_CLASS)
     }
 
-    /**
-     * Build one guest: a fresh partition, the switcher row, and the failure line.
-     * @param {string} hostId - host this window belongs to.
-     * @param {string} url - loopback launch URL (already validated by the caller).
-     * @param {string} message - load-failure line.
-     * @returns {Promise<object|null>} the warm guest, or null when it cannot be acquired.
-     */
     async function createCarrier(hostId, url, message) {
       const bridge = desktopBrowserBridge()
       if (bridge === null) return null
@@ -3281,13 +2830,11 @@ window.__ModuleLoader__.load({
         root,
         view,
         grip,
-        /** Caption band to mirror into this guest, or null when there is none. */
         caption,
         /** Set once the guest page carries the desktop marker (never in a band-less window). */
         captionApplied: false,
         url,
         rowInstalled: false,
-        /** Set when a main-frame load failed, so the next show retries instead of reusing it. */
         failed: false,
         timer: null,
       }
@@ -3367,11 +2914,6 @@ window.__ModuleLoader__.load({
       return whenCarrierIdle(() => showOverlayNow(hostId, options))
     }
 
-    /**
-     * @param {string} hostId - host to show.
-     * @param {{url?: string, message?: string}} options - launch URL / failure line.
-     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
-     */
     async function showOverlayNow(hostId, options) {
       const url = typeof options.url === 'string' ? options.url : ''
       let entry = carrierOf(hostId)
@@ -3422,11 +2964,6 @@ window.__ModuleLoader__.load({
       return { ok: true, reused }
     }
 
-    /**
-     * Hide every guest and hand the window back to the local page, keeping all of them
-     * warm: leaving a remote is not the same as closing it.
-     * @returns {void}
-     */
     function hideOverlays() {
       carrierPool.wanted = null
       if (carrierPool.current === null) return
@@ -3475,22 +3012,12 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Drop one host's warm window: its host disconnected or was deleted, or the plugin is
-     * going away. There is no count-based eviction.
-     * @param {string} hostId - host whose window goes away.
-     * @returns {Promise<void>}
-     */
     async function closeCarrier(hostId) {
       const entry = carrierOf(hostId)
       if (entry === null) return
       await disposeCarrier(entry)
     }
 
-    /**
-     * Drop every warm window (plugin disposal, or a host that is no longer usable).
-     * @returns {Promise<void>}
-     */
     async function closeOverlay() {
       stopHostRowPoll()
       const hosts = carrierPool.entries.map((entry) => entry.hostId)
@@ -3507,11 +3034,6 @@ window.__ModuleLoader__.load({
 
     //#region 9c. key-file picker
 
-    /**
-     * Browse the user's home and pick a private-key file.
-     * @param {object} props - t, locale, initialDir, onPick(path), onClose().
-     * @returns {object} modal element.
-     */
     function KeyFilePicker(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -3620,14 +3142,12 @@ window.__ModuleLoader__.load({
 
     //#region 10. connect wizard
 
-    /** Parse a positive integer, falling back when the input is not numeric. */
     function toInt(value, fallback) {
       const number =
         typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
       return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
     }
 
-    /** Parse `user@host:port` (the masked form the Host exposes) for edit prefill. */
     function parseMaskedAddress(masked) {
       const text = String(masked || '')
       const result = { username: '', port: null }
@@ -3639,7 +3159,6 @@ window.__ModuleLoader__.load({
       return result
     }
 
-    /** Build the `POST /hosts` body from the wizard draft (docs/api.md). */
     function buildHostInput(draft, hostId, includeAuth) {
       const host = {
         name: String(draft.name || '').trim(),
@@ -3669,11 +3188,6 @@ window.__ModuleLoader__.load({
       return host
     }
 
-    /**
-     * Validate the SSH form. Returns a dictionary key, or null when valid.
-     * @param {object} draft - form draft.
-     * @returns {string|null} validation failure key.
-     */
     function validateHostDraft(draft) {
       if (!String(draft.name || '').trim()) return 'wizard.validationName'
       const address = String(draft.address || '').trim()
@@ -3685,7 +3199,6 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /** Create the initial wizard draft from an existing host and settings defaults. */
     function initialDraft(mode, host, settings) {
       const defaults = settings && typeof settings === 'object' ? settings : {}
       const auto = defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
@@ -3725,15 +3238,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Add / edit host dialog (docs/design.md（接入向导）). One step, two actions: the SSH form is
-     * the whole body, `保存` stores the entry and closes, and `连接` (add mode only) stores it and
-     * hands the connection to the connect window — staged progress, the host-key question and the
-     * live log — which takes the whole window once the host answers. There is no test step: a
-     * connection either happens for real, or it is not started at all.
-     * @param {object} props - mode, host, live state, callbacks.
-     * @returns {object} modal element.
-     */
     function WizardDialog(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -3746,7 +3250,6 @@ window.__ModuleLoader__.load({
       const [authDirty, setAuthDirty] = useState(mode === 'add')
       const [nameTouched, setNameTouched] = useState(mode === 'edit')
       const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
-      /** Which button is in flight: `'save' | 'connect' | null`. */
       const [saving, setSaving] = useState(null)
       const [formError, setFormError] = useState(null)
       const [aliases, setAliases] = useState([])
@@ -3802,13 +3305,6 @@ window.__ModuleLoader__.load({
         if (!nameTouched && mode === 'add') patchDraft({ name: alias.alias || alias.host || '' })
       }
 
-      /**
-       * Finish the dialog with the button that was pressed. `save` only stores the entry;
-       * `connect` stores it and hands the connection to the overlay (which opens the connect
-       * window and takes the whole window over once the host is up).
-       * @param {'save' | 'connect'} intent - which action to finish with.
-       * @returns {Promise<void>} resolves once the action settled.
-       */
       const submit = async (intent) => {
         const invalid = validateHostDraft(draft)
         if (invalid !== null) {
@@ -4144,7 +3640,6 @@ window.__ModuleLoader__.load({
       return list.sort((a, b) => rank(a) - rank(b))
     }
 
-    /** Localized label for a diagnostic check status. */
     function checkStatusLabel(t, status) {
       if (status === 'pass') return t('diag.checkPass')
       if (status === 'fail') return t('diag.checkFail')
@@ -4177,11 +3672,6 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    /**
-     * Diagnostics drawer (docs/design.md（诊断）): a redacted checklist with re-run and
-     * @param {object} props - host, status, report, callbacks.
-     * @returns {object|null} drawer elements.
-     */
     function DiagnoseDrawer(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -4329,7 +3819,6 @@ window.__ModuleLoader__.load({
 
     //#region 12. settings modal
 
-    /** Build the partial SettingsView sent by `POST /settings` (docs/api.md). */
     function settingsPatchFromDraft(draft) {
       return {
         defaultPort: toInt(draft.defaultPort, 22),
@@ -4351,7 +3840,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Create the editable settings draft from a SettingsView. */
     function settingsDraft(settings) {
       const view = settings && typeof settings === 'object' ? settings : {}
       const auto = view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
@@ -4624,11 +4112,6 @@ window.__ModuleLoader__.load({
 
     //#region 13. one-time password prompt
 
-    /**
-     * SSH password prompt for hosts whose `authType` is `password`. The value stays
-     * @param {object} props - host, busy flag, error, submit({password, remember})/cancel callbacks.
-     * @returns {object} modal element.
-     */
     function PasswordPrompt(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -4771,11 +4254,6 @@ window.__ModuleLoader__.load({
 
     //#region 14. toast
 
-    /**
-     * Lightweight toast for action results.
-     * @param {{toast: {text: string, tone?: string}|null}} props - toast payload.
-     * @returns {object|null} toast element.
-     */
     function Toast(props) {
       if (!props || !props.toast) return null
       return h(
@@ -4789,13 +4267,6 @@ window.__ModuleLoader__.load({
 
     //#region 15. overlay host (floating windows + remote window)
 
-    /**
-     * Owns the plugin's live state: one initial `/state` read, then SSE with a
-     * 3s polling fallback (docs/api.md). Disposal closes the stream and timers.
-     * An optional `initialState` is a test/preview seam; production callers omit it.
-     * @param {object|undefined} [initialState] - state used for the first render.
-     * @returns {{state: object|null, error: object|null, loading: boolean, mode: string, refresh: Function, patch: Function}} remote state handle.
-     */
     function useRemoteState(initialState) {
       const hasInitial = initialState !== undefined && initialState !== null
       const [state, setState] = useState(hasInitial ? initialState : null)
@@ -4848,15 +4319,6 @@ window.__ModuleLoader__.load({
       return { state, error, loading, mode, refresh, patch }
     }
 
-    /**
-     * The floating window, with two bodies behind one shell. A host that is connecting — or
-     * waiting for its host key, or has just failed — gets the connect window: staged progress on
-     * top and the Host's log streaming underneath. That is the whole point of opening a host
-     * that is not up yet, so the host list is deliberately not part of it; management is what
-     * the window shows when nothing is connecting, and it is one close away.
-     * @param {object} props - window state, the active host, and every callback the bodies use.
-     * @returns {object|null} the window element, or null while it is closed.
-     */
     function ManageWindow(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -4921,7 +4383,6 @@ window.__ModuleLoader__.load({
       // remote window all read from it.
       const remote = useRemoteState(props.initialState)
       const state = remote.state
-      /** Host filling the window, or null when the local page is in front. */
       const [target, setTarget] = useState(() => {
         const initial = props.initialState
         return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
@@ -5083,7 +4544,6 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      /** Connect with an optional one-time password (memory only). */
       const performConnect = (host, password) => {
         if (!host || !host.id) return
         setBusyHostId(host.id)
@@ -5117,15 +4577,6 @@ window.__ModuleLoader__.load({
         performConnect(host, opts.password)
       }
 
-      /**
-       * Hand the window to one host: the management window steps aside for a host that is
-       * up, and stays up while one that is not (connecting, waiting for a fingerprint, in
-       * conflict) gets there, so its progress, log or prompt is visible.
-       * @param {object} host - HostView to open.
-       * @param {{password?: string}} [options] - a one-time password typed elsewhere (the
-       *   add-host dialog hands the one it collected here instead of asking again).
-       * @returns {void}
-       */
       const openHost = (host, options) => {
         if (!host) return
         const opts = options || {}
@@ -5210,7 +4661,6 @@ window.__ModuleLoader__.load({
         if (store && typeof store.close === 'function') store.close()
       }
 
-      /** Submit the one-time password for the pending open/connect/reconnect. */
       const submitPassword = (submitted) => {
         const pending = passwordPrompt
         if (!pending || !pending.host) return
@@ -5354,15 +4804,6 @@ window.__ModuleLoader__.load({
         notify(t('settings.saved'), 'success')
       }
 
-      /**
-       * Confirm or refuse the host key the window is waiting on. The wizard asks the same
-       * question in its second step; this is the same call, reached from the floating list
-       * so a host opened straight from the switcher can get past that step too.
-       * @param {object} host - HostView waiting for its fingerprint.
-       * @param {boolean} accept - true to pin it, false to refuse it (which drops the link).
-       * @param {boolean} [remember] - pin permanently (accept only).
-       * @returns {void}
-       */
       const answerFingerprint = (host, accept, remember) => {
         if (!host || !host.id) return
         const sha256 = host.fingerprint && typeof host.fingerprint.sha256 === 'string' ? host.fingerprint.sha256 : ''
@@ -5379,7 +4820,6 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** Open the add/edit wizard; it floats over whatever is on screen. */
       const openWizard = (draft) => {
         if (typeof props.openWizard === 'function') {
           props.openWizard(draft)
@@ -5501,11 +4941,6 @@ window.__ModuleLoader__.load({
 
     //#region 16. styles
 
-    /**
-     * Panel styles. No local palette and no local token layer: every colour, surface,
-     * radius and shadow is the host's own --dsw-* alias, and a theme change restyles
-     * the whole surface on the next paint.
-     */
     const CSS = `
     /*
      * Panel styles.
@@ -6219,7 +5654,6 @@ window.__ModuleLoader__.load({
     html.drg-caption-live body > [data-windows-menu] { z-index: 2147483002; }
 `
 
-    /** Injects the panel styles once per mounted panel (removed on unmount). */
     function StyleSheet() {
       return h('style', { 'data-dsh-remote-go': 'styles', dangerouslySetInnerHTML: { __html: CSS } })
     }
@@ -6228,13 +5662,6 @@ window.__ModuleLoader__.load({
 
     //#region 17. plugin registration
 
-    /**
-     * Register the dictionaries, the overlay host (floating windows + remote window),
-     * and the sidebar switcher row. The switcher row is the plugin's only entry: no
-     * settings page and no sidebar or main panel are registered.
-     * @param {object} ctx - browser plugin context.
-     * @returns {void}
-     */
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-remote-go: dictionaries')
       const t = ctx.locale.bind(NS)
@@ -6263,16 +5690,8 @@ window.__ModuleLoader__.load({
         return 'zh'
       }
 
-      /** Command channel into the overlay host: open one host, show management, go local. */
       const panelStore = createPanelRequestStore()
-      /** The add/edit wizard's own channel, so it can open from anywhere. */
       const wizardStore = createWizardStore()
-      /**
-       * Open the host wizard. It floats in the shell's overlay layer, above a remote window,
-       * so nothing behind it changes.
-       * @param {{mode?: string, host?: object|null}} draft - what the dialog edits.
-       * @returns {void}
-       */
       const openWizard = (draft) => {
         wizardStore.open(draft)
       }
@@ -6369,7 +5788,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Components exported for tests and host-side tooling. */
     const components = {
       RemoteIcon,
       PluginOverlay,
@@ -6403,10 +5821,6 @@ window.__ModuleLoader__.load({
        * The Host-API client, exposed so unit tests can exercise the real security
        */
       api,
-      /**
-       * The takeover carrier's seams, exposed for unit tests: the warm-window pool, the
-       * injected row, the local/guest pushes and the intent dispatcher.
-       */
       carrier: {
         open: showOverlay,
         close: closeOverlay,

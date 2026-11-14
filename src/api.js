@@ -10,18 +10,9 @@ import { nowIso } from './util.js'
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024
 
-/**
- * @param {{
- *   service: import('./service.js').RemoteGoService,
- *   getOrigin: () => string | null,
- *   logger?: { warn?: (...a: any[]) => void, error?: (...a: any[]) => void },
- *   diagnostics?: () => Record<string, unknown>,
- * }} options
- */
 export function createApi(options) {
   const { service } = options
   const logger = options.logger ?? console
-  /** @type {Set<import('node:http').ServerResponse>} */
   const sseClients = new Set()
 
   const broadcastState = () => {
@@ -80,7 +71,6 @@ export function createApi(options) {
     return { ok: true }
   }
 
-  /** @param {import('node:http').IncomingMessage} req */
   function authorize(req) {
     const origin = authorizeOrigin(req)
     if (!origin.ok) return origin
@@ -99,10 +89,8 @@ export function createApi(options) {
     return { ok: true }
   }
 
-  /** @param {import('node:http').IncomingMessage} req */
   function readJson(req) {
     return new Promise((resolve, reject) => {
-      /** @type {Buffer[]} */
       const chunks = []
       let size = 0
       req.on('data', (chunk) => {
@@ -132,7 +120,6 @@ export function createApi(options) {
     })
   }
 
-  /** @param {import('node:http').ServerResponse} res @param {number} status @param {Record<string, unknown>} payload */
   function sendJson(res, status, payload) {
     const body = JSON.stringify(payload)
     res.writeHead(status, {
@@ -143,7 +130,6 @@ export function createApi(options) {
     res.end(body)
   }
 
-  /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   function handleSse(req, res) {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -158,10 +144,6 @@ export function createApi(options) {
     })
   }
 
-  /**
-   * @param {import('node:http').IncomingMessage} req
-   * @param {import('node:http').ServerResponse} res
-   */
   async function handler(req, res) {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -274,7 +256,6 @@ export function createApi(options) {
           const result = await service.connect(id, {
             password: typeof body.password === 'string' ? body.password : undefined,
             rememberPassword: body.rememberPassword === true,
-            rememberFingerprint: body.rememberFingerprint !== false,
           })
           sendJson(res, 200, { ok: true, ...result })
           return
@@ -282,17 +263,6 @@ export function createApi(options) {
         if (method === 'POST' && action === 'conflict') {
           const body = await readJson(req)
           const result = await service.confirmConflict(id, { action: body.action })
-          sendJson(res, 200, { ok: true, ...result })
-          return
-        }
-        // Remember (or forget) the SSH password in the credential store. The value
-        // never enters hosts.json; `available:false` means nothing can be persisted.
-        if (method === 'POST' && action === 'password') {
-          const body = await readJson(req)
-          const result = await service.saveHostPassword(id, {
-            password: typeof body.password === 'string' ? body.password : undefined,
-            clear: body.clear === true,
-          })
           sendJson(res, 200, { ok: true, ...result })
           return
         }
@@ -324,15 +294,6 @@ export function createApi(options) {
         }
         if (method === 'GET' && action === 'open') {
           sendJson(res, 200, { ok: true, ...service.openInfo(id) })
-          return
-        }
-        if (method === 'POST' && action === 'keepalive') {
-          const body = await readJson(req)
-          const host = await service.updateHostPolicy(id, {
-            keepAlive: body.keepAlive,
-            idleMinutes: body.idleMinutes,
-          })
-          sendJson(res, 200, { ok: true, host })
           return
         }
         if (method === 'POST' && action === 'activate') {

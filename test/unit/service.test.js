@@ -610,12 +610,3 @@ test('setLocalVersion enables local-version parity resolution', async () => {
   assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
   assert.equal(service.snapshot().targetVersion, '0.2.2-rc.1')
 })
-
-test('updateHostPolicy patches keep-alive fields', async () => {
-  const { service, store } = await makeTestService()
-  const host = await createHost(service)
-  const view = await service.updateHostPolicy(host.id, { keepAlive: 'idle', idleMinutes: 45 })
-  assert.equal(view.keepAlive, 'idle')
-  assert.equal(view.idleMinutes, 45)
-  assert.equal(store.getHost(host.id).keepAlive, 'idle')
-})

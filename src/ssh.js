@@ -15,7 +15,6 @@ import { errors, RemoteGoError } from './errors.js'
 
 const { Client } = ssh2
 
-/** @param {Buffer | Uint8Array} blob */
 export function parseSshKeyType(blob) {
   try {
     const buffer = Buffer.from(blob)
@@ -28,29 +27,7 @@ export function parseSshKeyType(blob) {
   }
 }
 
-/**
- * @typedef {{
- *   host: string,
- *   port?: number,
- *   username?: string | null,
- *   auth?: { type: 'agent' | 'key' | 'password', keyPath?: string | null, password?: string | null, passphrase?: string | null },
- *   identityFiles?: string[],
- *   hostKeyPolicy?: 'first-use' | 'strict',
- *   pinnedFingerprint?: string | null,
- *   knownHostFingerprints?: string[],
- *   sock?: import('node:stream').Duplex,
- *   onHostKey?: (info: { sha256: string, keyType: string, pinned: boolean }) => Promise<boolean>,
- *   acceptUnknownHostKey?: boolean,
- *   readyTimeoutMs?: number,
- *   keepaliveIntervalMs?: number,
- *   home?: string,
- * }} SshConnectOptions
- */
-
 export class SshConnection extends EventEmitter {
-  /**
-   * @param {SshConnectOptions} options
-   */
   constructor(options) {
     super()
     this.options = {
@@ -65,15 +42,11 @@ export class SshConnection extends EventEmitter {
       identityFiles: options.identityFiles ?? [],
     }
     this.client = null
-    /** @type {string | null} */
     this.fingerprint = null
-    /** @type {string | null} */
     this.keyType = null
     this.closed = false
     this.disposed = false
-    /** @type {Promise<boolean> | null} */
     this.hostKeyDecision = null
-    /** @type {{ sha256: string, keyType: string, pinned: boolean } | null} */
     this.hostKeyInfo = null
     this.execSeq = 0
     // ssh2 clients emit `error` for every failed auth attempt and again while
@@ -81,7 +54,6 @@ export class SshConnection extends EventEmitter {
     // exception, which would take down the whole DSH host process; keep a
     // permanent safety listener so failures stay inside this connection.
     this.on('error', () => {})
-    /** @type {() => any} */
     this.clientFactory = typeof options.clientFactory === 'function' ? options.clientFactory : () => new Client()
   }
 
@@ -89,10 +61,6 @@ export class SshConnection extends EventEmitter {
     return this.client !== null && !this.closed
   }
 
-  /**
-   * Connect with auth-method fallback. Resolves once the transport is ready.
-   * @returns {Promise<{ fingerprint: string, keyType: string, serverBanner: string | null }>}
-   */
   async connect() {
     if (this.connected) return { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '', serverBanner: null }
     const candidates = await this.resolveAuthCandidates()
@@ -102,7 +70,6 @@ export class SshConnection extends EventEmitter {
         en: 'No usable SSH authentication: choose a readable private-key file (or enter a one-time password).',
       })
     }
-    /** @type {unknown} */
     let lastError = null
     for (const candidate of candidates) {
       try {
@@ -125,10 +92,6 @@ export class SshConnection extends EventEmitter {
     throw lastError instanceof Error ? lastError : errors.auth()
   }
 
-  /**
-   * @param {Record<string, unknown>} authConfig
-   * @returns {Promise<{ fingerprint: string, keyType: string, serverBanner: string | null }>}
-   */
   connectOnce(authConfig) {
     return new Promise((resolve, reject) => {
       let settled = false
@@ -147,7 +110,6 @@ export class SshConnection extends EventEmitter {
       // `connected === false` and every later `exec`/`forwardOut` would throw
       // "SSH connection is not open" on a transport that is actually up.
       this.closed = false
-      /** @type {string | null} */
       let serverBanner = null
       client.on('banner', (message) => {
         serverBanner = String(message).trim()
@@ -185,12 +147,6 @@ export class SshConnection extends EventEmitter {
     })
   }
 
-  /**
-   * Host-key policy (§9.1): pin comparison, then user confirmation for first
-   * use, then strict rejection when no pin exists.
-   * @param {Buffer} keyBlob
-   * @returns {Promise<boolean>}
-   */
   async verifyHostKey(keyBlob) {
     const sha256 = fingerprintFromBlob(keyBlob)
     const keyType = parseSshKeyType(keyBlob)
@@ -232,12 +188,8 @@ export class SshConnection extends EventEmitter {
     return true
   }
 
-  /**
-   * @returns {Promise<Record<string, unknown>[]>}
-   */
   async resolveAuthCandidates() {
     const auth = this.options.auth ?? { type: 'key' }
-    /** @type {Record<string, unknown>[]} */
     const out = []
     if (auth.type === 'password') {
       if (auth.password) out.push({ password: auth.password, tryKeyboard: true })
@@ -265,12 +217,6 @@ export class SshConnection extends EventEmitter {
     return out
   }
 
-  /**
-   * Run one command. Output is collected and streamed to the callbacks.
-   * @param {string} command
-   * @param {{ timeoutMs?: number, env?: Record<string, string>, maxBytes?: number, onStdout?: (chunk: string) => void, onStderr?: (chunk: string) => void, signal?: AbortSignal }} [options]
-   * @returns {Promise<{ code: number | null, signal: string | null, stdout: string, stderr: string, timedOut: boolean }>}
-   */
   exec(command, options = {}) {
     const timeoutMs = options.timeoutMs ?? 30_000
     const maxBytes = options.maxBytes ?? 2 * 1024 * 1024
@@ -281,7 +227,6 @@ export class SshConnection extends EventEmitter {
       }
       let settled = false
       let timedOut = false
-      /** @type {NodeJS.Timeout | null} */
       let timer = null
       const chunks = { stdout: '', stderr: '' }
       const finish = (/** @type {any} */ error, /** @type {any} */ value) => {
@@ -335,14 +280,6 @@ export class SshConnection extends EventEmitter {
     })
   }
 
-  /**
-   * Forward one TCP connection through an SSH channel (`ssh -L` equivalent).
-   * @param {string} destHost
-   * @param {number} destPort
-   * @param {string} [srcHost]
-   * @param {number} [srcPort]
-   * @returns {Promise<import('node:stream').Duplex>}
-   */
   forwardOut(destHost, destPort, srcHost = '127.0.0.1', srcPort = 0) {
     return new Promise((resolve, reject) => {
       if (!this.client || this.closed) {
@@ -356,7 +293,6 @@ export class SshConnection extends EventEmitter {
     })
   }
 
-  /** @returns {Promise<void>} */
   async dispose() {
     this.disposed = true
     const client = this.client
@@ -392,7 +328,6 @@ export class SshConnection extends EventEmitter {
     }
   }
 
-  /** Assert that the remote of a probe is the loopback host we expect. */
   assertLoopbackForward() {
     if (!isLoopbackHost(this.options.host)) {
       throw errors.invalidInput('host', {
@@ -403,10 +338,6 @@ export class SshConnection extends EventEmitter {
   }
 }
 
-/**
- * @param {string} keyPath
- * @returns {Promise<Buffer | null>}
- */
 async function readKey(keyPath) {
   try {
     if (!existsSync(keyPath)) return null
@@ -416,12 +347,6 @@ async function readKey(keyPath) {
   }
 }
 
-/**
- * Classify ssh2 connect errors into the plugin's user-facing taxonomy.
- * @param {any} error
- * @param {string} host
- * @param {number} port
- */
 export function toSshError(error, host, port) {
   if (!error) return errors.internal('unknown ssh error')
   if (error instanceof RemoteGoError) return error
@@ -449,7 +374,6 @@ export function toSshError(error, host, port) {
   })
 }
 
-/** @param {unknown} error */
 function isHostKeyError(error) {
   const code = /** @type {any} */ (error)?.code
   return code === 'host-key-changed' || code === 'host-key-unknown'

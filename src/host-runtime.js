@@ -13,13 +13,11 @@ export function emptyRemote() {
     profile: null,
     bootstrapLevel: null,
     nodeVersion: null,
-    /** `'system'` (the remote's own Node) or `'managed'` (provisioned by the plugin). */
     nodeSource: null,
     startedAt: null,
   }
 }
 
-/** @param {Record<string, any>} host */
 export function createHostRuntime(host) {
   return {
     id: host.id,
@@ -51,7 +49,6 @@ export function createHostRuntime(host) {
     idleTimer: null,
     connectPromise: null,
     closing: false,
-    /** Unfiltered ring of this connection's log; `seq` is monotonic so the Client can key lines. */
     logs: [],
     logSeq: 0,
   }

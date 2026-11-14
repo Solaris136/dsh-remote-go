@@ -13,13 +13,8 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-/** Entries beyond this count are dropped and reported as truncated. */
 const MAX_ENTRIES = 500
 
-/**
- * @param {{ home: string, dir?: string, fsImpl?: typeof fs }} options
- * @returns {Promise<{ path: string, parent: string | null, entries: Array<{ name: string, path: string, isDirectory: boolean }>, truncated: boolean }>}
- */
 export async function listKeyFiles(options) {
   const home = path.resolve(options.home)
   const impl = options.fsImpl ?? fs
@@ -61,12 +56,6 @@ export async function listKeyFiles(options) {
   }
 }
 
-/**
- * Expand a leading `~` against the resolved home; a bare relative path stays
- * relative so the caller's `path.resolve` keeps its meaning.
- * @param {string | undefined} value
- * @param {string} home
- */
 function expandHome(value, home) {
   if (typeof value !== 'string' || value.trim() === '') return ''
   const trimmed = value.trim()
