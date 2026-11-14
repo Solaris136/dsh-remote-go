@@ -176,7 +176,7 @@ test('ensureRemoteNode reports a typed failure when no checksum can be fetched',
     () => ensureRemoteNode(ssh, { facts: makeFacts(), layout: LAYOUT }),
     (error) =>
       error.code === 'remote-node-install-failed' &&
-      /nodejs\.org/.test(error.detail.zh) &&
+      error.detail.zh.includes('nodejs.org') &&
       /Could not resolve host/.test(error.technical ?? ''),
   )
 })
