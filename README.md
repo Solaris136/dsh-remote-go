@@ -50,7 +50,7 @@ host inventory, SSH connection plus tunnel, main-content takeover, and connectio
 - 接管后看到的是**远端 DSH 自己的完整 Web 界面**：桌面端用 Chromium guest 把它铺满窗口（标题栏以下）。本地侧边栏在接管期间隐藏，所以窗口里只有一个侧边栏——远端自己的那个。没有 iframe、不开第二个浏览器窗口。
 - 接管期间，插件把**主机条注入远端页面自己的侧边栏**（品牌行下方）：状态点 + 当前主机全名（点开切换）+ 远端会话名；菜单里还有刷新与「离开远端」。它用远端页面的主题变量绘制，跟着远端的字体、hover、弹层遮罩一起变，看不出是外接的。
 - 本地只做四件事：**主机清单、SSH 连接与隧道、整窗接管、连接状态与诊断**。
-- 远端只需**原版 DSH 的运行前提**：Linux + Node ≥ 24.9（含 npm/npx）。插件用 `npx -y @deepseek-ai/dsh@<本机版本>` 拉起远端 DSH——**不安装、不下载 Node**，远端数据就是该用户自己的 `~/.dsh`。
+- 远端只需要 **Linux + 能访问外网**：插件用 `npx -y @deepseek-ai/dsh@<本机版本>` 拉起远端 DSH，并在 `~/.dsh/remote-go/node` **固定安装一份自己用的 Node**（版本取本机 DSH 自己 `engines.node` 的下限，不碰系统 Node、不需要 root）；远端有没有 Node 都一样，数据就是该用户自己的 `~/.dsh`。
 
 ## 切换方式（本地 ↔ 远端）
 
@@ -66,8 +66,8 @@ host inventory, SSH connection plus tunnel, main-content takeover, and connectio
 
 | 证据 | 结果 |
 |---|---|
-| 单元测试（Host + Client） | `pnpm run test:unit` → **373** 用例全部通过；集成/E2E `pnpm run test:integration` → 42 用例（模拟远端 + `Web E2E` + `Desktop E2E`；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
-| 覆盖率门禁 | `pnpm run test:coverage` → 行 **90.63%** / 分支 **77.75%** / 函数 **90.11%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
+| 单元测试（Host + Client） | `pnpm run test:unit` → **406** 用例全部通过；集成/E2E `pnpm run test:integration` → 42 用例（模拟远端 + `Web E2E` + `Desktop E2E`；后两个浏览器套件缺 harness/浏览器时跳过，`Desktop E2E` 只在 Windows 上运行） |
+| 覆盖率门禁 | `pnpm run test:coverage` → 行 **90.67%** / 分支 **77.36%** / 函数 **90.15%**（排除 `vendor/` 与测试自身），阈值 85 / 70 / 80 |
 | 发布路径 | `pnpm pack` → tarball 仅含运行时文件 → 安装进干净 profile → API 与 client-module 均从安装目录加载（`e2e/artifacts/publish-e2e-report.json`）；该路径现由 `Acceptance E2E` 的 Web 作业（夜间定时 + 手动）复核 |
 | 持续集成 | GitHub Actions 共 **3 项必需检查**（ruleset「main protection」：`strict`、无绕过）：`Verify (ubuntu-latest)`（仓库规范 + Prettier 格式 + PR 标题 + 覆盖率门禁 + 模拟远端集成/E2E + tarball 校验）、`Tests (windows-latest, Node 24)`（单元 + 模拟远端集成/E2E）、`Analyze (javascript-typescript)`（CodeQL）；真实浏览器验收（Web/Desktop E2E）与真实主机 E2E 都不在门禁里，见「CI 与发布」 |
 
@@ -98,12 +98,12 @@ host inventory, SSH connection plus tunnel, main-content takeover, and connectio
 | **整窗接管**：远端 DSH 以真正的 Chromium guest 铺满窗口（标题栏以下），本地侧边栏在接管期间让位（无 iframe、无第二个浏览器窗口；下载与权限受桌面端限制） | ✅ 0.1.0 |
 | 连接状态 / 分阶段进度 / 断线自动重连 | ✅ 0.1.0 |
 | 手工启动的远端 DSH 冲突提示：停止 / 并存 / 取消 | ✅ 0.1.0 |
-| 诊断检查表（9 项）+ 复制脱敏诊断信息 | ✅ 0.1.0 |
-| 远端运行时：`npx -y @deepseek-ai/dsh@<本机版本>`（不安装、不下载 Node；要求远端 Node ≥ 24.9 + npx） | ✅ 0.1.0 |
+| 诊断检查表（10 项）+ 复制脱敏诊断信息 | ✅ 0.1.0 |
+| 远端运行时：插件托管的 Node（`~/.dsh/remote-go/node`，版本取 DSH `engines.node` 下限并固定、官方 tarball + SHA-256 校验、官方源失败回退 npmmirror）+ `npx -y @deepseek-ai/dsh@<本机版本>` | ✅ 0.1.0 |
 | 版本一致性：目标版本恒为本机 DSH 版本；`npx` 预检回读不一致直接失败，不静默混用 | ✅ 0.1.0 |
 | 远端存活策略：保持运行 / 退出即停 / 空闲停止（按主机） | ✅ 0.1.0 |
 | 隧道收养（本地重启后复用仍在运行的远端实例） | ✅ 0.1.0 |
-| 设置（SSH 默认值/自动重连/指纹策略/保存令牌开关/远端运行时 `remoteDir` + `profile`） | ✅ 0.1.0 |
+| 设置（SSH 默认值/自动重连/指纹策略/保存令牌开关/远端 `profile`） | ✅ 0.1.0 |
 | 双语界面（中文 / English） | ✅ 0.1.0 |
 | 沉浸模式 / 本机通知 / 远端设置管理 | ⏳ V1.1+ |
 
@@ -140,35 +140,36 @@ dsh plugin --profile web add dsh-remote-go
 1. 打开 **设置 → 远程主机** →「添加第一台服务器」。
 2. 填 SSH 地址或 `~/.ssh/config` 别名，选私钥文件（默认已填 `~/.ssh/id_ed25519`，可点「选择文件…」浏览）或一次性密码；可选跳板机。
 3. 首次连接确认主机指纹（可「接受并记住」）。
-4. 插件探测远端环境（Linux / Node ≥ 24.9 / npx），用 `npx` 固定本机版本启动远端 DSH（首次运行会下载进 npx 缓存），等待进入「已连接」。
+4. 插件探测远端环境，在 `~/.dsh/remote-go/node` 准备自己用的 Node（缺失或版本不符时自动下载安装），用 `npx` 固定本机版本启动远端 DSH（首次运行还会把 DSH 下载进 npx 缓存，下载进度会显示在连接进度里），等待进入「已连接」。
 5. 点「打开」：远端 DSH 接管整个窗口，本地侧边栏让位，底部出现注入的主机条（更多的主机就在里面切换）。回到本地：点主机条右侧的「离开远端」回到主机管理页，再点侧边栏里的本地工作区 / 会话。
 6. 关闭视窗只关闭本地承载，远端任务继续（按主机的存活策略）。
 
 ### 远端运行时
 
-远端运行时只有一种形态：**用 `npx` 拉起与本机完全相同版本的 DSH**。没有自举分级、不下载 Node、不做隔离安装。
+远端运行时只有一种形态：**插件自带的 Node + `npx` 拉起与本机完全相同版本的 DSH**。远端系统里有没有 Node、装的是哪个版本都不影响它——插件只用自己的那一份，避免和远端其他项目、nvm 或包管理器互相干扰。
 
 | 前提 | 说明 |
 |---|---|
 | Linux 远端 | 只支持 Linux；Windows / macOS 远端待后续版本 |
-| Node ≥ 24.9.0 | 远端 `node` 在 PATH 上（DSH 的 `engines.node` 要求） |
-| npm / npx | 随 Node 提供；`npx` 不在 PATH 上时明确失败，并提示安装 npm 或补齐 PATH |
-| curl | 连接后的远端界面探活会用到（`127.0.0.1:<port>` 的 HTTP 探测） |
+| 能访问 nodejs.org（或 npmmirror.com） | 首次连接下载 Node 官方 Linux 构建（`.tar.gz`，约 50 MB），解压到 `~/.dsh/remote-go/node/v<version>`；之后复用 |
+| `curl` 或 `wget` | 下载与连接后的界面探活都只需要其中一个 |
 | 首次可访问 npm registry | 第一次运行会把 `@deepseek-ai/dsh@<本机版本>` 下载进 npx 缓存，之后走缓存 |
+| 约 400 MB 可用磁盘 | tarball、解压后的 Node 与临时目录 |
 
-连接时实际执行的命令是固定的（`remoteDir` 只决定插件自己的文件写到哪里）：
+连接时实际执行的命令是固定的（版本与路径都由校验后的值填入）：
 
 ```bash
-env DSH_HOME=~/.dsh PATH=<node bin>:"$PATH" \
-  npx -y @deepseek-ai/dsh@<本机版本> --profile <profile> --no-open --port 0
+env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
+  ~/.dsh/remote-go/node/v<version>/bin/npx -y @deepseek-ai/dsh@<本机版本> --profile <profile> --no-open --port 0
 ```
 
+- **托管 Node 固定版本**：要装的版本 = 本机 DSH 自己声明的 `engines.node` 下限（当前 `>=24.9.0` → Node 24.9.0），随插件读取、不追最新补丁；已装同一版本就复用，不再轮询 registry，也不会静默升级。DSH 以后抬高下限时，插件自然跟着升级并清理旧版本。下载前校验官方 `SHASUMS256.txt` 的 SHA-256 才解压；nodejs.org 不可达时回退到 npmmirror.com 的同一版本。**永远不修改系统 Node、不需要 root**。
 - **`~/.dsh` 是远端用户真实的 DSH 主目录**：凭据、会话、工作区、插件配置就是该用户自己的那一份，插件不复制、不隔离。
 - **`profile` 可配**：设置项 `bootstrap.profile`（默认 `web`），profile 的插件构成在 `~/.dsh/profiles/<profile>`；会话、凭据、工作区等数据在 `~/.dsh` 下全局共享。`desktop` 留给桌面端，不能选。
-- **插件只用自己的状态目录**：设置项 `bootstrap.remoteDir`（默认 `~/.dsh-remote-go/`），只放 `logs/web.log`、`run/web.json`（pid / port / version / profile / dshHome）以及租约与流助手文件；没有 `node/`、`dsh-home/`、`home/` 这类隔离产物。
-- **连接前先预检**：`npx -y @deepseek-ai/dsh@<本机版本> --version` 在前台跑一次（冷缓存下载就发生在这里，失败会带日志报错），回读版本必须与本机一致，否则直接 `version-mismatch` 失败。
-- **失败即明确失败**：缺 Node、Node < 24.9、缺 npx、registry 不可达或 npx 报出别的版本，都会停在可解释、可重试的错误上；不自动安装 Node/npm，也不会退化成隔离安装。
-- **不迁移旧版运行时**：旧版的 `~/.dsh-remote-go/{node,dsh-home,home}` 不再被读取，旧进程也不会被收养（run 注册表还要匹配 `dshHome` 与 `profile`）。
+- **插件自己的文件固定在 `~/.dsh/remote-go/`**（不再是设置项）：`logs/web.log`、`run/web.json`（pid / port / version / profile / dshHome）、`node/`（托管 Node）、`downloads/`、租约与流助手文件。
+- **连接前先预检**：托管 Node 就绪后，用它的 `npx -y @deepseek-ai/dsh@<本机版本> --version` 在前台跑一次（冷缓存下载就发生在这里，失败会带日志报错），回读版本必须与本机一致，否则直接 `version-mismatch` 失败。预检**没有超时**：第一次可能要下载几分钟，npm 的抓取输出会实时显示为连接进度（「正在下载 DSH 依赖包…」）。
+- **失败即明确失败**：下载不到 Node（网络/磁盘/架构不支持/musl）、npx 拉不到本机版本、回读版本不一致，都会停在可解释、可重试的错误上。**没有系统 Node 兜底**：装不上就失败，不会退回去用远端自带的那份。
+- **旧目录不再使用**：`~/.dsh-remote-go/` 与更早的隔离运行时不再被读取，旧进程也不会被收养（run 注册表还要匹配 `dshHome` 与 `profile`）。
 - **本机版本必须已发布到 npm**：`npx` 要能解析到该精确版本，否则预检阶段就会失败。
 
 所有远端文件都在用户目录，无需 root；远端界面只绑定回环地址，经 SSH 隧道访问。
@@ -179,10 +180,10 @@ env DSH_HOME=~/.dsh PATH=<node bin>:"$PATH" \
 本地 DSH（Host 插件 src/ + Client 插件 client.js）
 ├─ 主机管理页：主机清单 / 向导 / 诊断 / 插件设置（侧边栏一行「远程主机」进入）
 ├─ SSH（ssh2）：认证、主机指纹、exec、forwardOut
-├─ 远端运行时准备（npx 预检）/ 远端 dsh web 生命周期（start/stop/adopt）
+├─ 远端运行时准备（托管 Node 安装/升级 + npx 预检）/ 远端 dsh web 生命周期（start/stop/adopt）
 └─ 本地回环 TCP 隧道  127.0.0.1:<localPort> ──SSH──▶ 远端 127.0.0.1:<remotePort>
                                                       │
-远端服务器：原版 DSH（`DSH_HOME=~/.dsh npx -y @deepseek-ai/dsh@<本机版本> --profile web --no-open --port 0`）
+远端服务器：原版 DSH（`DSH_HOME=~/.dsh ~/.dsh/remote-go/node/v<version>/bin/npx -y @deepseek-ai/dsh@<本机版本> --profile web --no-open --port 0`）
 └─ 远端 DSH Web 界面 ──Chromium guest（桌面端整窗接管）──▶ 本地窗口
                      └─ 整窗接管：Chromium guest 铺满窗口；内容区底部注入 远端侧边栏注入的主机条（当前主机 / 远端会话名 / 刷新 / 离开）
 
@@ -192,7 +193,7 @@ env DSH_HOME=~/.dsh PATH=<node bin>:"$PATH" \
 
 1. **整窗接管，而不是内嵌或反代**：远端 DSH 由桌面端以真正的 Chromium guest 渲染（自有 cookie 与下载管线，行为与真实浏览器一致），不再有同站 iframe、浮层控件或状态页。接管时本地侧边栏隐藏、远端自己的侧边栏成为窗口里唯一的侧边栏；本地只留一条注入的主机条负责换主机和离开。早期同站 loopback iframe 的可行性结论已随该形态一并退役（可从 git 历史取回）。
 2. **每台主机独立本地端口**：cookie 按 authority 绑定，多主机登录态天然隔离。
-3. **远端运行时只用固定模板命令**（`npx -y @deepseek-ai/dsh@<本机版本>` 预检与启动），不接受任意 shell；不安装、不下载 Node。
+3. **远端运行时只用固定模板命令**（托管 Node 的 `npx` 预检与启动），不接受任意 shell；Node 由插件安装到自己的目录，不碰系统 Node。
 4. **版本一致**：目标版本恒为本机 DSH 版本（`clientModules.graph().release.version` → `DSH_VERSION` → 本机 `@deepseek-ai/dsh/package.json` 兜底），预检与启动都写精确版本；npx 回读不一致直接失败，不静默混用。
 5. **零运行时依赖、零安装脚本**：`ssh2` 由 `scripts/build-vendor.mjs` 打包成 `vendor/ssh2.bundle.cjs`，发布包 `dependencies: {}`，安装不执行任何 npm 生命周期脚本（供应链更可控，CI/市场安装更稳）。
 
@@ -217,7 +218,7 @@ env DSH_HOME=~/.dsh PATH=<node bin>:"$PATH" \
 | 已发布版本 | 暂无 | 尚未发布到 npm，也无对应 tag/release |
 
 - 兼容性由 `package.json` 的 `engines.dsh`（`>=0.2.2-rc.1`）与 `engines.node`（`>=24`）声明，安装和运行都会校验。
-- 远端要求 **Linux + Node ≥ 24.9.0 + npm/npx**，且首次连接能访问 npm registry；本机 DSH 版本需已发布到 npm（`npx` 按精确版本解析）。
+- 远端要求 **Linux + 能访问 nodejs.org（或 npmmirror.com）+ 首次能访问 npm registry**；**不要求预装 Node**——插件会把自己的 Node 装到 `~/.dsh/remote-go/node` 并只使用它；装不上就明确失败，没有系统 Node 兜底。
 - 插件与远端 DSH 的版本必须一致（见「架构与关键决策」第 4 条）；远端一律由 `npx` 按本机版本拉起，预检回读不一致会直接失败，不静默混用。
 - 变更记录见 [CHANGELOG.md](CHANGELOG.md)。发布流程（npm + 插件市场）已就绪，但当前**尚未执行**；
   发布动作由 `.github/workflows/release.yml` 在 `v*` 标签上执行。
@@ -351,7 +352,8 @@ E2E 环境变量：`E2E_NODE`（Node 可执行文件，默认取 PATH 中的 `no
 
 - 不做沉浸模式（`shell.overlay`）、本机通知、多窗口分屏、远端设置 diff/备份管理。
 - 远端仅支持 Linux；Windows 远端待后续版本。
-- 远端需要自备 Node ≥ 24.9 与 npm/npx，并且首次连接能访问 npm registry；插件不会自动安装 Node/npm，也没有离线包。
+- 远端首次连接需要能访问 nodejs.org（或 npmmirror.com）与 npm registry 来下载托管 Node 和本机 DSH 版本；没有离线包。官方 Node 构建要求 glibc ≥ 2.28；musl（如 Alpine）会明确失败并提示 `apk add nodejs npm`。
+- 托管 Node 是唯一运行时：远端系统 Node 永远不参与；装不上（网络/磁盘/架构/musl/glibc 过低）时连接明确失败，不会降级。
 - 远端 DSH 版本恒等于本机版本：本机版本必须已发布到 npm，否则 `npx` 解析不到、连接在预检阶段失败。
 - 不迁移旧版的隔离运行时（`~/.dsh-remote-go/{node,dsh-home,home}`）：升级后远端数据改为用户自己的 `~/.dsh`，旧目录不再使用。
 - 插件只收养自己启动的远端实例（run 注册表匹配 `dshHome` + `profile`）；远端如果已有手工启动的 DSH，连接会暂停并列出这些进程，由你选择「停止它并启动受管实例」「保留它，另起一个」或「取消连接」。

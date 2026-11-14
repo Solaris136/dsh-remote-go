@@ -43,11 +43,20 @@ test('planNpx refuses a remote without npx', () => {
   )
 })
 
-test('planNpx refuses a remote without curl', () => {
+test('planNpx refuses a remote without curl or wget', () => {
   assert.throws(
-    () => planNpx({ facts: makeFacts({ curlPath: null }), targetVersion: TARGET, profile: 'web' }),
+    () => planNpx({ facts: makeFacts({ curlPath: null, wgetPath: null }), targetVersion: TARGET, profile: 'web' }),
     (error) => error.code === 'remote-dsh-missing',
   )
+})
+
+test('planNpx accepts a remote with wget but no curl', () => {
+  const plan = planNpx({
+    facts: makeFacts({ curlPath: null, wgetPath: '/usr/bin/wget' }),
+    targetVersion: TARGET,
+    profile: 'web',
+  })
+  assert.equal(plan.level, 'npx')
 })
 
 test('planNpx refuses an invalid target version', () => {
@@ -57,7 +66,7 @@ test('planNpx refuses an invalid target version', () => {
   )
 })
 
-test('buildPreflightCommand pins the exact package and prefixes PATH', () => {
+test('buildPreflightCommand pins the exact package, prefixes PATH and streams npm output', () => {
   const plan = planNpx({
     facts: makeFacts({ nodePath: '/opt/node/bin/node', npxPath: '/opt/node/bin/npx' }),
     targetVersion: TARGET,
@@ -67,20 +76,37 @@ test('buildPreflightCommand pins the exact package and prefixes PATH', () => {
   assert.match(command, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
   assert.match(command, /--version/)
   assert.match(command, /PATH='\/opt\/node\/bin':"\$PATH"/)
+  // Without a TTY npm prints nothing until it finishes; http level streams fetches.
+  assert.match(command, /npm_config_loglevel=http/)
 })
 
-test('verifyNpxVersion accepts the exact version and warms the cache', async () => {
+test('verifyNpxVersion accepts the exact version, streams output and sets no deadline', async () => {
   const calls = []
   const ssh = {
     async exec(command, options) {
       calls.push({ command, options })
+      options.onStdout('0.2.2-rc.1\n')
+      options.onStderr('npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh\n')
       return { code: 0, stdout: '0.2.2-rc.1\n', stderr: '' }
     },
   }
   const plan = planNpx({ facts: makeFacts(), targetVersion: TARGET, profile: 'web' })
-  assert.equal(await verifyNpxVersion(ssh, plan, { timeoutMs: 1234 }), TARGET)
+  /** @type {string[]} */
+  const stdout = []
+  /** @type {string[]} */
+  const stderr = []
+  assert.equal(
+    await verifyNpxVersion(ssh, plan, {
+      onStdout: (chunk) => stdout.push(chunk),
+      onStderr: (chunk) => stderr.push(chunk),
+    }),
+    TARGET,
+  )
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].options.timeoutMs, 1234)
+  // 0 means "no deadline": progress replaces a guessed timeout for a cold cache.
+  assert.equal(calls[0].options.timeoutMs, 0)
+  assert.equal(stdout.join(''), '0.2.2-rc.1\n')
+  assert.match(stderr.join(''), /http fetch/)
 })
 
 test('verifyNpxVersion reports a different version as version-mismatch', async () => {

@@ -9,8 +9,8 @@ import {
 } from '../../src/probe.js'
 import { makeFacts } from '../helpers/fake-remote.js'
 
-test('buildProbeScript emits every fact line and quotes the remote dir', () => {
-  const script = buildProbeScript("~/.dsh-remote-go/it's")
+test('buildProbeScript emits every fact line', () => {
+  const script = buildProbeScript()
   for (const marker of [
     'os\t',
     'arch\t',
@@ -19,6 +19,9 @@ test('buildProbeScript emits every fact line and quotes the remote dir', () => {
     'npm_path\t',
     'npx_path\t',
     'curl_path\t',
+    'wget_path\t',
+    'libc\t',
+    'glibc_version\t',
     'disk_free_kb\t',
     'ssh_connection\t',
     'credentials_file\t',
@@ -26,8 +29,6 @@ test('buildProbeScript emits every fact line and quotes the remote dir', () => {
   ]) {
     assert.ok(script.includes(marker), `missing marker ${marker}`)
   }
-  // Single quote inside the dir must be shell-quoted, not break out.
-  assert.ok(script.includes("it'\\''s"))
 })
 
 test('parseProbeOutput keeps values containing spaces and tabs', () => {
@@ -47,6 +48,9 @@ test('toProbeFacts normalizes versions and reads the runtime facts', () => {
     npm_path: '/usr/bin/npm',
     npx_path: '/usr/bin/npx',
     curl_path: '/usr/bin/curl',
+    wget_path: '/usr/bin/wget',
+    libc: 'glibc',
+    glibc_version: '2.39',
     disk_free_kb: '35000000',
     ssh_connection: 'yes',
     credentials_file: 'yes',
@@ -56,6 +60,9 @@ test('toProbeFacts normalizes versions and reads the runtime facts', () => {
   assert.equal(facts.nodeVersion, '24.22.2')
   assert.equal(facts.npxPath, '/usr/bin/npx')
   assert.equal(facts.curlPath, '/usr/bin/curl')
+  assert.equal(facts.wgetPath, '/usr/bin/wget')
+  assert.equal(facts.libc, 'glibc')
+  assert.equal(facts.glibcVersion, '2.39')
   assert.equal(facts.diskFreeKb, 35_000_000)
   assert.equal(facts.sshConnection, true)
   assert.equal(facts.credentialsFile, true)
@@ -67,6 +74,7 @@ test('toProbeFacts tolerates missing/invalid fields', () => {
   assert.equal(facts.diskFreeKb, null)
   assert.equal(facts.nodeVersion, null)
   assert.equal(facts.npxPath, null)
+  assert.equal(facts.glibcVersion, null)
   assert.deepEqual(facts.providerEnvKeys, [])
 })
 
@@ -79,7 +87,7 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
       return { code: 0, stdout: 'os\tLinux\narch\tx86_64\nnode_version\tv24.22.2\n', stderr: '' }
     },
   }
-  const facts = await probeRemote(ssh, { remoteDir: '~/.dsh-remote-go' })
+  const facts = await probeRemote(ssh)
   assert.equal(facts.os, 'Linux')
   assert.equal(facts.nodeVersion, '24.22.2')
 
@@ -89,7 +97,7 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
     },
   }
   await assert.rejects(
-    () => probeRemote(failing, { remoteDir: '~/x' }),
+    () => probeRemote(failing),
     (error) => error.code === 'remote-dsh-missing',
   )
 })

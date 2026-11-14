@@ -12,7 +12,6 @@ import { homedir } from 'node:os'
 import {
   DEFAULT_IDLE_MINUTES,
   REMOTE_CONFLICT_TIMEOUT_MS,
-  REMOTE_PREFLIGHT_TIMEOUT_MS,
   REMOTE_START_TIMEOUT_MS,
   SSH_READY_TIMEOUT_MS,
   TUNNEL_PROBE_TIMEOUT_MS,
@@ -23,6 +22,7 @@ import { loadLocalSshMaterial } from './local-ssh.js'
 import { findKnownHostEntries, parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import { probeRemote } from './probe.js'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
+import { applyManagedNodeFacts, ensureRemoteNode, managedNodeVersionFromEngine } from './node-runtime.js'
 import { discoverSshAliases as discoverAliasesFromConfig, resolveDestination } from './ssh-config.js'
 import { parseSshConfig } from './ssh-config.js'
 import { SshConnection } from './ssh.js'
@@ -40,7 +40,7 @@ import {
 } from './webapp.js'
 import { randomBytes } from 'node:crypto'
 import { nowIso, randomDelay } from './util.js'
-import { normalizeVersion, versionParity, versionsEqual } from './version.js'
+import { normalizeVersion, isNodeVersionSupported, versionParity, versionsEqual } from './version.js'
 import {
   DEFAULT_EPOCH_JUMP_LIMIT,
   MIRROR_LEASE_TTL_MS,
@@ -109,10 +109,12 @@ const DELETE_WAIT_MS = 5_000
  *   home: string,
  *   logger?: { info?: (...a: any[]) => void, warn?: (...a: any[]) => void, debug?: (...a: any[]) => void, error?: (...a: any[]) => void },
  *   localVersion?: string | null,
+ *   engineNodeRange?: string | null,
  *   sshFactory?: (options: any) => any,
  *   tunnelFactory?: (options: any) => Promise<any>,
  *   probe?: typeof probeRemote,
  *   plan?: typeof planNpx,
+ *   ensureNode?: typeof ensureRemoteNode,
  *   preflight?: typeof verifyNpxVersion,
  *   startWeb?: typeof startRemoteWeb,
  *   stopWeb?: typeof stopRemoteWeb,
@@ -140,6 +142,32 @@ const DELETE_WAIT_MS = 5_000
  * }} ServiceOptions
  */
 
+/** @param {string} text */
+function stripAnsi(text) {
+  return String(text ?? '').replace(/\u001B\[[0-9;]*m/g, '')
+}
+
+/**
+ * Turn one npm/npx output line into a progress event for the connect line.
+ * `npm_config_loglevel=http` makes npm report fetches without a TTY; known shapes
+ * get a localized progress code, anything else is kept (truncated) as a detail.
+ * @param {string} line
+ * @param {string} version
+ * @returns {{ code: string, params?: Record<string, string> } | null}
+ */
+export function describePreflightEvent(line, version) {
+  const text = stripAnsi(line).trim()
+  if (text === '') return null
+  // The package's own `--version` output is the success signal, not progress.
+  if (/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(text)) return null
+  if (/The following package was not found and will be installed/i.test(text)) {
+    return { code: 'bootstrap-first-run', params: { version } }
+  }
+  if (/^npm (http fetch|http request)/i.test(text)) return { code: 'bootstrap-fetching' }
+  if (/added \d+ packages? in/i.test(text)) return { code: 'bootstrap-installed' }
+  return { code: 'bootstrap-progress', params: { detail: text.slice(0, 160) } }
+}
+
 /**
  * @param {any} runtime
  */
@@ -154,6 +182,8 @@ function emptyRemote() {
     profile: null,
     bootstrapLevel: null,
     nodeVersion: null,
+    /** `'system'` (the remote's own Node) or `'managed'` (provisioned by the plugin). */
+    nodeSource: null,
     startedAt: null,
   }
 }
@@ -168,10 +198,15 @@ export class RemoteGoService extends EventEmitter {
     this.logger = options.logger ?? console
     this.localVersion = options.localVersion ?? null
     this.localVersionSource = 'unknown'
+    // `engines.node` of the local DSH package; the managed Node version is its
+    // lower bound (see `managedNodeVersionFromEngine`). Null until detected.
+    this.engineNodeRange = options.engineNodeRange ?? null
+    this.engineNodeSource = 'unknown'
     this.sshFactory = options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions))
     this.tunnelFactory = options.tunnelFactory ?? createTunnel
     this.probe = options.probe ?? probeRemote
     this.plan = options.plan ?? planNpx
+    this.ensureNode = options.ensureNode ?? ensureRemoteNode
     this.preflight = options.preflight ?? verifyNpxVersion
     this.startWeb = options.startWeb ?? startRemoteWeb
     this.stopWeb = options.stopWeb ?? stopRemoteWeb
@@ -229,6 +264,18 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
+  /**
+   * Remember the local DSH build's `engines.node`. The managed Node version is
+   * derived from it, so the plugin follows DSH instead of hard-coding a number.
+   * @param {string | null} range
+   * @param {string} [source]
+   */
+  setLocalEnginesNode(range, source = 'detected') {
+    const text = typeof range === 'string' ? range.trim() : ''
+    this.engineNodeRange = text === '' ? null : text
+    this.engineNodeSource = source
+  }
+
   /** @param {Record<string, any>} host */
   #ensureRuntime(host) {
     let runtime = this.runtimes.get(host.id)
@@ -255,6 +302,8 @@ export class RemoteGoService extends EventEmitter {
       password: null,
       facts: null,
       plan: null,
+      /** Managed Node build used by this connection. */
+      managedNode: null,
       exchange: null,
       pendingHostKey: null,
       pendingConflict: null,
@@ -329,6 +378,56 @@ export class RemoteGoService extends EventEmitter {
     runtime.phase = phase
     runtime.progress = { code, ...(params ? { params } : {}) }
     this.#emitState()
+  }
+
+  /**
+   * Managed-Node provisioning reports coarse steps; surface them in the same
+   * progress line the rest of the pipeline uses (and throttle nothing here: the
+   * installer already bundles byte progress into ~5s/8 MB events).
+   * @param {any} runtime
+   * @param {{ step: string, version?: string, bytes?: number }} event
+   */
+  #nodeProgress(runtime, event) {
+    if (event.step === 'check') return
+    if (event.step === 'download') {
+      this.#phase(runtime, 'bootstrap', 'downloading-node', {
+        version: event.version,
+        mb: Math.max(0, Math.round(Number(event.bytes ?? 0) / (1024 * 1024))),
+      })
+      return
+    }
+    if (event.step === 'ready') return
+    this.#phase(runtime, 'bootstrap', 'installing-node', { version: event.version })
+  }
+
+  /**
+   * Stream one channel of the npx preflight into the connect progress line.
+   * npm has no TTY over SSH, so the command enables `npm_config_loglevel=http`;
+   * each line becomes a short detail, throttled so the SSE stream is not flooded.
+   * @param {any} runtime
+   * @param {string} version
+   * @returns {(chunk: string) => void}
+   */
+  #bootstrapReporter(runtime, version) {
+    let buffer = ''
+    let lastAt = 0
+    let lastKey = ''
+    return (chunk) => {
+      buffer += String(chunk ?? '')
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() ?? ''
+      for (const rawLine of lines) {
+        const event = describePreflightEvent(rawLine, version)
+        if (!event) continue
+        const key = `${event.code}:${event.params?.detail ?? ''}`
+        if (key === lastKey) continue
+        const now = Date.now()
+        if (now - lastAt < 700) continue
+        lastAt = now
+        lastKey = key
+        this.#phase(runtime, 'bootstrap', event.code, event.params)
+      }
+    }
   }
 
   /** Build the client-facing state snapshot (contract: docs/api.md). */
@@ -523,7 +622,7 @@ export class RemoteGoService extends EventEmitter {
         defaultWorkspaceId: null,
       }
     }
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     const result = await readRemoteWorkspaces(runtime.ssh, layout.dshHome)
     return {
       hostId: id,
@@ -631,7 +730,7 @@ export class RemoteGoService extends EventEmitter {
 
   /** @param {any} runtime */
   async #syncMirrors(runtime) {
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     const result = await readRemoteWorkspaces(runtime.ssh, layout.dshHome)
     const existing = this.mirrorStore.listMirrors({ hostId: runtime.id })
     const decision = this.#mirrorDecision(runtime)
@@ -837,7 +936,7 @@ export class RemoteGoService extends EventEmitter {
         .filter((entry) => entry?.ok === true)
         .map((entry) => entry.localSessionId),
     )
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     /** @type {import('./mirror.js').MirrorDescriptor[]} */
     const updated = []
     let appliedAny = false
@@ -1748,7 +1847,27 @@ export class RemoteGoService extends EventEmitter {
       )
 
       this.#phase(runtime, 'probe', 'probing')
-      const facts = await this.probe(runtime.ssh, { remoteDir: this.store.getSettings().bootstrap.remoteDir })
+      let facts = await this.probe(runtime.ssh)
+      // The runtime always runs on a plugin-owned Node (`~/.dsh/remote-go/node`),
+      // whether or not the remote already has one: a shared system/nvm Node is
+      // exactly what makes "works for my other project" break the remote DSH.
+      // There is no system fallback on purpose — the managed install is the only
+      // path, so this failure is the connection's failure.
+      const profile = this.store.getSettings().bootstrap.profile
+      const managedVersion = managedNodeVersionFromEngine(this.engineNodeRange)
+      const managed = await this.ensureNode(runtime.ssh, {
+        facts,
+        layout: remoteLayout(facts.home),
+        version: managedVersion,
+        onProgress: (event) => this.#nodeProgress(runtime, event),
+      })
+      facts = applyManagedNodeFacts(facts, managed)
+      runtime.managedNode = managed
+      this.#log(
+        runtime,
+        'info',
+        `managed Node ${managed.version}${managed.installed ? ' installed' : ' reused'} at ${managed.nodeBinDir}`,
+      )
       runtime.facts = facts
       const targetVersion = this.localVersion
       if (!targetVersion) {
@@ -1757,13 +1876,12 @@ export class RemoteGoService extends EventEmitter {
           en: 'The local DSH version is unknown, so the remote cannot be pinned to the same version. Start the plugin from the DSH UI so the Host can read the local version.',
         })
       }
-      const profile = this.store.getSettings().bootstrap.profile
       const plan = this.plan({ facts, targetVersion, profile })
       runtime.plan = plan
       this.#log(runtime, 'info', `runtime plan ${plan.level}: ${plan.reason.en}`)
 
       this.#phase(runtime, 'start', 'starting-remote', { level: plan.level })
-      const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+      const layout = remoteLayout(runtime.facts?.home ?? null)
       let webInfo = null
       // Adopt an instance left running by a previous local process (keep-alive).
       // This is checked before the npx preflight: an adoptable instance should not
@@ -1792,12 +1910,28 @@ export class RemoteGoService extends EventEmitter {
         this.#log(runtime, 'debug', 'adopt check failed:', error instanceof Error ? error.message : String(error))
       }
       if (!webInfo) {
+        // The registry row we refused to adopt (stale launch marker, unresponsive
+        // HTTP, ...) still names a process on this ~/.dsh profile. Starting a
+        // second one would let two clients write the same session files.
+        const leftover = await this.readRegistry(runtime.ssh, layout)
+        const leftoverPid = Number(leftover?.pid ?? 0)
+        if (leftover?.dshHome === layout.dshHome && leftover?.profile === profile && leftoverPid > 0) {
+          try {
+            await this.stopWeb(runtime.ssh, layout, { pid: leftoverPid })
+            this.#log(runtime, 'info', `stopped a non-adoptable remote web instance pid=${leftoverPid}`)
+          } catch (error) {
+            this.#log(runtime, 'warn', 'could not stop the non-adoptable remote web:', String(error?.message ?? error))
+          }
+        }
         await this.#resolveForeignConflict(runtime, layout, profile)
         this.#phase(runtime, 'bootstrap', 'bootstrapping', { level: plan.level })
         // Resolve the exact package in the foreground first: a cold npx download
         // belongs in the connect error, not in a detached process that only leaves
-        // a log behind. This also warms the cache for the real start below.
-        await this.preflight(runtime.ssh, plan, { timeoutMs: REMOTE_PREFLIGHT_TIMEOUT_MS })
+        // a log behind. This also warms the cache for the real start below. There is
+        // no deadline: a cold cache can take minutes, so its output becomes progress.
+        const reportStdout = this.#bootstrapReporter(runtime, plan.start.targetVersion)
+        const reportStderr = this.#bootstrapReporter(runtime, plan.start.targetVersion)
+        await this.preflight(runtime.ssh, plan, { onStdout: reportStdout, onStderr: reportStderr })
         this.#phase(runtime, 'start', 'starting-remote', { level: plan.level })
         webInfo = await this.startWeb(runtime.ssh, {
           plan,
@@ -1806,6 +1940,13 @@ export class RemoteGoService extends EventEmitter {
           timeoutMs: REMOTE_START_TIMEOUT_MS,
           onLine: (line) => this.#log(runtime, 'debug', `remote: ${line}`),
         })
+      }
+      if (webInfo.browserCarrier === 'patched') {
+        this.#log(
+          runtime,
+          'info',
+          'the remote profile disables api-remotes (browser Remote-Event carrier); re-enabled it for this launch',
+        )
       }
       remoteStarted = true
       runtime.token = webInfo.token
@@ -1819,6 +1960,7 @@ export class RemoteGoService extends EventEmitter {
         profile,
         bootstrapLevel: plan.level,
         nodeVersion: facts.nodeVersion,
+        nodeSource: 'managed',
         startedAt: webInfo.startedAt ?? nowIso(),
       }
 
@@ -2229,13 +2371,9 @@ export class RemoteGoService extends EventEmitter {
   async #stopRemoteQuietly(runtime) {
     try {
       if (runtime.ssh?.connected) {
-        await this.stopWeb(
-          runtime.ssh,
-          remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null),
-          {
-            pid: runtime.remote.pid ?? undefined,
-          },
-        )
+        await this.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
+          pid: runtime.remote.pid ?? undefined,
+        })
       }
     } catch (error) {
       this.#log(runtime, 'warn', 'idle stop failed:', error instanceof Error ? error.message : String(error))
@@ -2267,7 +2405,7 @@ export class RemoteGoService extends EventEmitter {
    */
   async #ensureStreamHelper(runtime) {
     if (typeof runtime.streamHelperPath === 'string' && runtime.streamHelperPath !== '') return true
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     if (!layout?.stateHome) return false
     const scriptPath = remoteStreamScript(layout.stateHome)
     try {
@@ -2351,7 +2489,7 @@ export class RemoteGoService extends EventEmitter {
       this.#log(runtime, 'info', 'mirror stream: trace { guard: no-helper }')
       return
     }
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     if (!layout?.stateHome) return
     const descriptors = this.mirrorStore.listMirrors({ hostId: runtime.id })
     /** @type {any[]} */
@@ -2549,7 +2687,7 @@ export class RemoteGoService extends EventEmitter {
     runtime.leaseSessionKey = null
     runtime.leasePublished = null
     if (key === null || published === null || !runtime.ssh?.connected) return
-    const layout = remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null)
+    const layout = remoteLayout(runtime.facts?.home ?? null)
     if (!layout?.stateHome) return
     try {
       await runtime.ssh.exec(
@@ -2603,13 +2741,9 @@ export class RemoteGoService extends EventEmitter {
     this.#cancelIdleStop(runtime)
     if (options.stopRemote && runtime.ssh?.connected) {
       try {
-        await this.stopWeb(
-          runtime.ssh,
-          remoteLayout(this.store.getSettings().bootstrap.remoteDir, runtime.facts?.home ?? null),
-          {
-            pid: runtime.remote.pid ?? undefined,
-          },
-        )
+        await this.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
+          pid: runtime.remote.pid ?? undefined,
+        })
       } catch (error) {
         this.#log(runtime, 'warn', 'stop remote failed:', error instanceof Error ? error.message : String(error))
       }
@@ -2717,6 +2851,25 @@ export class RemoteGoService extends EventEmitter {
             en: `Page title: ${runtime.exchange.title ?? '(none)'}`,
           }
         : { zh: '尚未完成远端界面的鉴权握手。', en: 'The remote UI authentication handshake has not completed.' },
+    )
+
+    const nodeVersion = runtime.facts?.nodeVersion ?? null
+    const nodeOk = isNodeVersionSupported(nodeVersion) && Boolean(runtime.facts?.npxPath)
+    push(
+      'remote-node',
+      { zh: '远端 Node 运行时', en: 'Remote Node runtime' },
+      runtime.facts ? (nodeOk ? 'pass' : 'fail') : 'unknown',
+      runtime.facts
+        ? nodeOk
+          ? {
+              zh: `Node ${nodeVersion}（插件托管），npx 可用`,
+              en: `Node ${nodeVersion} (plugin-managed) with npx available`,
+            }
+          : {
+              zh: `Node ${nodeVersion ?? '未检测到'}${runtime.facts.npxPath ? '' : '，缺少 npx'}，不满足 ≥ 24.9。`,
+              en: `Node ${nodeVersion ?? 'not detected'}${runtime.facts.npxPath ? '' : ' (npx missing)'} does not meet >= 24.9.`,
+            }
+        : { zh: '未探测远端环境。', en: 'Remote environment has not been probed.' },
     )
 
     const target = this.localVersion

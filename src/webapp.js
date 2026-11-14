@@ -27,6 +27,31 @@ import { normalizeVersion } from './version.js'
 const WEB_LINE_RE = /dsh web:\s*(https?:\/\/[^\s]+)/
 
 /**
+ * Version tag written into the run registry. Bumping it invalidates adoption of
+ * instances started by an older launch path (they may lack the browser-carrier
+ * overlay, which would leave the in-window page stuck at "failed to load
+ * plugins"). One restart after a plugin upgrade is the cost of correctness.
+ */
+export const LAUNCH_MARKER = 'browser-carrier-v1'
+
+/** Overlay file the launch passes with `--patch` when the profile disables the carrier. */
+export const BROWSER_CARRIER_PATCH_FILE = 'browser-carrier.patch.yml'
+
+/**
+ * The window shows the remote DSH *web* UI, so the `api-remotes` Remote-Event
+ * carrier must stay mounted. A profile bundle aimed at a native companion can
+ * disable that row (e.g. goldenpigeon's patch does), which leaves the browser
+ * client with `typert gateway: $events: forwarded Remote event source is
+ * unavailable` and a blank "failed to load plugins" page. Re-enable the row with
+ * a launch-only overlay instead of editing the user's profile.
+ */
+const BROWSER_CARRIER_PATCH = `# Written by dsh-remote-go. The remote window is a browser client, so the
+# Remote-Event carrier (api-remotes) must stay enabled even when a profile
+# bundle disables it for a native-UI companion.
+- id: api-remotes
+  disabled: false`
+
+/**
  * Parse the readiness line printed by `dsh web` (design §15.2 P3): the plugin
  * owns the remote process, so it reads the URL from stdout instead of guessing
  * a systemd unit.
@@ -57,9 +82,73 @@ export function parseWebLine(text) {
  */
 export function buildStartCommand(plan, layout, options = {}) {
   const profile = options.profile ?? plan.profile ?? DEFAULT_REMOTE_PROFILE
-  const args = `--profile ${shellQuote(profile)} --no-open --port 0`
+  const patch = options.patchPath ? `--patch ${shellQuote(options.patchPath)} ` : ''
+  const args = `${patch}--profile ${shellQuote(profile)} --no-open --port 0`
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
   return `env DSH_HOME=${shellQuote(layout.dshHome)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} ${args}`
+}
+
+/**
+ * Compose the profile without booting it and check whether a bundle disabled the
+ * browser carrier. When it did, write the launch-only overlay and report PATCH;
+ * a profile that composes cleanly reports CLEAR. A failed compose (e.g. the
+ * profile does not exist yet) reports DUMP-FAILED and the launch proceeds
+ * without an overlay, leaving the real error to the start step.
+ * @param {import('./bootstrap.js').RuntimePlan} plan
+ * @param {ReturnType<typeof remoteLayout>} layout
+ * @param {string} profile
+ */
+export function buildBrowserCarrierProbe(plan, layout, profile) {
+  const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
+  const dumpFile = shellQuote(`${layout.root}/profile-dump.yml`)
+  const patchFile = shellQuote(`${layout.root}/${BROWSER_CARRIER_PATCH_FILE}`)
+  return `set -u
+mkdir -p ${shellQuote(layout.root)}
+DUMP=${dumpFile}
+if ! env DSH_HOME=${shellQuote(layout.dshHome)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} --profile ${shellQuote(profile)} --dump-config > "$DUMP" 2>/dev/null; then
+  echo "DUMP-FAILED"
+  exit 0
+fi
+if grep -A6 'id: api-remotes' "$DUMP" | grep -q 'disabled: true'; then
+  cat > ${patchFile} <<'DSH_REMOTE_GO_PATCH'
+${BROWSER_CARRIER_PATCH}
+DSH_REMOTE_GO_PATCH
+  echo "PATCH"
+else
+  echo "CLEAR"
+fi`
+}
+
+/**
+ * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
+ * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout: ReturnType<typeof remoteLayout>, profile: string, onLine?: (line: string) => void }} options
+ * @returns {Promise<{ status: 'patched' | 'clear' | 'unknown', patchPath: string | null }>}
+ */
+export async function ensureBrowserCarrier(ssh, options) {
+  try {
+    const result = await ssh.exec(buildBrowserCarrierProbe(options.plan, options.layout, options.profile), {
+      timeoutMs: 60_000,
+      maxBytes: 64_000,
+    })
+    if (result.code === 0 && result.stdout.includes('PATCH')) {
+      options.onLine?.('browser carrier: the profile disables api-remotes; re-enabling it for this launch')
+      return {
+        status: 'patched',
+        patchPath: `${options.layout.root}/${BROWSER_CARRIER_PATCH_FILE}`,
+      }
+    }
+    if (result.code === 0 && result.stdout.includes('CLEAR')) {
+      options.onLine?.('browser carrier: api-remotes is enabled by the profile')
+      return { status: 'clear', patchPath: null }
+    }
+    options.onLine?.(`browser carrier: profile probe failed (${headTail(result.stdout + result.stderr, 300)})`)
+    return { status: 'unknown', patchPath: null }
+  } catch (error) {
+    // swallow-ok: probe failure — launching without the overlay keeps the start
+    // error (missing profile, npx failure) as the actionable one.
+    options.onLine?.(`browser carrier: probe failed (${error instanceof Error ? error.message : String(error)})`)
+    return { status: 'unknown', patchPath: null }
+  }
 }
 
 /**
@@ -106,7 +195,7 @@ fi
 echo "LINE:$LINE"
 PORT=$(printf '%s' "$LINE" | sed -n 's#.*127\\.0\\.0\\.1:\\([0-9][0-9]*\\)/.*#\\1#p')
 if [ -z "$PORT" ]; then PORT=$(printf '%s' "$LINE" | sed -n 's#.*:\\([0-9][0-9]*\\)/.*#\\1#p'); fi
-printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":%s,"version":%s,"dshHome":%s}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${shellQuote(JSON.stringify(profile))} ${shellQuote(JSON.stringify(version))} ${shellQuote(JSON.stringify(layout.dshHome))} > ${runFile}
+printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":%s,"version":%s,"dshHome":%s,"launch":"${LAUNCH_MARKER}"}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${shellQuote(JSON.stringify(profile))} ${shellQuote(JSON.stringify(version))} ${shellQuote(JSON.stringify(layout.dshHome))} > ${runFile}
 echo "DONE:$PID:$PORT"
 `
 }
@@ -122,19 +211,21 @@ echo "DONE:$PID:$PORT"
  *   rawLine: string,
  *   profile: string,
  *   dshHome: string,
+ *   browserCarrier: 'patched' | 'clear' | 'unknown',
  * }} RemoteWebInfo
  */
 
 /**
  * Start the remote web app and parse its readiness line.
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout?: ReturnType<typeof remoteLayout>, profile?: string, timeoutMs?: number, onLine?: (line: string) => void }} options
+ * @param {{ plan: import('./bootstrap.js').RuntimePlan, layout?: ReturnType<typeof remoteLayout>, home?: string | null, profile?: string, timeoutMs?: number, onLine?: (line: string) => void }} options
  * @returns {Promise<RemoteWebInfo>}
  */
 export async function startRemoteWeb(ssh, options) {
-  const layout = options.layout ?? remoteLayout(options.remoteDir ?? '~/.dsh-remote-go')
+  const layout = options.layout ?? remoteLayout(options.home ?? null)
   const profile = options.profile ?? options.plan.profile ?? DEFAULT_REMOTE_PROFILE
-  const startCommand = buildStartCommand(options.plan, layout, { profile })
+  const carrier = await ensureBrowserCarrier(ssh, { plan: options.plan, layout, profile, onLine: options.onLine })
+  const startCommand = buildStartCommand(options.plan, layout, { profile, patchPath: carrier.patchPath })
   const script = buildStartScript(startCommand, layout, {
     waitSeconds: Math.ceil((options.timeoutMs ?? REMOTE_START_TIMEOUT_MS) / 1000),
     version: options.plan.start.targetVersion,
@@ -179,6 +270,7 @@ export async function startRemoteWeb(ssh, options) {
     rawLine: parsed.rawLine,
     profile,
     dshHome: layout.dshHome,
+    browserCarrier: carrier.status,
   }
 }
 
@@ -282,6 +374,10 @@ export async function remotePidAlive(ssh, pid) {
 export async function adoptRemoteWeb(ssh, layout, options = {}) {
   const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
   const registry = await readRunRegistry(ssh, layout)
+  // Instances from a launch path that did not apply the browser-carrier overlay
+  // cannot be adopted: the page they serve may be stuck at "failed to load
+  // plugins", and nothing on the server side reveals that.
+  if (registry?.launch !== LAUNCH_MARKER) return null
   // The old isolated-home process wrote a registry without (or with another)
   // dshHome; adopting it would silently ignore the `~/.dsh` switch.
   if (registry?.dshHome !== layout.dshHome) return null
@@ -448,15 +544,22 @@ echo "STOPPED"
 
 /**
  * Check the remote UI locally on the remote loopback (server alive check).
+ * `curl` is preferred; `wget` is the fallback so a minimal host still works.
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
  * @param {number} port
  */
 export async function remoteHttpStatus(ssh, port) {
   if (!Number.isInteger(port) || port <= 0) return null
-  const script = `curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:${port}/ 2>/dev/null || true`
+  const script = `URL="http://127.0.0.1:${port}/"
+if command -v curl >/dev/null 2>&1; then
+  curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true
+elif command -v wget >/dev/null 2>&1; then
+  wget -S -O /dev/null --max-time 5 "$URL" 2>&1 | sed -n 's/.*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' | head -n 1
+fi
+`
   try {
     const result = await ssh.exec(script, { timeoutMs: 15_000 })
-    const code = Number(result.stdout.trim())
+    const code = Number(String(result.stdout ?? '').trim())
     return Number.isInteger(code) && code > 0 ? code : null
   } catch {
     return null

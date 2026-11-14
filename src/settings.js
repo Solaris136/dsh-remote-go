@@ -3,13 +3,7 @@
  * fields fall back to defaults instead of failing activation (a malformed saved
  * setting must never brick the plugin).
  */
-import {
-  DEFAULT_IDLE_MINUTES,
-  DEFAULT_KEY_PATH,
-  DEFAULT_REMOTE_DIR,
-  DEFAULT_REMOTE_PROFILE,
-  SSH_READY_TIMEOUT_MS,
-} from './constants.js'
+import { DEFAULT_IDLE_MINUTES, DEFAULT_KEY_PATH, DEFAULT_REMOTE_PROFILE, SSH_READY_TIMEOUT_MS } from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
 
 /**
@@ -27,7 +21,7 @@ import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
  *   mirrorHistory: boolean,
  *   language: 'auto' | 'zh' | 'en',
  *   logLevel: 'error' | 'warn' | 'info' | 'debug',
- *   bootstrap: { remoteDir: string, profile: string },
+ *   bootstrap: { profile: string },
  * }} Settings
  */
 
@@ -62,7 +56,6 @@ export function defaultSettings() {
     language: 'auto',
     logLevel: 'info',
     bootstrap: {
-      remoteDir: DEFAULT_REMOTE_DIR,
       profile: DEFAULT_REMOTE_PROFILE,
     },
   }
@@ -145,10 +138,6 @@ export function sanitizeSettings(raw) {
     language: oneOf(input.language, ['auto', 'zh', 'en'], defaults.language),
     logLevel: oneOf(input.logLevel, ['error', 'warn', 'info', 'debug'], defaults.logLevel),
     bootstrap: {
-      remoteDir:
-        typeof bootstrap.remoteDir === 'string' && bootstrap.remoteDir.trim() !== ''
-          ? bootstrap.remoteDir.trim()
-          : defaults.bootstrap.remoteDir,
       profile,
     },
   }

@@ -1,12 +1,14 @@
 /**
  * One read-only remote probe (design §4.2 step 2–3, §16.2): a single POSIX `sh`
  * script prints `key<TAB>value` lines that this module turns into facts used by
- * the npx planner, the wizard's capability list and diagnostics.
+ * the runtime planner, the managed-Node installer, the wizard's capability list
+ * and diagnostics.
  *
  * Deliberately small now that the runtime is always npx-pinned: the probe only
- * needs to prove that Node, npm/npx, curl and a user home exist.
+ * needs to prove what the remote has (Node, npm/npx, curl/wget, libc, home) so
+ * the plugin knows whether it has to provision a managed Node itself.
  */
-import { headTail, shellQuote } from './util.js'
+import { headTail } from './util.js'
 import { errors } from './errors.js'
 import { normalizeVersion, isNodeVersionSupported } from './version.js'
 
@@ -15,7 +17,8 @@ import { normalizeVersion, isNodeVersionSupported } from './version.js'
  *   os: string, arch: string, osName: string, user: string, home: string, shell: string,
  *   nodePath: string | null, nodeVersion: string | null,
  *   npmPath: string | null, npxPath: string | null,
- *   curlPath: string | null,
+ *   curlPath: string | null, wgetPath: string | null,
+ *   libc: 'glibc' | 'musl' | 'unknown', glibcVersion: string | null,
  *   diskFreeKb: number | null,
  *   sshConnection: boolean,
  *   credentialsFile: boolean, deepseekKeyEnv: boolean, providerEnvKeys: string[],
@@ -23,16 +26,10 @@ import { normalizeVersion, isNodeVersionSupported } from './version.js'
  */
 
 /**
- * @param {string} remoteDir plugin state directory (`~/.dsh-remote-go` by default)
+ * @returns {string}
  */
-export function buildProbeScript(remoteDir) {
-  const dir = shellQuote(remoteDir)
+export function buildProbeScript() {
   return `set -u
-DIR=${dir}
-case "$DIR" in
-  "~") DIR="$HOME" ;;
-  "~/"*) DIR="$HOME/\${DIR#\\~/}" ;;
-esac
 echo "os\t$(uname -s 2>/dev/null || echo unknown)"
 echo "arch\t$(uname -m 2>/dev/null || echo unknown)"
 echo "os_name\t$(sed -n 's/^PRETTY_NAME="\\(.*\\)"$/\\1/p' /etc/os-release 2>/dev/null | head -n 1)"
@@ -45,6 +42,15 @@ if [ -n "$NODE_PATH_1" ]; then echo "node_version\t$(timeout 10 "$NODE_PATH_1" -
 echo "npm_path\t$(command -v npm 2>/dev/null || true)"
 echo "npx_path\t$(command -v npx 2>/dev/null || true)"
 echo "curl_path\t$(command -v curl 2>/dev/null || true)"
+echo "wget_path\t$(command -v wget 2>/dev/null || true)"
+if [ -f /etc/alpine-release ]; then
+  echo "libc\tmusl"
+elif command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | head -n 1 | grep -qi musl; then
+  echo "libc\tmusl"
+else
+  echo "libc\tglibc"
+fi
+echo "glibc_version\t$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
 echo "disk_free_kb\t$(df -Pk "$HOME" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
 if [ -n "\${SSH_CONNECTION:-}" ] || [ -n "\${SSH_TTY:-}" ]; then echo "ssh_connection\tyes"; else echo "ssh_connection\tno"; fi
 [ -f "$HOME/.dsh/.credentials.yaml" ] && echo "credentials_file\tyes" || echo "credentials_file\tno"
@@ -91,6 +97,9 @@ export function toProbeFacts(values) {
     npmPath: values.npm_path || null,
     npxPath: values.npx_path || null,
     curlPath: values.curl_path || null,
+    wgetPath: values.wget_path || null,
+    libc: values.libc === 'musl' ? 'musl' : values.libc === 'glibc' ? 'glibc' : 'unknown',
+    glibcVersion: values.glibc_version ? String(values.glibc_version).trim() : null,
     diskFreeKb: num(values.disk_free_kb),
     sshConnection: values.ssh_connection === 'yes',
     credentialsFile: values.credentials_file === 'yes',
@@ -102,11 +111,11 @@ export function toProbeFacts(values) {
 /**
  * Run the probe against one SSH connection.
  * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ remoteDir: string, timeoutMs?: number }} options
+ * @param {{ timeoutMs?: number }} [options]
  * @returns {Promise<ProbeFacts>}
  */
-export async function probeRemote(ssh, options) {
-  const script = buildProbeScript(options.remoteDir)
+export async function probeRemote(ssh, options = {}) {
+  const script = buildProbeScript()
   const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 60_000 })
   if (result.code !== 0) {
     throw errors.remoteDshMissing({
@@ -140,7 +149,10 @@ export function describeProbeCapabilities(facts) {
     },
     network: {
       curl: Boolean(facts.curlPath),
+      wget: Boolean(facts.wgetPath),
     },
+    libc: facts.libc,
+    glibcVersion: facts.glibcVersion,
     modelCredentials: {
       credentialsFile: facts.credentialsFile,
       deepseekKeyEnv: facts.deepseekKeyEnv,

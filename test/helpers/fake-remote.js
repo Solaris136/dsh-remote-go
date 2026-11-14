@@ -24,6 +24,9 @@ export function makeFacts(overrides = {}) {
     npmPath: '/usr/bin/npm',
     npxPath: '/usr/bin/npx',
     curlPath: '/usr/bin/curl',
+    wgetPath: '/usr/bin/wget',
+    libc: 'glibc',
+    glibcVersion: '2.39',
     diskFreeKb: 35_000_000,
     sshConnection: true,
     credentialsFile: true,
@@ -91,10 +94,25 @@ export class FakeTunnel {
   }
 }
 
+/** The managed Node path the fake provisioner reports. */
+export function managedNodeFixture(version = '24.9.0') {
+  const dir = `/home/ubuntu/.dsh/remote-go/node/v${version}`
+  return {
+    managed: true,
+    version,
+    nodePath: `${dir}/bin/node`,
+    npmPath: `${dir}/bin/npm`,
+    npxPath: `${dir}/bin/npx`,
+    nodeBinDir: `${dir}/bin`,
+    installed: false,
+  }
+}
+
 /**
  * Build a service wired to fakes plus the pieces a test wants to observe.
  * @param {{
  *   facts?: any,
+ *   ensureNode?: any,
  *   startWeb?: any,
  *   sshFactory?: any,
  *   tunnelFactory?: any,
@@ -105,6 +123,7 @@ export class FakeTunnel {
  *   stopForeign?: any,
  *   readRegistry?: any,
  *   localVersion?: string | null,
+ *   engineNodeRange?: string | null,
  *   hostKeyConfirmTimeoutMs?: number,
  *   sessionAdapter?: any,
  *   workspaceAdapter?: any,
@@ -128,10 +147,12 @@ export async function makeTestService(overrides = {}) {
     home: path.join(dir, 'home'),
     logger: overrides.logger ?? { warn() {}, info() {}, debug() {}, error() {} },
     localVersion: overrides.localVersion === undefined ? '0.2.2-rc.1' : overrides.localVersion,
+    engineNodeRange: overrides.engineNodeRange,
     sshFactory,
     tunnelFactory,
     probe: async () => facts,
     plan: (await import('../../src/bootstrap.js')).planNpx,
+    ensureNode: overrides.ensureNode ?? (async () => managedNodeFixture()),
     preflight: overrides.preflight ?? (async (_ssh, plan) => plan.targetVersion),
     findForeign: overrides.findForeign ?? (async () => ({ ok: true, processes: [] })),
     stopForeign: overrides.stopForeign ?? (async () => ({ ok: true, alive: [], output: 'STOPPED' })),

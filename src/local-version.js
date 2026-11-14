@@ -47,6 +47,32 @@ export async function detectLocalVersion(input = {}) {
 }
 
 /**
+ * The local DSH build's Node engine range (`engines.node`). It is the source of
+ * truth for the managed Node version the plugin installs on the remote: the
+ * remote runs this exact DSH version, so it must satisfy this declaration.
+ *
+ * Best-effort like the version probe: an unreadable or missing package yields
+ * `range: null` and the caller falls back to the plugin's own floor.
+ * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} [input]
+ * @returns {Promise<{ range: string | null, source: string }>}
+ */
+export async function detectLocalEnginesNode(input = {}) {
+  for (const candidate of candidatePackageJsons(input)) {
+    try {
+      if (!existsSync(candidate)) continue
+      const parsed = JSON.parse(await readFile(candidate, 'utf8'))
+      const range = parsed?.engines?.node
+      if (typeof range === 'string' && range.trim() !== '') {
+        return { range: range.trim(), source: `package.json:${candidate}` }
+      }
+    } catch {
+      /* keep looking */
+    }
+  }
+  return { range: null, source: 'unknown' }
+}
+
+/**
  * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} input
  * @returns {string[]}
  */
