@@ -60,7 +60,7 @@
 6. **托管 Node 供应链**：下载源/URL 被替换、SHA-256 校验被绕过或跳过、解压路径穿越、升级时替换到非插件目录。
 6. **本地 HTTP API 的 CSRF / Origin 校验**：`x-dsh-remote-go` 请求头、同源 `Origin`、`sec-fetch-site` 栅栏与 `/events` 的
    EventSource 例外处理被绕过，导致任意站点可驱动本地 API。
-7. **回环 URL 校验**：`/open` 返回的 URL 必须是 `http://127.0.0.1:<port>` 才交给桌面端 guest；绕过该校验会让任意地址被加载或令牌被带出。
+8. **回环 URL 校验**：`/open` 返回的 URL 必须是 `http://127.0.0.1:<port>` 才交给桌面端 guest；绕过该校验会让任意地址被加载或令牌被带出。
 8. **诊断/日志脱敏绕过**：`src/redact.js` 的脱敏被绕过，导致「一键复制诊断」或导出的日志泄露 token、密码、私钥或家目录。
 
 ### 不在范围内
@@ -81,7 +81,7 @@
 - 访问令牌默认只在内存；`saveTokens=true` 时才以 0600 写入本地文件；密码永不落盘。
 - 主机指纹首次显式确认，变化时阻断并强提示；`strict` 策略下未记录指纹直接拒绝。
 - 远端运行时只执行固定白名单模板的 `npx` 命令，不接受用户拼接的任意 shell；版本号与 profile 经校验和 shell 引用，预检回读的版本必须与本机一致。
-- 托管 Node 只从插件内置的官方源下载（nodejs.org，官方不可达时回退 npmmirror），URL 由常量与探测到的架构拼出；解压前必须通过官方 `SHASUMS256.txt` 的 SHA-256 校验，解压目标固定为 `~/.dsh/remote-go/node`，永不修改系统 Node。
+- 托管 Node 只从插件内置的官方源下载（nodejs.org，官方不可达时回退 npmmirror），URL 由常量与探测到的架构拼出；解压前必须通过官方 `SHASUMS256.txt` 的 SHA-256 校验，目标固定为 `~/.dsh/remote-go/node`，永不修改系统 Node。
 
 ## 依赖与已知告警（Dependabot）
 

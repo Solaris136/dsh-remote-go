@@ -1,201 +1,177 @@
-# dsh-remote-go 实现说明（V1.0）
+# dsh-remote-go 实现
 
-> 面向维护者：模块划分、关键流程、数据与状态、测试矩阵。产品内容见 `docs/design.md`，本地 Host↔Client 契约见 `docs/api.md`。
+> 面向维护者：模块划分、连接管线、数据与测试。产品设计见 [design.md](design.md)，协议见 [api.md](api.md)。
+> 本文只引用**符号名**，不引用行号——行号会随重构漂移。
 
-## 1. 总体结构
+## 1. 仓库结构
 
 ```text
-dsh-remote-go（一个 bundle 包，Host + Client 两半）
-├─ index.js                 → 导出 Host 插件 apply/inject（src/index.js 再导出）
-├─ client.js                → window.__ModuleLoader__ 浏览器半端（单文件、无构建）
-├─ cordis.patch.yml         → - insert: [{ id: dsh-remote-go, name: dsh-remote-go }]
-├─ package.json             → dsh.bundle.patch + dsh.client{platform:'web',immediately:true,inject:[...]}
+dsh-remote-go
+├─ index.js                 包入口：再导出 src/index.js
+├─ client.js                浏览器半端（单文件、无构建、window.__ModuleLoader__ 注册）
+├─ cordis.patch.yml         bundle 的 profile patch
+├─ package.json             dsh.bundle.patch + dsh.client（web / immediately / inject）
 ├─ src/
-│  ├─ index.js              Host 插件入口：挂 HTTP API、初始化服务、探测本机 DSH 版本、装配会话/工作区适配器
-│  ├─ api.js                本地 HTTP/SSE API（契约实现）
-│  ├─ service.js            连接编排状态机（SSH→探测→npx 预检→启动→隧道→校验）、诊断、存活策略、镜像同步编排
-│  ├─ ssh.js                ssh2 封装：主机指纹策略、认证回退、exec（流式）、forwardOut
-│  ├─ ssh-config.js         ~/.ssh/config 解析 / 别名发现 / 目标解析
+│  ├─ index.js              Host 插件入口：挂 API、初始化 service、探测本机版本
+│  ├─ api.js                本地 HTTP + SSE 路由（契约实现）
+│  ├─ service.js            主机注册表、连接管线、公共 API facade（CRUD、设置、快照、诊断入口）
+│  ├─ host-runtime.js       每主机 runtime 对象的唯一形状（建/用分开）
+│  ├─ host-view.js          每主机对客户端的只读视图（HostView 投影）
+│  ├─ diagnostics.js        9 项诊断检查表（只读投影，不新建连接）
+│  ├─ ssh.js                ssh2 封装：指纹策略、认证回退、exec、forwardOut
+│  ├─ ssh-config.js         ~/.ssh/config 解析与别名发现
 │  ├─ known-hosts.js        known_hosts 只读解析 + OpenSSH SHA256 指纹
 │  ├─ local-ssh.js          读取本机 ~/.ssh 材料（只读）
-│  ├─ probe.js              远端环境探测（单条 POSIX sh，key<TAB>value 输出：OS/架构/libc/Node/npm/npx/curl/wget/凭据）
-│  ├─ node-runtime.js       托管 Node：扫描已装版本、取 DSH `engines.node` 下限作为固定版本、取官方 SHA-256、下载校验、解压到插件状态目录、清理旧版本
-│  ├─ bootstrap.js          npx 预检：判定远端可运行 npx（Linux + Node ≥ 24.9 + npx + curl/wget）+ 固定命令模板 + 版本校验
-│  ├─ webapp.js             远端 dsh web 生命周期：npx 固定版本启动/停止/收养、URL 行解析、token→cookie 校验
-│  ├─ tunnel.js             本地回环 TCP ↔ SSH forwardOut（ssh -L 等价）
-│  ├─ mirror.js             镜像描述符模型：能力分级（L1/L2）、reconcile 计划、事件投影（applyEvents）、缺口检测
-│  ├─ mirror-store.js       $DSH_HOME/remote-go/mirrors.json 的读写（按 host 分组，原子写/0600）
-│  ├─ mirror-writer.js      描述符的**单写者**：每 host 一条队列 + 删除墓碑 + 单调字段合并（design §6.3）
-│  ├─ history.js            远端会话日志的读取/解析/窗口计划（echo 分片、版本、折叠、缺口 → 类型化原因）
-│  ├─ lease.js              写入租约（插件状态目录下的 `remote-go/lease*.json`）：读/解析远端权威（`fetchRemoteLease`）、构造并发布自己的记录
-│  │                        （`buildLeaseRecord` / `publishRemoteLease`）、释放墓碑、发布结果分类（design §6.2）
-│  ├─ session-adapter.js    本地会话侧适配器：创建/查找镜像会话、append 事件、去重（mirrorSeq）
-│  ├─ workspace-adapter.js  侧边栏工作区注册：每主机一个 `Remote: <主机名>` 分组
-│  ├─ workspaces.js         本机 / 远端 DSH 的 storages/workspace.json 读取
-│  ├─ store.js              本地持久化：$DSH_HOME/remote-go/{hosts,settings,secrets}.json（原子写/0600）
-│  ├─ atomic-json.js        原子 JSON 写（临时名 + wx + fsync + 目录 fsync + 重命名重试）
+│  ├─ probe.js              远端环境探测（单条 POSIX sh，key<TAB>value）
+│  ├─ bootstrap.js          npx 预检：环境判定、固定命令模板、版本回读
+│  ├─ node-runtime.js       托管 Node：engines.node 下限解析、下载校验、安装/复用
+│  ├─ webapp.js             远端 dsh web 生命周期：npx 启动/停止/收养、URL 解析、token 校验
+│  ├─ tunnel.js             本地回环 TCP ↔ SSH forwardOut
+│  ├─ store.js              hosts/settings/secrets 持久化与内存缓存
+│  ├─ atomic-json.js        原子 JSON 写（tmp + wx + fsync + rename 重试）
 │  ├─ settings.js           设置与主机条目的默认值/校验/清洗
-│  ├─ version.js            版本解析/比较/Node/Dsh 兼容判定
-│  ├─ local-version.js      本机 DSH 版本探测（clientModules graph → env → package.json）与 `engines.node` 读取
+│  ├─ secrets.js            DSH 凭据存储适配（密码不落 hosts.json）
+│  ├─ layout.js             远端目录布局（~/.dsh 与插件状态目录）
+│  ├─ version.js            版本解析/比较/Node 门槛
+│  ├─ local-version.js      本机 DSH 版本探测（clientModules → env → package.json）
 │  ├─ errors.js             分类错误（中英双语、下一步、技术细节）
-│  ├─ redact.js             诊断脱敏（token/密码/私钥/家目录）
-│  ├─ layout.js             远端目录布局：固定为 `~/.dsh`（远端 DSH 自己的数据）+ `~/.dsh/remote-go`（logs/run/node/downloads/租约）
-│  └─ constants.js          默认值/常量
-├─ locale/{zh,en}.json      插件市场显示元数据（meta.title/description）
-├─ test/unit/*.test.js      node:test 单元测试（纯逻辑 + fake SSH/HTTP 服务 + 三个结构性守卫）
-├─ test/integration/        模拟远端集成/E2E（sim 主机、历史回放、租约、镜像、web/desktop 浏览器）
-├─ test/e2e/publish.e2e.js  发布路径验收（tarball → 干净 profile）
-└─ e2e/control/             隔离 control DSH（0.2.2-rc.1）运行时 + 启停脚本
+│  ├─ redact.js             诊断脱敏
+│  ├─ key-files.js          用户主目录内的私钥文件浏览
+│  ├─ constants.js          默认值/常量
+│  └─ util.js               通用工具（时间、延迟、日志级别、文本）
+├─ locale/{zh,en}.json      插件市场显示元数据
+├─ test/unit/               node:test 单元测试
+├─ test/integration/        模拟远端集成 + 浏览器/桌面验收
+├─ test/e2e/                发布路径验收（tarball → 干净 profile）
+├─ e2e/sim/                 本机模拟远端主机（真实 SSH + HTTP stub）
+├─ e2e/control/             隔离的 control DSH 运行时（发布路径验收用）
+├─ e2e/remote/              真实测试主机的准备脚本
+└─ scripts/                 仓库规范 / 市场条目 / 打包 / 语法检查
 ```
 
-## 2. 关键流程
+依赖方向是单向的：`index → service → (ssh / probe / node-runtime / bootstrap / webapp / tunnel / …)`；`service → (host-runtime / host-view / diagnostics / store / settings / …)`；低层模块不反向依赖 `service`。`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`。
 
-### 2.1 连接管线（`service.js#connectPipeline`）
+`host-runtime.js` 是 runtime 形状的唯一来源；`host-view.js` 是 `HostView` 的唯一投影；两者都不做 I/O，因此新增字段/视图只需要改一处。
+
+## 2. Host 入口与装配
+
+`src/index.js#apply(ctx, config)`：
+
+1. 解析 `$DSH_HOME` 与插件状态目录，创建 `HostStore`。
+2. 创建 `SecretStore`（可选：组合没有 `credentials` 服务时降级为仅内存）。
+3. 创建 `RemoteGoService`，注入 store / home / logger / secrets / 本地版本 / 指纹确认超时。
+4. `createApi({ service, getOrigin, logger, diagnostics })`，在 `ctx.effect` 内把 API 挂到 `webServer` 的 `/dsh-remote-go/api` 前缀上。
+5. 异步 `service.init()` + `detectLocalVersion({ ctx })`；探测到版本就 `setLocalVersion`，否则记一条 warn。
+6. 卸载时依次 `api.dispose()`、`service.shutdown()`、注销路由。
+
+`optional = ['credentials']`：只有凭据存储是可选能力；其余依赖都是 node 内置模块或本仓库模块，发布包 `dependencies: {}`。
+
+## 3. 连接管线
+
+入口：`RemoteGoService#connect(id)` 只做参数登记（密码、是否保存密码），把 `runtime.connectPromise` 设为 `#connectPipeline(runtime)` 后立即返回；进度全部通过 `state` 事件广播。管线顺序：
 
 ```text
-connect(id)
-  ├─ 解析目标：address → ~/.ssh/config 别名 → host/user/port/identityFiles；known_hosts 指纹集合
-  ├─ [phase ssh]  ssh2 连接（主机指纹策略见 2.2；跳板机则先连跳板再 forwardOut 到目标 22）
-  ├─ [phase probe] 远端探测（OS/架构/libc/Node/npm/npx/curl/wget/磁盘/凭据/SSH 会话标记）
-  ├─ [phase bootstrap] 托管 Node：扫描 `~/.dsh/remote-go/node`；目标版本 = 本机 DSH `engines.node` 下限（当前 24.9.0），
-  │                  不在就直接取官方 SHA-256 → 下载 → 校验 → 解压 → 版本自检 → 替换并清理旧版本（失败即连接失败，无系统 Node 兜底）
-  ├─ [phase start]  先收养已有远端 web（run registry 的 `launch` 标记 + dshHome/profile 必须匹配 + 日志 URL + pid 存活 + HTTP 探测）；
-  │                  不匹配但 registry 指向同一 `~/.dsh`/profile 的进程时，先停止它再继续
-  ├─ [phase start]  未收养时扫描同一 `~/.dsh` 下其他 DSH 进程（忽略 registry pid）；命中则
-  │                  status=conflict-pending，等待 `POST /hosts/:id/conflict` 的 stop/alongside/cancel
-  ├─ [phase bootstrap] 仅在继续启动时：`planNpx`（托管 Node ≥ 24.9 + npx + curl/wget）后前台执行
-  │                  `<托管 npx> -y @deepseek-ai/dsh@<本机版本> --version` 预检（无超时；`npm_config_loglevel=http`
-  │                  的输出流式映射成进度，冷缓存下载、版本回读）
-  ├─ [phase start]  启动前用 `--dump-config` 检查 profile 是否禁用了 `api-remotes`（浏览器 Remote-Event 载体），
-  │                  禁用则写 `remote-go/browser-carrier.patch.yml` 并以 `--patch` 只对本次启动重新启用
-  ├─ [phase start]  仍未收养则启动：`env DSH_HOME=~/.dsh PATH=<托管 bin>:"$PATH" <托管 npx> -y @deepseek-ai/dsh@<本机版本> [--patch …] --profile <profile> --no-open --port 0`
-  │                  （setsid nohup + 插件状态目录日志 + 轮询 `dsh web:` 行 → pid/port/token）
-  ├─ [phase tunnel] net.Server(127.0.0.1:0) → 每连接 ssh.forwardOut(127.0.0.1:remotePort)
-  ├─ [phase verifying] 远端 curl/wget 探活 + 经隧道完成 token→cookie→干净首页 校验（无 XFO/CSP 阻塞）
-  └─ connected：记录 lastOpenedAt、activeHostId；按设置用 0600 保存 token（默认不保存）
+1. 清空上次的 error/warning/facts/exchange，status = connecting
+2. #resolveTargetForRuntime：读本机 ssh 材料 → 解析别名 → 计算 known_hosts 指纹集合
+3. 密码认证且勾选保存过：先从 SecretStore 取回密码（后台重连也不需要弹窗）
+4. #openTransport：
+   - 直接连接：sshFactory(buildOptions) → connect() → #captureFingerprint
+   - 跳板机：先连跳板，再 forwardOut(target 22)，在通道上建第二条 ssh
+   - onHostKey 回调进入 #onHostKey（严格策略直接拒绝；否则挂起等待 UI）
+5. probeRemote：OS/Node/npm/npx/curl/磁盘/凭据/SSH 会话标记 → runtime.facts
+6. ensureRemoteNode：按本机 `engines.node` 下限安装/复用 `~/.dsh/remote-go/node/v<version>`，失败即中止
+7. applyManagedNodeFacts：把托管 Node 的 node/npm/npx 路径写回 facts
+8. 本机版本未知则失败；planNpx 产出固定 npx 模板并绑定托管 Node 的 PATH → runtime.plan
+9. 收养：adoptRemoteWeb 读 run registry（dshHome/profile/pid/日志 URL/HTTP 探活）
+   - 版本不符且是本插件实例：stopRemoteWeb 后继续
+10. 未收养则 #resolveForeignConflict：扫描非本插件 DSH 进程，暂停等待 stop/alongside/cancel
+11. npx 预检（前台）：verifyNpxVersion，回读版本必须精确相等
+12. startRemoteWeb：setsid nohup 启动，轮询 `dsh web:` 行取 pid/port/token
+13. createTunnel：本地 127.0.0.1:0 → forwardOut(远端 port)
+14. waitForRemoteUi（远端 curl 探活）→ exchangeTokenOverTunnel（token→cookie→干净首页）
+15. connected：记录 lastOpenedAt/activeHostId，按设置保存 token/密码，挂断线处理器
+16. 失败：toErrorView，按 desired 判断是「用户取消」还是「连接失败」，统一 teardown
 ```
 
-失败分类落到 `errors.js`（network/auth/host-key-changed/host-key-unknown/remote-dsh-missing/remote-node-install-failed/remote-dsh-start-failed/remote-dsh-running/remote-ui-unreachable/version-mismatch/unsupported-os/invalid-input/internal），客户端据 code 展示文案与下一步。
+teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/冲突提示、置 `closing`、取消空闲计时器、按策略停远端、关隧道、释放 SSH、清空 probe/exchange/token/remote。disconnect`、`removeHost`、连接失败与 `shutdown` 都复用它。
 
-### 2.2 主机指纹
+## 4. SSH 与主机指纹
 
-- ssh2 `hostVerifier(keyBlob, verify)` 内计算 `SHA256:<base64>`（OpenSSH 形式）。
-- 已记录指纹：匹配放行，变化 → `host-key-changed` 阻塞。
-- 未记录且 known_hosts 有该主机条目：任意一条匹配即放行（等价 OpenSSH 行为）。
-- 首次使用且无记录：`host-key-pending` 状态，等待 UI `POST /hosts/:id/fingerprint`（默认 120s 超时），接受后可记录；strict 策略直接拒绝。
+`ssh.js` 封装 ssh2：
 
-### 2.3 版本一致性
+- `hostVerifier(keyBlob, verify)` 计算 `SHA256:<base64>`，按 `pinnedFingerprint` / `knownHostFingerprints` / `hostKeyPolicy` 决策。
+- 认证回退：私钥文件 →（密码认证时）密码；不支持 Agent。
+- `exec(command, { timeoutMs })` 统一返回 `{ code, stdout, stderr }`；`forwardOut` 供隧道与跳板机使用。
+- `onHostKey` 由 service 提供：`strict` 直接抛 `host-key-unknown`；否则把指纹挂到 runtime 并返回一个 promise，`confirmFingerprint()` 或超时后 resolve。
 
-- 本机版本：`ctx.clientModules.graph().release.version` → `DSH_VERSION` / `DSH_RUNTIME_VERSION` → `@deepseek-ai/dsh/package.json` 候选路径。
-- 目标版本**恒等于本机版本**：没有 `bootstrap.targetVersion` 设置，也没有「沿用远端」的 `overrideVersion` 分支。
-- 连接前用托管 Node 的 `npx -y @deepseek-ai/dsh@<本机版本> --version` 预检：npx 回读的版本必须与本机精确相等，否则 `version-mismatch` 直接失败。
-- 收养旧进程前校验 run registry：`dshHome` 必须是 `~/.dsh`、`profile` 必须与本次一致、版本相等；版本不一致且是本插件留下的实例时先停止，再另起一个匹配实例。
-- 主机卡片/诊断仍上报 `versionParity`（本机 vs 远端）作为事实陈述；在托管 Node + npx 模型下两者恒等。
+## 5. 版本一致性与托管 Node 运行时
 
-### 2.4 存活策略（设计 §16.4）
+- 本机版本：`local-version.js#detectLocalVersion` 依次尝试 `ctx.get('clientModules').graph().release.version`、`DSH_VERSION`/`DSH_RUNTIME_VERSION`、`@deepseek-ai/dsh/package.json`。
+- 目标版本恒等于本机版本；`bootstrap.js#planNpx` 只产出 `npx -y @deepseek-ai/dsh@<version>` 的固定模板。
+- 托管 Node 版本取本机 DSH `engines.node` 的下限；`node-runtime.js` 负责下载、SHA-256 校验、解压与复用。
+- 预检与启动都写精确版本；`verifyNpxVersion` 把回读值与目标比较，不等即 `version-mismatch`。
+- `webapp.js` 负责所有远端 shell 命令模板：启动脚本写 `logs/web.log`，读 `dsh web:` 行；`run/web.json` 只记录 pid/port/version/profile/dshHome（无 token）。
 
-| 策略 | 本地断开时 | 本地 DSH 退出时 |
-|---|---|---|
-| `keep`（默认） | 只关隧道，远端继续 | 保留远端进程 |
-| `stop` | 停止远端 web 后关隧道 | 停止远端 web |
-| `idle` | 关隧道，N 分钟后停止远端（进程存活期间） | 保留（租约式清理为 V1.1 预留） |
+## 6. 本地 HTTP API
 
-远端启动时写 `~/.dsh/remote-go/run/web.json`（pid/port/version/profile/dshHome，无 token）；token 只存在于远端 0600 日志与本地内存，重连时由作者校验身份后从日志重新读取（收养）。
+`api.js`：
 
-### 2.5 本地 HTTP API
+- 挂载：`webServer.register({ kind: 'prefix', path: API_PREFIX, handler })`。
+- 鉴权：`authorize()`（`x-dsh-remote-go: 1` + Origin 同源 + 拒绝 cross-site）；`/health` 开放，`/events` 只做 Origin 栅栏（EventSource 不能加头）。
+- 请求体上限 1 MiB；错误统一 `{ ok:false, error: ErrorView }`，`invalid-input` → 400，其余业务错误 → 409，未知异常 → 500。
+- SSE：`service.on('state', broadcast)`，连接时先推一帧，15s 一次 `ping`。
+- 路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口与 client-module 图行，用于验收/排障。
 
-- 挂载：`webServer.register({kind:'prefix', path:'/dsh-remote-go/api', handler})`。
-- 鉴权：`x-dsh-remote-go: 1` 头 + Origin 同源 + 非 `sec-fetch-site: cross-site`；`/health` 开放、`/events`（EventSource 无法加头）只做 Origin 栅栏。
-- 端点与字段见 `docs/api.md`；`/diagnostics/self` 返回 Host 入口与 client-module 图行（用于验收/排障）。
-- 设置：`bootstrap.profile`（默认 `web`，拒绝 `desktop`）；插件远端目录固定在 `~/.dsh/remote-go`，不再是设置项；`GET /version` 的 `apiVersion` 为 `1.3`。
+## 7. 持久化
 
-### 2.6 镜像会话层（L1 / L2，L3 未实现）
-
-远端会话镜像成本地原生会话，分成三级能力（`src/mirror.js`）：L1 只做目录镜像（远端哪些会话存在），L2 在其上
-回放历史（读远端会话日志），L3（事件流 / 输入转发 / 审批桥）**未实现**——传输尝试曾存在并在修复两个真实缺陷后
-为收敛范围移除，状态是「未验证」而不是「已证伪」（`docs/session-design.md` §6.4 / §11）。
-
-**L1 目录镜像**：`syncHostMirrors(id)`（`src/service.js:527`）读远端 `storages/workspace.json`
-（`readRemoteWorkspaces`，`src/workspaces.js`），与本地描述符比对后 reconcile（`reconcileMirrors`，
-`src/mirror.js:352`）；远端侧只读，不回写。远端已删除的会话保留描述符并标记 `remote-deleted`
-（`src/mirror.js:368`），不删本地记录；读不到远端时同样保留上次快照（`src/service.js:582-584`）。
-每个主机在侧边栏注册一个 `Remote: <主机名>` 工作区（`WORKSPACE_TITLE_PREFIX`，`src/workspace-adapter.js:34`），
-镜像会话的 `meta.cwd` 指向 `$DSH_HOME/remote-go/mirrors/<hostId>`，这正是工作区归属的依据。
-
-**L2 历史回放**：`#syncMirrorHistory`（`src/service.js:737`）对每个镜像发三次有界 SSH 命令（探测目录 → 发现日志
-→ 读文件），解析与投影是纯函数（`src/history.js` 的 `fetchRemoteHistory` / `planHistoryWindow` /
-`applyEvents`）。幂等靠两重：描述符 `cursor` 挡住重放，事件里的 `data.mirrorSeq` 挡住「append 成功但游标没落盘」。
-保留窗口由 `mirrorMaxEvents`（默认 200，`0` = 不限）限制，只保留最新 N 条并在首次同步（`cursor === 0`）折叠前缀、
-写一条 `mirror/history-folded` 通知；之后的溢出按缺口处理。
-
-**描述符的单写者（design §6.3）**：所有描述符变更走 `withMirrorWriter`（`src/mirror-writer.js:28`）——
-每主机一条 Promise 队列（`withMirrorQueue`，`src/mirror-writer.js:54`），**读 → 增量 → 持久化**在队列内完成，
-因此两路写入（reconcile 与历史回放）不会互相覆盖 `cursor`。合并是**更新而不是 upsert**：`mergeDescriptorDeltas`
-（`src/mirror-writer.js:80`）丢弃 `current` 里不存在的描述符（`:88`），并让 `cursor` / `epoch` / `conflictCount`
-只增不减（`:93`）。删除走同一条队列（`#removeMirrorsForHost`，`src/service.js:2069`），且在**第一个 `await` 之前**
-置墓碑 `runtime.mirrorDeleted = true`（`src/service.js:384`）；墓碑由 `withMirrorWriter` 在排队操作内部检查
-（`src/mirror-writer.js:35`），所以删除前入队、删除后执行的写入也不会把镜像写回来——**队列负责顺序，墓碑负责结果，
-两者都要**。
-
-**写入租约与围栏（design §6.2，L3 前置）**：本地发布自己的 `{ writer, epoch, expiresAt, sessionKey }`
-（`buildLeaseRecord` / `publishRemoteLease`，`src/lease.js:238` / `:364`），并读远端权威决定能否写
-（`fetchRemoteLease`，`src/lease.js:190`）。被更高 epoch 接管时转为只读：`reason.code="fenced"`、`cursor` 不推进、
-历史仍可读（`src/service.js:938-946`）。**注意**：远端的校验逻辑目前只由模拟远端实现（`e2e/sim`），未改造的真实 DSH
-没有这段代码，所以「两个客户端只有一个能写」只在模拟远端下成立。
-
-**三个结构性守卫（防止「全绿但静默坏掉」）**：`test/unit/swallow-guard.test.js`（任何产出 `reason:` 的 `catch`
-必须可区分或带 `// swallow-ok: <≥2 词>`，默认违规、递归扫 `src/**/*.js`、判定前剥离注释）、
-`test/unit/predicate-guard.test.js`（等待谓词必须覆盖其后的断言）、`test/unit/e2e-child-process.test.js`
-（所有子进程必须 `windowsHide`）。约定与反例见 `CONTRIBUTING` §9。
-
-## 3. 数据与持久化
-
-`$DSH_HOME/remote-go/`
+本地 `$DSH_HOME/remote-go/`：
 
 | 文件 | 内容 | 权限 |
 |---|---|---|
-| `hosts.json` | 主机清单（显示名、address、port、username、auth.type/keyPath、jumpHost、存活策略、指纹 pin、时间戳） | 0600 |
-| `settings.json` | 设置（见契约 SettingsView，含远端 `profile`、镜像开关与保留上限） | 0600 |
+| `hosts.json` | 主机清单（地址、认证、跳板机、存活策略、指纹 pin、时间戳） | 0600 |
+| `settings.json` | 设置（见契约 SettingsView） | 0600 |
 | `secrets.json` | 仅 `saveTokens=true` 时保存的 launch token | 0600 |
-| `mirrors.json` | 镜像描述符（按 hostId 分组；`cursor` / `epoch` / `reason` / `status` 等，**不含** token 与堆栈） | 0600 |
-| `mirrors/<hostId>/` | 镜像会话的 `meta.cwd` 指向的目录，用于把会话归入侧边栏的 `Remote: <主机名>` 工作区 | 0700 |
 
-写入为 tmp+rename 原子写；目录 0700；密码永不落盘。
+全部走 `atomic-json.js`：目录 0700、文件 0600、临时文件 `wx`、fsync、rename 重试、失败清理临时文件。密码不进 `hosts.json`，保存时写 DSH 凭据存储。
 
-远端：DSH 自己的数据在 `~/.dsh`（profile、会话、工作区、凭据）；插件固定在自己的状态目录 `~/.dsh/remote-go/` 写 `logs/web.log`、`run/web.json`、`node/v<version>/`（托管 Node）、`downloads/`，以及 `lease*.json` 与 `follow.mjs`（租约与流助手）。不做隔离 DSH home。
+远端 `~/.dsh/remote-go/`：`logs/web.log`、`run/web.json`、`node/`、`downloads/`。远端 DSH 自己的数据始终在 `~/.dsh`。
 
-## 4. Client 半端
+## 8. Client 半端
 
-- 注册：`settings.section`「远程主机」（id `dsh-remote-go`，order 45）承载主机清单/添加/编辑/删除/连接/诊断；`sidebar.panellist`（order 20）是唯一的侧边栏入口，打开同一个主机管理页；`main` 面板（key `dsh-remote-go`）只承载主机管理页，点「打开」后由桌面端把远端 DSH 以 Chromium guest 接管整个窗口（本地侧边栏让位）。`ctx.layout.selectPanel('dsh-remote-go')` 切换面板。
-- 工作区接口：`GET /local/workspaces` + 每台主机 `GET /hosts/:id/workspaces`（Host 读取本机/远端 DSH 的 `storages/workspace.json`）。它们原本服务于面板内的工作区栏，该栏已移除；接口保留供镜像/诊断使用，面板不再渲染工作区列表。
-- 市场显示名：`dsh remote go`（locale meta.title）；设置页栏目名「远程主机」（Remote hosts）。
-- 状态：`GET /state` 为唯一真相；`EventSource /events` 实时推送，失败退化 3s 轮询。
-- 呈现：仅 `connected` 时 `GET /hosts/:id/open` 取一次性 token URL，校验 `http://127.0.0.1:` 前缀后交给桌面端 Chromium guest（`<webview>`）；URL/token 不进 localStorage/日志。接管区铺满标题栏以下的整个窗口；本地侧边栏被盖住，窗口里只留远端自己的侧边栏；注入远端侧边栏顶部的主机条（主机全名 / 远端会话标题 / 刷新 / 离开）（当前主机全名 / 远端会话标题 / 切换主机 / 刷新 / 离开远端），这是接管期间唯一的本地控件。
-- UI：主机清单/空态、接入向导 3 步、指纹确认、密码弹窗（password 认证）、诊断抽屉、设置、错误卡片、断线 banner、首次提示；中英双语。
-- `data-testid` 覆盖关键交互，供 E2E 使用。
+`client.js` 是**单文件、无构建步骤**的浏览器插件：`window.__ModuleLoader__.load({ id, factory(require) })`，只 `require('react')`。
 
-## 5. 测试矩阵
+- 注册：`main` 面板、`settings.section`（order 45）、`sidebar.panellist`（order 20）。
+- 数据：`GET /state` 为唯一真相，`EventSource /events` 实时推送，失败退化为 3s 轮询。
+- API 层：所有请求经一个 `apiRequest`，统一加 `x-dsh-remote-go: 1` 与 `credentials:'same-origin'`；错误转成 `ErrorView`。
+- i18n：内置 `zh`/`en` 字典 + 宿主 locale 服务；两侧键集合由单元测试保证一致。
+- 接管：`openOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest；`HOST_ROW_SCRIPT` 注入远端侧边栏；`__drgBridge` 轮询处理切主机/刷新/离开。
+- 安全不变量（测试会读源码断言）：不打开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。
+- 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 接管/承载 → 向导 → 诊断 → 设置 → 密码/冲突 → 面板 → 设置区 → 样式 → 注册。
+
+## 9. 测试与结构守卫
 
 | 层 | 文件 | 覆盖 |
 |---|---|---|
-| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe` | 解析、排序、指纹、脱敏、校验、版本/engines 探测 |
-| 计划/命令 | `bootstrap/webapp/node-runtime` | npx 预检（无超时 + 流式进度）、固定命令模板、URL 行、token→cookie 握手（本地假 DSH）、启动失败分类、托管 Node 扫描/校验/安装与版本选择 |
-| 镜像模型 | `mirror` / `mirror-writer` / `mirror-store` | reconcile（含 `remote-deleted` 标记与复活检测）、能力分级、事件投影与缺口、单写者串行、墓碑、单调合并、原子持久化 |
-| 历史回放 | `history` | 日志发现/解析、版本与截断、窗口计划（折叠前缀 vs 缺口）、重复 seq 去重、`internal-error` 分类 |
-| 租约 | `lease` / `mirror` | 记录构造/发布/释放命令、过期与 epoch 跳变分类、围栏状态机 |
-| 存储/服务 | `store/service` | 原子持久化/密钥策略、连接管线（fake SSH/tunnel）、指纹确认、npx 预检版本不一致、断线重连、存活策略、诊断清单、镜像同步编排与内部缺陷上报 |
-| HTTP | `api` | 鉴权（头/Origin/cross-site）、全部端点、SSE 首帧、错误码 |
-| 浏览器 | `client.test.js`（VM + react-dom/server） | 模块格式、slot 注册、双语字典对齐、安全不变量、关键组件渲染、data-testid 覆盖、密码弹窗 |
-| 模拟远端集成 | `test/integration/*.e2e.js`（sim） | 模拟远端 → SSH → 探针/隧道、L1 目录镜像、L2 历史回放与缺口恢复、租约围栏（两个客户端只有一个能写） |
-| 浏览器集成 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 真实桌面端 → 设置页与面板 → 浅色/深色对比度 |
-| 结构性守卫 | `swallow-guard` / `predicate-guard` / `e2e-child-process` | 吞错扫描（默认违规）、等待谓词覆盖断言、`windowsHide` 全覆盖 |
+| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe` | 解析、比较、指纹、脱敏、校验 |
+| 运行时 | `node-runtime/bootstrap/webapp/tunnel/ssh` | 托管 Node、npx 判定与命令模板、URL/token 握手、隧道、认证与指纹 |
+| 服务 | `service/api/store/secrets/key-files/host-key` | 连接管线、指纹确认、冲突、重连/存活、诊断、HTTP 鉴权/SSE、原子写 |
+| 浏览器 | `client.test.js` / `client-compat` / `client-styles` | 模块格式、slot 注册、双语对齐、安全不变量、关键组件、CSS 卫生 |
+| 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
+| 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 设置页 → 浅/深色对比度 |
+| 发布路径 | `test/e2e/publish.e2e.js` | tarball → 干净 profile → API 与 client-module 从安装目录加载 |
 
-E2E 判定点：tarball 装进干净 profile 后 Host API 可访问、client-module 行从安装目录解析，报告写入 `e2e/artifacts/publish-e2e-report.json`。
+四条结构性约定（见 CONTRIBUTING §9）：
 
-## 6. 设计取舍记录
+1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；默认违规，递归扫 `src/**/*.js`。
+2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，且条目失效会被判失败。
+3. `e2e-child-process`：所有测试/脚本子进程必须 `windowsHide`。
+4. `client-styles`：样式表选择器与变量必须可解析，禁止内联样式散落。
 
-1. **桌面 guest 而非本地反代**：远端 DSH 由桌面端以 Chromium guest 铺满整个窗口，避免 dsh-remote-window 式 portal 的 3–4 倍工作量，也没有 iframe 的剪贴板/下载限制（代价是 guest 自己禁用下载、拒绝权限请求）。
-2. **本地 HTTP API 而非 typert Remote**：Host↔Client 只需少量端点；HTTP+SSE 无生成步骤、易测试，避免为 V1 引入 typert 生成链路。
-3. **ssh2 而非系统 ssh**：需要程序化 host key（首次确认/变化中止）、密码认证、forwardOut 通道；系统 ssh 在 Windows 上无法安全地做一次性密码认证。
-4. **远端不装 DSH、也不碰系统 Node**：DSH 只用 `npx` 固定本机版本拉起；Node 只装插件自己的一份（`~/.dsh/remote-go/node`，官方 tarball + SHA-256），失败时明确解释并给出准备步骤；所有命令都是固定模板，不接受用户拼接 shell。
-5. **不重复远端能力**：远端插件/凭据/设置都在远端界面里操作，本地不复制。
+## 10. 维护约定
+
+- 文档引用**符号**，不写行号；重构后跑 `pnpm run verify` 即可发现断链。
+- 新增远端 shell 命令必须走 `webapp.js` 的固定模板，不接受调用方拼接的任意 shell。
+- 新增可替换的外部依赖从 `ServiceOptions` 注入；不要在 `service.js` 里直接 `new` 外部客户端。
+- 新增 runtime 字段先改 `host-runtime.js`，新增对外字段先改 `host-view.js`；不要在管线里临时拼一个形状。
+- 新增设置项要同时更新 `settings.js` 的默认值/清洗、`docs/api.md` 的 SettingsView、`docs/design.md` 的界面说明。
+- 日志级别：`#log(runtime, level, …)` 的 `level` 是真实级别；信息性 trace 用 `debug`，不要用 `info` 刷屏。

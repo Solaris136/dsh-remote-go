@@ -9,7 +9,7 @@
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm run verify        # lint + check:syntax + check:workflows + market:check + pack:check + test:unit
+pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 单测 + 集成
 ```
 
 端到端（需要真实测试主机与本机浏览器，非必需门禁）：
@@ -52,7 +52,7 @@ pnpm run test:e2e
 推送 `v*` 标签后，[`release.yml`](../.github/workflows/release.yml) 依次执行：
 
 1. 检出代码，安装依赖（`--frozen-lockfile --ignore-scripts`）。
-2. 跑全部门禁（`lint` / `check:syntax` / `check:workflows` / `market:check` / `pack:check` / `test:unit`）。
+2. 跑发布门禁（`lint` / `check:syntax` / `check:workflows` / `market:check` / `pack:check` / `test:unit`）。
 3. 校验标签与版本一致。
 4. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）。
 5. 若仓库配置了 secret `NPM_PUBLISH_TOKEN`：`npm publish --access public --provenance`（带构建来源证明）。
@@ -115,10 +115,13 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 ```json
 {
   "name": "dsh-remote-go",
-  "title": { "zh": "dsh remote go", "en": "dsh remote go" },
+  "title": {
+    "zh": "dsh remote go",
+    "en": "dsh remote go"
+  },
   "description": {
-    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入远端侧边栏注入的主机条：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动，Node 运行时由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰远端系统 Node），数据在远端用户自己的 ~/.dsh；含主机清单、接入向导、连接诊断与版本一致。",
-    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version on a plugin-managed Node installed at the lower bound of DSH’s engines.node under ~/.dsh/remote-go/node (the system Node is never touched), with its data in the user’s own ~/.dsh, plus host list, connection wizard, diagnostics and exact version parity."
+    "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：桌面端把远端界面铺满整个窗口，并在远端自己的侧边栏顶部注入一条主机条（当前主机 / 远端会话 / 切换 / 刷新 / 离开）；远端 Node 由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰系统 Node），再用 npx 固定本机 DSH 版本启动（数据在远端用户自己的 ~/.dsh）；含主机清单、接入向导、连接诊断与版本一致。",
+    "en": "Use a remote DSH over SSH inside the local DSH: the desktop client fills the whole window with the remote UI and injects a host row at the top of the remote sidebar (current host / remote session / switch / reload / leave). The plugin installs its own Node under ~/.dsh/remote-go/node at the lower bound of DSH engines.node (never the system one), then launches the remote DSH with npx pinned to the local version; its data stays in the user’s own ~/.dsh. Host list, connection wizard, diagnostics and exact version parity included."
   }
 }
 ```
@@ -147,21 +150,7 @@ PR 条目可直接复制 `market/plugin-entry.json` 的中英标题与描述：
 - [ ] npm 页面展示 README、LICENSE、keywords 正确
 - [ ] GitHub Release 已生成，notes 与 `CHANGELOG.md` 一致，附带 `.tgz`
 - [ ] `dsh plugin --profile web add dsh-remote-go@<version>` 在全新 profile 安装成功
-- [ ] 首次连接向导可完成：指纹确认 → 远端环境探测（Node/npx）→ 远端 DSH 接管整窗
+- [ ] 首次连接向导可完成：指纹确认 → 远端环境探测 → 托管 Node 准备 → npx 预检 → 远端 DSH 接管整窗
 - [ ] 断线重连、诊断、设置可用
 - [ ] 市场索引条目可解析、可一键安装（路径 A 或 B）
 - [ ] 升级后回滚路径：`dsh plugin --profile web add dsh-remote-go@<旧版本>` 可用
-
-## 8. 历史验证记录（0.1.0 之前）
-
-以下结果在维护者机器上验证过，作为发布路径的既有证据保留；新版本以 CI 与 `pnpm run verify` 为准。
-
-| 项目 | 结果 |
-|---|---|
-| `scripts/market-entry.mjs --check` | 通过：官方 `@deepseek-ai/dsh-plugin-market-index` 校验 format-1 索引 |
-| `scripts/check-syntax.mjs` / `scripts/check-workflows.mjs` | 通过：JS 可解析；workflow 通过真实 YAML 解析器校验 |
-| `pnpm publish --dry-run --no-git-checks` | 通过：`prepack` 门禁执行、包内容与 registry 目标校验通过 |
-| `pnpm pack` + `scripts/pack-check.mjs --find artifacts` | 通过：tarball 仅含运行时文件，必需文件齐全 |
-| 从 tarball 安装到干净 DSH profile | 通过（`test/e2e/publish.e2e.js`）：API 200、client-module 从安装目录加载 |
-| 从目录链接安装（开发模式） | 通过（当时的 `test/e2e/plugin.e2e.js`；该套件已随呈现方式收敛移除） |
-| `engines.dsh` 兼容校验 | 运行版本 0.2.2-rc.1 满足 `>=0.2.2-rc.1` |

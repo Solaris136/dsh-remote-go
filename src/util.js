@@ -60,6 +60,8 @@ export function isPlainObject(value) {
  * can only appear if a caller ever passes a hostile `base`; the guard is cheap
  * insurance for that case.
  */
+const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 }
+
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
 /**
@@ -229,6 +231,17 @@ export function headTail(text, max = 4000) {
   const head = value.slice(0, Math.floor(max / 2))
   const tail = value.slice(-Math.floor(max / 2))
   return `${head}\n…\n${tail}`
+}
+
+/**
+ * Whether a line at `level` clears the `threshold`.
+ * @param {string} level
+ * @param {string} [threshold]
+ */
+export function logVisible(level, threshold = 'info') {
+  const rank = LOG_LEVELS[level] ?? LOG_LEVELS.info
+  const floor = LOG_LEVELS[threshold] ?? LOG_LEVELS.info
+  return rank >= floor
 }
 
 /**

@@ -12,8 +12,6 @@ import path from 'node:path'
 import { createApi } from './api.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
-import { canonicalMirrorRoot, createSessionAdapter } from './session-adapter.js'
-import { createWorkspaceAdapter } from './workspace-adapter.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 
@@ -21,7 +19,7 @@ export const name = PLUGIN_ID
 export const inject = ['webServer']
 
 /** Services the plugin can use when the composition provides them. */
-export const optional = ['connection', 'workspaceRegistry', 'credentials']
+export const optional = ['connection', 'credentials']
 
 /**
  * @param {any} ctx Cordis context.
@@ -32,30 +30,6 @@ export function apply(ctx, config = {}) {
   const home = config.home ? String(config.home) : resolveDshHome(process.env)
   const stateDir = resolveStateDir(home)
   const store = new HostStore({ dir: stateDir, logger })
-  // Mirror sessions are an optional host capability: without `ctx.sessions` the
-  // adapter answers typed `sessions-unavailable` and the plugin keeps working.
-  // Each host gets its own cwd under `$DSH_HOME/remote-go/mirrors/<hostId>`; the
-  // remote workspace path is never used (it may not exist on this machine).
-  //
-  // The root is canonicalized once (realpath) and the same value feeds both
-  // adapters: the host's workspace registry canonicalizes registrations, while a
-  // session header keeps our literal `meta.cwd`, so with a symlinked or junctioned
-  // root the two spellings would otherwise disagree and grouping would depend on
-  // the registry canonicalizing the header too (docs/session-design.md §4.3).
-  const mirrorRoot = canonicalMirrorRoot(path.join(stateDir, 'mirrors'), { logger })
-  const sessionAdapter = createSessionAdapter({
-    ctx,
-    logger,
-    mirrorRoot,
-  })
-  // Sidebar visibility needs the same directory registered as a workspace: DSH
-  // lists sessions per workspace and derives membership from the session's
-  // canonical cwd. Optional like `sessions`; absent ⇒ mirrors stay panel-only.
-  const workspaceAdapter = createWorkspaceAdapter({
-    ctx,
-    logger,
-    mirrorRoot,
-  })
   // Saved SSH passwords live in DSH's credential store, never in hosts.json.
   const secrets = createSecretStore({ ctx, logger })
   const service = new RemoteGoService({
@@ -65,8 +39,6 @@ export function apply(ctx, config = {}) {
     secrets,
     localVersion: config.localVersion ? String(config.localVersion) : null,
     hostKeyConfirmTimeoutMs: config.hostKeyConfirmTimeoutMs,
-    sessionAdapter,
-    workspaceAdapter,
   })
   const getOrigin = () => {
     try {

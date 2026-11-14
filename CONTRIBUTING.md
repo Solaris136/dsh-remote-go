@@ -1,7 +1,7 @@
 # 贡献指南
 
-> **English abstract.** `dsh-remote-go` is a DSH plugin that opens a remote DSH inside a full-page local
-> panel over SSH, with host management, connection diagnostics, the remote npx runtime and exact version parity. This
+> **English abstract.** `dsh-remote-go` is a DSH plugin that opens a remote DSH in a full-window takeover over
+> SSH, with host management, connection diagnostics, the remote npx runtime and exact version parity. This
 > guide covers local setup (Node 24 + pnpm 11, install with `--ignore-scripts`), the canonical checks
 > (`pnpm run verify`), Conventional Commits, the PR flow (fork → branch → PR against `main`, squash merge),
 > review expectations, code style, and private security reporting. The rest is written in Chinese.
@@ -57,7 +57,7 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run test:coverage` | 单元测试 + 覆盖率门禁（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%，不含 `vendor/` 与自己） |
 | `pnpm run check:pr-title` | 按 Conventional Commits 校验 PR 标题（CI 对 PR 强制，见 §5） |
 | `pnpm run build:vendor` | 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
-| `pnpm run test:e2e` | 两个端到端套件（见下），需要 SSH 主机、Chrome 或可用的 pnpm；不在常规 PR CI 中运行 |
+| `pnpm run test:e2e` | 发布路径验收（见下），需要 control DSH 运行时；不在常规 PR CI 中运行 |
 
 `pnpm run verify` 依次执行：`lint` + `format:check` + `check:syntax` + `check:workflows` + `market:check` +
 `pack:check` + `test:unit` + `test:integration`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。
@@ -122,7 +122,7 @@ node scripts/check-pr-title.mjs "feat(panel): add SSH tunnel keepalive backoff"
 
 ### CI 检查项
 
-PR 触发 `.github/workflows/ci.yml`，只有两个作业：
+PR 触发 `.github/workflows/ci.yml`，包含两个作业（CodeQL 是独立的第三个必过检查）：
 
 - **Verify (ubuntu-latest)** —— `pnpm run lint` + `format:check` + `check:syntax` + `check:workflows`、
   PR 标题校验（`scripts/check-pr-title.mjs`，dependabot 除外）、`test:coverage` 覆盖率门禁、
@@ -203,13 +203,11 @@ ES 尾逗号、LF）；提交前跑 `pnpm run format`，不要手工调格式，
 
 1. **等待谓词必须覆盖其后的断言（wait predicate ⊇ assertion）。**
    `pollUntil` / `while` 轮询 / `waitForFunction` 返回真之后的第一段断言，涉及的每一个状态都必须在谓词里出现过。
-   反例：`history.e2e.js` 只等 `cursor === 2`，随后断言日志含 `gap-unfilled`——日志在持久化之后才写，于是
-   Windows 上偶发失败、ubuntu 上通过。现在谓词同时覆盖 cursor、level、reason 与日志行。
-   写测试时先写下断言，再把断言里的每个条件抄进谓词；不要用「再睡一会儿」掩盖窗口。
-   这条由 `test/unit/predicate-guard.test.js` 强制：它扫描 `test/integration/*.e2e.js` 的
-   `waitForMirrors` / `pollUntil` 谓词，与紧随其后 `assert.*` 读取的字段比对，缺字段就按 `file:line` 失败；
-   少数「瞬时快照」等待（断言读的是谓词匹配到的同一份快照）在 `TRANSIENT_SNAPSHOT_WAITS` 里逐条登记理由，
-   新增违规仍然失败，登记失效（违规消失）也会失败。
+   反例：一个连接用例只等 `status === 'connected'`，随后断言卡片上的版本号——版本是连接完成后异步写入的，于是
+   Windows 上偶发失败、ubuntu 上通过。写测试时先写下断言，再把断言里的每个条件抄进谓词；不要用「再睡一会儿」掩盖窗口。
+   这条由 `test/unit/predicate-guard.test.js` 强制：它扫描 `test/integration/*.e2e.js` 的 `pollUntil` 等轮询谓词，
+   与紧随其后 `assert.*` 读取的字段比对，缺字段就按 `file:line` 失败；少数「瞬时快照」等待在
+   `TRANSIENT_SNAPSHOT_WAITS` 里逐条登记理由，新增违规仍然失败，登记失效（违规消失）也会失败。
 
 2. **激活路径只能有一套定位器，且必须验证效果（one locator, DOM click, verified effect）。**
    就绪检查与点击必须用同一个定位器（`test/integration/activation.js` 的 `activateRowInPage` 用 `*` 遍历），
@@ -222,10 +220,8 @@ ES 尾逗号、LF）；提交前跑 `pnpm run format`，不要手工调格式，
    无关浮层才算遮挡。命中同源时照常点击，由「效果已验证」兜底。不要再写第二套 `clickByText`。
 
 3. **测试替身要比宿主更严格，而不是更宽松（fakes enforce the host contract）。**
-   替身接受的形状必须与真实宿主一致：`sessions.create` 在 `meta.isSeeded` 时必须要求显式 `seed` 与
-   `inheritedEventCount`（用 `test/helpers/fake-sessions.js` 的 `assertSeededCreateOptions`），重复 id 要抛错，
-   surface 事件必须带 intent，`Session` **没有** `events` 数组。反例：一个忽略 `create` 选项的替身让「每次镜像
-   会话创建都失败」这样的生产缺陷一路绿灯通过 CI。
+   替身接受的形状必须与真实宿主一致：缺参数要抛错、重复 id 要拒绝、未知字段要显式忽略而不是静默吞掉。
+   反例：一个忽略调用参数的 SSH/HTTP 替身让「真实命令模板写错」这样的生产缺陷一路绿灯通过 CI。
    需要钩子就放在替身里，**不要**为此给生产代码加分支或导出。
 
 4. **不要把内部缺陷伪装成正常/远端状态（never swallow an internal defect into a plausible state）。**
@@ -233,10 +229,9 @@ ES 尾逗号、LF）；提交前跑 `pnpm run format`，不要手工调格式，
    判定的结构性做法：`try` 的边界就是 I/O 调用本身（只包住 `await ssh.exec(...)` 这类传输调用），
    这样只有传输失败才会落到远端原因；其它语句（拼路径、解析、映射）抛出的异常一律是插件自己的缺陷，
    必须走独立的类型化原因 + `error` 日志（含堆栈），**不能**复用远端原因。
-   反例（本约定的来源）：L3 流式回放尝试里，`streamFile` 在 `const` 之前被读取（TDZ `ReferenceError`），
-   外层的兜底 `catch` 把**任意**异常映射成 `read-failed`——一个可信的远端原因。结果是历史回放被静默关闭，
-   而所有测试依然全绿；只有真机上「历史永远为空」暴露了它。现在这种精况会变成
-   `reason.code="internal-error"` + `error` 级日志（异常名/消息/堆栈）+ `history.internalErrors` 计数。
+   反例（本约定的来源）：一段读远端日志的代码在 `const` 之前读取变量（TDZ `ReferenceError`），
+   外层的兜底 `catch` 把**任意**异常映射成 `read-failed`——一个可信的远端原因。结果是功能被静默关闭，
+   而所有测试依然全绿。现在这种情形必须变成 `reason.code="internal-error"` + `error` 级日志（异常名/消息/堆栈）。
    允许的例外只有一种，且必须写明理由：
    ```js
    try {

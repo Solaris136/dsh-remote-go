@@ -362,5 +362,5 @@ test('the scanner covers src recursively, not just the top level', () => {
     files.filter((file) => !file.endsWith('.js')),
     [],
   )
-  assert.ok(files.includes('history.js'), 'top-level sources are still scanned')
+  assert.ok(files.includes('service.js'), 'top-level sources are still scanned')
 })

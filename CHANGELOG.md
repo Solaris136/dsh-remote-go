@@ -14,40 +14,38 @@
 
 ### 变更
 
-- **远端 Node 由插件固定托管**：连接时总是使用插件自己的 Node —— 即使远端已经装了 Node，也不再借用系统/nvm 的那一份，避免和远端其他项目互相干扰。要装的版本 = **本机 DSH 自己 `engines.node` 的下限**（0.2.2 的 `>=24.9.0` → Node 24.9.0），随插件读取并钉死该版本：已装同一版本即复用，不轮询 registry、不静默升级；DSH 抬高下限时随之下一个新版本并清理旧目录。首次连接从 nodejs.org 下载官方 Linux 构建（`.tar.gz`），用官方 `SHASUMS256.txt` 校验 SHA-256 后解压到 `~/.dsh/remote-go/node/v<version>`；官方源不可达回退 npmmirror.com 的同一版本。**没有系统 Node 兜底**：网络/磁盘/架构不支持/musl/glibc 过低等失败一律明确报错。
+- **移除镜像/会话子系统，产品收敛为「远程入口」**：删除远端会话镜像（L1 目录、L2 历史回放、L3 轮询跟随）、
+  写入租约/围栏、本地镜像会话与侧边栏 `Remote: <主机名>` 工作区注册，以及只服务于它们的模块
+  （`mirror*.js`、`history.js`、`lease.js`、`session-adapter.js`、`workspace-adapter.js`、`workspaces.js`）。
+  随之移除五个设置项（`mirrorToSidebar` / `mirrorMaxSessions` / `mirrorMaxEvents` / `mirrorHistory` / `mirrorStream`）、
+  镜像/工作区 HTTP 端点与客户端镜像轮询；API 契约升到 **2.0**（见 `docs/api.md`）。连接、整窗接管、主机条、诊断与
+  设置保持不变。相关设计内容并入 `docs/design.md` 与 `docs/implementation.md`，删除 `docs/session-design.md`。
 
-- **远端页面起不来时自动修正浏览器载体**：如果远端 profile 的 bundle（例如 `@goldenpigeon/dsh-remote-agent`）为原生 UI 关闭了 `api-remotes`，DSH 浏览器客户端会停在「failed to load plugins / $events unavailable」。启动前会先 `--dump-config` 检查，只在需要时用 `--patch remote-go/browser-carrier.patch.yml` 对**本次启动**重新启用该行（不改用户 profile）；旧启动方式留下的实例按 run 注册表的 `launch` 标记识别并先停止，再按当前方式拉起。
+- **远端 Node 由插件固定托管**：连接时总是使用插件自己的 Node——即使远端已经装了 Node，也不再借用系统/nvm 的那一份。
+  要装的版本 = 本机 DSH 自己 `engines.node` 的下限（0.2.2 的 `>=24.9.0` → Node 24.9.0），已装同一版本即复用，
+  不轮询 registry、不静默升级。首次连接从 nodejs.org 下载官方 Linux 构建，用官方 `SHASUMS256.txt` 校验 SHA-256 后
+  解压到 `~/.dsh/remote-go/node/v<version>`；官方源不可达回退 npmmirror.com 的同一版本。**没有系统 Node 兜底**。
 
-- **npx 预检不再设超时**：首次冷缓存可能要下载几分钟，改用 `npm_config_loglevel=http` 把 npm 的抓取输出流式映射成连接进度（首次运行下载 / 正在下载 DSH 依赖 / 依赖已安装），不再用猜的超时时间把正常下载截断。
+- **远端页面起不来时自动修正浏览器载体**：启动前检查远端 profile 的 bundle；只在需要时对**本次启动**重新启用
+  `api-remotes`，不改用户 profile；旧启动方式留下的实例按 run 注册表的 `launch` 标记识别并先停止。
 
-- **插件远端目录固定到 `~/.dsh/remote-go`**：删除设置项 `bootstrap.remoteDir`（设置页与 API 都不再暴露）。日志、run 注册表、托管 Node、下载缓存、租约与流助手全部放这个固定目录；旧的 `~/.dsh-remote-go/` 不再读取或迁移。`GET /version` 的 `apiVersion` 升到 **1.3**，`RemoteView` 新增 `nodeSource`，进度新增 `installing-node` / `downloading-node`，错误新增 `remote-node-install-failed`，诊断检查表新增「远端 Node 运行时」一项（10 项）。
+- **npx 预检不再设超时**：首次冷缓存可能要下载几分钟，npm 的抓取输出会流式映射成连接进度
+  （`bootstrap-first-run` / `bootstrap-fetching` / `bootstrap-installed`），不再用猜的超时时间截断正常下载。
 
-- **主机切换注入远端侧边栏**：接管期间不再画本地横条，也不再有任何兜底条——主机条由 webview.executeJavaScript() 注入远端页面自己的侧边栏（品牌行下方，左侧贴边、全高那一列），用远端页面的 --dsw-* 变量绘制，所以随远端主题、hover 与弹层遮罩一起变化；点开是主机列表 +「刷新远端界面」+「离开远端」，点击经 window.__drgBridge 轮询桥回本地。每次页面加载完成都会重新注入，修掉「点刷新后远端退出按钮消失」的问题。
-
-- **远端运行时收敛为 npx 固定版本（npx-only）**：远端 DSH 一律用
-  `npx -y @deepseek-ai/dsh@<本机 DSH 版本> --profile <profile> --no-open --port 0` 启动，`DSH_HOME` 使用远端用户真实的
-  `~/.dsh`——凭据、会话、工作区就是该用户自己的那一份。删除 T0/T0-local/T1/T2/T3 自举分级与隔离 DSH home；
-  Node 由「远端 Node 由插件固定托管」条目的运行时提供。连接前先在前台跑一次 `npx … --version` 预检
-  （冷缓存下载发生在预检里，失败带日志），回读版本必须与本机一致，否则直接 `version-mismatch`。
+- **插件远端目录固定到 `~/.dsh/remote-go`**：删除设置项 `bootstrap.remoteDir`；日志、run 注册表、托管 Node、下载缓存
+  都放这个固定目录，旧的 `~/.dsh-remote-go/` 不再读取或迁移。`RemoteView` 新增 `nodeSource`，进度新增
+  `installing-node` / `downloading-node`，错误新增 `remote-node-install-failed`，诊断检查表新增「远端 Node 运行时」一项。
 
 - **手工启动的远端 DSH 冲突提示**：插件只收养自己启动的实例；未收养时扫描远端同一 `~/.dsh` 下其他 DSH 进程
-  （忽略本插件 registry pid）。命中则暂停连接（`conflict-pending`）、列出进程，由用户选择「停止它并启动受管实例」
-  「保留它，另起一个（共享 ~/.dsh，给出警告）」或「取消连接」；120s 未选择按取消处理。取消/停止失败的错误码是
-  `remote-dsh-running`。新增 `POST /hosts/:id/conflict`。
+  （忽略本插件 registry pid）。命中则暂停连接（`conflict-pending`），由用户选择停止、并存或取消；120s 未选择按取消处理。
 
-- **设置与契约随运行时收敛**：`settings.bootstrap` 只剩 `{ profile }`——插件远端目录固定为 `~/.dsh/remote-go`
-  （`logs/`、`run/`、`node/`、`downloads/`、租约与流助手），`profile`（默认 `web`，拒绝 `desktop`）
+- **设置与契约随运行时收敛**：`settings.bootstrap` 只剩 `{ profile }`；`profile`（默认 `web`，拒绝 `desktop`）
   决定远端 DSH 用哪个 profile；删除 `bootstrap.targetVersion` / `bootstrap.mode` / `bootstrap.nodeVersion` /
-  `bootstrap.remoteDir`，主机条目也不再保存
-  自己的 `bootstrap` 字段（运行时配置是全局设置）。
-  `POST /hosts/:id/connect` 不再接受 `overrideVersion`；`HostView.targetVersion` 恒等于本机版本；`RemoteView` 增加
-  `profile`、`nodeSource`，`bootstrapLevel` 恒为 `npx`；API 契约升到 **1.3**。
+  `bootstrap.remoteDir`，主机条目也不再保存自己的 `bootstrap` 字段。`HostView.targetVersion` 恒等于本机版本；
+  `RemoteView` 增加 `profile`、`nodeSource`，`bootstrapLevel` 恒为 `npx`；API 契约升到 **2.0**。
 
-- **不再迁移旧版隔离运行时**：`~/.dsh-remote-go/{node,dsh-home,home}` 不再被读取；run 注册表还要求 `dshHome`
-  （`~/.dsh`）与 `profile` 匹配才会被收养，旧进程不会被复用。
-
-- **文档与市场描述同步**：README、`docs/`（implementation / design / api / publish / session-design）、本文件与
-  `market/` 条目改为 npx-only 运行时，删除自举分级表与「无 Node 下载运行时 / 离线包」等已不存在的路径。
+- **文档与代码同步收敛**：README、`docs/` 与市场条目改写为「托管 Node + npx、无镜像子系统」的当前行为；
+  删除 `docs/session-design.md`，代码中不再引用文档行号。
 
 - **呈现方式收敛为「整窗接管」**：远端 DSH 由桌面端以 Chromium guest 铺满标题栏以下的整个窗口，不再有任何内嵌、
   浮层或独立窗口形态。本地侧边栏在接管期间让位，因此窗口里不会再出现「本地侧栏 + 远端侧栏」并排的两条栏。
@@ -60,12 +58,11 @@
   一个「远程主机」入口，点开是主机管理页（清单 / 添加 / 编辑 / 诊断 / 删除 / 打开 / 断开），点「打开」才把窗口交给远端；
   离开后回到主机管理页，远端任务不停。规则由组件生命周期实现（面板卸载即关闭承载），不靠全局点击监听去猜意图。
 
-- **设置里的无效配置项删除**：删除固定的「窗口 / 关闭视窗行为」只读区（没有可选值），以及「镜像会话 /
-  把远端镜像会话显示在本地侧边栏」开关（整窗接管后本地侧边栏不再呈现远端会话；后端镜像描述符与历史回放 API
-  仍保留）。
+- **设置里的无效配置项删除**：删除固定的「窗口 / 关闭视窗行为」只读区（没有可选值）。镜像会话相关开关随后
+  随整个子系统一并移除。
 
 - **面板内的「工作区」栏整体移除**：`WorkspaceRail` 组件、它的取数 hook、整套 `.drg-rail*` 样式与 20 余条相关文案都删了，
-  面板只保留主机管理页。侧边栏镜像工作区（`mirrorToSidebar`）仍由 Host 侧维护。
+  面板只保留主机管理页。
 
 - **移除「接管整个窗口」与「面板内嵌」两种旧形态的中间状态页**：连接时不再出现"正在接管远端窗口…"卡片；载入失败改为窗口里
   一行普通提示。相关浏览器验收（`test/e2e/plugin.e2e.js`、`.github/workflows/e2e.yml`、`web/desktop` e2e 里的面板断言）一并删除，

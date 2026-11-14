@@ -206,20 +206,7 @@ function violations(text, file) {
  * The guard still fails for every wait *not* listed here, and it fails when an entry
  * goes stale (the violation disappeared), so the list cannot rot.
  */
-const TRANSIENT_SNAPSHOT_WAITS = new Map([
-  [
-    "lease.e2e.js|=> list.every((mirror) => mirror.reason?.code === 'fenced'), )",
-    'fenced writers: the fence is observed while the descriptor is still advancing; assertions read that same snapshot',
-  ],
-  [
-    "lease.e2e.js|=> list.every((mirror) => mirror.reason?.code === 'fenced' && mirror.readOnly === true), )",
-    'refused client: it never takes a lease (epoch stays 0), so only reason+readOnly are stably settled',
-  ],
-  [
-    'lease.e2e.js|=> list.every((m) => m.cursor === 5))',
-    'two-client test: the later assertions describe a different phase than this first write',
-  ],
-])
+const TRANSIENT_SNAPSHOT_WAITS = new Map([])
 
 test('every e2e wait predicate covers the fields its following assertions read', () => {
   const files = readdirSync(INTEGRATION).filter((name) => name.endsWith('.e2e.js'))
