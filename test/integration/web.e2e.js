@@ -34,7 +34,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -197,7 +197,9 @@ async function openManageWindow(page) {
     return { ok: true }
   })
   if (!opened.ok) throw new Error(`could not open host management: ${opened.error}`)
-  await page.waitForSelector('[data-testid="manage-window"]', { visible: true, timeout: 60_000 })
+  // The wrapper is a zero-height block whose only child is the fixed dialog, so "visible"
+  // on the wrapper is false by definition; wait for the dialog itself.
+  await page.waitForSelector('[data-testid="manage-window"] [role="dialog"]', { visible: true, timeout: 60_000 })
   await page.waitForSelector('[data-testid="host-list-empty"], [data-testid="host-list"]', {
     visible: true,
     timeout: 60_000,
@@ -374,24 +376,27 @@ test('dsh web renders the host-management window with legible buttons', { timeou
         'the plugin must not register a settings section',
       )
       // Behaviour, not a marker: the plugin's stylesheet is proven applied when its
-      // own class and CSS custom properties resolve on the mounted window. (The
+      // class, its dialog surface and its radius resolve on the mounted window. (The
       // `[data-dsh-remote-go="styles"]` element is NOT reliable — the desktop shell
       // applies the same styles without it.)
       const applied = await page.evaluate(() => {
         const window = document.querySelector('[data-testid="manage-window"]')
         if (!window) return { present: false }
+        const dialog = window.querySelector('[role="dialog"]')
         const style = getComputedStyle(window)
         return {
           present: true,
           hasPluginClass: window.closest('.drg-root.drg-overlay') !== null,
-          primary: style.getPropertyValue('--drg-primary').trim(),
-          radius: style.getPropertyValue('--drg-radius-sm').trim(),
+          layer: style.getPropertyValue('--dsw-alias-bg-layer-2').trim(),
+          radius: style.getPropertyValue('--dsw-radius-panel').trim(),
+          dialogRadius: getComputedStyle(dialog).borderTopLeftRadius,
         }
       })
       assert.equal(applied.present, true)
       assert.equal(applied.hasPluginClass, true, 'the plugin root class is missing around the mounted window')
-      assert.ok(applied.primary !== '', 'the plugin CSS custom properties did not resolve (stylesheet missing)')
-      assert.ok(applied.radius !== '', 'the plugin CSS custom properties did not resolve (stylesheet missing)')
+      assert.ok(applied.layer !== '', 'the host layer-2 token did not resolve (stylesheet missing)')
+      assert.ok(applied.radius !== '', 'the host panel radius token did not resolve (stylesheet missing)')
+      assert.equal(applied.dialogRadius, applied.radius, 'the host-management dialog must use the host panel radius')
     })
 
     await t.test('every button label is legible in light mode', async () => {
@@ -422,6 +427,111 @@ test('dsh web renders the host-management window with legible buttons', { timeou
         lightMeasurement.sectionBackground,
         'the host-management window background did not change between light and dark mode',
       )
+    })
+
+    await t.test('every theme token the plugin reads is published by the host', async () => {
+      // The plugin writes no colours of its own: it reads the host's --dsw-* aliases. If the
+      // host renames or drops one, the plugin silently falls back to a hard-coded colour that
+      // no third-party theme controls. Resolve every token the client references against the
+      // live document to turn that into a failure instead of a cosmetic surprise.
+      const source = await readFile(path.join(REPO_ROOT, 'client.js'), 'utf8')
+      const tokens = [...new Set([...source.matchAll(/--dsw-[a-z0-9-]+/g)].map((found) => found[0]))]
+      assert.ok(
+        tokens.length >= 30,
+        `expected the client to read the theme vocabulary, found ${tokens.length} token(s)`,
+      )
+      const missing = await page.evaluate(
+        (names) => {
+          const window = document.querySelector('[data-testid="manage-window"]')
+          if (window === null) return names
+          const style = getComputedStyle(window)
+          return names.filter((name) => style.getPropertyValue(name).trim() === '')
+        },
+        // --dsw-focus-ring-color is opt-in per control (focus.css sets it on the focused
+        // element itself), so it is legitimately empty on a container; everything else the
+        // client reads must exist in the live document.
+        tokens.filter((name) => name !== '--dsw-focus-ring-color'),
+      )
+      assert.deepEqual(missing, [], `unresolved theme token(s): ${missing.join(', ')}`)
+    })
+
+    await t.test('a third-party theme’s token overrides reach the window and stay legible', async () => {
+      // A theme plugin lands through ctx.theme.register()/overrideTokens(); ui-layout's
+      // ThemePresenter then writes the composed palette as inline --dsw-* variables on
+      // <body>. Reproducing that write is exactly the contract a third-party theme uses.
+      const overrides = {
+        '--dsw-alias-bg-base': '#1e2430',
+        '--dsw-alias-bg-layer-1': '#242c3b',
+        '--dsw-alias-bg-layer-2': '#2a3346',
+        '--dsw-alias-bg-overlay': '#2a3346',
+        '--dsw-alias-border-l1': 'rgb(255 255 255 / 8%)',
+        '--dsw-alias-border-l2': 'rgb(255 255 255 / 13%)',
+        '--dsw-alias-border-l3': 'rgb(255 255 255 / 18%)',
+        '--dsw-alias-label-primary': '#eceff4',
+        '--dsw-alias-label-secondary': '#c6cede',
+        '--dsw-alias-label-tertiary': '#9aa7bd',
+        '--dsw-alias-brand-primary': '#88c0d0',
+        '--dsw-alias-button-primary-fill': '#88c0d0',
+        '--dsw-alias-button-primary-hover': '#9fd0de',
+        '--dsw-alias-label-primary-foreground': '#10202f',
+        '--dsw-alias-state-success-primary': '#a3be8c',
+        '--dsw-alias-state-warn-primary': '#ebcb8b',
+        '--dsw-alias-state-error-primary': '#bf616a',
+        '--dsw-alias-interactive-bg-hover': 'rgb(255 255 255 / 7%)',
+      }
+      /** The painted colour a token resolves to, read off a throw-away probe element. */
+      const paintOf = async (value) =>
+        await page.evaluate((tokenValue) => {
+          const probe = document.createElement('div')
+          probe.style.background = tokenValue
+          document.body.appendChild(probe)
+          const resolved = getComputedStyle(probe).backgroundColor
+          probe.remove()
+          return resolved
+        }, value)
+
+      const before = await page.evaluate(() => {
+        const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
+        return getComputedStyle(dialog).backgroundColor
+      })
+      await page.evaluate((tokens) => {
+        for (const [name, value] of Object.entries(tokens)) document.body.style.setProperty(name, value)
+      }, overrides)
+      try {
+        const expectedSurface = await paintOf(overrides['--dsw-alias-bg-layer-2'])
+        const expectedLabel = await paintOf(overrides['--dsw-alias-label-primary'])
+        const painted = await page.evaluate(() => {
+          const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
+          const title = document.querySelector('[data-testid="manage-window"] .drg-page-title')
+          return { surface: getComputedStyle(dialog).backgroundColor, label: getComputedStyle(title).color }
+        })
+        assert.equal(
+          painted.surface,
+          expectedSurface,
+          'the window background did not follow the overridden layer-2 token',
+        )
+        assert.equal(painted.label, expectedLabel, 'the page title did not follow the overridden label token')
+        const measured = await assertMeasured(await measureStable(page, { scheme: 'dark' }), 'dark/third-party')
+        assert.notEqual(
+          measured.sectionBackground,
+          before,
+          'the management window did not repaint for the third-party theme',
+        )
+      } finally {
+        await page.evaluate((names) => {
+          for (const name of names) document.body.style.removeProperty(name)
+        }, Object.keys(overrides))
+      }
+      // Removing the layer must restore the host palette: the plugin caches no colours.
+      await page.waitForFunction(
+        (previous) => {
+          const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
+          return dialog !== null && getComputedStyle(dialog).backgroundColor === previous
+        },
+        { timeout: 15_000 },
+        before,
+      )
+      await assertMeasured(await measureStable(page, { scheme: 'dark' }), 'dark/restored')
     })
 
     await t.test('loading the app and the host-management window logged no console errors', async () => {

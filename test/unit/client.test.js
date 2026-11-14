@@ -550,6 +550,17 @@ test('dictionaries are bilingual and balanced', () => {
     assert.ok(dicts.zh[key].length > 0, 'zh.' + key + ' must not be empty')
     assert.ok(dicts.en[key].length > 0, 'en.' + key + ' must not be empty')
   }
+
+  // Every connect phase gets a labelled pill; a missing key renders the raw `phase.<id>`
+  // in the progress row, which is how `phase.verifying` once shipped.
+  const phases = [...(SOURCE.match(/const PHASES = \[([\s\S]*?)\]/)?.[1] ?? '').matchAll(/'([a-z-]+)'/g)].map(
+    (found) => found[1],
+  )
+  assert.ok(phases.length >= 7, `expected the connect phases, found ${phases.length}`)
+  for (const phase of phases) {
+    assert.ok(dicts.zh['phase.' + phase], 'missing zh label for connect phase ' + phase)
+    assert.ok(dicts.en['phase.' + phase], 'missing en label for connect phase ' + phase)
+  }
 })
 
 test('apply registers only the overlay host: the switcher row is the plugin sole entry', () => {

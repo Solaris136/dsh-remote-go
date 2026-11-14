@@ -319,7 +319,9 @@ async function openManageWindow(page) {
     return { ok: true }
   })
   if (!opened.ok) throw new Error(`could not open host management: ${opened.error}`)
-  await page.waitForSelector('[data-testid="manage-window"]', { visible: true, timeout: 60_000 })
+  // The wrapper is a zero-height block whose only child is the fixed dialog, so "visible"
+  // on the wrapper is false by definition; wait for the dialog itself.
+  await page.waitForSelector('[data-testid="manage-window"] [role="dialog"]', { visible: true, timeout: 60_000 })
   await page.waitForSelector('[data-testid="host-list-empty"], [data-testid="host-list"]', {
     visible: true,
     timeout: 60_000,
