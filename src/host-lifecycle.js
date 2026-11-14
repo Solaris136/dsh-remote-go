@@ -1,12 +1,5 @@
 /**
- * Per-host lifecycle: the reconnect backoff, the idle-stop timer, and the
- * teardown path every caller funnels through (disconnect, delete, failed
- * connect, shutdown).
- *
- * Nothing here starts a connection: the reconnect timer is handed a callback, so
- * this module never imports the pipeline. That keeps the edge one-way
- * (`connect-pipeline → host-lifecycle`) and leaves `service.js` the only place
- * that wires the two together.
+ * Per-host lifecycle: the reconnect backoff, the idle-stop timer and the single teardown path; the reconnect timer gets a callback, so this never imports the pipeline.
  */
 import { DEFAULT_IDLE_MINUTES } from './constants.js'
 import { errors, toErrorView } from './errors.js'
@@ -31,9 +24,6 @@ export function cancelIdleStop(runtime) {
 
 /**
  * Arm the next reconnect attempt, or give up once the configured budget is spent.
- * @param {any} ctx
- * @param {any} runtime
- * @param {() => void} onDue
  */
 export function scheduleReconnect(ctx, runtime, onDue) {
   cancelReconnect(runtime)
@@ -129,9 +119,6 @@ export async function disposeSsh(runtime) {
  * `stop`), `keepSshForIdle` leaves the transport up for a fast resume, and
  * `keepRemote` preserves the remote facts so the card still describes what is
  * running on the other side.
- * @param {any} ctx
- * @param {any} runtime
- * @param {{ stopRemote?: boolean, keepRemote?: boolean, keepSshForIdle?: boolean }} [options]
  */
 export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelConflict(runtime)
@@ -159,8 +146,6 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
 /**
  * Tear one host down and leave it idle: the keep-alive policy decides whether the
  * remote web is stopped and whether the transport survives for a fast resume.
- * @param {any} ctx @param {any} runtime
- * @param {{ stopRemote?: boolean }} [options]
  */
 export async function disconnectHost(ctx, runtime, options = {}) {
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
@@ -183,7 +168,6 @@ export async function disconnectHost(ctx, runtime, options = {}) {
 /**
  * Stop every host's timers and release its transport. The `stop` keep-alive
  * policy also stops the remote web so nothing is left running unowned.
- * @param {any} ctx
  */
 export async function shutdownAll(ctx) {
   for (const runtime of ctx.state.runtimes.values()) {

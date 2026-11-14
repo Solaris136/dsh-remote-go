@@ -35,10 +35,6 @@ const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
  * Recursively merge `patch` into `base` (arrays and scalars replace). Only keys
  * `base` declares are written, so untrusted input can change known values but
  * never invent a property or poison the prototype.
- * @template T
- * @param {T} base
- * @param {unknown} patch
- * @returns {T}
  */
 export function deepMerge(base, patch) {
   if (!isPlainObject(base) || !isPlainObject(patch)) return /** @type {T} */ (patch === undefined ? base : patch)
@@ -138,10 +134,6 @@ export function isPid(value) {
  * A promise that resolves at most once: through `settle`, or with `onTimeout()`
  * when the deadline passes first. `onSettled` runs before the promise resolves so
  * a caller can clear the pending slot it installed on both paths.
- * @template T
- * @param {number} timeoutMs
- * @param {() => T} [onTimeout]
- * @param {(value: T) => void} [onSettled]
  */
 export function createDecision(timeoutMs, onTimeout, onSettled) {
   let settle

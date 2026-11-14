@@ -1,14 +1,5 @@
 /**
- * Read-only directory browsing used by the key-file picker.
- *
- * The plugin authenticates with a private-key file only, so the client needs a way
- * to *choose* one without typing an absolute path. DSH ships a directory picker,
- * not a file picker, so the Host lists directories itself: a caller walks to a
- * folder and picks a file from it.
- *
- * Everything stays inside the user's home directory: the picker never becomes a
- * general filesystem browser, and a path that resolves outside home (through `..`
- * or a symlink) is refused rather than clamped.
+ * Read-only directory browsing for the key-file picker; a path that resolves outside the user home directory (through `..` or a symlink) is refused.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'

@@ -1,10 +1,5 @@
 /**
- * Remote process and reachability primitives: finding stopping and probing DSH
- * processes on the remote, plus the one HTTP round-trip the local tunnel needs to
- * prove the remote UI answers through it.
- *
- * Everything here is a bounded shell command or a loopback request; nothing owns
- * lifecycle state, so the web lifecycle (`remote-web.js`) can build on it.
+ * Remote process and reachability primitives: find, stop and probe DSH processes on the remote, plus the one HTTP round-trip that proves the remote UI answers.
  */
 import http from 'node:http'
 import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'

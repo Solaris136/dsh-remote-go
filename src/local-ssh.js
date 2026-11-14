@@ -1,6 +1,5 @@
 /**
- * Local SSH material (read-only): `~/.ssh/config` and `~/.ssh/known_hosts`.
- * Never writes, never prompts.
+ * Local SSH material (read-only): `~/.ssh/config` and `~/.ssh/known_hosts`; never writes, never prompts.
  */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'

@@ -1,11 +1,5 @@
 /**
- * Remote runtime preparation, reduced to the one supported shape: run DSH with
- * `npx` pinned to the local DSH version, against the remote's real `$DSH_HOME`
- * (`~/.dsh`). There is no isolated install and no Node download — a remote that
- * cannot run `npx` fails with instructions instead.
- *
- * The planner is pure and testable; the executor only runs the planner's fixed
- * command template (design §16.8: never a user-composed shell).
+ * Remote runtime preparation: `npx` pinned to the local DSH version against the remote's real `$DSH_HOME`; the executor runs only fixed templates.
  */
 import { errors } from './errors.js'
 import { headTail, shellQuote } from './util.js'
@@ -71,8 +65,6 @@ export function planNpx(input) {
  * `npm_config_loglevel=http` is deliberate: over an SSH channel npm has no TTY and
  * would otherwise print nothing until it finishes. At `http` it reports fetches
  * on stderr, which the caller turns into progress.
- * @param {RuntimePlan} plan
- * @returns {string}
  */
 export function buildPreflightCommand(plan) {
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''

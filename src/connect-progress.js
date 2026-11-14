@@ -1,10 +1,5 @@
 /**
- * Connect progress: the per-host log ring, the coalesced `/state` frame that
- * carries it, the staged progress line, and the two reporters that turn npm and
- * managed-Node output into that line.
- *
- * It owns exactly one piece of state — the pending flush timer — and never
- * decides when a host changes status; it only reports through `emitState`.
+ * Connect progress: the coalesced `/state` frame that carries log lines, the staged progress line and the npm / managed-Node reporters; it never sets a status.
  */
 import { appendConnectLog, connectLogVisible } from './connect-log.js'
 import { logVisible, nowIso } from './util.js'
@@ -41,14 +36,6 @@ export function describePreflightEvent(line, version) {
   return { code: 'bootstrap-progress', params: { detail: text.slice(0, 160) } }
 }
 
-/**
- * @param {{
- *   logger: { warn?: (...a: any[]) => void },
- *   logLevel: string | null,
- *   getSettings: () => Record<string, any>,
- *   emitState: () => void,
- * }} options
- */
 export function createConnectProgress(options) {
   let flushTimer = null
 

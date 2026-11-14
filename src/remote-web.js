@@ -1,11 +1,5 @@
 /**
- * Remote DSH web lifecycle: start (detached, log in the plugin's remote directory),
- * parse the `dsh web:` URL line, stop, and adopt an instance a previous local
- * process left running. The launch token stays in memory (design §16.8).
- *
- * The remote runtime is always npx pinned to the local DSH version and always
- * uses the remote user's real DSH home (`~/.dsh`); this module no longer knows
- * about isolated installs.
+ * Remote DSH web lifecycle — start (detached, logged), parse the `dsh web:` URL, stop, adopt; the launch token stays in memory.
  */
 import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS } from './constants.js'
 import { errors } from './errors.js'

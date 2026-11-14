@@ -1,25 +1,8 @@
 /**
- * Plugin settings: defaults, validation and sanitization. Unknown or invalid
- * fields fall back to defaults instead of failing activation (a malformed saved
- * setting must never brick the plugin).
+ * Plugin settings: defaults, validation and sanitization; unknown or invalid fields fall back to defaults instead of failing activation.
  */
 import { DEFAULT_IDLE_MINUTES, DEFAULT_KEY_PATH, DEFAULT_REMOTE_PROFILE, SSH_READY_TIMEOUT_MS } from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
-
-/**
- * @typedef {{
- *   defaultPort: number,
- *   defaultAuth: 'key' | 'password',
- *   defaultKeyPath: string,
- *   connectTimeoutSec: number,
- *   autoReconnect: { enabled: boolean, maxAttempts: number, baseDelayMs: number },
- *   hostKeyPolicy: 'first-use' | 'strict',
- *   saveTokens: boolean,
- *   language: 'auto' | 'zh' | 'en',
- *   logLevel: 'error' | 'warn' | 'info' | 'debug',
- *   bootstrap: { profile: string },
- * }} Settings
- */
 
 export function defaultSettings() {
   return {
@@ -43,8 +26,6 @@ export function defaultSettings() {
 /**
  * A profile name DSH can boot: one safe path segment, and never `desktop`
  * (the Electron app reserves that profile and the CLI refuses it).
- * @param {unknown} value
- * @returns {string | null}
  */
 export function normalizeProfileName(value) {
   const text = typeof value === 'string' ? value.trim() : ''

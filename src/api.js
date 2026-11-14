@@ -1,8 +1,5 @@
 /**
- * Local HTTP API for the browser half (contract: docs/api.md). Mounted on the
- * local DSH Web server as a prefix route; every request must carry the
- * `x-dsh-remote-go` header and, when a browser supplies an Origin, be same-origin
- * (design §9.1: the remote UI is never exposed, only the local plugin state).
+ * Local HTTP API for the browser half (contract: docs/api.md); every request needs the marker header and, with an Origin, same-origin.
  */
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'

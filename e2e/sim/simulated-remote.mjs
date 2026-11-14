@@ -1,9 +1,6 @@
-// A local stand-in for an SSH-reachable remote host.
-//
-// Why: the plugin's real path is SSH auth → exec probe → remote `dsh web` → loopback
-// `forwardOut` tunnel. Docker/WSL are not always available, so this script uses ssh2's
-// *server* API to expose a genuine SSH endpoint on 127.0.0.1 plus a local HTTP server playing
-// the remote DSH web: the real client code runs with no container, VM or external machine.
+// A local stand-in for an SSH-reachable remote host: ssh2's *server* API exposes a real SSH
+// endpoint on 127.0.0.1 plus a local HTTP server playing the remote DSH web, so the real
+// client code runs with no container, VM or external machine.
 //
 //   node e2e/sim/simulated-remote.mjs --self-test   # start, verify, exit
 //   node e2e/sim/simulated-remote.mjs --serve       # stay up for manual use
@@ -18,15 +15,7 @@
 //                                                             VALIDATES publishes, which makes the channel enforced
 //   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published
 //
-// While serving it publishes a state file (ports, host-key fingerprint) so other tooling can
-// point at it: E2E_SSH_ADDRESS=127.0.0.1:<sshPort>. Parallel test files pass their own
-// --state-file so they never race on the default path.
-//
-// The answers below are NOT a permissive fake: `respond()` recognises the plugin's real command
-// shapes by their leading tokens (never by substring: the probe script mentions `/etc/os-release`,
-// `cat`, `curl` and friends all over its body) and returns the exact wire format each caller
-// parses. Anything else exits 127 with a stderr line, so a drifted command set shows up loudly
-// instead of silently "passing".
+// Not a permissive fake: commands are matched by leading tokens, anything else exits 127.
 import { createServer as createHttpServer } from 'node:http'
 import { connect as netConnect } from 'node:net'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -39,7 +28,7 @@ import { createHostKey } from './host-key.mjs'
 
 const { Server: SshServer, Client: SshClient } = ssh2
 
-/** The installed `ssh2` version, for a host-key failure report. @returns {string} */
+/** The installed `ssh2` version, for a host-key failure report. */
 function ssh2Version() {
   try {
     return JSON.parse(readFileSync(new URL('../../node_modules/ssh2/package.json', import.meta.url), 'utf8')).version
@@ -51,9 +40,7 @@ function ssh2Version() {
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_STATE_FILE = path.join(HERE, '.state.json')
 
-/** @param {string[]} argv */
 function parseArgs(argv) {
-  /** @type {Record<string, string | boolean>} */
   const out = {}
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
@@ -77,7 +64,6 @@ const serve = args['serve'] === true || !selfTest
 /**
  * The state file: the repository default, or the path the caller chose so two simulators
  * (e.g. test files running in parallel) never race on one file.
- * @returns {string}
  */
 function resolveStateFile() {
   const requested = args['state-file'] ?? process.env.SIM_STATE_FILE ?? null
@@ -113,10 +99,6 @@ const SIM = {
   token: 'sim-token-0123456789abcdef',
 }
 
-/** @typedef {{ code: number, stdout: string, stderr: string }} CommandResult */
-/** @typedef {{ remotePort: number, pid: number, started: boolean, token: string, historyProbes?: number, historyDiscovery?: number, historyReads?: Record<string, number>, leaseReads?: number, leaseWrites?: number, leaseRefusals?: number, suspiciousJumps?: number, authority?: any, authorityHistory?: any[] }} SimState */
-
-/** @param {string} message */
 function fatal(what, error) {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[sim] ${what} failed: ${message}`)
@@ -152,10 +134,8 @@ function fatal(what, error) {
 /**
  * Exactly the `key<TAB>value` lines `buildProbeScript()` prints, with values that satisfy
  * the plugin's own parsing and OS gate.
- * @returns {string}
  */
 function probeOutput() {
-  /** @type {Array<[string, string]>} */
   const lines = [
     ['os', 'Linux'],
     ['arch', 'x86_64'],
@@ -204,7 +184,6 @@ function defaultHistoryEvents(remoteSessionId) {
   ]
 }
 
-/** @typedef {{ sessions: Record<string, any[]>, default: any[], gap: boolean, rootAvailable: boolean }} HistoryAnswer */
 function loadHistoryAnswer() {
   const answer = {
     sessions: {},
@@ -292,11 +271,10 @@ function loadWorkspaceAnswer() {
 const WORKSPACE = loadWorkspaceAnswer()
 const HISTORY = loadHistoryAnswer()
 
-/** Records served by the polled follower (design §6.4). @returns {Record<string, any[]>} */
+/** Records served by the polled follower (design §6.4). */
 function loadStreamAnswer() {
   const file = args['stream-fixture'] ?? process.env.SIM_STREAM_FIXTURE ?? null
   if (!file) return {}
-  /** @type {any} */
   let parsed = null
   try {
     parsed = JSON.parse(readFileSync(file, 'utf8'))
@@ -313,7 +291,6 @@ const STREAM_FENCE = process.argv.includes('--stream-fence')
 /** The writer authority published for L3 (design §6.2); `null` means no authority file. */
 const LEASE = loadLeaseAnswer()
 
-/** @param {string} file @returns {string} */
 function sessionKeyOf(file) {
   return /lease(?:-([^'/]*))?\.json$/.exec(String(file ?? ''))?.[1] ?? ''
 }
@@ -345,8 +322,6 @@ function currentAuthority(sim, file = '') {
  * be a one-line denial of service); an epoch **below** the current one is `stale-epoch` (the
  * stale writer); the same epoch from a different session key is `writer-changed`; an expired
  * current record is free to take over; otherwise the record is accepted.
- * @param {any} record @param {any} sim @param {string} fileOrKey
- * @returns {{ ok: true, record: any } | { ok: false, reason: string, remoteEpoch: number | null }}
  */
 function acceptAuthority(record, sim, fileOrKey = '') {
   const writer = typeof record?.writer === 'string' ? record.writer.trim() : ''
@@ -387,7 +362,6 @@ function refused(sim, reason, remoteEpoch) {
   return { code: 3, stdout: `dsh-lease: ${reason}${suffix}\n`, stderr: '' }
 }
 
-/** @returns {{ writer: string | null, epoch: number | null, expiresAt: number, sessionKey: string } | null} */
 function loadLeaseAnswer() {
   const fixture = readFixture('lease-fixture', 'SIM_LEASE_FIXTURE')
   if (fixture === null) return null
@@ -415,12 +389,10 @@ for (const entry of Object.values(JSON.parse(WORKSPACE.json)?.tables?.workspaces
 }
 for (const id of Object.keys(HISTORY.sessions)) HISTORY_SESSION_IDS.add(id)
 
-/** @param {SimState} sim @returns {string} */
 function webLine(sim) {
   return `dsh web: http://127.0.0.1:${sim.remotePort}/?token=${sim.token}`
 }
 
-/** @param {SimState} sim @returns {string} */
 function runRegistry(sim) {
   return JSON.stringify({
     pid: sim.pid,
@@ -443,12 +415,9 @@ function startScriptAnswer(sim) {
 
 /**
  * Recognise one command by its leading tokens.
- * @param {string} command @param {SimState} sim
- * @returns {CommandResult | null}
  */
 function respond(command, sim) {
   const cmd = command.trim()
-  /** @param {string} stdout @returns {CommandResult} */
   const ok = (stdout) => ({ code: 0, stdout, stderr: '' })
 
   // 4c. The polled follower (src/mirror-stream.js). The install command is accepted and
@@ -463,7 +432,6 @@ function respond(command, sim) {
       sim.streamRefusals = (sim.streamRefusals ?? 0) + 1
       return ok(JSON.stringify({ ok: false, reason: 'stale-epoch', remoteEpoch: 9 }))
     }
-    /** @type {any} */
     let payload = null
     try {
       payload = JSON.parse(Buffer.from(follow[2], 'base64').toString('utf8'))
@@ -472,7 +440,6 @@ function respond(command, sim) {
     }
     if (!payload) return ok(JSON.stringify({ ok: false, reason: 'log-malformed' }))
     // The log is the history fixture plus whatever the scenario says landed after connect.
-    /** @type {any[]} */
     const records = []
     for (const [sessionId, entry] of Object.entries(HISTORY)) {
       const own = Array.isArray(entry?.events) ? entry.events : []
@@ -671,7 +638,6 @@ function describeCommand(command) {
 
 // Servers
 
-/** @param {number} ms @param {string} label @returns {Promise<never>} */
 function timeoutAfter(ms, label) {
   return new Promise((_resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
@@ -679,11 +645,6 @@ function timeoutAfter(ms, label) {
   })
 }
 
-/**
- * @template T
- * @param {Promise<T>} promise @param {number} ms @param {string} label
- * @returns {Promise<T>}
- */
 function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeoutAfter(ms, label)])
 }
@@ -724,7 +685,7 @@ function startRemoteWeb() {
   })
 }
 
-/** Start the simulated host. @returns {Promise<{ sshPort: number, remotePort: number, fingerprint: string, close: () => Promise<void>, sim: SimState }>} */
+/** Start the simulated host. */
 async function startSimulatedRemote() {
   const remote = await startRemoteWeb()
   const shutRemoteWeb = async () => {
@@ -734,7 +695,6 @@ async function startSimulatedRemote() {
   // The host key is generated in memory and validated before anything listens: a key ssh2
   // cannot parse (e.g. after a CRLF round-trip) must fail here, with the reason, instead of
   // leaving the client to fail at handshake time.
-  /** @type {import('./host-key.mjs').HostKey} */
   let hostKey
   try {
     hostKey = createHostKey()
@@ -746,18 +706,14 @@ async function startSimulatedRemote() {
     process.exit(2)
   }
 
-  /** @type {SimState} */
   const sim = { remotePort: remote.port, pid: 0, started: false, token: SIM.token }
   // ssh2's `Server` emits `connection` with its own ServerConnection wrapper (it has `end()`,
   // and a private `_sock` for the raw socket), so track those and tear them down explicitly;
   // otherwise `close()` can wait forever.
-  /** @type {Set<any>} */
   const connections = new Set()
-  /** @type {Set<import('node:net').Socket>} */
   const tunnelSockets = new Set()
   let closed = false
 
-  /** @type {import('ssh2').Server} */
   let server
   try {
     server = new SshServer({ hostKeys: [hostKey.material] }, (client) => {
@@ -863,12 +819,10 @@ async function startSimulatedRemote() {
 
 // Self-test: drive the simulator with the plugin's own code paths.
 
-/** @param {boolean} condition @param {string} message */
 function expect(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-/** @param {number} sshPort @param {{ username?: string, password?: string }} [credentials] */
 function connectClient(sshPort, credentials = {}) {
   const client = new SshClient()
   const ready = new Promise((resolve, reject) => {
@@ -886,7 +840,6 @@ function connectClient(sshPort, credentials = {}) {
   return withTimeout(ready, 15_000, 'SSH connect').then(() => client)
 }
 
-/** @param {InstanceType<typeof SshClient>} client @param {string} command */
 function execOver(client, command) {
   const call = new Promise((resolve, reject) => {
     client.exec(command, (error, stream) => {
@@ -902,7 +855,6 @@ function execOver(client, command) {
   return withTimeout(call, 20_000, 'SSH exec')
 }
 
-/** @param {InstanceType<typeof SshClient>} client @param {number} destPort */
 function forwardOver(client, destPort) {
   const call = new Promise((resolve, reject) => {
     client.forwardOut('127.0.0.1', 40_000, '127.0.0.1', destPort, (error, stream) => {
@@ -913,7 +865,6 @@ function forwardOver(client, destPort) {
   return withTimeout(call, 15_000, 'SSH forwardOut')
 }
 
-/** @param {import('node:stream').Duplex} stream @param {string} request */
 function httpOver(stream, request) {
   const call = new Promise((resolve, reject) => {
     let response = ''

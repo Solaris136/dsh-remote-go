@@ -1,16 +1,5 @@
 /**
- * Orchestration service — the facade over five collaborators:
- *
- *   host-registry    the host records and the client-facing snapshot
- *   connect-pipeline the connect sequence (SSH → probe → Node → start → tunnel)
- *   host-lifecycle   reconnect/idle timers and the single teardown path
- *   prompts          the host-key and foreign-conflict rendezvous
- *   connect-progress the log ring, `/state` coalescing and progress codes
- *
- * Every external step is injected, so the whole pipeline runs in unit tests with
- * fakes (no SSH, no timers). The shared `ctx` below is the only thing the five
- * modules have in common: it carries the dependencies, the live settings reader
- * and the two pieces of mutable service state (host runtimes, active host).
+ * Orchestration service — the facade over host-registry, connect-pipeline, host-lifecycle, prompts and connect-progress; every external step is injected.
  */
 import { EventEmitter } from 'node:events'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
@@ -54,33 +43,7 @@ export { describePreflightEvent }
 /** Milliseconds a paused host-key handshake waits for the user. */
 export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
 
-/**
- * @typedef {{
- *   store: import('./store.js').HostStore,
- *   home: string,
- *   logger?: { info?: (...a: any[]) => void, warn?: (...a: any[]) => void, debug?: (...a: any[]) => void, error?: (...a: any[]) => void },
- *   localVersion?: string | null,
- *   engineNodeRange?: string | null,
- *   sshFactory?: (options: any) => any,
- *   tunnelFactory?: (options: any) => Promise<any>,
- *   probe?: typeof probeRemote,
- *   plan?: typeof planNpx,
- *   ensureNode?: typeof ensureRemoteNode,
- *   preflight?: typeof verifyNpxVersion,
- *   startWeb?: typeof startRemoteWeb,
- *   stopWeb?: typeof stopRemoteWeb,
- *   waitUi?: typeof waitForRemoteUi,
- *   exchange?: typeof exchangeTokenOverTunnel,
- *   adopt?: typeof adoptRemoteWeb,
- *   findForeign?: typeof findForeignDshProcesses,
- *   stopForeign?: typeof stopForeignDshProcesses,
- *   readRegistry?: typeof readRunRegistry,
- *   loadSshMaterial?: typeof loadLocalSshMaterial,
- * }} ServiceOptions
- */
-
 export class RemoteGoService extends EventEmitter {
-  /** @param {ServiceOptions} options */
   constructor(options) {
     super()
     this.store = options.store
@@ -112,7 +75,6 @@ export class RemoteGoService extends EventEmitter {
       readRegistry: options.readRegistry ?? readRunRegistry,
       loadSshMaterial: options.loadSshMaterial ?? loadLocalSshMaterial,
     }
-    /** @type {any} */
     this.ctx = {
       deps,
       store: this.store,
@@ -141,7 +103,6 @@ export class RemoteGoService extends EventEmitter {
     })
   }
 
-  /** @returns {Map<string, any>} */
   get runtimes() {
     return this.ctx.state.runtimes
   }
@@ -150,7 +111,6 @@ export class RemoteGoService extends EventEmitter {
     return this.ctx.state.activeHostId
   }
 
-  /** @returns {this} */
   async init() {
     await initRegistry(this.ctx)
     return this
@@ -164,7 +124,6 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
-  /** @param {string | null} version */
   setLocalVersion(version) {
     const normalized = version ? normalizeVersion(version) : null
     if (normalized) {
@@ -173,7 +132,6 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
-  /** @param {string | null} range */
   setLocalEnginesNode(range) {
     const text = typeof range === 'string' ? range.trim() : ''
     this.engineNodeRange = text === '' ? null : text
@@ -188,29 +146,22 @@ export class RemoteGoService extends EventEmitter {
     return this.ctx.userHome()
   }
 
-  // ---------------------------------------------------------------- hosts
-
-  /** @param {Record<string, any>} rawHost */
   async saveHost(rawHost) {
     return saveHost(this.ctx, rawHost)
   }
 
-  /** @param {string} id */
   async removeHost(id) {
     return removeHost(this.ctx, id)
   }
 
-  /** @param {string | null} id */
   setActiveHost(id) {
     return setActiveHost(this.ctx, id)
   }
 
-  /** @param {Record<string, any>} patch */
   async saveSettings(patch) {
     return saveSettings(this.ctx, patch)
   }
 
-  /** @param {string} [dir] */
   async listKeyFiles(dir) {
     return listKeyFiles(this.ctx, dir)
   }
@@ -219,36 +170,28 @@ export class RemoteGoService extends EventEmitter {
     return discoverSshAliases(this.ctx)
   }
 
-  // -------------------------------------------------------------- connect
-
-  /** @param {string} id @param {{ password?: string, rememberPassword?: boolean }} [options] */
   async connect(id, options = {}) {
     return startConnect(this.ctx, id, options)
   }
 
-  /** @param {string} id @param {{ stopRemote?: boolean }} [options] */
   async disconnect(id, options = {}) {
     await this.init()
     return disconnectHost(this.ctx, runtimeOf(this.ctx, id), options)
   }
 
-  /** @param {string} id */
   async reconnect(id) {
     await this.init()
     return reconnectHost(this.ctx, runtimeOf(this.ctx, id))
   }
 
-  /** @param {string} id @param {{ accept: boolean, remember?: boolean, sha256?: string }} decision */
   async confirmFingerprint(id, decision) {
     return confirmHostKey(this.ctx, runtimeOf(this.ctx, id), decision)
   }
 
-  /** @param {string} id @param {{ action: 'stop'|'alongside'|'cancel' }} decision */
   async confirmConflict(id, decision) {
     return confirmConflict(runtimeOf(this.ctx, id), decision)
   }
 
-  /** @param {string} id */
   openInfo(id) {
     const runtime = runtimeOf(this.ctx, id)
     if (runtime.status !== 'connected' || !runtime.tunnel || !runtime.token) {
@@ -264,13 +207,10 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
-  /** @param {string} id */
   async diagnose(id) {
     await this.init()
     return diagnoseHost(runtimeOf(this.ctx, id), { targetVersion: this.localVersion })
   }
-
-  // ------------------------------------------------------------- teardown
 
   async shutdown() {
     this.ctx.state.disposed = true

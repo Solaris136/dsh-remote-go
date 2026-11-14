@@ -1,9 +1,5 @@
 /**
- * The host registry: the record of configured hosts, the per-host runtime
- * objects that mirror them, and the client-facing snapshot built from both.
- *
- * Reads are pure; writes go through `store` and then re-emit the snapshot, so a
- * caller never has to remember to push state to the Client.
+ * The host registry: the configured hosts, their runtime objects and the client-facing snapshot; reads are pure, writes re-emit the snapshot after `store`.
  */
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -120,7 +116,6 @@ export async function saveSettings(ctx, patch) {
 /**
  * Browse directories inside the user's home so the client can pick a private-key
  * file instead of typing an absolute path. Read-only and home-confined.
- * @param {any} ctx @param {string} [dir]
  */
 export async function listKeyFiles(ctx, dir) {
   // The picker is rooted at the OS user home, not DSH_HOME: private keys live in

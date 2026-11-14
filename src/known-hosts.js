@@ -1,6 +1,5 @@
 /**
- * Read-only `~/.ssh/known_hosts` parsing and OpenSSH SHA256 fingerprints
- * (design §15.1: hashed entries are counted, never guessed at).
+ * Read-only `~/.ssh/known_hosts` parsing and OpenSSH SHA256 fingerprints; hashed entries are counted, never guessed at.
  */
 import { createHash } from 'node:crypto'
 

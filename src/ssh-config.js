@@ -1,11 +1,5 @@
 /**
- * Read-only `~/.ssh/config` parsing and alias discovery (design §15.1).
- *
- * Implements the subset of `ssh_config(5)` that matters for host discovery:
- * Host blocks with several patterns and `!` negation, global options before the
- * first Host, first-obtained-value-wins option resolution, and the `~` / `%h` /
- * `%r` / `%p` / `%d` tokens. `Include`, `Match` and `ProxyCommand` are reported
- * as unsupported rather than guessed at.
+ * Read-only `~/.ssh/config` parsing and alias discovery for the subset `ssh_config(5)` defines; `Include`, `Match` and `ProxyCommand` are reported, not guessed.
  */
 
 const KNOWN_OPTIONS = new Set([
@@ -193,8 +187,6 @@ export function resolveSshAlias(parsed, alias, options = {}) {
  * List concrete, manually-dialable aliases from the config. Wildcard patterns
  * (`*`, `?`) and negations are skipped because they cannot be resolved without
  * a concrete target.
- * @param {ReturnType<typeof parseSshConfig>} parsed
- * @param {{ home?: string }} [options]
  */
 export function discoverSshAliases(parsed, options = {}) {
   const out = []
@@ -213,7 +205,6 @@ export function discoverSshAliases(parsed, options = {}) {
 
 export function resolveDestination(destination, options = {}) {
   const text = String(destination ?? '').trim()
-  /** @type {import('./util.js').parseSshDestination extends never ? never : { user: string | null, host: string, port: number | null }} */
   const literal = parseDestinationLiteral(text)
   const parsed = parseSshConfig(options.configText ?? '')
   const home = options.home ?? '~'

@@ -1,7 +1,5 @@
 /**
- * Thin promise wrapper over `ssh2` that carries everything the plugin needs:
- * host-key policy/confirmation, auth-method fallback, one-shot `exec` with
- * streamed output, and TCP forwarding for the loopback tunnel.
+ * Promise wrapper over `ssh2`: host-key policy/confirmation, auth fallback, one-shot `exec` with streamed output, and TCP forwarding for the loopback tunnel.
  */
 import { EventEmitter } from 'node:events'
 import { readFile } from 'node:fs/promises'

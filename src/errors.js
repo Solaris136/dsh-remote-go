@@ -1,6 +1,5 @@
 /**
- * Coded, bilingual errors (design §8.4). `toErrorView` is the only shape the
- * Client ever sees.
+ * Coded, bilingual errors; `toErrorView` is the only shape the Client ever sees.
  */
 
 export const ErrorCode = Object.freeze({

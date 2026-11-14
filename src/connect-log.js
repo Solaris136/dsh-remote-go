@@ -1,15 +1,5 @@
 /**
- * The connect log the Client prints under the staged progress (docs/api.md
- * `HostView.logs`).
- *
- * One module owns the whole shape: the per-host ring the runtime keeps, the
- * bounded tail that travels in `/state`, and which statuses have a window that
- * prints it. The service only writes lines; the view only reads them — neither
- * one has to know how many are kept or how a line is tagged.
- *
- * The lines are local content the user produced (SSH / npx / remote stdout), so
- * they travel as they were written; redaction is the diagnostics bundle's job,
- * not this one's.
+ * The connect log behind `HostView.logs`: the per-host ring, its bounded `/state` tail and which statuses print it; lines travel as written, unredacted.
  */
 
 export const CONNECT_LOG_STATUSES = Object.freeze(['connecting', 'fingerprint-pending', 'error'])

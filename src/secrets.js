@@ -1,16 +1,5 @@
 /**
- * Per-host SSH password storage.
- *
- * A password is accepted for hosts whose key file is not usable, and the user may
- * ask for it to be remembered. It is then kept in DSH's own credential store
- * (`ctx.credentials`, the plugin-owned record space) instead of `hosts.json`, so
- * the secret inherits whatever protection that store provides — encrypted file with
- * restrictive permissions, or the provider's keychain — and never appears in the
- * plugin's plain-JSON state.
- *
- * When the composition provides no credential service, nothing is persisted: the
- * password stays in memory for the session and `available()` reports false so the
- * client can say so instead of promising storage it cannot deliver.
+ * Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in `hosts.json`; with no credential service nothing is persisted.
  */
 
 const RECORD_PREFIX = 'dsh-remote-go:ssh-password:'

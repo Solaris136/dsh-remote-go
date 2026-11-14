@@ -1,13 +1,5 @@
 /**
- * Durable local state under `$DSH_HOME/remote-go/`:
- *  - hosts.json    — host registry (never contains passwords; pinned host keys only)
- *  - settings.json — plugin settings
- *  - secrets.json  — only when `saveTokens` is enabled; 0600, holds launch tokens
- *
- * Writes go through the shared atomic writer (`./atomic-json.js`): 0700 directory,
- * 0600 file, unique fsynced temp file, rename retry on Windows, cleanup on
- * failure, and a cross-process lock. Reads stay tolerant (a corrupt file falls
- * back to defaults instead of throwing).
+ * Durable local state under `$DSH_HOME/remote-go/`: hosts.json, settings.json and secrets.json; writes are atomic, a corrupt file falls back to defaults.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'

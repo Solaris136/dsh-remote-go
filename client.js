@@ -1,12 +1,9 @@
 /*
- * dsh-remote-go · Client half
- *
- * A single-file browser plugin (no build step): one host switcher row plus every floating window
- * in the shell's overlay layer. It renders the Host's state (docs/api.md is the frozen contract;
- * the Host half in src/ is the only source of truth) and sends user intents back. The row is the
+ * dsh-remote-go · Client half — a single-file browser plugin with no build step: one host
+ * switcher row plus every floating window in the shell's overlay layer (the sections below are
+ * marked with //#region). It renders the Host's state (docs/api.md is the frozen contract; the
+ * Host half in src/ is the only source of truth) and sends user intents back. The row is the
  * plugin's only entry — no settings page, no sidebar panel, no main panel.
- *
- * Sections 1-17 are marked with //#region below.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-remote-go',

@@ -1,11 +1,5 @@
 /**
- * The connect pipeline: SSH → probe → managed Node → plan → adopt/conflict →
- * npx preflight → start → tunnel → verify, plus re-entry for reconnect.
- *
- * Every external step comes from `ctx.deps` (the facade's injected fakes), so the
- * sequence runs in unit tests without SSH or timers. The step order is the
- * behavior: adopt before the preflight, a leftover registry stop before the
- * foreign-process scan, and teardown on every failure path.
+ * The connect pipeline: SSH -> probe -> managed Node -> plan -> adopt/conflict -> preflight -> start -> tunnel -> verify; the step order is the behavior and every step is injected.
  */
 import { REMOTE_START_TIMEOUT_MS, SSH_READY_TIMEOUT_MS, TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
 import { errors, toErrorView } from './errors.js'

@@ -1,17 +1,5 @@
 /**
- * SSH host-key material for the simulated remote host.
- *
- * Why a module: the key is generated in memory and handed straight to `ssh2`'s server, and a
- * single CRLF translation anywhere in that chain makes `ssh2` answer `Cannot parse privateKey:
- * Malformed OpenSSH private key` at server construction — the simulator dies before it can
- * listen and every test that needs a connection fails with a confusing downstream error.
- * Windows CI is exactly where that class of bug shows up first, so the handling is
- * deterministic, byte-level and unit-tested on every platform.
- *
- * Rules: the material stays a **Buffer** end to end (no `.toString()` round-trip); carriage
- * returns are dropped from armored text before `ssh2` sees the key; a key that cannot be
- * parsed throws here, with the reason, instead of surfacing later as a handshake failure.
- * No side effects: importing this module never starts a listener.
+ * SSH host-key material for the simulated remote: bytes stay a Buffer end to end, carriage returns are dropped before `ssh2` sees the key, and a bad key throws here.
  */
 import { createHash } from 'node:crypto'
 import ssh2 from 'ssh2'
@@ -31,18 +19,11 @@ const CARRIAGE_RETURN = 0x0d
 export const HOST_KEY_GENERATION_ATTEMPTS = 5
 
 /**
- * @typedef {{ material: Buffer, keyType: string, publicBlob: Buffer, fingerprint: string }} HostKey
- */
-
-/**
  * Normalize private-key material: always a Buffer, with carriage returns removed from armored
  * text. Bytes are filtered in place (no string round-trip), and binary material is left
  * untouched because a lone `0x0d` can be real key data there.
- * @param {string | Buffer | Uint8Array} material
- * @returns {Buffer}
  */
 export function normalizePrivateKey(material) {
-  /** @type {Buffer} */
   let buffer
   if (typeof material === 'string') buffer = Buffer.from(material, 'utf8')
   // Both copies keep the caller's buffer from being mutated by the in-place filter below.
@@ -63,8 +44,6 @@ export function normalizePrivateKey(material) {
 /**
  * Parse normalized key material into the facts the simulator needs. Throws (never returns a
  * half-valid key) so a broken key is a startup error that names the reason.
- * @param {string | Buffer | Uint8Array} material
- * @returns {HostKey}
  */
 export function describeHostKey(material) {
   const normalized = normalizePrivateKey(material)
@@ -91,14 +70,10 @@ export function describeHostKey(material) {
  * Windows CI runner and reproduced locally with concurrent test workers (~1 in 30 runs).
  * Handing that key to the SSH server kills the simulator at construction, so generation is
  * retried a bounded number of times; the validation itself stays strict.
- * @param {{ generate?: () => { private?: unknown, public?: unknown } }} [options]
- *   `generate` is a test seam: it lets the retry be exercised deterministically.
- * @returns {HostKey}
  */
 export function createHostKey(options = {}) {
   const generate =
     typeof options.generate === 'function' ? options.generate : () => utils.generateKeyPairSync('ed25519')
-  /** @type {Error | null} */
   let lastError = null
   for (let attempt = 1; attempt <= HOST_KEY_GENERATION_ATTEMPTS; attempt += 1) {
     const generated = generate()

@@ -1,11 +1,6 @@
-// Syntax-check every JavaScript entry that runs in production, tests, scripts or the
-// fixture tooling. Parsing without executing covers a browser bundle (client.js) and
-// Node plugin files alike.
-//
-// Why one child instead of `node --check` per file: on Windows each spawnSync flashes a
-// console window (~200 ms); parsing all files in one child drops that to one. ESM is
-// parsed with `vm.SourceTextModule` (the parser `node --check` uses), `.cjs` with
-// `vm.Script`.
+// Syntax-check every JavaScript entry that runs in production, tests, scripts or fixtures,
+// browser bundle and Node files alike, in one child: a per-file `node --check` flashes a
+// Windows console window per spawn (~200 ms).
 import { existsSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
@@ -35,7 +30,6 @@ for (const file of JSON.parse(readFileSync(0, 'utf8'))) {
 process.stdout.write(JSON.stringify(failures))
 `
 
-/** @param {string} dir @param {string[]} out */
 async function walk(dir, out) {
   if (!existsSync(dir)) return
   for (const entry of await readdir(dir, { withFileTypes: true })) {
@@ -50,7 +44,6 @@ async function walk(dir, out) {
   }
 }
 
-/** @type {string[]} */
 const files = []
 for (const dir of includeDirs) await walk(path.join(root, dir), files)
 for (const file of includeFiles) {
@@ -66,7 +59,6 @@ const parsed = spawnSync(process.execPath, ['--experimental-vm-modules', '--no-w
   windowsHide: true,
 })
 
-/** @type {{ file: string, error: string }[]} */
 let failures = []
 if (parsed.status !== 0 || !parsed.stdout) {
   failures = [

@@ -1,12 +1,5 @@
 /**
- * One read-only remote probe (design §4.2 step 2–3, §16.2): a single POSIX `sh`
- * script prints `key<TAB>value` lines that this module turns into facts used by
- * the runtime planner, the managed-Node installer, the wizard's capability list
- * and diagnostics.
- *
- * Deliberately small now that the runtime is always npx-pinned: the probe only
- * needs to prove what the remote has (Node, npm/npx, curl/wget, libc, home) so
- * the plugin knows whether it has to provision a managed Node itself.
+ * One read-only remote probe: a single POSIX `sh` script prints `key<TAB>value` lines that become the facts used by the planner, the Node installer and diagnostics.
  */
 import { headTail } from './util.js'
 import { errors } from './errors.js'

@@ -1,10 +1,6 @@
-// Generate and validate the format-1 plugin market entry for dsh-remote-go.
-//
+// Generate and validate the format-1 plugin market entry:
 //   node scripts/market-entry.mjs           # write market/plugin-entry.json + market/index.json
 //   node scripts/market-entry.mjs --check   # validate only (CI / prepack gate)
-//
-// Validation uses @deepseek-ai/dsh-plugin-market-index (devDependency), the same
-// validator DSH and the market use, so a broken entry fails here first.
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -31,8 +27,6 @@ function fail(message) {
  * Serialize a market document as Prettier-formatted JSON, so the committed output
  * also satisfies `pnpm run format:check`. Falls back to plain JSON when Prettier is
  * unavailable (it is a devDependency).
- * @param {unknown} value
- * @returns {Promise<string>}
  */
 async function toJsonText(value) {
   try {

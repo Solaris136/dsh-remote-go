@@ -1,7 +1,5 @@
 /**
- * Remote DSH web lifecycle — the public surface of the two modules behind it:
- * `remote-web.js` owns start/stop/adopt, `remote-proc.js` owns the process scan
- * and reachability primitives. Callers keep importing from here.
+ * Remote DSH web lifecycle — the surface callers import: `remote-web.js` owns start/stop/adopt, `remote-proc.js` the scan and reachability primitives.
  */
 export {
   LAUNCH_MARKER,

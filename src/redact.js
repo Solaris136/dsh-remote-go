@@ -1,6 +1,5 @@
 /**
- * Diagnostics redaction (design §15.2 P9, §16.8): tokens, passwords and private
- * keys never leave the machine in a diagnostic package.
+ * Diagnostics redaction: tokens, passwords and private keys never leave the machine in a diagnostic package.
  */
 
 const SECRET_QUERY_KEYS = ['token', 'access_token', 'api_key', 'apikey', 'key', 'secret', 'password', 'passwd', 'auth']
@@ -45,9 +44,6 @@ function redactValue(key, value) {
 
 /**
  * Deep-redact a JSON-compatible value.
- * @template T
- * @param {T} value
- * @returns {T}
  */
 export function redactObject(value) {
   if (Array.isArray(value)) return /** @type {T} */ (value.map((item) => redactValue('', item)))

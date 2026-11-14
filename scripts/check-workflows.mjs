@@ -1,8 +1,6 @@
-// Validate the committed CI workflow YAML files with a real YAML parser.
-//
-// Resolution order: the js-yaml devDependency (what CI installs), DSH_JS_YAML (an
-// explicit path to a js-yaml entry point), then python3 + PyYAML. Exits 1 when a
-// workflow fails to parse or is missing, and 2 when no YAML parser is available.
+// Validate the committed CI workflow YAML files with a real parser: the js-yaml
+// devDependency, then DSH_JS_YAML, then python3 + PyYAML. Exit 1 on a bad workflow and 2
+// when no YAML parser is available.
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -13,7 +11,6 @@ import process from 'node:process'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const files = ['ci', 'codeql', 'release', 'acceptance'].map((name) => `.github/workflows/${name}.yml`)
 
-/** @type {((text: string) => unknown) | null} */
 let parse = null
 try {
   // Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).

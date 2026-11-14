@@ -1,7 +1,5 @@
 /**
- * Version parsing/comparison and the design's exact-version parity rule (§16.3).
- * Supports the version shapes DSH and Node actually publish: `0.2.2-rc.1`,
- * `24.22.2`, optional leading `v`, optional build metadata.
+ * Version parsing/comparison and the exact-version parity rule, covering the shapes DSH and Node publish (`0.2.2-rc.1`, `24.22.2`, optional `v`).
  */
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/

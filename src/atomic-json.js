@@ -1,8 +1,5 @@
 /**
- * Atomic JSON persistence for the plugin's own state files (design §8):
- * 0700 directory, 0600 file, `wx` random temp file + fsync + rename retry, and a
- * cross-process `wx` lock. Reads are tolerant: missing or unparseable files are
- * reported, never thrown.
+ * Atomic JSON persistence: 0700 dir, 0600 file, fsynced temp, rename retry and a cross-process lock; a bad file is reported, never thrown.
  */
 import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
@@ -27,18 +24,12 @@ const LOCK_UNLINK_ATTEMPTS = 3
 /**
  * In-process chains keyed by lock path; the value is the always-settled tail so a
  * rejected write never poisons the next waiter.
- * @type {Map<string, Promise<unknown>>}
  */
 const LOCAL_CHAINS = new Map()
 
 /**
  * Run `task` under the cross-process lock, serialized with every in-process holder
  * of the same lock path.
- * @template T
- * @param {string} lockFile
- * @param {{ fs?: typeof fs, logger?: { warn?: (...args: any[]) => void }, staleMs?: number, waitMs?: number, retryMs?: number }} [options]
- * @param {() => Promise<T>} task
- * @returns {Promise<T>}
  */
 export function withProcessLock(lockFile, options, task) {
   const previous = LOCAL_CHAINS.get(lockFile) ?? Promise.resolve()
@@ -53,7 +44,6 @@ export function withProcessLock(lockFile, options, task) {
   return run
 }
 
-/** @template T @param {string} lockFile @param {any} options @param {() => Promise<T>} task */
 async function runExclusive(lockFile, options, task) {
   const release = await acquireLock(lockFile, options)
   try {

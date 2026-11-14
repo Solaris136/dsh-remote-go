@@ -1,7 +1,5 @@
 /**
- * Detect the DSH version of the *local* installation. The design pins the
- * remote runtime to this exact version (§16.3), so the value must come from the
- * running installation rather than npm `latest`.
+ * Detect the DSH version of the local installation; the remote runtime is pinned to this exact version, never to npm `latest`.
  */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
@@ -47,8 +45,6 @@ export async function detectLocalVersion(input = {}) {
  *
  * Best-effort like the version probe: an unreadable or missing package yields
  * `range: null` and the caller falls back to the plugin's own floor.
- * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} [input]
- * @returns {Promise<{ range: string | null, source: string }>}
  */
 export async function detectLocalEnginesNode(input = {}) {
   for (const candidate of candidatePackageJsons(input)) {

@@ -1,11 +1,5 @@
-// Verify the published artifact without publishing: check `files` coverage and, when
-// given a tarball, that the archive contains exactly the runtime files.
-//
-//   node scripts/pack-check.mjs                  # check package.json files coverage
-//   node scripts/pack-check.mjs <plugin.tgz>     # additionally inspect the packed tarball
-//
-// The tarball listing comes from `tar -tzf` (POSIX tar ships with Windows 10+, macOS
-// and Linux); if tar is unavailable the check reports that instead of passing silently.
+// Verify the published artifact without publishing: `node scripts/pack-check.mjs` checks the
+// package.json `files` coverage, and `... <plugin.tgz>` also inspects the packed tarball.
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
@@ -15,7 +9,6 @@ import process from 'node:process'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const cliArgs = process.argv.slice(2)
 const findIndex = cliArgs.indexOf('--find')
-/** @type {string | null} */
 let tarball = cliArgs.find((arg, index) => !arg.startsWith('--') && index !== findIndex + 1) ?? null
 if (findIndex >= 0) {
   const dir = path.resolve(root, cliArgs[findIndex + 1] ?? 'artifacts')
@@ -24,7 +17,6 @@ if (findIndex >= 0) {
   console.log(`[pack-check] tarball: ${path.relative(root, tarball)}`)
 }
 
-/** @param {string} dir */
 async function newestTarball(dir) {
   if (!existsSync(dir)) return null
   let best = null

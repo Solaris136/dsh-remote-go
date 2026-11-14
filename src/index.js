@@ -1,10 +1,5 @@
 /**
- * dsh-remote-go — Host half.
- *
- * Registers the local HTTP API used by the browser panel and owns the SSH /
- * bootstrap / tunnel lifecycle. The remote DSH UI itself is rendered by the
- * remote host through a window takeover; this half never proxies UI bytes
- * (design §2, §7.0).
+ * dsh-remote-go — Host half: registers the local HTTP API the browser panel uses and owns the SSH / bootstrap / tunnel lifecycle; it never proxies UI bytes.
  */
 import { API_PREFIX, PLUGIN_ID } from './constants.js'
 import { statSync } from 'node:fs'

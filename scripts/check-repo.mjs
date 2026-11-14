@@ -1,8 +1,5 @@
 // Repository conventions the release process depends on: required files, package metadata,
-// version parity, line hygiene, secret hygiene and workflow hygiene.
-//
-// Dependency-free (node: built-ins only). Every problem is reported as a `[check-repo] FAIL`
-// line and the process exits 1 when at least one is found.
+// version parity, line hygiene, secret hygiene and workflow hygiene. Node built-ins only.
 import { existsSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
@@ -10,9 +7,7 @@ import process from 'node:process'
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 
-/** @type {string[]} */
 const problems = []
-/** @type {string[]} */
 const warnings = []
 let checks = 0
 
@@ -20,14 +15,12 @@ function pass() {
   checks += 1
 }
 
-/** @param {string} message */
 function fail(message) {
   problems.push(message)
 }
 
 /**
  * One check: a passing condition counts, a failing one records its message.
- * @param {boolean} ok @param {string} message
  */
 function check(ok, message) {
   if (ok) pass()
@@ -38,7 +31,6 @@ const abs = (rel) => path.join(root, rel)
 const exists = (rel) => existsSync(abs(rel))
 const readText = (rel) => readFile(abs(rel), 'utf8').catch(() => null)
 
-/** @param {string} rel */
 async function readJson(rel) {
   try {
     return JSON.parse(await readFile(abs(rel), 'utf8'))
@@ -47,7 +39,6 @@ async function readJson(rel) {
   }
 }
 
-/** @param {number[]} numbers */
 function listLines(numbers) {
   const head = numbers.slice(0, 6).join(', ')
   return numbers.length > 6 ? `${head}, +${numbers.length - 6} more` : head
@@ -71,7 +62,6 @@ if (pkg === null) {
 } else {
   pass()
   const author = typeof pkg.author === 'string' ? pkg.author : pkg.author?.name
-  /** @type {Array<[string, unknown]>} */
   const strings = [
     ['name', pkg.name],
     ['version', pkg.version],
@@ -172,8 +162,6 @@ const TABBED_EXTENSIONS = /\.(?:js|mjs|cjs|json|ya?ml)$/
 
 /**
  * Repository-relative paths under `dir` that `accept` allows.
- * @param {string} dir @param {(rel: string) => boolean} accept
- * @returns {Promise<string[]>}
  */
 async function walk(dir, accept) {
   const entries = await readdir(abs(dir), { withFileTypes: true }).catch(() => [])
@@ -189,7 +177,6 @@ async function walk(dir, accept) {
   return found
 }
 
-/** @type {Set<string>} */
 const hygieneFiles = new Set()
 const rootEntries = await readdir(root, { withFileTypes: true }).catch(() => [])
 for (const entry of rootEntries) {
@@ -197,7 +184,6 @@ for (const entry of rootEntries) {
   if (entry.name.endsWith('.md') || ROOT_DOTFILES.includes(entry.name)) hygieneFiles.add(entry.name)
 }
 const directChild = (rel) => rel.split('/').length === 2
-/** @type {Array<[string, (rel: string) => boolean]>} */
 const HYGIENE_SWEEP = [
   ['docs', (rel) => rel.endsWith('.md') && directChild(rel)],
   ['.github', () => true],
@@ -211,7 +197,6 @@ for (const [dir, accept] of HYGIENE_SWEEP) {
   for (const rel of await walk(dir, accept)) hygieneFiles.add(rel)
 }
 
-/** @type {string[]} */
 const hygieneFailures = []
 for (const rel of [...hygieneFiles].sort()) {
   if (SKIPPED_PREFIXES.some((prefix) => rel.startsWith(prefix)) || !exists(rel)) continue
@@ -267,7 +252,6 @@ const SECRET_PATTERNS = [
   ['AWS access key id', /\bAKIA[0-9A-Z]{16}\b/],
 ]
 
-/** @type {Set<string>} */
 const secretFiles = new Set(['client.js', 'index.js'])
 for (const dir of ['src', 'scripts', '.github']) {
   for (const rel of await walk(dir, () => true)) secretFiles.add(rel)

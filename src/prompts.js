@@ -1,20 +1,11 @@
 /**
- * The two prompts a connection can pause on — an unknown host key and a foreign
- * DSH already running on the remote — and the answers the Client sends back.
- *
- * Both are the same shape: install a `{ resolve }` slot on the runtime, stall the
- * pipeline on a promise, and settle exactly once (user answer, timeout, or
- * teardown). The slot on the runtime is the only channel between this module and
- * the facade; neither imports the other.
+ * The two prompts a connection can pause on (unknown host key, foreign DSH already running) and the answers the Client sends back; each settles exactly once.
  */
 import { errors, toErrorView } from './errors.js'
 import { createDecision, nowIso } from './util.js'
 
 /**
  * Park the SSH handshake until the user answers the fingerprint prompt.
- * @param {any} ctx
- * @param {any} runtime
- * @param {{ sha256: string, keyType: string }} info
  */
 export function requestHostKey(ctx, runtime, info) {
   const policy = runtime.entry.hostKeyPolicy ?? ctx.settings().hostKeyPolicy
@@ -81,7 +72,6 @@ export async function confirmHostKey(ctx, runtime, decision) {
 /**
  * Pause the pipeline for a decision about foreign remote processes.
  * Mirrors the host-key prompt: a status, a promise, and a bounded timeout.
- * @returns {Promise<{ action: 'stop'|'alongside'|'cancel', timedOut?: boolean }>}
  */
 export function askConflict(ctx, runtime, processes) {
   runtime.status = 'conflict-pending'
@@ -133,7 +123,6 @@ export function confirmConflict(runtime, decision) {
 /**
  * Abandon a pending conflict prompt (teardown). Resolving it with `cancel` makes
  * the stalled `askConflict` call return instead of holding the pipeline open.
- * @param {any} runtime
  */
 export function cancelConflict(runtime) {
   const pending = runtime.pendingConflict

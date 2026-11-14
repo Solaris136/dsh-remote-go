@@ -1,14 +1,5 @@
 /**
- * The plugin's own Node.js runtime on the remote.
- *
- * The managed install is the only path: an official Node build, SHA-256 verified
- * against the published checksum file, unpacked under `$DSH_HOME/remote-go/node`.
- * A shared system/nvm Node is exactly what makes "works for my other project"
- * break the remote DSH, so the version is pinned to the lower bound of the local
- * DSH `engines.node` and reused, with no registry polling and no silent upgrades.
- *
- * Every command here is a fixed template built from validated values (version,
- * architecture, checksum, base URL) — never a user-composed shell.
+ * The plugin's own Node.js runtime on the remote: an official build, SHA-256 verified, under `$DSH_HOME/remote-go/node`; commands are fixed templates, never user-composed.
  */
 import { errors } from './errors.js'
 import { headTail, messageOf, shellQuote } from './util.js'

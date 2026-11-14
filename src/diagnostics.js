@@ -1,5 +1,5 @@
 /**
- * The diagnostic checklist (docs/design.md（诊断与设置）): read-only, no new connections.
+ * The diagnostic checklist: read-only, opens no new connections.
  */
 import { isNodeVersionSupported, versionParity } from './version.js'
 import { nowIso } from './util.js'
