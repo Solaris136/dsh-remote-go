@@ -36,17 +36,14 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
-import { activateByAriaLabel, activateRow, activateRowAndWaitFor, rowPresent, waitForRow } from './activation.js'
 import {
   isWindows,
-  describePage,
   makeTempRoot,
   packPlugin,
   pollUntil,
   resolveDesktopApp,
   resolvePnpm,
   skipOrFail,
-  sleep,
   stopChild,
   tail,
   writeFailureArtifacts,
@@ -55,17 +52,6 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
 
-const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account menu"], [aria-label="账号"]'
-const SETTINGS_LABELS = ['设置', 'Settings']
-const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
-const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
-/**
- * A settings row may only be located inside the settings surface. The plugin also
- * registers a **sidebar** entry labelled "Remote hosts" (`sidebar.panellist`,
- * `t('settingsNav')`), so a global text match answers "present" for a surface that
- * was never opened and then clicks the sidebar entry instead of the settings row.
- */
-const SETTINGS_SURFACE = '[role="dialog"]'
 // The onboarding affordance is localised. "Set up later" is what the shipped app renders in
 // English (observed on the Windows runner); "Configure later" was an assumption that made the
 // first CI run time out, so both spellings (and the Chinese one) are accepted.
@@ -313,72 +299,41 @@ async function waitForSelector(page, selector, timeout = 60_000) {
 }
 
 /**
- * Make the shell's settings surface show the Remote-hosts entry (account menu →
- * Settings), verified by **the nav row the next step needs**, scoped to the open
- * settings dialog. Under load the shell renders a loading view ("正在加载设置…")
- * before anything dialog-like exists, so the bounded wait covers the dialog
- * appearing and the row landing inside it.
+ * Open the plugin's floating host-management window from the sidebar switcher row.
  *
- * Readiness and activation use the same locator (`activation.js`), and every click
- * is a DOM click that is checked for actionability and overlay coverage.
- */
-async function openSettingsSurface(page) {
-  // Scoped to the dialog: the plugin's sidebar entry carries the same label, so a
-  // global presence check would claim the settings surface is ready while the
-  // sidebar panel — not Settings — is what is actually on screen.
-  if (await rowPresent(page, REMOTE_HOSTS_LABELS, { within: SETTINGS_SURFACE })) return true
-  if (!(await page.$('[role="dialog"]'))) {
-    const menu = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
-    if (!menu.clicked) {
-      console.log(`[desktop-e2e] account menu not activated: ${JSON.stringify(menu)}`)
-      return false
-    }
-    const menuReady = await waitForRow(page, SETTINGS_LABELS, { timeoutMs: 30_000 })
-    if (!menuReady) return false
-  }
-  const settings = await activateRow(page, SETTINGS_LABELS)
-  if (!settings.clicked) {
-    console.log(`[desktop-e2e] Settings entry not activated: ${JSON.stringify(settings)}`)
-    return false
-  }
-  return await waitForRow(page, REMOTE_HOSTS_LABELS, { timeoutMs: 60_000, within: SETTINGS_SURFACE })
-}
-
-/**
- * Account menu → Settings → Remote hosts, with every activation verified by its
- * effect and retried when it did not take. Not a longer timeout: the section must
- * mount, and when it does not the surface is re-ensured and the row re-located.
+ * The plugin registers no settings page — the switcher row is its only entry — so the
+ * suite drives the same path a user does: click the row, then "Manage hosts". Both
+ * clicks are DOM clicks, and the step completes only when the window and its host list
+ * have a layout box; failures carry the renderer state instead of a bare timeout.
  * @param {import('puppeteer-core').Page} page
  */
-async function openRemoteHostsSection(page) {
-  await waitForSelector(page, ACCOUNT_MENU_SELECTOR, 120_000)
-  /** @type {any[]} */
-  const log = []
-  for (let cycle = 1; cycle <= 3; cycle += 1) {
-    const surfaceReady = await openSettingsSurface(page)
-    log.push({ cycle, surfaceReady })
-    if (!surfaceReady) {
-      await sleep(300)
-      continue
-    }
-    try {
-      await activateRowAndWaitFor(page, {
-        labels: REMOTE_HOSTS_LABELS,
-        selector: '[data-testid="settings-remote-section"]',
-        label: 'the Remote-hosts section',
-        describe: () => describePage(page),
-        attempts: 2,
-        within: SETTINGS_SURFACE,
-      })
-      return
-    } catch (error) {
-      log.push({ cycle, error: String(error?.message ?? error).slice(0, 400) })
-      await sleep(300)
-    }
-  }
-  throw new Error(
-    `the Remote-hosts section could not be opened: ${JSON.stringify({ cycles: log, page: await describePage(page) })}`,
-  )
+async function openManageWindow(page) {
+  await page.waitForSelector('#drg-host-row', { visible: true, timeout: 120_000 })
+  const opened = await page.evaluate(() => {
+    const row = document.getElementById('drg-host-row')
+    if (!row) return { error: 'the switcher row is missing' }
+    row.click()
+    const item = row.querySelector('.drg-hr-item[data-action="manage"]')
+    if (!item) return { error: 'the switcher menu has no manage row' }
+    item.click()
+    return { ok: true }
+  })
+  if (!opened.ok) throw new Error(`could not open host management: ${opened.error}`)
+  await page.waitForSelector('[data-testid="manage-window"]', { visible: true, timeout: 60_000 })
+  await page.waitForSelector('[data-testid="host-list-empty"], [data-testid="host-list"]', {
+    visible: true,
+    timeout: 60_000,
+  })
+}
+
+/** Close the floating management window through its close button. */
+async function closeManageWindow(page) {
+  await page.evaluate(() => {
+    const win = document.querySelector('[data-testid="manage-window"]')
+    const close = win ? win.querySelector('.drg-modal-head button') : null
+    if (close) close.click()
+  })
+  await page.waitForFunction(() => !document.querySelector('[data-testid="manage-window"]'), { timeout: 20_000 })
 }
 
 /**
@@ -400,7 +355,7 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
   }
 }
 
-test('the desktop shell renders the plugin settings with legible buttons', { timeout: 1_200_000 }, async (t) => {
+test('the desktop shell renders the host-management window with legible buttons', { timeout: 1_200_000 }, async (t) => {
   if (!isWindows) {
     skipOrFail(t, 'the desktop installer exists for Windows and macOS only; there is no Linux build')
     return
@@ -478,7 +433,7 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
     browser = connected.browser
     console.log(`[desktop-e2e] chromium=${connected.version?.Browser ?? 'unknown'} cdpPort=${port}`)
 
-    await t.test('the renderer runs the plugin and reaches the Remote-hosts section', async () => {
+    await t.test('the renderer runs the plugin and opens host management from the switcher row', async () => {
       // A fresh profile opens a separate welcome window; "configure later" needs no
       // credentials and hands control to the app window.
       const skipped = await dismissOnboarding(browser, consoleErrors)
@@ -494,20 +449,27 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
       console.log(
         `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,
       )
-      await openRemoteHostsSection(page)
-      await openRemoteHostsSection(page)
+      await openManageWindow(page)
+      // Close and reopen: the switcher row must bring the window back, not a settings tab.
+      await closeManageWindow(page)
+      await openManageWindow(page)
+      assert.equal(
+        await page.$('[data-testid="settings-remote-section"]'),
+        null,
+        'the plugin must not register a settings section',
+      )
       const applied = await page.evaluate(() => {
-        const section = document.querySelector('[data-testid="settings-remote-section"]')
-        if (!section) return { present: false }
-        const style = getComputedStyle(section)
+        const win = document.querySelector('[data-testid="manage-window"]')
+        if (!win) return { present: false }
+        const style = getComputedStyle(win)
         return {
           present: true,
-          hasPluginClass: section.className.includes('drg-settings-remote'),
+          hasPluginClass: win.closest('.drg-root.drg-overlay') !== null,
           primary: style.getPropertyValue('--drg-primary').trim(),
         }
       })
-      assert.equal(applied.present, true, 'the Remote-hosts section did not mount in the desktop shell')
-      assert.equal(applied.hasPluginClass, true, 'the plugin class is missing on the desktop section')
+      assert.equal(applied.present, true, 'the host-management window did not mount in the desktop shell')
+      assert.equal(applied.hasPluginClass, true, 'the plugin root class is missing around the desktop window')
       assert.ok(applied.primary !== '', 'the plugin styles did not apply in the desktop shell')
     })
 
@@ -525,10 +487,14 @@ test('the desktop shell renders the plugin settings with legible buttons', { tim
         'desktop dark',
       )
       assert.notEqual(dark.bodyBackground, lightMeasurement.bodyBackground, 'the shell did not switch theme')
-      assert.notEqual(dark.sectionBackground, lightMeasurement.sectionBackground, 'the section did not switch theme')
+      assert.notEqual(
+        dark.sectionBackground,
+        lightMeasurement.sectionBackground,
+        'the host-management window did not switch theme',
+      )
     })
 
-    await t.test('the shell logged no console errors while rendering the section', async () => {
+    await t.test('the shell logged no console errors while rendering the window', async () => {
       assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
     })
   } catch (error) {

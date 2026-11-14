@@ -1,16 +1,17 @@
 /**
- * Real-browser acceptance for **web compatibility of the Remote-hosts settings
- * section** (the desktop shell has its own suite: `desktop.e2e.js`).
+ * Real-browser acceptance for **web compatibility of the host-management window**
+ * (the desktop shell has its own suite: `desktop.e2e.js`).
  *
  * What it does:
  * 1. packs this repository (`pnpm pack`) and installs that **tarball** into an
  *    isolated `dsh web` profile — a packaging bug (`files[]`/`exports` drift, a
  *    missing `client.js`) fails here instead of shipping;
  * 2. boots `dsh web` on an ephemeral port with a temporary `DSH_HOME`;
- * 3. drives the real UI with Chrome: account menu → Settings → Remote hosts;
- * 4. asserts the section mounts with every button label legible (WCAG contrast
+ * 3. drives the real UI with Chrome: sidebar switcher row → Manage hosts;
+ * 4. asserts the window mounts with every button label legible (WCAG contrast
  *    >= 3, alpha/opacity aware, gradients refused) in **light and dark** mode,
- *    and that the page logged no console errors.
+ *    and that the page logged no console errors. The plugin registers no settings
+ *    page, so the settings surface is also checked to be free of it.
  *
  * Calibration: with the pre-#10 `client.js` (a single-class `.drg-btn-primary`
  * rule that lost the cascade) the primary buttons measure ratio **1.0**; the fixed
@@ -39,14 +40,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
 import { assertMeasured, measureStable } from './browser-contrast.js'
-import {
-  activateByAriaLabel,
-  activateRow,
-  activateRowAndWaitFor,
-  dismissOpenDialog,
-  rowPresent,
-  waitForRow,
-} from './activation.js'
+import { dismissOpenDialog } from './activation.js'
 import {
   assertPackedDependency,
   describePage,
@@ -67,17 +61,6 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
 
-const ACCOUNT_MENU_SELECTOR = '[aria-label="账号菜单"], [aria-label="Account menu"], [aria-label="账号"]'
-const ACCOUNT_MENU_LABELS = ['账号菜单', 'Account menu', '账号', 'Account']
-const SETTINGS_LABELS = ['设置', 'Settings']
-const REMOTE_HOSTS_LABELS = ['远程主机', 'Remote hosts', 'Remote Hosts']
-/**
- * The settings surface is the only place a settings row may be located. The plugin
- * also registers a **sidebar** entry labelled "Remote hosts" (`sidebar.panellist`,
- * `t('settingsNav')`), so a global text match finds that entry first and reports the
- * dialog's backdrop as an overlay. Scoping to the open dialog keeps the two apart.
- */
-const SETTINGS_SURFACE = '[role="dialog"]'
 /** First-run dialog buttons: any of these dismisses the overlay (both sides normalised). */
 const DIALOG_DISMISS_LABELS = [
   '继续',
@@ -193,65 +176,31 @@ async function dismissFirstRunDialogs(page) {
 }
 
 /**
- * Open the account menu and wait, bounded, for its Settings entry.
+ * Open the plugin's floating host-management window from the sidebar switcher row.
  *
- * Readiness and activation share one locator (`activation.js`), the click is a DOM
- * click, and each attempt waits for the entry to appear — a fresh profile paints the
- * shell before the app's handlers are attached, so the first click can land on a dead
- * button.
+ * The plugin registers no settings page — the switcher row is its only entry — so the
+ * test drives the same path a user does: click the row, then "Manage hosts". Both
+ * clicks are DOM clicks, and the step completes only when the window and its host list
+ * have a layout box; failures carry the panel state instead of a bare timeout.
  * @param {import('puppeteer-core').Page} page
  */
-async function openAccountMenu(page) {
-  await waitForSelector(page, ACCOUNT_MENU_SELECTOR)
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await dismissFirstRunDialogs(page)
-    // Only an *open* menu/dialog can already contain the entry; a stray "Settings"
-    // label elsewhere must not short-circuit the navigation.
-    if ((await page.$('[role="dialog"]')) && (await rowPresent(page, SETTINGS_LABELS, { within: SETTINGS_SURFACE })))
-      return
-    const clicked = await activateByAriaLabel(page, ACCOUNT_MENU_LABELS)
-    if (clicked.clicked) {
-      if (await waitForRow(page, SETTINGS_LABELS, { timeoutMs: 15_000 })) return
-    } else if (clicked.reason !== 'covered' && clicked.reason !== 'not-actionable') {
-      throw new Error(`the account-menu button could not be activated: ${JSON.stringify(clicked)}`)
-    }
-    await page.keyboard.press('Escape').catch(() => {})
-  }
-  const aria = await page.$$eval('[aria-label]', (nodes) =>
-    nodes.map((node) => node.getAttribute('aria-label')).filter(Boolean),
-  )
-  const dialogs = await page.$$eval('[role="dialog"]', (nodes) => nodes.length)
-  throw new Error(
-    `could not open the account menu and find a Settings entry (dialogs open: ${dialogs}); ` +
-      `aria-labels on the page: ${JSON.stringify(aria.slice(0, 40))}`,
-  )
-}
-
-/**
- * Navigate account menu -> Settings -> Remote hosts.
- *
- * One locator for readiness and activation, DOM clicks only, and the step completes
- * only when the section has mounted with a layout box; failures carry the attempt log
- * (row, overlay, dialogs) instead of a bare timeout.
- * @param {import('puppeteer-core').Page} page
- */
-async function openRemoteHostsSection(page) {
+async function openManageWindow(page) {
   await dismissFirstRunDialogs(page)
-  await openAccountMenu(page)
-  // The menu is open with a Settings entry; activate it and verify the settings
-  // surface actually took over before looking for the Remote-hosts row inside it.
-  // Both lookups are scoped to the dialog: the plugin's sidebar entry shares the
-  // label, and an unscoped match would select that entry behind the backdrop.
-  const settings = await activateRow(page, SETTINGS_LABELS)
-  if (!settings.clicked) {
-    throw new Error(`the Settings entry could not be activated: ${JSON.stringify(settings)}`)
-  }
-  await activateRowAndWaitFor(page, {
-    labels: REMOTE_HOSTS_LABELS,
-    selector: '[data-testid="settings-remote-section"]',
-    label: 'the Remote-hosts section',
-    describe: () => describePage(page),
-    within: SETTINGS_SURFACE,
+  await waitForSelector(page, '#drg-host-row')
+  const opened = await page.evaluate(() => {
+    const row = document.getElementById('drg-host-row')
+    if (!row) return { error: 'the switcher row is missing' }
+    row.click()
+    const item = row.querySelector('.drg-hr-item[data-action="manage"]')
+    if (!item) return { error: 'the switcher menu has no manage row' }
+    item.click()
+    return { ok: true }
+  })
+  if (!opened.ok) throw new Error(`could not open host management: ${opened.error}`)
+  await page.waitForSelector('[data-testid="manage-window"]', { visible: true, timeout: 60_000 })
+  await page.waitForSelector('[data-testid="host-list-empty"], [data-testid="host-list"]', {
+    visible: true,
+    timeout: 60_000,
   })
 }
 
@@ -280,7 +229,7 @@ async function applyColorScheme(page, scheme, previousBodyBackground) {
   }
 }
 
-test('dsh web renders the plugin settings with legible buttons', { timeout: 900_000 }, async (t) => {
+test('dsh web renders the host-management window with legible buttons', { timeout: 900_000 }, async (t) => {
   const harness = resolveDshCli()
   if (!harness) {
     skipOrFail(
@@ -396,10 +345,10 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
       )
     })
 
-    await t.test('the Remote-hosts settings section mounts', async () => {
+    await t.test('the host-management window mounts from the switcher row', async () => {
       await dismissFirstRunDialogs(page)
       try {
-        await openRemoteHostsSection(page)
+        await openManageWindow(page)
       } catch (error) {
         // Without this, a navigation failure is undiagnosable from the log alone (the first
         // CI runs failed here with nothing but "TimeoutError"). Report what the UI shows.
@@ -418,23 +367,29 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
           .catch((inspectError) => ({ error: String(inspectError?.message ?? inspectError) }))
         throw new Error(`${error?.message ?? error} — page: ${JSON.stringify(snapshot)}`)
       }
+      // The plugin owns no settings page: the settings surface must not carry one.
+      assert.equal(
+        await page.$('[data-testid="settings-remote-section"]'),
+        null,
+        'the plugin must not register a settings section',
+      )
       // Behaviour, not a marker: the plugin's stylesheet is proven applied when its
-      // own class and CSS custom properties resolve on the mounted section. (The
+      // own class and CSS custom properties resolve on the mounted window. (The
       // `[data-dsh-remote-go="styles"]` element is NOT reliable — the desktop shell
       // applies the same styles without it.)
       const applied = await page.evaluate(() => {
-        const section = document.querySelector('[data-testid="settings-remote-section"]')
-        if (!section) return { present: false }
-        const style = getComputedStyle(section)
+        const window = document.querySelector('[data-testid="manage-window"]')
+        if (!window) return { present: false }
+        const style = getComputedStyle(window)
         return {
           present: true,
-          hasPluginClass: section.className.includes('drg-settings-remote'),
+          hasPluginClass: window.closest('.drg-root.drg-overlay') !== null,
           primary: style.getPropertyValue('--drg-primary').trim(),
           radius: style.getPropertyValue('--drg-radius-sm').trim(),
         }
       })
       assert.equal(applied.present, true)
-      assert.equal(applied.hasPluginClass, true, 'the plugin class is not on the mounted section')
+      assert.equal(applied.hasPluginClass, true, 'the plugin root class is missing around the mounted window')
       assert.ok(applied.primary !== '', 'the plugin CSS custom properties did not resolve (stylesheet missing)')
       assert.ok(applied.radius !== '', 'the plugin CSS custom properties did not resolve (stylesheet missing)')
     })
@@ -465,11 +420,11 @@ test('dsh web renders the plugin settings with legible buttons', { timeout: 900_
       assert.notEqual(
         dark.sectionBackground,
         lightMeasurement.sectionBackground,
-        'the plugin section background did not change between light and dark mode',
+        'the host-management window background did not change between light and dark mode',
       )
     })
 
-    await t.test('loading the app and the plugin section logged no console errors', async () => {
+    await t.test('loading the app and the host-management window logged no console errors', async () => {
       assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
     })
   } catch (error) {

@@ -1,13 +1,14 @@
 /*
  * dsh-remote-go · Client half
  *
- * A single-file browser plugin (no build step) that contributes the
- * Settings → "Remote hosts" section, a host switcher row at the top of the
- * sidebar, and floating windows. The row lists the local page plus every SSH
- * host and hands the whole window to the remote DSH Web UI — reached through a
- * local loopback tunnel — as a live browser guest. Management, the add/edit
- * wizard and every prompt float in the shell's overlay layer, so they open over
- * whichever page (local or remote) is showing and leave it untouched.
+ * A single-file browser plugin (no build step) that contributes one host
+ * switcher row at the top of the sidebar and floating windows. The row lists
+ * the local page plus every SSH host and hands the whole window to the remote
+ * DSH Web UI — reached through a local loopback tunnel — as a live browser
+ * guest. Management, the add/edit wizard and every prompt float in the shell's
+ * overlay layer, so they open over whichever page (local or remote) is showing
+ * and leave it untouched. The row is the plugin's only entry: it registers no
+ * settings page, no sidebar panel and no main panel.
  *
  * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
  * source of truth; this file renders that state and sends user intents back.
@@ -22,12 +23,16 @@
  *   7. icons and small UI primitives
  *   8. host list view
  *   9. full-window remote carrier (DSH desktop guest)
+ *   9b. host switcher row + full-window remote carrier
+ *   9c. key-file picker
  *  10. connect wizard
  *  11. diagnostics drawer
  *  12. settings modal
- *  13. panel container (state, SSE, routing, modals)
- *  14. styles
- *  15. plugin registration (apply)
+ *  13. one-time password prompt
+ *  14. toast
+ *  15. overlay host (floating windows + remote window)
+ *  16. styles
+ *  17. plugin registration (apply)
  */
 window.__ModuleLoader__.load({
   id: 'dsh-remote-go',
@@ -42,7 +47,7 @@ window.__ModuleLoader__.load({
 
     /** Dictionary namespace owned by this plugin. */
     const NS = 'dsh-remote-go'
-    /** The plugin's id: namespace for its overlay seats and the Settings entry. */
+    /** The plugin's id: namespace for its overlay seat and locale dictionary. */
     const PANEL_ID = 'dsh-remote-go'
     /** Base path of the Host HTTP API (same origin as the page). */
     const API_BASE = '/dsh-remote-go/api'
@@ -100,13 +105,6 @@ window.__ModuleLoader__.load({
      */
     const zh = {
       // -- navigation / common -------------------------------------------------
-      settingsNav: '远程主机',
-      settingsIntro: '管理通过 SSH 连接的远程主机；连接后可以在这里打开远端 DSH 界面。',
-      settingsEmptyTitle: '还没有远程主机',
-      settingsEmptyBody: '还没有远程主机。添加一台，然后在这里打开它的 DSH。',
-      settingsAddHost: '添加远程主机',
-      settingsHostOpen: '打开远程界面',
-      settingsPluginSettings: '插件设置',
       panelSubtitle: '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
       addHost: '添加主机',
       addFirstHost: '添加第一台服务器',
@@ -380,13 +378,6 @@ window.__ModuleLoader__.load({
 
     /** English dictionary — complete parallel of `zh`. */
     const en = {
-      settingsNav: 'Remote hosts',
-      settingsIntro: 'Manage hosts connected over SSH; once connected, open their DSH interface here.',
-      settingsEmptyTitle: 'No remote hosts yet',
-      settingsEmptyBody: 'No remote hosts yet. Add one, then open its DSH here.',
-      settingsAddHost: 'Add remote host',
-      settingsHostOpen: 'Open remote UI',
-      settingsPluginSettings: 'Plugin settings',
       panelSubtitle: 'Manage remote hosts and hand the whole window to one of their DSH instances.',
       addHost: 'Add host',
       addFirstHost: 'Add your first server',
@@ -1844,21 +1835,20 @@ window.__ModuleLoader__.load({
      */
     function EmptyHosts(props) {
       const t = translatorOf(props)
-      const settingsMode = props.variant === 'settings'
       return h(
         'div',
-        { className: 'drg-empty', 'data-testid': settingsMode ? 'settings-host-list-empty' : 'host-list-empty' },
+        { className: 'drg-empty', 'data-testid': 'host-list-empty' },
         h('div', { className: 'drg-empty-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 40 })),
-        h('h3', { className: 'drg-empty-title' }, settingsMode ? t('settingsEmptyTitle') : t('emptyTitle')),
-        h('p', { className: 'drg-empty-body' }, settingsMode ? t('settingsEmptyBody') : t('emptyBody')),
+        h('h3', { className: 'drg-empty-title' }, t('emptyTitle')),
+        h('p', { className: 'drg-empty-body' }, t('emptyBody')),
         h(
           Button,
           {
             variant: 'primary',
-            testId: settingsMode ? 'settings-host-add-empty' : 'host-add-empty',
+            testId: 'host-add-empty',
             onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
           },
-          settingsMode ? t('settingsAddHost') : t('addFirstHost'),
+          t('addFirstHost'),
         ),
       )
     }
@@ -1882,10 +1872,8 @@ window.__ModuleLoader__.load({
       const lastOpened = host.lastOpenedAt ? formatTime(host.lastOpenedAt, locale) : t('neverOpened')
       const failing = host.status === 'error' || host.status === 'limited'
       const reason = host.error ? resolveText(host.error.detail, locale) || resolveText(host.error.title, locale) : ''
-      const settingsMode = props.variant === 'settings'
-      const primaryLabel = settingsMode
-        ? t('settingsHostOpen')
-        : host.status === 'connected'
+      const primaryLabel =
+        host.status === 'connected'
           ? t('cardOpen')
           : host.status === 'fingerprint-pending'
             ? t('confirmFingerprint')
@@ -1894,10 +1882,8 @@ window.__ModuleLoader__.load({
               : host.status === 'connecting'
                 ? t('connecting')
                 : t('cardConnect')
-      const primaryTestId = settingsMode ? 'settings-host-open' : 'host-open'
-      const primaryDisabled = settingsMode
-        ? busy || host.status !== 'connected'
-        : busy || host.status === 'connecting' || host.status === 'conflict-pending'
+      const primaryTestId = 'host-open'
+      const primaryDisabled = busy || host.status === 'connecting' || host.status === 'conflict-pending'
 
       return h(
         'li',
@@ -1956,22 +1942,10 @@ window.__ModuleLoader__.load({
                 if (typeof props.onOpen === 'function') props.onOpen(host)
               },
               disabled: primaryDisabled,
-              busy: settingsMode ? false : busy && host.status !== 'connected' && host.status !== 'connecting',
+              busy: busy && host.status !== 'connected' && host.status !== 'connecting',
             },
             primaryLabel,
           ),
-          settingsMode && host.status !== 'connected'
-            ? h(
-                Button,
-                {
-                  variant: 'secondary',
-                  testId: 'settings-host-connect',
-                  onClick: () => props.onConnect && props.onConnect(host),
-                  disabled: busy || host.status === 'connecting',
-                },
-                host.status === 'connecting' ? t('connecting') : t('cardConnect'),
-              )
-            : null,
           host.status === 'connected'
             ? h(
                 Button,
@@ -1984,7 +1958,7 @@ window.__ModuleLoader__.load({
                 t('cardDisconnect'),
               )
             : null,
-          !settingsMode && (host.status === 'disconnected' || host.status === 'error' || host.status === 'limited')
+          host.status === 'disconnected' || host.status === 'error' || host.status === 'limited'
             ? h(
                 Button,
                 {
@@ -2026,7 +2000,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Main-panel host list (docs/design.md（主机清单）). Pure presentation: all actions rise
+     * Host list for the floating management window (docs/design.md（主机清单）). Pure
+     * presentation: all actions rise through callbacks.
      * @param {object} props - state, errors, and callbacks.
      * @returns {object} div element.
      */
@@ -2040,7 +2015,6 @@ window.__ModuleLoader__.load({
       const connected = connectedCount(hosts)
       const total = hosts.length
       const busyHostId = props.busyHostId || null
-      const settingsMode = props.variant === 'settings'
 
       let content
       if (state === null && error !== null) {
@@ -2053,7 +2027,7 @@ window.__ModuleLoader__.load({
       } else if (state === null) {
         content = h(LoadingBlock, { t, label: t('loading') })
       } else if (hosts.length === 0) {
-        content = h(EmptyHosts, { t, variant: props.variant, onAdd: props.onAdd })
+        content = h(EmptyHosts, { t, onAdd: props.onAdd })
       } else {
         content = h(
           'div',
@@ -2073,7 +2047,6 @@ window.__ModuleLoader__.load({
                 t,
                 locale,
                 host,
-                variant: props.variant,
                 busy: busyHostId === host.id,
                 onOpen: props.onOpenHost,
                 onConnect: props.onConnectHost,
@@ -2097,8 +2070,8 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'drg-page-heading' },
-            h('h1', { className: 'drg-page-title' }, settingsMode ? t('settingsNav') : t('hostsTitle')),
-            h('p', { className: 'drg-page-subtitle' }, settingsMode ? t('settingsIntro') : t('panelSubtitle')),
+            h('h1', { className: 'drg-page-title' }, t('hostsTitle')),
+            h('p', { className: 'drg-page-subtitle' }, t('panelSubtitle')),
           ),
           h(
             'div',
@@ -2107,17 +2080,17 @@ window.__ModuleLoader__.load({
               Button,
               {
                 variant: 'primary',
-                testId: settingsMode ? 'settings-host-add' : 'host-add',
+                testId: 'host-add',
                 onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
               },
               h(IconPlus, { size: 14 }),
-              h('span', null, settingsMode ? t('settingsAddHost') : t('addHost')),
+              h('span', null, t('addHost')),
             ),
             h(
               Button,
               {
                 variant: 'ghost',
-                testId: settingsMode ? 'settings-host-refresh' : 'host-refresh',
+                testId: 'host-refresh',
                 onClick: props.onRefresh,
                 busy: loading,
               },
@@ -2126,8 +2099,8 @@ window.__ModuleLoader__.load({
             ),
             h(IconButton, {
               icon: h(IconGear),
-              label: settingsMode ? t('settingsPluginSettings') : t('settings'),
-              testId: settingsMode ? 'settings-settings-open' : 'host-settings',
+              label: t('settings'),
+              testId: 'host-settings',
               onClick: props.onOpenSettings,
             }),
           ),
@@ -5327,314 +5300,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#region 16. settings section
-
-    function SettingsSection(props) {
-      const t = translatorOf(props)
-      const locale = localeOf(props)
-      const remote = useRemoteState(props.initialState)
-      const state = remote.state
-      const [wizard, setWizard] = useState(null)
-      const [diagnose, setDiagnose] = useState(null)
-      const [settingsOpen, setSettingsOpen] = useState(false)
-      const [pendingDelete, setPendingDelete] = useState(null)
-      const [deleting, setDeleting] = useState(false)
-      const [busyHostId, setBusyHostId] = useState(null)
-      const [passwordPrompt, setPasswordPrompt] = useState(null)
-      const [conflictBusy, setConflictBusy] = useState(false)
-      const [toast, setToast] = useState(null)
-      const toastTimer = useRef(null)
-
-      const notify = (text, tone) => {
-        setToast({ text, tone: tone || 'info' })
-        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
-        if (typeof setTimeout === 'function') toastTimer.current = setTimeout(() => setToast(null), 4200)
-      }
-      useEffect(
-        () => () => {
-          if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
-        },
-        [],
-      )
-      const errorMessage = (error) => {
-        const view = toErrorView(error)
-        const title = resolveText(view.title, locale)
-        const detail = resolveText(view.detail, locale)
-        return detail ? title + ' ' + detail : title
-      }
-
-      const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
-      const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
-
-      const requestPanelHost = (hostId) => {
-        api.activate(hostId).catch(() => {})
-        // The overlay host consumes this and hands the window to the host.
-        if (props.panelStore && typeof props.panelStore.request === 'function') props.panelStore.request(hostId)
-        // The settings.section slot hands us the shell's `close` callback; close the
-        // settings dialog so the remote window is not left behind it.
-        if (typeof props.close === 'function') {
-          try {
-            props.close()
-          } catch (_error) {
-            /* already closed */
-          }
-        }
-        remote.refresh()
-      }
-
-      const performConnect = (host, password) => {
-        if (!host || !host.id) return
-        setBusyHostId(host.id)
-        api
-          .connect(host.id, typeof password === 'string' ? { password } : {})
-          .then(
-            () => {
-              setPasswordPrompt(null)
-              remote.refresh()
-            },
-            (error) => {
-              setPasswordPrompt(null)
-              notify(errorMessage(error), 'error')
-            },
-          )
-          .finally(() => setBusyHostId(null))
-      }
-      const connectHost = (host, options) => {
-        if (!host || !host.id) return
-        const opts = options || {}
-        if (host.authType === 'password' && typeof opts.password !== 'string') {
-          setPasswordPrompt({ host, intent: 'connect', error: null, busy: false })
-          return
-        }
-        performConnect(host, opts.password)
-      }
-      const submitPassword = (submitted) => {
-        const pending = passwordPrompt
-        if (!pending || !pending.host) return
-        const value = submitted && typeof submitted.password === 'string' ? submitted.password : ''
-        const remember = submitted && submitted.remember === true
-        if (value.trim() === '') {
-          setPasswordPrompt({ ...pending, error: t('passwordPromptRequired') })
-          return
-        }
-        const host = pending.host
-        setPasswordPrompt({ ...pending, busy: true, error: null })
-        setBusyHostId(host.id)
-        const connect =
-          pending.intent === 'reconnect'
-            ? api
-                .disconnect(host.id, false)
-                .catch(() => {})
-                .then(() => api.connect(host.id, { password: value, rememberPassword: remember }))
-            : api.connect(host.id, { password: value, rememberPassword: remember })
-        connect
-          .then(
-            () => {
-              setPasswordPrompt(null)
-              remote.refresh()
-            },
-            (error) => {
-              const message = errorMessage(error)
-              setPasswordPrompt((current) => (current ? { ...current, busy: false, error: message } : current))
-              notify(message, 'error')
-            },
-          )
-          .finally(() => setBusyHostId(null))
-      }
-      const cancelPassword = () => setPasswordPrompt(null)
-
-      const disconnectHost = (host) => {
-        if (!host) return
-        setBusyHostId(host.id)
-        api
-          .disconnect(host.id, false)
-          .then(
-            () => remote.refresh(),
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setBusyHostId(null))
-      }
-      const reconnectHost = (host) => {
-        if (!host) return
-        if (host.authType === 'password') {
-          setPasswordPrompt({ host, intent: 'reconnect', error: null, busy: false })
-          return
-        }
-        setBusyHostId(host.id)
-        api
-          .reconnect(host.id)
-          .then(
-            () => remote.refresh(),
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setBusyHostId(null))
-      }
-
-      const resolveConflict = (host, action) => {
-        if (!host || !host.id) return
-        setConflictBusy(true)
-        api
-          .confirmConflict(host.id, action)
-          .then(
-            () => remote.refresh(),
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setConflictBusy(false))
-      }
-
-      const runDiagnose = (host) => {
-        if (!host || !host.id) return
-        setDiagnose({ host, status: 'loading', report: null, error: null })
-        api.diagnose(host.id).then(
-          (report) =>
-            setDiagnose((current) =>
-              current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current,
-            ),
-          (error) =>
-            setDiagnose((current) =>
-              current && current.host && current.host.id === host.id
-                ? { ...current, status: 'error', error: toErrorView(error) }
-                : current,
-            ),
-        )
-      }
-      const rerunDiagnose = () => {
-        if (diagnose && diagnose.host) runDiagnose(diagnose.host)
-      }
-      const confirmDeleteHost = () => {
-        if (!pendingDelete) return
-        setDeleting(true)
-        api
-          .deleteHost(pendingDelete.id)
-          .then(
-            () => {
-              setPendingDelete(null)
-              remote.refresh()
-            },
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setDeleting(false))
-      }
-      const saveSettings = async (patch) => {
-        const saved = await api.saveSettings(patch)
-        remote.patch((current) => ({ ...current, settings: saved }))
-        notify(t('settings.saved'), 'success')
-      }
-      const openRemoteFromWizard = (hostId) => {
-        setWizard(null)
-        requestPanelHost(hostId)
-      }
-      const closeWizard = () => {
-        setWizard(null)
-        remote.refresh()
-      }
-      const openRemoteHost = (host) => {
-        if (!host) return
-        if (host.status !== 'connected') {
-          connectHost(host)
-          return
-        }
-        requestPanelHost(host.id)
-      }
-
-      return h(
-        'div',
-        { className: 'drg-root drg-settings-remote', 'data-testid': 'settings-remote-section' },
-        h(StyleSheet),
-        h(HostListView, {
-          t,
-          locale,
-          variant: 'settings',
-          state,
-          loading: remote.loading,
-          error: remote.error,
-          busyHostId,
-          onAdd: () => setWizard({ mode: 'add', host: null }),
-          onRefresh: remote.refresh,
-          onOpenSettings: () => setSettingsOpen(true),
-          onOpenHost: openRemoteHost,
-          onConnectHost: connectHost,
-          onDisconnectHost: disconnectHost,
-          onReconnectHost: reconnectHost,
-          onEditHost: (host) => setWizard({ mode: 'edit', host }),
-          onDeleteHost: (host) => setPendingDelete(host),
-          onDiagnoseHost: runDiagnose,
-        }),
-        wizard
-          ? h(WizardDialog, {
-              key: (wizard.mode || 'add') + ':' + (wizard.host ? wizard.host.id : 'new'),
-              t,
-              locale,
-              mode: wizard.mode,
-              initialHost: wizard.host,
-              state,
-              onClose: closeWizard,
-              onRefresh: remote.refresh,
-              onOpenRemote: openRemoteFromWizard,
-              onDiagnose: runDiagnose,
-            })
-          : null,
-        diagnose
-          ? h(DiagnoseDrawer, {
-              t,
-              locale,
-              host: diagnose.host,
-              status: diagnose.status,
-              report: diagnose.report,
-              error: diagnose.error,
-              onClose: () => setDiagnose(null),
-              onRun: rerunDiagnose,
-            })
-          : null,
-        settingsOpen && state
-          ? h(SettingsModal, {
-              t,
-              locale,
-              settings: state.settings,
-              onClose: () => setSettingsOpen(false),
-              onSave: saveSettings,
-            })
-          : null,
-        pendingDelete
-          ? h(ConfirmDialog, {
-              title: t('deleteTitle'),
-              body: t('deleteBody', { name: pendingDelete.name || pendingDelete.id }),
-              confirmLabel: deleting ? t('deleteBusy') : t('deleteConfirm'),
-              cancelLabel: t('cancel'),
-              busy: deleting,
-              onConfirm: confirmDeleteHost,
-              onCancel: () => setPendingDelete(null),
-            })
-          : null,
-        conflictHost
-          ? h(RemoteConflictPrompt, {
-              key: conflictHost.id,
-              t,
-              host: conflictHost,
-              busy: conflictBusy,
-              onResolve: resolveConflict,
-            })
-          : null,
-        passwordPrompt
-          ? h(PasswordPrompt, {
-              key: passwordPrompt.host && passwordPrompt.host.id ? passwordPrompt.host.id : 'password',
-              t,
-              locale,
-              host: passwordPrompt.host,
-              busy: passwordPrompt.busy === true,
-              error: passwordPrompt.error,
-              storageAvailable: passwordPrompt.host ? passwordPrompt.host.passwordStorageAvailable === true : false,
-              onSubmit: submitPassword,
-              onCancel: cancelPassword,
-            })
-          : null,
-        h(Toast, { toast }),
-      )
-    }
-
-    //#endregion
-
-    //#region 17. styles
+    //#region 16. styles
 
     /**
      * Panel styles. Everything inherits from the DSH theme: labels use
@@ -5872,8 +5538,6 @@ window.__ModuleLoader__.load({
 .drg-manage-live .drg-progress, .drg-manage-live .drg-fingerprint { padding: 0; }
 /* The shell's overlay seat may have to float above a remote guest window. */
 [data-shell-overlay] { z-index: 2147483001; }
-.drg-settings-remote { display: flex; flex-direction: column; height: auto; min-height: 0; background: transparent; }
-.drg-settings-remote .drg-page { padding: 0; overflow: visible; }
 
 .drg-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: min(560px, calc(100vw - 32px)); padding: 9px 16px; border-radius: var(--drg-radius-sm); background: var(--dsw-alias-toast-bg, CanvasText); color: var(--dsw-alias-toast-label, Canvas); font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28); }
 .drg-toast[data-tone="error"] { background: var(--dsw-alias-state-error-primary, #d64545); color: #fff; }
@@ -5887,11 +5551,12 @@ window.__ModuleLoader__.load({
 
     //#endregion
 
-    //#region 18. plugin registration
+    //#region 17. plugin registration
 
     /**
      * Register the dictionaries, the overlay host (floating windows + remote window),
-     * the Settings section, and the sidebar switcher row.
+     * and the sidebar switcher row. The switcher row is the plugin's only entry: no
+     * settings page and no sidebar or main panel are registered.
      * @param {object} ctx - browser plugin context.
      * @returns {void}
      */
@@ -5954,25 +5619,11 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      ctx.slots.inject('settings.section', () =>
-        ctx.slots.register(
-          {
-            name: 'settings.section',
-            id: PANEL_ID,
-            order: 45,
-            label: () => t('settingsNav'),
-            locale: NS,
-            inject: sharedInject,
-          },
-          SettingsSection,
-        ),
-      )
-
       // The window's one control is the switcher row drawn into the sidebar of whichever
       // page owns the window: this one (local) or the remote guest's. It lists local plus
-      // every host, so picking one is all it takes to move the window. There is no sidebar
-      // panel entry, and no main panel either: management and the wizard are floating
-      // windows in the overlay layer.
+      // every host, so picking one is all it takes to move the window. It is the plugin's
+      // only entry: there is no settings page, no sidebar panel and no main panel;
+      // management and the wizard are floating windows in the overlay layer.
       ctx.effect(() => {
         switcher.labelsOf = () => ({
           local: t('switcherLocal'),
@@ -6047,7 +5698,6 @@ window.__ModuleLoader__.load({
     const components = {
       RemoteIcon,
       PluginOverlay,
-      SettingsSection,
       HostListView,
       HostCard,
       EmptyHosts,
