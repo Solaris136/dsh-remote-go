@@ -530,6 +530,41 @@ export function desktopAppVersion(exe) {
 }
 
 /**
+ * A compact snapshot of what a shell page currently shows, for failure messages.
+ *
+ * Both suites append this to a timeout: "TimeoutError" alone cannot distinguish
+ * "the section never mounted" from "the row was found but the click did not land",
+ * and a red nightly run has no interactive page to inspect. It reports the URL, the
+ * open dialogs, whether the plugin's settings section mounted, the visible labels
+ * and the first 300 characters of text.
+ *
+ * Read-only, and it never throws: a diagnostics call that fails must not replace
+ * the assertion error it was meant to explain.
+ * @param {import('puppeteer-core').Page} page
+ */
+export async function describePage(page) {
+  return await page
+    .evaluate(() => {
+      const strip = (value) => (value ?? '').replace(/\s+/g, ' ').trim()
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+        .map((node) => strip(node.textContent).slice(0, 160))
+        .slice(0, 4)
+      const labels = [...document.querySelectorAll('button, [role="menuitem"], [role="tab"], a')]
+        .map((node) => strip(node.getAttribute('aria-label') ?? node.textContent))
+        .filter(Boolean)
+        .slice(0, 40)
+      return {
+        url: location.href,
+        dialogs,
+        section: Boolean(document.querySelector('[data-testid="settings-remote-section"]')),
+        labels,
+        text: strip(document.body?.innerText).slice(0, 300),
+      }
+    })
+    .catch((error) => ({ error: String(error?.message ?? error).slice(0, 200) }))
+}
+
+/**
  * Write the failure bundle CI uploads: screenshot, console errors, page URL, and
  * the harness log tail. Best effort — diagnostics must never mask the assertion.
  * @param {{ dir: string | null, page: import('puppeteer-core').Page | null, logs: string[] | string, consoleErrors: string[], error: unknown, name: string }} input
