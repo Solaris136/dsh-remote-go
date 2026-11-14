@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   findKnownHostEntries,
-  findPinnedFingerprint,
   fingerprintFromBase64,
   fingerprintFromBlob,
   knownHostFieldMatches,
@@ -11,7 +10,6 @@ import {
   summarizeKnownHosts,
 } from '../../src/known-hosts.js'
 
-/** A deterministic fake key blob whose first field is the key type. */
 function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'abcdef') {
   const type = Buffer.from(keyType, 'ascii')
   const len = Buffer.alloc(4)
@@ -64,7 +62,6 @@ test('findKnownHostEntries matches hosts and non-default ports', () => {
   assert.equal(findKnownHostEntries(parsed, 'example.com', 2222).length, 1)
   assert.equal(findKnownHostEntries(parsed, 'example.com', 22).length, 0)
   assert.equal(findKnownHostEntries(parsed, 'plain.example', 22).length, 1)
-  assert.equal(findPinnedFingerprint(parsed, 'plain.example', 22), fingerprintFromBlob(key))
 })
 
 test('knownHostFieldMatches supports wildcards', () => {

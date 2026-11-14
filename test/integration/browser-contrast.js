@@ -1,34 +1,10 @@
-/**
- * Shared contrast measurement for the browser-driven E2E suites (web `dsh web`
- * and the Electron desktop shell).
- *
- * Why a shared module: both shells must be graded by exactly the same rule, and
- * the rule is subtle enough that two copies would drift. The measurement runs
- * inside the page (puppeteer serializes `measureButtons`), so it must be
- * self-contained — no imports, no closure over module scope.
- */
+import { applyColorScheme } from './ui-steps.js'
 
-/** Minimum contrast ratio a button label must reach (WCAG 1.4.11, large text AA). */
 export const MIN_CONTRAST = 3
 
-/** The regression target: the primary buttons that were invisible before #10. */
 export const PRIMARY_TEST_IDS = ['host-add', 'host-add-empty']
 
-/**
- * Measure every button inside `[data-testid="manage-window"]`:
- *
- * - the painted background (alpha-composited over ancestor `backgroundColor`s),
- * - any `background-image` gradient on the way up (the checker refuses to grade
- *   one: comparing a gradient against the colour underneath it is a false pass),
- * - the button colour and its `.drg-btn-label`, each composited over that
- *   background and faded by the accumulated `opacity` — `.drg-btn:disabled` uses
- *   `opacity: .55`, which would otherwise be graded as a solid label,
- * - the WCAG ratio of the rendered colours, and the section's own background.
- *
- * Serializable: this function is evaluated inside the page.
- */
 export function measureButtons() {
-  /** @param {string} value */
   function parseColor(value) {
     const match = /rgba?\(([^)]+)\)/.exec(value ?? '')
     if (!match) return null
@@ -36,7 +12,6 @@ export function measureButtons() {
     if (parts.length < 3 || parts.some((part) => Number.isNaN(part))) return null
     return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 }
   }
-  /** @param {any} top @param {any} bottom */
   function blend(top, bottom) {
     const alpha = top.a + bottom.a * (1 - top.a)
     if (alpha === 0) return { r: 0, g: 0, b: 0, a: 0 }
@@ -47,11 +22,6 @@ export function measureButtons() {
       a: alpha,
     }
   }
-  /**
-   * The painted background behind `node`, plus any gradient encountered.
-   * @param {Element} node
-   * @returns {{ color: { r: number, g: number, b: number, a: number }, gradient: string | null }}
-   */
   function effectiveBackground(node) {
     const layers = []
     let gradient = null
@@ -71,8 +41,6 @@ export function measureButtons() {
     while (layers.length > 0) base = blend(layers.pop(), base)
     return { color: base, gradient }
   }
-  /** Product of `opacity` from `node` to the root — what actually paints. */
-  /** @param {Element} node */
   function accumulatedOpacity(node) {
     let opacity = 1
     let current = node
@@ -83,28 +51,18 @@ export function measureButtons() {
     }
     return opacity
   }
-  /**
-   * A text colour as actually seen: its own alpha over the background, faded by
-   * the element opacity into that same background.
-   * @param {{ r: number, g: number, b: number, a: number } | null} color
-   * @param {{ r: number, g: number, b: number, a: number }} background
-   * @param {number} opacity
-   */
   function renderedForeground(color, background, opacity) {
     if (!color) return null
     const composited = blend({ ...color, a: color.a * opacity }, background)
     return { r: composited.r, g: composited.g, b: composited.b }
   }
-  /** @param {number} value */
   function channel(value) {
     const normalized = value / 255
     return normalized <= 0.03928 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4
   }
-  /** @param {{ r: number, g: number, b: number }} color */
   function luminance(color) {
     return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
   }
-  /** @param {{ r: number, g: number, b: number }} one @param {{ r: number, g: number, b: number }} two */
   function contrast(one, two) {
     const luminanceOne = luminance(one)
     const luminanceTwo = luminance(two)
@@ -114,8 +72,6 @@ export function measureButtons() {
   const format = (color) => `rgb(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)})`
   const section = document.querySelector('[data-testid="manage-window"]')
   if (!section) return { mounted: false, buttons: [] }
-  // The wrapper is a zero-height block whose only child is the fixed dialog, so its own
-  // background would resolve to <body>. Measure the dialog surface the buttons sit on.
   const surface = section.querySelector('[role="dialog"]') ?? section
   const sectionBackground = effectiveBackground(surface)
   const buttons = [...section.querySelectorAll('button')].map((node) => {
@@ -150,20 +106,9 @@ export function measureButtons() {
   }
 }
 
-/**
- * Poll the page until the measurement is **stable** — two identical consecutive
- * samples after the colour scheme flipped.
- *
- * Sampling once right after `emulateMediaFeatures` catches the shell mid-repaint
- * (observed: a dark-mode sample still carrying the light section background,
- * ratio 1.56). Stability, not a sleep, is the deterministic signal.
- * @param {import('puppeteer-core').Page} page
- * @param {{ scheme: 'light' | 'dark', previousBodyBackground?: string | null, timeoutMs?: number }} options
- */
 export async function measureStable(page, options) {
   const timeoutMs = options.timeoutMs ?? 60_000
   const started = Date.now()
-  /** @type {string | null} */
   let previous = null
   while (Date.now() - started <= timeoutMs) {
     const current = await page.evaluate(measureButtons)
@@ -180,11 +125,6 @@ export async function measureStable(page, options) {
   )
 }
 
-/**
- * Assert a measurement: section mounted, no gradient, every button label legible.
- * @param {any} measured result of `measureButtons`/`measureStable`
- * @param {string} mode label used in failure messages
- */
 export async function assertMeasured(measured, mode) {
   const { default: assert } = await import('node:assert/strict')
   assert.equal(measured.mounted, true, `${mode}: the host-management window did not mount`)
@@ -223,4 +163,28 @@ export async function assertMeasured(measured, mode) {
       `(min ${MIN_CONTRAST}), shell ${measured.bodyBackground}, section ${measured.sectionBackground}`,
   )
   return measured
+}
+
+export async function assertLightAndDark(page, mode) {
+  const { default: assert } = await import('node:assert/strict')
+  await applyColorScheme(page, 'light', null)
+  const light = await assertMeasured(await measureStable(page, { scheme: 'light' }), `${mode} light`)
+  assert.equal(light.scheme, 'light', `${mode}: the shell did not report a light scheme`)
+  await applyColorScheme(page, 'dark', light.bodyBackground)
+  const dark = await assertMeasured(
+    await measureStable(page, { scheme: 'dark', previousBodyBackground: light.bodyBackground }),
+    `${mode} dark`,
+  )
+  assert.equal(dark.scheme, 'dark', `${mode}: the shell did not report a dark scheme`)
+  assert.notEqual(
+    dark.bodyBackground,
+    light.bodyBackground,
+    `${mode}: the app shell background did not change between light and dark mode`,
+  )
+  assert.notEqual(
+    dark.sectionBackground,
+    light.sectionBackground,
+    `${mode}: the host-management window background did not change between light and dark mode`,
+  )
+  return { light, dark }
 }

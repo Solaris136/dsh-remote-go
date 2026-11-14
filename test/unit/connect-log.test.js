@@ -39,9 +39,7 @@ test('appending keeps the ring bounded and the sequence monotonic', () => {
   assert.equal(runtime.logs[0].seq, 26, 'the oldest lines are the ones that fall out')
   assert.equal(last.seq, LOG_RING_LIMIT + 25)
   assert.equal(last.message, 'line ' + (LOG_RING_LIMIT + 25))
-  // `line` is the process-log/diagnostics form; `message` is what the window prints.
   assert.equal(last.line, '[dsh-remote-go:h_test] line ' + (LOG_RING_LIMIT + 25))
-  // The runtime owns both fields, so a host created before this refactor still works.
   assert.equal(runtime.logSeq, last.seq)
 })
 
@@ -70,8 +68,6 @@ test('the tail is bounded, newest last, and carries the line as it was written',
   assert.equal(tail[tail.length - 1].seq, total)
   assert.equal(tail[tail.length - 1].message, `line ${total} says token=abc and "quotes"`)
   assert.equal(tail[tail.length - 1].level, 'debug')
-  // The console prints `message`; the plugin-tagged `line` belongs to the process log and
-  // the diagnostics bundle, so it must not be duplicated into the window's payload.
   assert.equal('line' in tail[tail.length - 1], false)
 })
 

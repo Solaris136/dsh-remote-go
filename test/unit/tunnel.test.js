@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import { createTunnel } from '../../src/tunnel.js'
 
-/** A fake SSH transport whose forwardOut connects to a local echo/HTTP target. */
 function fakeSshTo(port) {
   return {
     async forwardOut(destHost, destPort) {
@@ -27,7 +26,6 @@ test('createTunnel pipes a local loopback connection to the forwarded stream', a
     assert.equal(tunnel.listenHost, '127.0.0.1')
     const received = await new Promise((resolve, reject) => {
       const client = net.connect(tunnel.localPort, '127.0.0.1', () => {})
-      /** @type {Buffer[]} */
       const chunks = []
       client.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
       client.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -26,7 +27,6 @@ test('toSshError classifies auth, network and host-key failures', () => {
   assert.equal(toSshError(new Error('connect ECONNREFUSED 1.2.3.4:22'), 'h', 22).code, 'network')
   assert.equal(toSshError(new Error('Timed out while waiting for handshake'), 'h', 22).code, 'network')
   assert.equal(toSshError(new Error('Host key verification failed'), 'h', 22).code, 'network')
-  // Already-coded plugin errors pass through untouched.
   assert.equal(toSshError(errors.auth(), 'h', 22).code, 'auth')
   assert.equal(toSshError(errors.hostKeyChanged('SHA256:a', 'SHA256:b'), 'h', 22).code, 'host-key-changed')
 })
@@ -79,7 +79,6 @@ test('verifyHostKey asks the UI on first use and honors the answer', async () =>
   assert.equal(await accept.verifyHostKey(blob), true)
   assert.equal(asked.sha256, fingerprintFromBlob(blob))
   assert.equal(asked.keyType, 'ssh-ed25519')
-
   const reject = new SshConnection({ host: 'example.com', onHostKey: async () => false })
   await assert.rejects(
     () => reject.verifyHostKey(blob),
@@ -104,31 +103,20 @@ test('resolveAuthCandidates returns password and key-file candidates only', asyn
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-key-'))
   const keyFile = path.join(dir, 'id_test')
   await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
-
   const password = new SshConnection({ host: 'h', auth: { type: 'password', password: 'pw' } })
   assert.deepEqual(await password.resolveAuthCandidates(), [{ password: 'pw', tryKeyboard: true }])
-
   const key = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: keyFile }, home: dir })
   const keyCandidates = await key.resolveAuthCandidates()
   assert.equal(keyCandidates.length, 1)
   assert.equal(Buffer.from(keyCandidates[0].privateKey).toString('utf8'), 'PRIVATE-KEY-BYTES')
-
-  // A configured path that does not exist falls back to the conventional names,
-  // which do not exist in this temporary home either: no candidate, no crash.
   const missing = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: path.join(dir, 'nope') }, home: dir })
   assert.deepEqual(await missing.resolveAuthCandidates(), [])
-
-  // The conventional names are the default: a key placed there is picked up even
-  // when the host entry carries only the default path.
   const conventional = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: '~/.ssh/id_ed25519' }, home: dir })
   await mkdir(path.join(dir, '.ssh'), { recursive: true })
   await writeFile(path.join(dir, '.ssh', 'id_ed25519'), 'DEFAULT-KEY-BYTES', 'utf8')
   const conventionalCandidates = await conventional.resolveAuthCandidates()
   assert.ok(conventionalCandidates.length >= 1)
   assert.equal(Buffer.from(conventionalCandidates[0].privateKey).toString('utf8'), 'DEFAULT-KEY-BYTES')
-
-  // There is no agent candidate any more, even with a live agent environment: the
-  // plugin authenticates with key files only.
   const previousAgent = process.env.SSH_AUTH_SOCK
   process.env.SSH_AUTH_SOCK = '/tmp/agent.sock'
   try {
@@ -152,7 +140,6 @@ test('exec refuses to run without an open connection', async () => {
 })
 
 test('late ssh2 errors after a failed auth attempt never crash the host process', async () => {
-  const { EventEmitter } = await import('node:events')
   class FakeClient extends EventEmitter {
     connect() {
       queueMicrotask(() => {
@@ -172,13 +159,10 @@ test('late ssh2 errors after a failed auth attempt never crash the host process'
     clientFactory: () => new FakeClient(),
   })
   await assert.rejects(ssh.connect(), (error) => error?.code === 'auth')
-  // The second error must be swallowed by the permanent listener; an unhandled
-  // 'error' event would fail the whole test process here.
   await new Promise((resolve) => setTimeout(resolve, 20))
 })
 
 test('a failed auth candidate does not leave the fallback connection marked closed', async () => {
-  const { EventEmitter } = await import('node:events')
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-fallback-'))
   const keyFile = path.join(dir, 'id_test')
   await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
@@ -187,7 +171,6 @@ test('a failed auth candidate does not leave the fallback connection marked clos
     connect() {
       attempt += 1
       if (attempt === 1) {
-        // The agent candidate: no agent is running, so ssh2 reports auth failure.
         queueMicrotask(() => {
           this.emit(
             'error',
@@ -202,8 +185,6 @@ test('a failed auth candidate does not leave the fallback connection marked clos
     }
     end() {}
   }
-  // Two readable key candidates: the first is rejected by the (fake) server, the
-  // second authenticates. This is the key-file fallback the plugin actually has.
   const secondKey = path.join(dir, 'id_second')
   await writeFile(secondKey, 'SECOND-KEY-BYTES', 'utf8')
   const ssh = new SshConnection({
@@ -220,7 +201,6 @@ test('a failed auth candidate does not leave the fallback connection marked clos
 })
 
 test('post-connect ssh errors are contained and reach optional listeners', async () => {
-  const { EventEmitter } = await import('node:events')
   class FakeClient extends EventEmitter {
     connect() {
       queueMicrotask(() => this.emit('ready'))

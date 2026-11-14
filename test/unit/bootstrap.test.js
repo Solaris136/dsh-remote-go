@@ -76,7 +76,6 @@ test('buildPreflightCommand pins the exact package, prefixes PATH and streams np
   assert.match(command, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
   assert.match(command, /--version/)
   assert.match(command, /PATH='\/opt\/node\/bin':"\$PATH"/)
-  // Without a TTY npm prints nothing until it finishes; http level streams fetches.
   assert.match(command, /npm_config_loglevel=http/)
 })
 
@@ -91,9 +90,7 @@ test('verifyNpxVersion accepts the exact version, streams output and sets no dea
     },
   }
   const plan = planNpx({ facts: makeFacts(), targetVersion: TARGET, profile: 'web' })
-  /** @type {string[]} */
   const stdout = []
-  /** @type {string[]} */
   const stderr = []
   assert.equal(
     await verifyNpxVersion(ssh, plan, {
@@ -103,7 +100,6 @@ test('verifyNpxVersion accepts the exact version, streams output and sets no dea
     TARGET,
   )
   assert.equal(calls.length, 1)
-  // 0 means "no deadline": progress replaces a guessed timeout for a cold cache.
   assert.equal(calls[0].options.timeoutMs, 0)
   assert.equal(stdout.join(''), '0.2.2-rc.1\n')
   assert.match(stderr.join(''), /http fetch/)
