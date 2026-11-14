@@ -114,7 +114,10 @@ export function measureButtons() {
   const format = (color) => `rgb(${Math.round(color.r)}, ${Math.round(color.g)}, ${Math.round(color.b)})`
   const section = document.querySelector('[data-testid="manage-window"]')
   if (!section) return { mounted: false, buttons: [] }
-  const sectionBackground = effectiveBackground(section)
+  // The wrapper is a zero-height block whose only child is the fixed dialog, so its own
+  // background would resolve to <body>. Measure the dialog surface the buttons sit on.
+  const surface = section.querySelector('[role="dialog"]') ?? section
+  const sectionBackground = effectiveBackground(surface)
   const buttons = [...section.querySelectorAll('button')].map((node) => {
     const style = getComputedStyle(node)
     const background = effectiveBackground(node)

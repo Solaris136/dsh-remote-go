@@ -83,6 +83,31 @@
 - 设置弹窗：从管理清单右上角的齿轮打开，含 SSH 默认值、自动重连、指纹策略、保存令牌开关、界面语言、日志级别、远端 `profile`。
 - 密码与远端冲突按需弹窗；两者都有超时兜底（默认 120s）。
 
+### 4.7 视觉与主题兼容
+
+插件不拥有配色，只消费宿主主题：
+
+- 所有颜色、圆角、阴影、字体与滚动条都直接使用 `--dsw-*` 别名，**没有本地 token 层**：客户端不声明 `--drg-*`
+  之类的自有变量，也不写 `:root`，而是逐条读取宿主 token。这样浮层座位继承 `body`/祖先上的主题变量，插件不缓存颜色、
+  不判断亮暗、没有 `prefers-color-scheme` 分支，也不在 JS 里算颜色。
+- 表面沿用宿主自己的组件语义，而不是重新挑一套：对话框用 `--dsw-alias-bg-layer-2` + `--dsw-radius-panel` +
+  `--dsw-elevation-prominent`（与 DSH 的 Dialog 相同）；下拉菜单用 `--dsw-specific-menu` +
+  `--dsw-menu-backdrop-filter` + `--dsw-elevation-panel`（与 DSH 的 MenuSurface 相同）；遮罩用
+  `--dsw-alias-bg-mask-1` + `--dsw-mask-blur`；输入框用 `--dsw-alias-bg-layer-3` + `.5px --dsw-alias-border-l4`。
+- 主题的三种来源都即时生效：内置 light/dark；其他插件 `ctx.theme.register()` 后 `setTheme()`；以及
+  `ctx.theme.overrideTokens()` 叠加的 token 覆盖层。DSH 的 `ThemePresenter` 最终把合成后的 token 写成 `body` 内联变量，
+  插件的每个界面在下一次绘制时就跟随，无需重载或重新挂载。
+- 主题未提供的 token 不会被插件「补」成自己的颜色：`client.js` 里不存在任何颜色字面量（hex / `rgb()` / `hsl()`）；
+  token 改名或缺失会让 `client-styles` 与 E2E 失败，而不是悄悄落回一套仿配色。只有圆角与字体栈保留通用缺省。
+  第三方插件若只在某个局部容器里改 token，浮层保持基础调色板（与 DSH 自己的弹层一致）。
+- 主按钮成对使用 `--dsw-alias-button-primary-fill` 与 `--dsw-alias-label-primary-foreground`，状态色使用
+  `--dsw-alias-state-*-primary`，与 DSH 自己的组件同一套配对；**对比度由主题负责**，插件不替主题纠正颜色。
+- 远端窗口是远端 DSH 自己的页面，用远端的主题；本地主题不影响远端页面（这是整窗 guest 的边界，不是缺陷）。
+- 可访问性：键盘焦点环走 `--dsw-focus-ring-*`；尊重 `prefers-reduced-motion`、`prefers-contrast: more` 与
+  `forced-colors: active`；窄窗口下主机清单变单列、向导 / 设置变全宽浮层。
+- 验收：E2E 用「内联 token」模拟第三方主题，断言界面颜色跟随、按钮对比度仍达标、移除覆盖层后恢复宿主调色板；
+  单元测试锁定 token 白名单（未知 token 直接失败）、禁止任何 `--drg-*` 自有 token、禁止颜色字面量、禁止渐变与配色模式分支。
+
 ## 5. 连接生命周期
 
 ### 5.1 主机状态

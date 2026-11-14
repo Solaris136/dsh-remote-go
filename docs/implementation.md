@@ -161,7 +161,7 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 | 服务 | `service/api/store/secrets/key-files/host-key` | 连接管线、指纹确认、冲突、重连/存活、诊断、HTTP 鉴权/SSE、原子写 |
 | 浏览器 | `client.test.js` / `client-compat` / `client-styles` | 模块格式、slot 注册、双语对齐、安全不变量、关键组件、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
-| 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条拉起的浮窗 → 浅/深色对比度 |
+| 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条拉起的浮窗 → 浅/深色对比度、模拟第三方主题的 token 覆盖与恢复 |
 | 发布路径 | `test/e2e/publish.e2e.js` | tarball → 干净 profile → API 与 client-module 从安装目录加载 |
 
 四条结构性约定（见 CONTRIBUTING §9）：
@@ -169,7 +169,7 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；默认违规，递归扫 `src/**/*.js`。
 2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，且条目失效会被判失败。
 3. `e2e-child-process`：所有测试/脚本子进程必须 `windowsHide`。
-4. `client-styles`：样式表选择器与变量必须可解析，禁止内联样式散落。
+4. `client-styles`：样式表注释必须闭合，界面选择器必须有生效的声明块；禁止任何 `--drg-*` 自有 token 与颜色字面量（含 `var()` 兜底）；对话框 / 菜单 / 输入框必须使用宿主 Dialog / MenuSurface / 字段的 token 组合；引用的 `--dsw-*` token 必须在白名单里。
 
 ## 10. 维护约定
 
