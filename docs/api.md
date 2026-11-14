@@ -317,7 +317,7 @@ URL 直接交给桌面端 guest；`?token=` 只用一次完成 cookie 种入，�
 
 ### `POST /hosts/:id/activate`
 
-设置当前活动主机（客户端打开面板前调用）。无请求体，返回 `{ "ok": true }`。
+设置当前活动主机（客户端把窗口交给这台主机时调用）。无请求体，返回 `{ "ok": true }`。
 
 ### `POST /hosts/:id/diagnose`
 

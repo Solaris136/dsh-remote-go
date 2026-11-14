@@ -11,8 +11,8 @@
       "name": "dsh-remote-go",
       "title": { "zh": "dsh remote go", "en": "dsh remote go" },
       "description": {
-        "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：远端界面由桌面端整窗接管（本地侧边栏让位，内容区底部注入一条 26px 状态行：当前主机 / 远端会话标题 / 刷新 / 离开）；远端用 npx 固定本机 DSH 版本启动，Node 运行时由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰远端系统 Node），数据在远端用户自己的 ~/.dsh；含主机清单、接入向导、连接诊断与版本一致。",
-        "en": "Use a remote DSH over SSH inside the local DSH: the desktop client hands it the whole window (the local sidebar steps aside and a 26px status bar at the bottom of the content area switches hosts, reloads and leaves); the remote DSH is launched with npx pinned to the local version on a plugin-managed Node installed at the lower bound of DSH’s engines.node under ~/.dsh/remote-go/node (the system Node is never touched), with its data in the user’s own ~/.dsh, plus host list, connection wizard, diagnostics and exact version parity."
+        "zh": "通过 SSH 在本地 DSH 里使用远端 DSH：桌面端把远端界面铺满整个窗口；本地与远端的侧边栏顶部都有同一条主机条，列出「本地」和每台远端主机，点哪个就切到哪个——已连接的远端是绿色发光的点，没连接的点一下就会浮出主机清单并开始连接，最下面是「添加主机」和「管理界面」（都是浮窗，远端开着时背景仍是远端）；切回已打开过的远端不再重新加载；远端 Node 由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰系统 Node），再用 npx 固定本机 DSH 版本启动（数据在远端用户自己的 ~/.dsh）；含连接诊断与版本一致。",
+        "en": "Use a remote DSH over SSH inside the local DSH: the desktop client fills the whole window with the remote UI, and one host switcher sits at the top of the sidebar in both the local page and the remote one — it lists “Local” plus every remote host, and picking one switches the window to it. Connected remotes carry a glowing green dot; picking a host that is not up floats its connect screen; “Add host” and “Manage hosts” are the last entries, both floating over the page (a remote stays behind them), and coming back to a warm remote is instant. The plugin installs its own Node under ~/.dsh/remote-go/node at the lower bound of DSH engines.node (never the system one), then launches the remote DSH with npx pinned to the local version; its data stays in the user’s own ~/.dsh. Diagnostics and exact version parity included."
       },
       "author": "Solaris136",
       "homepage": "https://github.com/Solaris136/dsh-remote-go#readme",
@@ -21,9 +21,9 @@
       "versions": [
         {
           "version": "0.1.0",
-          "publishTimestamp": 1794628740,
+          "publishTimestamp": 1794632853,
           "source": { "type": "npm" },
-          "engines": { "dsh": ">=0.2.2-rc.1" }
+          "engines": { "dsh": ">=0.2.2-rc.3" }
         }
       ]
     }

@@ -1,6 +1,6 @@
 # dsh-remote-go
 
-> 在本地 DeepSeek Harness（DSH）里，通过 SSH 使用服务器上的 DSH：接管时远端界面铺满整个窗口，本地侧边栏让位，主机条注入到**远端自己的侧边栏顶部**。本地只负责连接、入口与状态。
+> 在本地 DeepSeek Harness（DSH）里，通过 SSH 使用服务器上的 DSH：接管时远端界面铺满整个窗口，本地侧边栏让位；**本地与远端的侧边栏顶部都有同一条主机条**——列出「本地」和每台远端主机，点哪个就切到哪个。本地只负责连接与状态。
 
 [![CI](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/Solaris136/dsh-remote-go/actions/workflows/codeql.yml)
@@ -8,7 +8,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](#版本与兼容)
 [![DSH](https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.1-blueviolet.svg)](#版本与兼容)
 
-**English** — `dsh-remote-go` is a [DeepSeek Harness](https://github.com/deepseek-ai) plugin that opens a **remote** DSH from your local DSH over SSH. The desktop shell renders the remote DSH web UI as a live browser guest filling the whole window, and the plugin injects a host row at the top of the remote sidebar. Nothing is embedded in a frame and no second browser window is opened; hosts are managed in **Settings → Remote hosts**. Current version: **0.1.0** (unpublished).
+**English** — `dsh-remote-go` is a [DeepSeek Harness](https://github.com/deepseek-ai) plugin that opens a **remote** DSH from your local DSH over SSH. The desktop shell renders the remote DSH web UI as a live browser guest filling the whole window, and the plugin draws one host switcher at the top of the sidebar — in the local page and in the remote one — that lists "Local" plus every host. Nothing is embedded in a frame and no second browser window is opened; hosts are managed in **Settings → Remote hosts**. Current version: **0.1.0** (unpublished).
 
 ## 文档
 
@@ -22,19 +22,25 @@
 
 ## 它是什么
 
-- 一个 DSH 插件：主机在 **设置 → 远程主机**（或侧边栏的「远程主机」入口）里配置，点「打开」后远端 DSH 接管**整个窗口**。
+- 一个 DSH 插件：主机在 **设置 → 远程主机** 里增删改诊断；侧边栏顶部的**主机条**就是切换器，点一台就接管整个窗口。
 - 接管后看到的是**远端 DSH 自己的完整 Web 界面**：桌面端用 Chromium guest 把它铺满窗口（标题栏以下）。本地侧边栏在接管期间隐藏，窗口里只有一个侧边栏——远端自己的那个。没有 iframe、不开第二个浏览器窗口。
-- 接管期间，插件把**主机条注入远端页面自己的侧边栏**（品牌行下方）：状态点 + 当前主机全名（点开切换）+ 远端会话名；菜单里还有刷新与「离开远端」。它用远端页面的主题变量绘制，跟随远端的字体、hover 与弹层遮罩。
+- 主机条在**本地和远端两侧都在**（品牌行下面），就是同一个东西：状态点 + 当前目标名（点开是列表）。列表依次是「本地」和每台远端主机：**已连接的远端前面是绿色发光的点**，表示现在可以切过去；没连接的点它是灰色，点一下浮出主机清单并开始连接（进度、指纹确认、密码都在那里）。已连接的主机行右侧还有一个「断开」——鼠标移到该行才显示，点了就断开那一台，不会顺带切过去。列表最下面是「添加主机」和「管理界面」——两者都是**浮窗**：向导浮在当前页面上，管理清单也浮在当前页面上，**远端开着的时候背景还是远端**，关掉就回到原来那一页。点「本地」才回到本地页面，点某个 IP 就切到那台远端。它用页面自己的主题变量绘制，跟随字体、hover 与弹层遮罩；侧边栏收起成窄条时它自动隐藏。
+- **切回已经打开过的远端不重新加载**：每台主机的远端窗口保持热态（**不设数量上限**），切走只是隐藏，所以「本地 ↔ 远端」「远端 A ↔ 远端 B」都是瞬时的；断开或删除主机时才真正释放。
 - 本地只做四件事：**主机清单、SSH 连接与隧道、整窗接管、连接状态与诊断**。
 - 远端只需 **Linux + 能访问 nodejs.org（或 npmmirror.com）与 npm registry**：插件把**自己的 Node** 固定安装到 `~/.dsh/remote-go/node`（版本取本机 DSH `engines.node` 的下限，官方 tarball + SHA-256 校验，不碰系统 Node、不需要 root），再用 `npx -y @deepseek-ai/dsh@<本机版本>` 拉起远端 DSH；远端数据就是该用户自己的 `~/.dsh`。
 
 ## 切换方式（本地 ↔ 远端）
 
-1. **进远端 / 换远端**：点侧边栏的「远程主机」→ 主机管理页 → 在目标主机上点「打开」。
-2. **换另一台主机**：接管期间在主机条里选另一台；没连接的主机会先回到主机管理页显示连接进度，连上后自动重新接管。
-3. **回本地**：点主机条里的「离开远端」回到主机管理页，再点侧边栏里的本地工作区 / 会话。远端任务不会停。
+只有一处入口：侧边栏顶部的主机条，点开是一份列表（其余界面都是它拉起的浮窗或整个窗口）。
 
-接管是整窗的，所以没有「本地侧边栏 + 远端侧边栏」并排的两条栏；也没有浮层胶囊、没有「在新窗口打开」、没有面板内的工作区栏。
+1. **进远端**：点主机条 → 选一台已连接的主机（绿点发光）→ 远端界面接管整个窗口。
+2. **换远端**：在列表里直接点另一台；没连接的主机会先浮出主机清单显示进度，连上后自动接管。回到已打开过的主机是瞬时的（窗口保持热态，不重新加载）。
+3. **连一台新的**：点列表最下面的「添加主机」，向导浮在当前页面上，填 SSH 信息、测试连接即可。
+4. **管主机**：点「管理界面」浮出主机清单，编辑 / 诊断 / 重连 / 删除都在那里（也可以从 设置 → 远程主机 进入）。远端开着时它浮在远端上面，关掉仍在远端。
+5. **断开某台**：在列表里把鼠标移到那台已连接的主机上，右侧会出现「断开」；点了就断开它的 SSH 并关掉它的窗口。
+6. **回本地**：在列表里点「本地」。SSH 连接与远端任务都不会停，随时可以再切回去。
+
+接管是整窗的，所以窗口里只有一条侧边栏；也没有浮层胶囊、没有「在新窗口打开」、没有面板内的工作区栏。
 
 ## 安装
 
@@ -63,11 +69,11 @@ dsh plugin --profile web add ./dsh-remote-go-0.1.0.tgz
 
 ## 快速开始
 
-1. 打开 **设置 → 远程主机** →「添加第一台服务器」。
+1. 点侧边栏顶部的**主机条**→「添加主机」→ 向导浮在当前页面上（也可以从 **设置 → 远程主机** →「添加第一台服务器」进入）。
 2. 填 SSH 地址或 `~/.ssh/config` 别名，选私钥文件（默认已填 `~/.ssh/id_ed25519`，可点「选择文件…」浏览）或一次性密码；可选跳板机。
 3. 首次连接确认主机指纹（可「接受并记住」）。
 4. 插件探测远端环境，在 `~/.dsh/remote-go/node` 准备自己用的 Node（缺失或版本不符时自动下载安装），用 `npx` 固定本机版本启动远端 DSH（首次运行还会把 DSH 下载进 npx 缓存，进度会显示在连接进度里），等待进入「已连接」。
-5. 点「打开」：远端 DSH 接管整个窗口，本地侧边栏让位，主机条出现在远端侧边栏顶部。回到本地：点主机条里的「离开远端」。
+5. 点主机条里的那台主机：远端 DSH 接管整个窗口，本地侧边栏让位，同一个主机条出现在远端侧边栏顶部。回到本地：在主机条里点「本地」。
 6. 关闭视窗只关闭本地承载，远端任务继续（按主机的存活策略）。
 
 ### 远端运行时
@@ -110,7 +116,7 @@ env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
 
 ## 版本与兼容
 
-- 兼容性由 `package.json` 的 `engines.dsh`（`>=0.2.2-rc.1`）与 `engines.node`（`>=24`）声明。
+- 兼容性由 `package.json` 的 `engines.dsh`（`>=0.2.2-rc.3`：界面统一注册在 `shell.overlay` 插槽）与 `engines.node`（`>=24`）声明。
 - 远端要求 **Linux + 能访问 nodejs.org（或 npmmirror.com）+ 首次能访问 npm registry**；**不要求预装 Node**——插件会把自己的 Node 装到 `~/.dsh/remote-go/node` 并只使用它。本机 DSH 版本需已发布到 npm（`npx` 按精确版本解析）。
 - 插件与远端 DSH 的版本必须一致：远端一律由 `npx` 按本机版本拉起，预检回读不一致会直接失败。
 - 变更记录见 [CHANGELOG.md](CHANGELOG.md)。发布流程见 [docs/publish.md](docs/publish.md)。
@@ -164,7 +170,7 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 - 不迁移旧版的独立状态目录（`~/.dsh-remote-go`）：升级后插件文件固定在 `~/.dsh/remote-go`，旧目录不再使用。
 - 插件只收养自己启动的远端实例；远端如果已有手工启动的 DSH，连接会暂停并列出这些进程，由你选择「停止它并启动受管实例」「保留它，另起一个」或「取消连接」。
 - 远端界面只能**整窗接管**：非桌面端（例如浏览器里的 `dsh web`）没有 guest 能力，此时没有可用的远端呈现方式。
-- 多台远端在同一时刻只能呈现一台；刷新本地页面需要重新打开视窗（远端任务不受影响）。
+- 多台远端在同一时刻只能呈现一台；刷新本地页面后主机条会重新出现，点那台主机即可再次接管（远端任务不受影响）。
 - 修改 Host 插件代码需重启本地 DSH 生效（Client 半端随页面刷新加载）。
 
 ## 参与贡献

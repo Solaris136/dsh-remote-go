@@ -24,7 +24,7 @@
   "type": "module",
   "packageManager": "pnpm@11.28.9",
   "engines": {
-    "dsh": ">=0.2.2-rc.1",
+    "dsh": ">=0.2.2-rc.3",
     "node": ">=24"
   },
   "sideEffects": [
@@ -55,7 +55,6 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-locale"
       ]
     }
