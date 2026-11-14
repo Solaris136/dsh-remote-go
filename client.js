@@ -3151,7 +3151,12 @@ window.__ModuleLoader__.load({
       if (entry === null || entry === undefined) return
       if (carrierPool.poll === entry) stopHostRowPoll()
       carrierPool.entries = carrierPool.entries.filter((item) => item !== entry)
-      if (carrierPool.current === entry.hostId) carrierPool.current = null
+      // The guest that filled the window is going away, so the local page is next: the row
+      // has to follow here as well. The React state that asked for the teardown is not
+      // enough - a disconnect arrives through a subscription created at mount, whose
+      // closure holds the target from that render, so it cannot clear it.
+      const wasShown = carrierPool.current === entry.hostId
+      if (wasShown) carrierPool.current = null
       if (entry.view !== null && entry.rowInstalled === true) {
         try {
           entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
@@ -3160,6 +3165,7 @@ window.__ModuleLoader__.load({
         }
       }
       if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
+      if (wasShown) updateSwitcher({ current: 'local' })
       const bridge = desktopBrowserBridge()
       if (bridge !== null && entry.lease !== null) {
         try {
@@ -4974,8 +4980,10 @@ window.__ModuleLoader__.load({
         const host = hostsRef.current.find((item) => item && item.id === intent.hostId) || null
         if (intent.kind === 'disconnect') {
           pendingIntent.current = null
+          // Disconnecting hands the window back once the Host confirms (see
+          // `disconnectHost`): doing it here would show the local page even if the
+          // disconnect then failed.
           if (host !== null) disconnectHost(host)
-          if (target === intent.hostId) setTarget(null)
           return
         }
         if (host === null) {
@@ -5066,8 +5074,11 @@ window.__ModuleLoader__.load({
           .then(
             () => {
               // The remote UI goes away with the connection: give its renderer back now,
-              // and hand the window back if it was that host's.
-              if (target === host.id) setTarget(null)
+              // and hand the window back if that is where it is pointing. The update is
+              // functional on purpose: this callback runs from the long-lived intent
+              // subscription, whose closure still holds the target it was created with,
+              // so a captured value would miss the host the window is really on.
+              setTarget((current) => (current === host.id ? null : current))
               closeCarrier(host.id).catch(() => {})
               remote.refresh()
             },

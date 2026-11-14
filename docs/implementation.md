@@ -148,7 +148,7 @@ teardown（`Service#teardownRuntime`）是唯一的收尾路径：取消指纹/�
 - API 层：所有请求经一个 `apiRequest`，统一加 `x-dsh-remote-go: 1` 与 `credentials:'same-origin'`；错误转成 `ErrorView`。
 - i18n：内置 `zh`/`en` 字典 + 宿主 locale 服务；两侧键集合由单元测试保证一致。
 - 接管：`showOverlay` 通过 `window.dshDesktop.browser.acquire` 创建 guest；每次 `did-stop-loading` 重新注入主机条；`__drgBridgeQueue` 轮询把点击（`{target}` / `{action:'add'|'manage'|'disconnect', hostId?}`）交回 `switcher.dispatch`。
-- 意图：`panelStore.requestIntent({kind:'open'|'disconnect'|'manage'|'local'})` 与 `wizardStore.open({mode,host})` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开某台并释放它的窗口，`manage` 打开浮窗，`local` 隐藏远端窗口并清掉 Host 侧的 active。
+- 意图：`panelStore.requestIntent({kind:'open'|'disconnect'|'manage'|'local'})` 与 `wizardStore.open({mode,host})` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开某台、释放它的窗口并在 Host 确认后把窗口交回本地（主机条的当前目标随之回落到「本地」），`manage` 打开浮窗，`local` 隐藏远端窗口并清掉 Host 侧的 active。意图订阅在挂载时建立，回调里读不到最新的窗口状态，所以「窗口在哪台」的收尾一律走 ref 或 `setState(fn)` 这类实时更新。
 - 安全不变量（测试会读源码断言）：不打开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。
 - 文件内部分区（`//#region`）：常量 → i18n → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 主机条/远端窗口 → 向导 → 诊断 → 设置 → 密码/冲突 → 浮层宿主（`PluginOverlay`）→ 样式 → 注册。
 

@@ -1220,6 +1220,66 @@ test('opening a host or a window from the remote keeps the remote behind it', as
   assert.deepEqual(released, ['lease-1'])
 })
 
+test('dropping the window that fills the screen hands the row back to the local page', async () => {
+  // The exit control lives in the remote page, so the disconnect comes back through the
+  // intent subscription - a closure created at mount that can no longer see which host
+  // the window is on. The renderer goes away with the connection all the same, and the
+  // row must follow the window it actually has: local, not the host that just left.
+  const dom = fakeDom()
+  const released = []
+  let leases = 0
+  const local = loadClientPlugin({
+    document: dom.document,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-' + (leases += 1), partition: 'persist:dsh-remote-go:' + leases }),
+        release: async (lease) => released.push(lease),
+      },
+    },
+  })
+  runApply(local)
+  const open = (hostId, url) => local.carrier.open({ hostId, url })
+  await open('h_a', 'http://127.0.0.1:43210/?token=abc')
+  await local.carrier.update({
+    hosts: [
+      hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' }),
+      hostView({ id: 'h_b', name: '生产机', status: 'connected' }),
+    ],
+    current: 'h_a',
+  })
+  const row = rowOf(dom)
+  assert.equal(rowName(row), '43.133.80.40')
+  assert.equal(local.carrier.shown(), 'h_a')
+
+  // A warm window that is not in front may go away without moving the row.
+  await open('h_b', 'http://127.0.0.1:43211/?token=def')
+  await open('h_a', '')
+  assert.equal(local.carrier.shown(), 'h_a')
+  await local.carrier.closeOne('h_b')
+  assert.equal(local.carrier.warm('h_b'), false)
+  assert.equal(rowName(rowOf(dom)), '43.133.80.40', 'a hidden window must not move the row')
+
+  // What `disconnectHost` runs once the Host confirms: the shown renderer is dropped and
+  // the local page is what is left.
+  await local.carrier.closeOne('h_a')
+  assert.equal(local.carrier.shown(), null)
+  assert.equal(local.carrier.warm('h_a'), false)
+  assert.equal(rowName(rowOf(dom)), '本地', 'the row must not name a host whose window is gone')
+  assert.deepEqual(released, ['lease-2', 'lease-1'])
+})
+
+test('the disconnect handover reads the live window target, not the mount-time one', () => {
+  // `target` is captured by the panel subscription when the overlay mounts, so it is
+  // always the initial value there: a comparison against it never hands the window back,
+  // and the row keeps naming the remote host over the local page. The handover has to be
+  // a functional update on the live state instead.
+  const captured = /if \(target === (?:host\.id|intent\.hostId)\) setTarget\(null\)/.test(SOURCE)
+  assert.equal(captured, false, 'the disconnect must not decide from a captured target')
+  const live = /setTarget\(\(current\) => \(current === host\.id \? null : current\)\)/.test(SOURCE)
+  assert.equal(live, true, 'the disconnect must hand the window back with a functional update')
+})
+
 test('fingerprint card shows SHA256 and accept / remember actions', () => {
   const host = hostView({
     status: 'fingerprint-pending',
