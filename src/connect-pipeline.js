@@ -18,7 +18,6 @@ import { remoteLayout } from './layout.js'
 import { applyManagedNodeFacts, managedNodeVersionFromEngine } from './node-runtime.js'
 import { askConflict, requestHostKey } from './prompts.js'
 import { resolveDestination } from './ssh-config.js'
-import { applySync, prepareSync, syncWanted } from './sync-run.js'
 import { isPid, messageOf, nowIso } from './util.js'
 import { normalizeVersion, versionsEqual } from './version.js'
 
@@ -26,18 +25,6 @@ function describeTarget(entry) {
   const user = entry.username ? `${entry.username}@` : ''
   const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   return `${user}${entry.address || '?'}${port}`
-}
-
-/**
- * An adopted remote web must be restarted when this plan differs from the one it
- * was started with, when it was never synced, or when the user forced a re-sync.
- */
-function adoptedSyncStale(runtime, syncPlan) {
-  if (!syncPlan) return false
-  if (runtime.forceSync === true) return true
-  const state = syncPlan.remote?.state ?? null
-  if (!state) return true
-  return state.hash !== syncPlan.hash || state.profile !== syncPlan.profile || state.status === 'failed'
 }
 
 /**
@@ -318,9 +305,6 @@ async function connectPipeline(ctx, runtime) {
 
     phase('start', 'starting-remote', { level: plan.level })
     const layout = remoteLayout(runtime.facts?.home ?? null)
-    // The sync plan comes before the adopt decision: a running instance that was
-    // started from a different plan must restart, and a plan failure only warns.
-    const syncPlan = syncWanted(runtime.entry) ? await prepareSync(ctx, runtime) : null
     let webInfo = null
     // Adopt an instance left running by a previous local process (keep-alive).
     // Checked before the npx preflight: an adoptable instance should not require
@@ -329,17 +313,8 @@ async function connectPipeline(ctx, runtime) {
       const adopted = await ctx.deps.adopt(runtime.ssh, layout, { profile })
       const adoptedVersion = adopted?.version ? normalizeVersion(adopted.version) : null
       if (adopted && (!adoptedVersion || versionsEqual(adoptedVersion, targetVersion))) {
-        if (adoptedSyncStale(runtime, syncPlan)) {
-          log('info', 'sync: the running remote predates this sync plan; restarting it')
-          try {
-            await ctx.deps.stopWeb(runtime.ssh, layout, { pid: adopted.pid })
-          } catch (error) {
-            log('warn', 'could not stop the stale remote web:', messageOf(error))
-          }
-        } else {
-          webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
-          log('info', `adopted running remote web pid=${adopted.pid} port=${adopted.port}`)
-        }
+        webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
+        log('info', `adopted running remote web pid=${adopted.pid} port=${adopted.port}`)
       } else if (adopted) {
         log(
           'info',
@@ -382,8 +357,6 @@ async function connectPipeline(ctx, runtime) {
       const onStderr = ctx.progress.bootstrapReporter(runtime, plan.start.targetVersion)
       await ctx.deps.preflight(runtime.ssh, plan, { onStdout, onStderr })
       log('info', `npx preflight ready: @deepseek-ai/dsh@${plan.start.targetVersion}`)
-      // Sync after the preflight: the `dsh plugin` calls reuse the warm npx package.
-      if (syncPlan) await applySync(ctx, runtime, syncPlan)
       phase('start', 'starting-remote', { level: plan.level })
       webInfo = await ctx.deps.startWeb(runtime.ssh, {
         plan,

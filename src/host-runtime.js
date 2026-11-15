@@ -18,10 +18,6 @@ export function emptyRemote() {
   }
 }
 
-export function emptySync() {
-  return { status: 'idle', enabled: false, at: null, hash: null, error: null, summary: null }
-}
-
 export function createHostRuntime(host) {
   return {
     id: host.id,
@@ -31,8 +27,6 @@ export function createHostRuntime(host) {
     progress: null,
     error: null,
     warning: null,
-    sync: emptySync(),
-    forceSync: false,
     fingerprint: host.pinnedFingerprint
       ? { sha256: host.pinnedFingerprint, keyType: 'pinned', status: 'pinned', pinned: host.pinnedFingerprint }
       : null,

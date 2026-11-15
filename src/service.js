@@ -19,7 +19,7 @@ import {
   setActiveHost,
   snapshot,
 } from './host-registry.js'
-import { disconnectHost, disposeSsh, shutdownAll } from './host-lifecycle.js'
+import { disconnectHost, shutdownAll } from './host-lifecycle.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { ensureRemoteNode } from './node-runtime.js'
 import { confirmConflict, confirmHostKey } from './prompts.js'
@@ -54,7 +54,6 @@ export class RemoteGoService extends EventEmitter {
     // lower bound (see `managedNodeVersionFromEngine`). Null until detected.
     this.engineNodeRange = options.engineNodeRange ?? null
     this.secrets = options.secrets ?? null
-    this.localProfileDir = options.localProfileDir ?? null
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.conflictConfirmTimeoutMs = options.conflictConfirmTimeoutMs ?? REMOTE_CONFLICT_TIMEOUT_MS
     this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
@@ -92,8 +91,6 @@ export class RemoteGoService extends EventEmitter {
       settings: () => this.store.getSettings(),
       localVersion: () => this.localVersion,
       engineNodeRange: () => this.engineNodeRange,
-      // Overridable so tests can point the sync at a fixture profile.
-      localProfileDir: this.localProfileDir,
       userHome: () => process.env.USERPROFILE || process.env.HOME || this.home,
       emitState: () => this.emitState(),
       init: () => this.init(),
@@ -185,26 +182,6 @@ export class RemoteGoService extends EventEmitter {
   async reconnect(id) {
     await this.init()
     return reconnectHost(this.ctx, runtimeOf(this.ctx, id))
-  }
-
-  /**
-   * Apply the host's sync options now: stop the remote web, drop the transport and
-   * run the pipeline again with `forceSync`, so a manual sync re-applies the plan
-   * even when the stored hash already matches.
-   */
-  async syncNow(id) {
-    await this.init()
-    const runtime = runtimeOf(this.ctx, id)
-    if (runtime.connectPromise) {
-      throw errors.invalidInput('sync', {
-        zh: '该主机正在连接，请等连接结束后再同步。',
-        en: 'The host is connecting; wait for it to finish before syncing.',
-      })
-    }
-    runtime.forceSync = true
-    await disconnectHost(this.ctx, runtime, { stopRemote: true })
-    await disposeSsh(runtime)
-    return startConnect(this.ctx, id, {})
   }
 
   async confirmFingerprint(id, decision) {
