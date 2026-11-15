@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore } from '../../src/store.js'
 import { RemoteGoService } from '../../src/service.js'
+import { errors } from '../../src/errors.js'
 
 export function makeFacts(overrides = {}) {
   return {
@@ -41,6 +42,7 @@ export class FakeSsh extends EventEmitter {
     this.execImpl = input.exec ?? (async () => ({ code: 0, stdout: '', stderr: '' }))
     this.connectImpl = input.connect
     this.onConnectRequest = input.onConnectRequest
+    this.files = input.files ?? new Map()
   }
   async connect() {
     this.onConnectRequest?.(this.options)
@@ -51,6 +53,23 @@ export class FakeSsh extends EventEmitter {
   async exec(command, options = {}) {
     this.calls.push({ command, options })
     return this.execImpl(command, options)
+  }
+  async readRemoteFile(remotePath, options = {}) {
+    const maxBytes = options.maxBytes ?? 64 * 1024 * 1024
+    const content = this.files instanceof Map ? this.files.get(remotePath) : this.files[remotePath]
+    if (content === undefined) {
+      const error = new Error('No such file')
+      error.code = 2
+      throw error
+    }
+    if (Buffer.isBuffer(content) ? content.length > maxBytes : String(content).length > maxBytes) {
+      throw errors.remoteFileUnavailable({
+        zh: '模拟文件超过下载上限。',
+        en: 'The fixture file exceeds the download limit.',
+      })
+    }
+    const data = Buffer.isBuffer(content) ? Buffer.from(content) : Buffer.from(String(content), 'utf8')
+    return { data, size: data.length }
   }
   async forwardOut() {
     return new Duplex({
@@ -102,7 +121,7 @@ export async function makeTestService(overrides = {}) {
   const sshFactory =
     overrides.sshFactory ??
     ((options) => {
-      const ssh = new FakeSsh({ options })
+      const ssh = new FakeSsh({ options, files: overrides.sshFiles })
       events.push({ type: 'ssh', ssh })
       return ssh
     })

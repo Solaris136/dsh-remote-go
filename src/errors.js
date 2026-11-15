@@ -12,6 +12,9 @@ const ErrorCode = Object.freeze({
   REMOTE_DSH_START_FAILED: 'remote-dsh-start-failed',
   REMOTE_DSH_RUNNING: 'remote-dsh-running',
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
+  REMOTE_FILE_UNAVAILABLE: 'remote-file-unavailable',
+  DOWNLOAD_NOT_READY: 'download-not-ready',
+  DOWNLOAD_BUSY: 'download-busy',
   VERSION_MISMATCH: 'version-mismatch',
   UNSUPPORTED_OS: 'unsupported-os',
   INVALID_INPUT: 'invalid-input',
@@ -42,6 +45,18 @@ const CODE_TABLE = {
   [ErrorCode.REMOTE_UI_UNREACHABLE]: {
     retryable: true,
     title: { zh: '远端界面打不开', en: 'The remote interface is unreachable' },
+  },
+  [ErrorCode.REMOTE_FILE_UNAVAILABLE]: {
+    retryable: true,
+    title: { zh: '无法读取远端文件', en: 'Cannot read the remote file' },
+  },
+  [ErrorCode.DOWNLOAD_NOT_READY]: {
+    retryable: true,
+    title: { zh: '下载尚未准备好', en: 'The download is not ready' },
+  },
+  [ErrorCode.DOWNLOAD_BUSY]: {
+    retryable: true,
+    title: { zh: '下载任务太多', en: 'Too many downloads are running' },
   },
   [ErrorCode.VERSION_MISMATCH]: {
     retryable: true,
@@ -202,6 +217,48 @@ export const errors = {
         ['点「重连」重试一次', 'Retry with Reconnect'],
         ['查看诊断中的隧道与界面可达性检查', 'Check tunnel and UI reachability in diagnostics'],
       ],
+    ),
+  remoteFileUnavailable: (detail, options) =>
+    fail(
+      ErrorCode.REMOTE_FILE_UNAVAILABLE,
+      detail ??
+        say(
+          '远端路径不存在、不可读，或无法写入本地保存位置。',
+          'The remote path does not exist, is not readable, or the local destination cannot be written.',
+        ),
+      [
+        ['确认文件仍在远端，且当前 SSH 用户可以读取', 'Confirm the file still exists and the SSH user can read it'],
+        [
+          '检查文件大小；过大的文件请先在远端压缩或拆分',
+          'Check the file size; compress or split large files on the remote first',
+        ],
+      ],
+      options,
+    ),
+  downloadNotReady: (detail, options) =>
+    fail(
+      ErrorCode.DOWNLOAD_NOT_READY,
+      detail ??
+        say(
+          '这个下载还在准备中，或已经失效；请重新发起下载。',
+          'This download is still being prepared or has expired; start it again.',
+        ),
+      [
+        ['等待进度条完成后再试', 'Wait for the progress bar to finish and retry'],
+        ['如果任务已失效，从远端文件树重新下载', 'If it expired, start the download again from the remote file tree'],
+      ],
+      options,
+    ),
+  downloadBusy: (detail, options) =>
+    fail(
+      ErrorCode.DOWNLOAD_BUSY,
+      detail ??
+        say(
+          '同时准备的下载任务过多，请等一个完成后再试。',
+          'Too many downloads are being prepared at once; wait for one to finish and retry.',
+        ),
+      [['取消不需要的下载，或稍后重试', 'Cancel an unneeded download, or retry later']],
+      options,
     ),
   versionMismatch: (local, remote) =>
     fail(

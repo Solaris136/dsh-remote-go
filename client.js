@@ -3,7 +3,7 @@
  * switcher row plus every floating window in the shell's overlay layer (the sections below are
  * marked with //#region). It renders the Host's state (docs/api.md is the frozen contract; the
  * Host half in src/ is the only source of truth) and sends user intents back. The row is the
- * plugin's only entry — no settings page, no sidebar panel, no main panel.
+ * plugin's host entry — no settings page, no sidebar panel, no main panel.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-remote-go',
@@ -169,6 +169,21 @@ window.__ModuleLoader__.load({
       switcherAddHost: ['添加主机', 'Add host'],
       switcherManage: ['管理界面', 'Manage hosts'],
       switcherExit: ['断开', 'Disconnect'],
+      downloadStarted: ['已开始下载「{name}」', 'Download started: "{name}"'],
+      downloadPreparing: ['正在下载「{name}」…', 'Downloading "{name}"…'],
+      downloadSaved: ['已保存「{name}」', 'Saved "{name}"'],
+      downloadSavedTo: ['已保存到 {path}', 'Saved to {path}'],
+      downloadCancelled: ['已取消下载', 'Download cancelled'],
+      downloadCancel: ['取消下载', 'Cancel download'],
+      downloadClose: ['关闭', 'Close'],
+      downloadDrag: ['拖动下载进度', 'Drag download progress'],
+      downloadFailed: ['下载失败', 'Download failed'],
+      downloadFolderDesktopOnly: [
+        '文件夹下载需要在桌面端选择保存文件夹。',
+        'Folder downloads need the desktop app to choose a destination folder.',
+      ],
+      downloadFolderChoose: ['请选择保存文件夹…', 'Choose a destination folder…'],
+      downloadFiles: ['{done} / {total} 个文件', '{done} / {total} files'],
       'progress.ssh-connecting': ['正在连接 SSH…', 'Connecting over SSH…'],
       'progress.host-key-confirm': ['等待确认主机指纹…', 'Waiting for you to confirm the host key…'],
       'progress.auth-checking': ['正在认证…', 'Authenticating…'],
@@ -598,6 +613,33 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Command queue from the injected guest page (or the switcher row) to the
+     * overlay: currently "download this remote file". Consumed in order.
+     */
+    function createToolRequestStore() {
+      let pending = []
+      const store = createStore()
+      return {
+        requestDownload(request) {
+          if (!request || typeof request !== 'object') return
+          if (typeof request.hostId !== 'string' || request.hostId === '') return
+          if (typeof request.path !== 'string' || request.path === '') return
+          pending.push({
+            kind: 'download',
+            hostId: request.hostId,
+            path: request.path,
+            name: typeof request.name === 'string' ? request.name : '',
+          })
+          store.emit()
+        },
+        take() {
+          return pending.length > 0 ? pending.shift() : null
+        },
+        subscribe: store.subscribe,
+      }
+    }
+
     //#region 5. local error views
 
     const LOCAL_ERRORS = {
@@ -804,12 +846,48 @@ window.__ModuleLoader__.load({
           defaultDir: typeof payload.defaultDir === 'string' ? payload.defaultDir : '',
         }
       },
+      /**
+       * Start a Host-side download job for a remote file or folder.
+       * The Host streams the content straight into the selected local directory.
+       * @param {string} hostId - connected host.
+       * @param {string} remotePath - absolute file or folder path.
+       * @param {string} destination - local folder chosen by the user.
+       * @returns {Promise<object>} the initial job view.
+       */
+      async startDownload(hostId, remotePath, destination) {
+        const payload = await apiRequest('/downloads', {
+          method: 'POST',
+          body: { hostId, path: remotePath, destination },
+        })
+        if (!payload.job || typeof payload.job !== 'object') {
+          throw apiError(localErrorView('internal', 'malformed download job'))
+        }
+        return payload.job
+      },
+      /** Read one job's current status (fallback for a missed SSE frame). */
+      async downloadStatus(jobId) {
+        const payload = await apiRequest('/downloads/' + encodeURIComponent(jobId) + '/status')
+        if (!payload.job || typeof payload.job !== 'object') {
+          throw apiError(localErrorView('internal', 'malformed download status'))
+        }
+        return payload.job
+      },
+      /** Cancel a preparing/ready job; a missing job is treated as already gone. */
+      async cancelDownload(jobId) {
+        try {
+          await apiRequest('/downloads/' + encodeURIComponent(jobId), { method: 'DELETE' })
+          return true
+        } catch (_error) {
+          return false
+        }
+      },
     }
 
     function subscribeState(handlers) {
       const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
       const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
       const onError = typeof handlers.onError === 'function' ? handlers.onError : () => {}
+      const onDownload = typeof handlers.onDownload === 'function' ? handlers.onDownload : () => {}
       let disposed = false
       let source = null
       let timer = null
@@ -863,6 +941,14 @@ window.__ModuleLoader__.load({
           try {
             const state = JSON.parse(event.data)
             deliver(state)
+          } catch (_error) {
+            // a malformed frame must not kill the stream
+          }
+        })
+        source.addEventListener('download', (event) => {
+          try {
+            const job = JSON.parse(event.data)
+            if (job && typeof job === 'object') onDownload(job)
           } catch (_error) {
             // a malformed frame must not kill the stream
           }
@@ -1009,6 +1095,212 @@ window.__ModuleLoader__.load({
           'data-testid': props.testId,
         },
         props.icon,
+      )
+    }
+
+    /** Human-readable byte count for the download progress card. */
+    function formatBytes(value) {
+      const bytes = Number(value)
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+      const units = ['B', 'KB', 'MB', 'GB']
+      let amount = bytes
+      let unit = 0
+      while (amount >= 1024 && unit < units.length - 1) {
+        amount /= 1024
+        unit += 1
+      }
+      const digits = unit === 0 ? 0 : amount >= 10 ? 0 : 1
+      return amount.toFixed(digits) + ' ' + units[unit]
+    }
+
+    /**
+     * Draggable stack for the transient download cards. The stack stays anchored to
+     * the bottom-right by CSS and is moved with a transform, so dragging never changes
+     * layout or the guest behind it. Clamping keeps at least a corner on screen.
+     */
+    function DownloadCenter(props) {
+      const jobs = Array.isArray(props.jobs) ? props.jobs : []
+      const [offset, setOffset] = useState({ x: 0, y: 0 })
+      const stackRef = useRef(null)
+      const dragRef = useRef(null)
+
+      const onPointerDown = (event) => {
+        if (event.button !== undefined && event.button !== 0) return
+        const target = event.target
+        if (target && typeof target.closest === 'function' && target.closest('button')) return
+        if (!stackRef.current || !event.currentTarget) return
+        const rect = stackRef.current.getBoundingClientRect()
+        dragRef.current = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          x: offset.x,
+          y: offset.y,
+          rect,
+        }
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId)
+        } catch (_captureError) {
+          // pointer capture is an enhancement; dragging still works inside the head
+        }
+        event.preventDefault()
+      }
+
+      const onPointerMove = (event) => {
+        const drag = dragRef.current
+        if (!drag || drag.pointerId !== event.pointerId) return
+        const x = drag.x + (event.clientX - drag.startX)
+        const y = drag.y + (event.clientY - drag.startY)
+        const minX = drag.x + (8 - drag.rect.left)
+        const maxX = drag.x + (window.innerWidth - 8 - drag.rect.right)
+        const minY = drag.y + (8 - drag.rect.top)
+        const maxY = drag.y + (window.innerHeight - 8 - drag.rect.bottom)
+        setOffset({
+          x: Math.min(Math.max(x, Math.min(minX, maxX)), Math.max(minX, maxX)),
+          y: Math.min(Math.max(y, Math.min(minY, maxY)), Math.max(minY, maxY)),
+        })
+        event.preventDefault()
+      }
+
+      const onPointerEnd = (event) => {
+        const drag = dragRef.current
+        if (!drag || drag.pointerId !== event.pointerId) return
+        dragRef.current = null
+        try {
+          if (event.currentTarget && event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+        } catch (_releaseError) {
+          // already released
+        }
+      }
+
+      return h(
+        'div',
+        {
+          ref: stackRef,
+          className: 'drg-downloads',
+          'data-testid': 'dsh-remote-go-downloads',
+          style: { transform: 'translate(' + offset.x + 'px, ' + offset.y + 'px)' },
+        },
+        jobs.map((job) =>
+          h(DownloadProgress, {
+            key: job.id,
+            job,
+            t: props.t,
+            locale: props.locale,
+            onCancel: props.onCancel,
+            onDismiss: props.onDismiss,
+            onDragStart: onPointerDown,
+            onDragMove: onPointerMove,
+            onDragEnd: onPointerEnd,
+          }),
+        ),
+      )
+    }
+
+    /**
+     * Bottom-right download card. It is transient (one per active job), shows a real
+     * determinate bar once the Host has an inventory, and stays indeterminate while a
+     * folder is still being enumerated. The header is the drag handle.
+     */
+    function DownloadProgress(props) {
+      const t = translatorOf(props)
+      const job = props.job
+      if (!job) return null
+      const total = Number(job.totalBytes) || 0
+      const done = Math.min(Number(job.doneBytes) || 0, total || Number.MAX_SAFE_INTEGER)
+      const percent = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0
+      const preparing = job.phase === 'preparing'
+      const failed = job.phase === 'error'
+      const donePhase = job.phase === 'done'
+      const name = job.name || job.path || 'download'
+      const title = failed
+        ? t('downloadFailed')
+        : preparing
+          ? t('downloadPreparing', { name })
+          : t('downloadSaved', { name })
+      const detail = failed && job.error ? resolveText(job.error.detail, localeOf(props)) : ''
+      const meta = []
+      if (total > 0) meta.push(formatBytes(done) + ' / ' + formatBytes(total))
+      if (Number(job.totalFiles) > 0) {
+        meta.push(t('downloadFiles', { done: Number(job.doneFiles) || 0, total: Number(job.totalFiles) || 0 }))
+      }
+      const cancellable = (preparing || job.phase === 'ready') && typeof props.onCancel === 'function'
+      const dismissible = (failed || donePhase) && typeof props.onDismiss === 'function'
+      return h(
+        'div',
+        {
+          className: 'drg-download' + (failed ? ' drg-download-error' : ''),
+          role: 'status',
+          'data-testid': 'dsh-remote-go-download',
+          'data-phase': job.phase,
+        },
+        h(
+          'div',
+          {
+            className: 'drg-download-head',
+            title: t('downloadDrag'),
+            onPointerDown: props.onDragStart,
+            onPointerMove: props.onDragMove,
+            onPointerUp: props.onDragEnd,
+            onPointerCancel: props.onDragEnd,
+          },
+          h(
+            'span',
+            { className: 'drg-download-grip', 'aria-hidden': 'true' },
+            h(
+              'svg',
+              { width: 10, height: 14, viewBox: '0 0 10 14', fill: 'currentColor', focusable: 'false' },
+              [2, 7, 12].map((cy) => [2, 8].map((cx) => h('circle', { key: cx + '-' + cy, cx, cy, r: 1.1 }))),
+            ),
+          ),
+          h('span', { className: 'drg-download-title', title }, title),
+          cancellable
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'drg-download-action',
+                  onClick: () => props.onCancel(job),
+                },
+                t('downloadCancel'),
+              )
+            : null,
+          dismissible
+            ? h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'drg-download-action',
+                  onClick: () => props.onDismiss(job),
+                },
+                t('downloadClose'),
+              )
+            : null,
+        ),
+        h(
+          'div',
+          {
+            className: 'drg-download-track',
+            'data-indeterminate': percent === 0 && preparing ? 'true' : undefined,
+            role: 'progressbar',
+            'aria-valuemin': 0,
+            'aria-valuemax': 100,
+            'aria-valuenow': total > 0 ? percent : undefined,
+          },
+          h('span', {
+            className: 'drg-download-fill',
+            style: { width: (total > 0 ? percent : preparing ? 35 : 100) + '%' },
+          }),
+        ),
+        h(
+          'div',
+          { className: 'drg-download-meta' },
+          h('span', null, meta.filter(Boolean).join(' · ')),
+          total > 0 ? h('span', null, percent + '%') : null,
+        ),
+        detail ? h('p', { className: 'drg-download-detail' }, detail) : null,
       )
     }
 
@@ -2159,6 +2451,258 @@ window.__ModuleLoader__.load({
     const HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'
 
     /**
+     * The remote DSH page's file menu already offers "Download", but a desktop
+     * guest session explicitly cancels Chromium downloads. This injected script
+     * keeps the page's own menu and, when its download item is chosen, turns the
+     * file row's absolute path into an intent the local half can fetch over SFTP.
+     * It only touches `win` and its locals (the script is stringified into the guest).
+     */
+    function mountGuestTools(win) {
+      try {
+        var doc = win.document
+        if (!doc || !doc.documentElement) return 'no-document'
+        if (win.__drgGuestTools === true) return 'already'
+        win.__drgGuestTools = true
+        var emit =
+          typeof win.__drgBridgeSink === 'function'
+            ? win.__drgBridgeSink
+            : function (intent) {
+                var queue = win.__drgBridgeQueue
+                if (!queue || typeof queue.push !== 'function') queue = []
+                queue.push(intent)
+                win.__drgBridgeQueue = queue
+              }
+        var lastFile = null
+        // The icon is the stable hook; the labels are a fallback for a future icon
+        // rename (the eight languages shipped by the file-action plugin).
+        var DOWNLOAD_LABELS = [
+          '下载',
+          'Download',
+          'ダウンロード',
+          '다운로드',
+          'Скачать',
+          'Descargar',
+          'Télécharger',
+          'Herunterladen',
+          'Baixar',
+        ]
+        var clear = function () {
+          lastFile = null
+        }
+        var restoreMenus = function () {
+          var hidden = doc.querySelectorAll('[data-drg-guest-hidden]')
+          for (var index = 0; index < hidden.length; index += 1) {
+            hidden[index].style.display = ''
+            hidden[index].removeAttribute('data-drg-guest-hidden')
+          }
+          var stale = doc.querySelectorAll('[data-drg-dir-download-wrap]')
+          for (var staleIndex = 0; staleIndex < stale.length; staleIndex += 1) {
+            if (stale[staleIndex].parentNode) stale[staleIndex].parentNode.removeChild(stale[staleIndex])
+          }
+        }
+        var hideMenus = function () {
+          // The page's menu closes from its own select handler, which the capture below
+          // suppressed. Hide the menu surface (and its backing) instead of replaying a
+          // synthetic click: a hidden node cannot eat the next gesture, and the next
+          // context menu restores it before the page opens it again.
+          try {
+            var menus = doc.querySelectorAll('[role="menu"][data-context-menu]')
+            for (var menuIndex = 0; menuIndex < menus.length; menuIndex += 1) {
+              menus[menuIndex].setAttribute('data-drg-guest-hidden', '1')
+              menus[menuIndex].style.display = 'none'
+            }
+            var backings = doc.querySelectorAll('[data-menu-backing]')
+            for (var backingIndex = 0; backingIndex < backings.length; backingIndex += 1) {
+              backings[backingIndex].setAttribute('data-drg-guest-hidden', '1')
+              backings[backingIndex].style.display = 'none'
+            }
+          } catch (_error) {
+            /* the menu also closes on the next pointer gesture */
+          }
+        }
+        var directoryTimer = null
+        /**
+         * A directory has no native download item, so append one to the context menu.
+         * React owns the menu but the appended wrapper uses the cloned item's classes;
+         * the wrapper is removed again on the next context menu.
+         */
+        var addDirectoryItem = function () {
+          if (!lastFile || lastFile.kind !== 'directory') return true
+          var menu = doc.querySelector('[role="menu"][data-context-menu]')
+          if (!menu) return false
+          if (menu.querySelector('[data-drg-dir-download]')) return true
+          var template = menu.querySelector('button[role="menuitem"]')
+          if (!template) return false
+          var wrapper = template.parentElement
+          var clone = (wrapper && wrapper !== menu ? wrapper : template).cloneNode(true)
+          var item = clone.tagName === 'BUTTON' ? clone : clone.querySelector('[role="menuitem"]')
+          if (!item) return false
+          item.removeAttribute('id')
+          item.disabled = false
+          item.removeAttribute('aria-disabled')
+          item.setAttribute('data-drg-dir-download', '1')
+          var lang = String(
+            doc.documentElement.getAttribute('lang') || (win.navigator && win.navigator.language) || '',
+          ).toLowerCase()
+          var label = lang.indexOf('zh') === 0 ? '下载到本地' : 'Download to this computer'
+          var leaf = null
+          var spans = item.querySelectorAll('span')
+          for (var spanIndex = spans.length - 1; spanIndex >= 0; spanIndex -= 1) {
+            if (!spans[spanIndex].querySelector('svg') && spans[spanIndex].children.length === 0) {
+              leaf = spans[spanIndex]
+              break
+            }
+          }
+          if (leaf) leaf.textContent = label
+          else item.setAttribute('aria-label', label)
+          var oldIcon = item.querySelector('svg')
+          if (oldIcon && oldIcon.parentNode) {
+            var ns = 'http://www.w3.org/2000/svg'
+            var icon = doc.createElementNS(ns, 'svg')
+            icon.setAttribute('width', '16')
+            icon.setAttribute('height', '16')
+            icon.setAttribute('viewBox', '0 0 24 24')
+            icon.setAttribute('fill', 'none')
+            icon.setAttribute('stroke', 'currentColor')
+            icon.setAttribute('stroke-width', '1.7')
+            icon.setAttribute('stroke-linecap', 'round')
+            icon.setAttribute('stroke-linejoin', 'round')
+            icon.setAttribute('aria-hidden', 'true')
+            var iconPath = doc.createElementNS(ns, 'path')
+            iconPath.setAttribute('d', 'M12 3v12m0 0 4-4m-4 4-4-4M4 19h16')
+            icon.appendChild(iconPath)
+            oldIcon.parentNode.replaceChild(icon, oldIcon)
+          }
+          clone.setAttribute('data-drg-dir-download-wrap', '1')
+          var addedFor = lastFile
+          clone.addEventListener(
+            'click',
+            function (event) {
+              if (!addedFor || addedFor.kind !== 'directory') return
+              event.preventDefault()
+              event.stopPropagation()
+              if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
+              clear()
+              emit({ action: 'download-file', kind: 'directory', path: addedFor.path, name: addedFor.name || '' })
+              hideMenus()
+            },
+            true,
+          )
+          if (wrapper && wrapper !== menu && wrapper.parentElement) {
+            wrapper.parentElement.insertBefore(clone, wrapper.nextSibling)
+          } else {
+            menu.appendChild(clone)
+          }
+          return true
+        }
+        var queueDirectoryItem = function () {
+          if (directoryTimer !== null) return
+          var tries = 0
+          var attempt = function () {
+            directoryTimer = null
+            if (!lastFile || lastFile.kind !== 'directory') return
+            if (addDirectoryItem()) return
+            tries += 1
+            if (tries < 20) {
+              directoryTimer =
+                typeof win.setTimeout === 'function' ? win.setTimeout(attempt, 40) : setTimeout(attempt, 40)
+            }
+          }
+          attempt()
+        }
+        var remember = function (target) {
+          restoreMenus()
+          lastFile = null
+          if (!target || typeof target.closest !== 'function') return
+          var row = target.closest('li[data-files-entry][data-files-path]')
+          if (!row) return
+          var kind = row.getAttribute('data-files-entry')
+          if (kind !== 'file' && kind !== 'directory') return
+          var path = row.getAttribute('data-files-path') || ''
+          if (path.charAt(0) !== '/') return
+          var name = row.getAttribute('data-files-name') || ''
+          if (!name) {
+            var label = row.querySelector ? row.querySelector('button') : null
+            name = label && label.textContent ? String(label.textContent).trim() : path.split('/').pop() || ''
+          }
+          lastFile = { kind: kind, path: path, name: name }
+          if (kind === 'directory') queueDirectoryItem()
+        }
+        var interceptDownload = function (item, event) {
+          if (!item || !lastFile || lastFile.kind !== 'file') return
+          if (item.hasAttribute('data-drg-dir-download')) return
+          if (item.disabled === true || item.getAttribute('aria-disabled') === 'true') return
+          var icon = item.querySelector
+            ? item.querySelector('svg[data-icon="dsw-icon-download-outline-regular"]')
+            : null
+          var label = String(item.textContent || '').trim()
+          if (!icon && DOWNLOAD_LABELS.indexOf(label) < 0) return
+          var file = lastFile
+          clear()
+          event.preventDefault()
+          event.stopPropagation()
+          if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
+          emit({ action: 'download-file', kind: 'file', path: file.path, name: file.name || '' })
+          hideMenus()
+        }
+        doc.addEventListener(
+          'contextmenu',
+          function (event) {
+            remember(event.target)
+          },
+          true,
+        )
+        doc.addEventListener(
+          'keydown',
+          function (event) {
+            if (event.key === 'ContextMenu' || (event.shiftKey === true && event.key === 'F10')) {
+              remember(event.target)
+              return
+            }
+            if (event.key === 'Escape') {
+              clear()
+              return
+            }
+            if (event.key === 'Enter' || event.key === ' ') {
+              var keyboardTarget = event.target
+              var keyboardItem =
+                keyboardTarget && typeof keyboardTarget.closest === 'function'
+                  ? keyboardTarget.closest('[role="menuitem"]')
+                  : null
+              if (keyboardItem) interceptDownload(keyboardItem, event)
+            }
+          },
+          true,
+        )
+        // Capture phase: the page's React menu would otherwise read the file itself
+        // and hand a Blob to a download Chromium refuses for a guest session.
+        doc.addEventListener(
+          'click',
+          function (event) {
+            var target = event.target
+            if (!target || typeof target.closest !== 'function') return
+            interceptDownload(target.closest('[role="menuitem"]'), event)
+          },
+          true,
+        )
+        doc.addEventListener(
+          'click',
+          function () {
+            // Runs after the interception listener above: any click ends the file
+            // gesture (the download branch already cleared it before emitting).
+            clear()
+          },
+          true,
+        )
+        return 'installed'
+      } catch (_error) {
+        return 'error'
+      }
+    }
+
+    const GUEST_TOOLS_SCRIPT = '(' + mountGuestTools.toString() + ')(window)'
+
+    /**
      * The live guests, most recently shown first. A guest is hidden, never reloaded — that is what
      * makes switching instant — and is dropped only when its host goes away.
      */
@@ -2210,9 +2754,23 @@ window.__ModuleLoader__.load({
       .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
     `
 
+    /** A switched-to carrier waits this long for its guest document before showing anyway. */
+    const CARRIER_READY_TIMEOUT_MS = 1200
+    const CARRIER_PAINT_TIMEOUT_MS = 320
+    /**
+     * Resolves once the guest has painted frames of its own: a hidden `<webview>`'s guest does not
+     * paint, so this is what tells a reveal that there is something to show instead of the empty
+     * carrier. Two frames: one to produce content, one to hand it to the embedder.
+     */
+    const GUEST_PAINT_SCRIPT =
+      '(function(){return new Promise(function(resolve){' +
+      'if(typeof requestAnimationFrame!=="function"){resolve("no-raf");return}' +
+      'requestAnimationFrame(function(){requestAnimationFrame(function(){resolve("ok")})})' +
+      '})})()'
+
     async function installHostRow(entry) {
-      const view = entry === null ? null : entry.view
-      if (view === null || typeof view.executeJavaScript !== 'function') return false
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return false
       let status = 'error'
       try {
         status = await view.executeJavaScript(HOST_ROW_SCRIPT)
@@ -2227,10 +2785,25 @@ window.__ModuleLoader__.load({
       return live
     }
 
+    /**
+     * Install the guest-side download bridge after every load stop. It shares the
+     * row's intent queue, so its install is independent of where the row landed.
+     */
+    async function installGuestTools(entry) {
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return false
+      try {
+        const status = await view.executeJavaScript(GUEST_TOOLS_SCRIPT)
+        return typeof status === 'string' && status !== 'error' && status !== 'no-document'
+      } catch (_error) {
+        return false
+      }
+    }
+
     function startHostRowPoll(entry) {
       stopHostRowPoll()
-      const view = entry === null ? null : entry.view
-      if (view === null || typeof view.executeJavaScript !== 'function') return
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return
       carrierPool.poll = entry
       // One drain at a time: an overlapping read of the same intent must not dispatch twice.
       let draining = false
@@ -2253,7 +2826,13 @@ window.__ModuleLoader__.load({
             } catch (_error) {
               // ignore a guest that navigated away mid-poll
             }
-            for (const intent of value) dispatchSwitcherIntent(intent)
+            for (const intent of value) {
+              // File intents belong to the host whose guest queued them; row intents
+              // keep their own hostId (a disconnect can target another host).
+              dispatchSwitcherIntent(
+                intent && intent.action === 'download-file' ? { ...intent, hostId: entry.hostId } : intent,
+              )
+            }
           })
           .catch(() => {})
           .then(() => {
@@ -2441,6 +3020,11 @@ window.__ModuleLoader__.load({
         rowInstalled: false,
         failed: false,
         timer: null,
+        /** True once the guest committed a document (or failed): a reveal can stop waiting. */
+        ready: false,
+        readyWaiters: [],
+        /** Bumped per reveal, so a reveal that lost the window cannot paint over the next one. */
+        revealToken: 0,
       }
 
       // `dom-ready` fires once per committed navigation, so navigating from it
@@ -2464,6 +3048,8 @@ window.__ModuleLoader__.load({
         if (entry.view !== view) return
         errorLayer.style.display = 'none'
         entry.failed = false
+        // The document is there: a switch waiting for it may show the guest from here on.
+        markCarrierReady(entry)
         // Re-install after *every* load stop: the remote page reloading wipes the injected DOM, and a one-shot install
         // would leave the window without any control. Both scripts are idempotent inside the page, and the caption has
         // to land before the row measures the sidebar it is placed into.
@@ -2473,8 +3059,13 @@ window.__ModuleLoader__.load({
             syncCarrierCaption(entry, applied)
             return installHostRow(entry)
           })
-          .then((live) => {
-            if (entry.view !== view || !live) return
+          .then(async (live) => {
+            if (entry.view !== view) return
+            // The download bridge is independent of the row's target: install it even
+            // when the sidebar is collapsed and the row had nowhere to land yet.
+            const tools = await installGuestTools(entry)
+            if (entry.view !== view) return
+            if (!live && !tools) return
             if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
           })
       })
@@ -2487,6 +3078,8 @@ window.__ModuleLoader__.load({
         if (!isMainFrame || aborted) return
         entry.failed = true
         errorLayer.style.display = 'flex'
+        // The failure line is the page now: show it rather than wait for a frame that never comes.
+        markCarrierReady(entry)
         // The page cannot paint its own frame, so it must not own the caption band either:
         // hand the band back to the local page (its menus stay reachable while the failure
         // line is up) and the next successful load takes it again.
@@ -2508,6 +3101,84 @@ window.__ModuleLoader__.load({
       const hostId = typeof options.hostId === 'string' ? options.hostId : ''
       carrierPool.wanted = hostId
       return whenCarrierIdle(() => showOverlayNow(hostId, options))
+    }
+
+    /** One frame of this page, so the compositor has committed what was just changed here. */
+    function nextLocalFrame() {
+      return new Promise((resolve) => {
+        let settled = false
+        const finish = (value) => {
+          if (settled) return
+          settled = true
+          resolve(value)
+        }
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => finish(true))
+        // An occluded window (or a windowless test) schedules no frames: never wait for one.
+        if (typeof setTimeout === 'function') unrefTimer(setTimeout(() => finish(false), 60))
+      })
+    }
+
+    /** Resolve once the guest has painted frames of its own; false when it never answers. */
+    function waitForGuestPaint(entry, timeoutMs) {
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return Promise.resolve(false)
+      let timer = null
+      const painted = Promise.resolve()
+        .then(() => view.executeJavaScript(GUEST_PAINT_SCRIPT))
+        .then(
+          (value) => value === 'ok' || value === 'no-raf',
+          () => false,
+        )
+      const expired = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs)
+        unrefTimer(timer)
+      })
+      return Promise.race([painted, expired]).then((paintedNow) => {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
+        return paintedNow
+      })
+    }
+
+    /** The guest committed a document (or failed to): a reveal no longer has to wait for it. */
+    function markCarrierReady(entry) {
+      if (entry === null || entry === undefined) return
+      entry.ready = true
+      const waiters = Array.isArray(entry.readyWaiters) ? entry.readyWaiters : []
+      entry.readyWaiters = []
+      for (const resolve of waiters) resolve(true)
+    }
+
+    function waitForCarrierReady(entry, timeoutMs) {
+      if (entry.ready === true) return Promise.resolve(true)
+      return new Promise((resolve) => {
+        entry.readyWaiters.push(resolve)
+        const timer = setTimeout(() => resolve(false), timeoutMs)
+        unrefTimer(timer)
+      })
+    }
+
+    /**
+     * Make a carrier visible without painting its empty frame first. A hidden `<webview>` has no
+     * guest surface, so revealing it as-is paints the carrier's own background: for one frame on a
+     * warm window, and for the whole page load on a cold one. That blank is the flash seen when the
+     * window switches from local to a host. The carrier goes up transparent instead, the guest gets
+     * a document and a frame to paint, and only then does the carrier become opaque. A reveal that
+     * lost its turn (local, or another host) leaves the carrier hidden.
+     */
+    async function revealCarrier(entry) {
+      const token = (entry.revealToken ?? 0) + 1
+      entry.revealToken = token
+      entry.root.style.display = ''
+      entry.root.style.opacity = '0'
+      // Still transparent: the local page underneath stays the one receiving clicks.
+      entry.root.style.pointerEvents = 'none'
+      await nextLocalFrame()
+      if (entry.ready !== true) await waitForCarrierReady(entry, CARRIER_READY_TIMEOUT_MS)
+      await waitForGuestPaint(entry, CARRIER_PAINT_TIMEOUT_MS)
+      await nextLocalFrame()
+      if (entry.revealToken !== token || carrierPool.current !== entry.hostId) return
+      entry.root.style.pointerEvents = ''
+      entry.root.style.opacity = ''
     }
 
     async function showOverlayNow(hostId, options) {
@@ -2547,8 +3218,15 @@ window.__ModuleLoader__.load({
         other.root.style.display = 'none'
       }
       carrierPool.entries = [entry, ...carrierPool.entries.filter((item) => item !== entry)]
+      const alreadyShown = carrierPool.current === hostId && entry.root.style.display !== 'none'
       carrierPool.current = hostId
-      entry.root.style.display = ''
+      if (alreadyShown) {
+        entry.root.style.pointerEvents = ''
+        entry.root.style.opacity = ''
+      } else {
+        // Rendered over the next frames, once the guest has something to show (see `revealCarrier`).
+        revealCarrier(entry).catch(() => {})
+      }
       // The band belongs to this guest now: keep the shell's caption menus above it, but
       // only when the guest actually reserved the band (otherwise the local band is intact).
       setCaptionLive(entry.captionApplied === true)
@@ -3733,13 +4411,15 @@ window.__ModuleLoader__.load({
 
     //#region 15. overlay host (floating windows + remote window)
 
-    function useRemoteState(initialState) {
+    function useRemoteState(initialState, onDownload) {
       const hasInitial = initialState !== undefined && initialState !== null
       const [state, setState] = useState(hasInitial ? initialState : null)
       const [error, setError] = useState(null)
       const [loading, setLoading] = useState(!hasInitial)
       const [mode, setMode] = useState('idle')
       const alive = useRef(true)
+      const downloadHandler = useRef(typeof onDownload === 'function' ? onDownload : () => {})
+      downloadHandler.current = typeof onDownload === 'function' ? onDownload : () => {}
       const refresh = useCallback(() => {
         setLoading(true)
         return api.getState().then(
@@ -3772,6 +4452,9 @@ window.__ModuleLoader__.load({
             if (!alive.current) return
             setError(toErrorView(readError))
             setLoading(false)
+          },
+          onDownload: (job) => {
+            if (alive.current) downloadHandler.current(job)
           },
         })
         return () => {
@@ -3839,8 +4522,13 @@ window.__ModuleLoader__.load({
       const t = translatorOf(props)
       const locale = localeOf(props)
       // One `/state` feed for the whole plugin (docs/api.md): the row, the windows and the
-      // remote window all read from it.
-      const remote = useRemoteState(props.initialState)
+      // remote window all read from it. Download jobs arrive on the same SSE stream.
+      const [downloadJobs, setDownloadJobs] = useState({})
+      const downloadJobsRef = useRef({})
+      const downloadPolls = useRef(new Map())
+      const downloadRemoval = useRef(new Map())
+      const downloadHandlerRef = useRef(() => {})
+      const remote = useRemoteState(props.initialState, (job) => downloadHandlerRef.current(job))
       const state = remote.state
       const [target, setTarget] = useState(() => {
         const initial = props.initialState
@@ -3884,6 +4572,190 @@ window.__ModuleLoader__.load({
         const detail = resolveText(viewOfError.detail, locale)
         return detail ? title + ' ' + detail : title
       }
+
+      /** Merge one Host job frame into the local card map, never letting a slow frame regress it. */
+      const updateDownloadView = (job) => {
+        if (!job || typeof job.id !== 'string') return null
+        const current = downloadJobsRef.current[job.id] || null
+        const merged = { ...(current || {}), ...job }
+        const rank = { preparing: 0, ready: 1, saving: 2, done: 3, error: 3 }
+        if (current && (rank[job.phase] ?? 0) < (rank[current.phase] ?? 0)) {
+          merged.phase = current.phase
+        }
+        merged.doneBytes = Math.max(Number(current?.doneBytes) || 0, Number(job.doneBytes) || 0)
+        merged.totalBytes = Math.max(Number(current?.totalBytes) || 0, Number(job.totalBytes) || 0)
+        const next = { ...downloadJobsRef.current, [job.id]: merged }
+        downloadJobsRef.current = next
+        setDownloadJobs(next)
+        return merged
+      }
+
+      const clearDownloadPoll = (id) => {
+        const timer = downloadPolls.current.get(id)
+        if (timer !== undefined && typeof clearInterval === 'function') clearInterval(timer)
+        downloadPolls.current.delete(id)
+      }
+
+      const removeDownloadView = (id, delay) => {
+        clearDownloadPoll(id)
+        const previous = downloadRemoval.current.get(id)
+        if (previous !== undefined && typeof clearTimeout === 'function') clearTimeout(previous)
+        downloadRemoval.current.delete(id)
+        const drop = () => {
+          if (!downloadJobsRef.current[id]) return
+          const next = { ...downloadJobsRef.current }
+          delete next[id]
+          downloadJobsRef.current = next
+          setDownloadJobs(next)
+        }
+        if (delay && typeof setTimeout === 'function') {
+          const timer = setTimeout(drop, delay)
+          timer.unref?.()
+          downloadRemoval.current.set(id, timer)
+        } else {
+          drop()
+        }
+      }
+
+      /** Poll as a fallback for EventSource gaps; SSE normally stops this before it runs. */
+      const startDownloadPoll = (id) => {
+        if (downloadPolls.current.has(id) || typeof setInterval !== 'function') return
+        const timer = setInterval(() => {
+          const current = downloadJobsRef.current[id]
+          if (!current || current.phase === 'saving' || current.phase === 'done') {
+            clearDownloadPoll(id)
+            return
+          }
+          api.downloadStatus(id).then(
+            (job) => {
+              handleDownloadJob(job)
+              if (job.phase === 'ready' || job.phase === 'error') clearDownloadPoll(id)
+            },
+            (error) => {
+              clearDownloadPoll(id)
+              const current = downloadJobsRef.current[id]
+              if (current && (current.phase === 'preparing' || current.phase === 'ready')) {
+                updateDownloadView({ id, phase: 'error', error: toErrorView(error) })
+                notify(errorMessage(error), 'error')
+                removeDownloadView(id, 5000)
+              }
+            },
+          )
+        }, 700)
+        timer.unref?.()
+        downloadPolls.current.set(id, timer)
+      }
+
+      /** A completed job is already written to the chosen local path by the Host. */
+      const finishSavedDownload = (job) => {
+        if (!job || typeof job.id !== 'string') return
+        const destination = job.destination || job.path || ''
+        notify(t('downloadSavedTo', { path: destination }), 'success')
+        updateDownloadView({ id: job.id, phase: 'done' })
+        removeDownloadView(job.id, 1400)
+        // The bytes never leave the Host, so release the job slot immediately.
+        void api.cancelDownload(job.id).catch(() => {})
+      }
+
+      /** Route one job frame: show progress, then report the local path on ready. */
+      const handleDownloadJob = (job) => {
+        if (!job || typeof job.id !== 'string') return
+        const previous = downloadJobsRef.current[job.id]
+        const merged = updateDownloadView(job)
+        if (!merged) return
+        if (merged.phase === 'ready') {
+          finishSavedDownload(merged)
+          return
+        }
+        if (merged.phase === 'error') {
+          clearDownloadPoll(job.id)
+          if (!previous || previous.phase !== 'error') {
+            const view = merged.error && typeof merged.error === 'object' ? merged.error : null
+            const detail = view ? resolveText(view.detail, locale) : ''
+            const title = view ? resolveText(view.title, locale) : ''
+            notify(detail ? (title ? title + ' ' : '') + detail : title || t('downloadFailed'), 'error')
+          }
+          removeDownloadView(job.id, 5000)
+        }
+      }
+      downloadHandlerRef.current = handleDownloadJob
+
+      /** Start one Host job; every job streams into the directory picked by the user. */
+      const startHostDownload = (request, destination) => {
+        const fallbackName = request.name || request.path.split('/').pop() || 'download'
+        notify(t('downloadStarted', { name: fallbackName }), 'info')
+        api.startDownload(request.hostId, request.path, destination).then(
+          (job) => {
+            const merged = updateDownloadView(job)
+            if (!merged) return
+            if (merged.phase === 'ready') {
+              finishSavedDownload(merged)
+            } else if (merged.phase === 'preparing') {
+              startDownloadPoll(job.id)
+            }
+          },
+          (error) => notify(errorMessage(error), 'error'),
+        )
+      }
+
+      /** Ask DSH's own directory picker for the local destination folder. */
+      const pickFolderDestination = async () => {
+        const workspacePick = typeof props.pickDirectory === 'function' ? props.pickDirectory : null
+        if (workspacePick) {
+          try {
+            const picked = await workspacePick()
+            if (picked === null) return null
+            if (typeof picked === 'string' && picked !== '') return picked
+          } catch (error) {
+            notify(errorMessage(error), 'error')
+            return null
+          }
+        }
+        const picker = typeof window === 'undefined' ? null : window.__DSH_DIRECTORY_PICKER__
+        if (!picker || typeof picker.pick !== 'function') {
+          notify(t('downloadFolderDesktopOnly'), 'warn')
+          return null
+        }
+        try {
+          const picked = await picker.pick()
+          return typeof picked === 'string' && picked !== '' ? picked : null
+        } catch (error) {
+          notify(errorMessage(error), 'error')
+          return null
+        }
+      }
+
+      /** A remote file/folder intent from the guest bridge becomes a Host job. */
+      const downloadFromHost = (request) => {
+        if (!request || typeof request.hostId !== 'string' || typeof request.path !== 'string') return
+        notify(t('downloadFolderChoose'), 'info')
+        pickFolderDestination().then((destination) => {
+          if (destination) startHostDownload(request, destination)
+        })
+      }
+
+      const cancelDownloadJob = (job) => {
+        if (!job || typeof job.id !== 'string') return
+        api.cancelDownload(job.id).then((cancelled) => {
+          if (!cancelled) return
+          notify(t('downloadCancelled'), 'info')
+          removeDownloadView(job.id)
+        })
+      }
+
+      useEffect(
+        () => () => {
+          for (const timer of downloadPolls.current.values()) {
+            if (typeof clearInterval === 'function') clearInterval(timer)
+          }
+          for (const timer of downloadRemoval.current.values()) {
+            if (typeof clearTimeout === 'function') clearTimeout(timer)
+          }
+          downloadPolls.current.clear()
+          downloadRemoval.current.clear()
+        },
+        [],
+      )
 
       /**
        * One Host-API call with the window's choreography: the host goes busy, success refreshes
@@ -4104,6 +4976,21 @@ window.__ModuleLoader__.load({
         sync()
         return store.subscribe(sync)
       }, [props.wizardStore])
+      // Guest file intents arrive through the same command channel as the wizard's
+      // requests; drain in order, with a small cap so a malformed producer cannot spin.
+      useEffect(() => {
+        const store = props.toolStore
+        if (!store || typeof store.subscribe !== 'function') return undefined
+        const consume = () => {
+          for (let index = 0; index < 8; index += 1) {
+            const request = typeof store.take === 'function' ? store.take() : null
+            if (!request) return
+            if (request.kind === 'download') downloadFromHost(request)
+          }
+        }
+        consume()
+        return store.subscribe(consume)
+      }, [props.toolStore])
       const closeWizard = () => {
         const store = props.wizardStore
         if (store && typeof store.close === 'function') store.close()
@@ -4262,6 +5149,15 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'drg-root drg-overlay', 'data-testid': 'dsh-remote-go-overlay-host' },
         h(StyleSheet),
+        Object.keys(downloadJobs).length > 0
+          ? h(DownloadCenter, {
+              jobs: Object.values(downloadJobs),
+              t,
+              locale,
+              onCancel: cancelDownloadJob,
+              onDismiss: (job) => removeDownloadView(job.id),
+            })
+          : null,
         h(ManageWindow, {
           open: manageOpen,
           view: manageView,
@@ -4455,6 +5351,58 @@ window.__ModuleLoader__.load({
     .drg-iconbtn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
     .drg-iconbtn:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
     .drg-iconbtn:disabled { opacity: 0.5; cursor: default; }
+    .drg-downloads {
+      position: fixed; right: 16px; bottom: 16px; z-index: 56; display: flex; flex-direction: column;
+      gap: 8px; width: 320px; max-width: calc(100vw - 32px); pointer-events: none;
+      will-change: transform;
+    }
+    .drg-download {
+      pointer-events: auto; padding: 10px 12px; border: 0.5px solid var(--dsw-alias-border-l2);
+      border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-2);
+      box-shadow: var(--dsw-elevation-panel); color: var(--dsw-alias-label-primary);
+    }
+    .drg-download-error { border-color: var(--dsw-alias-state-error-primary); }
+    .drg-download-error .drg-download-fill { background: var(--dsw-alias-state-error-primary); }
+    .drg-download-head {
+      display: flex; align-items: center; gap: 6px; min-width: 0;
+      cursor: grab; user-select: none; touch-action: none;
+    }
+    .drg-download-head:active { cursor: grabbing; }
+    .drg-download-grip { display: inline-flex; flex: none; color: var(--dsw-alias-label-tertiary); }
+    .drg-download-title {
+      flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 12px; line-height: 1.45;
+    }
+    .drg-download-action {
+      flex: none; height: 22px; padding: 0 7px; border: 0.5px solid var(--dsw-alias-border-l2);
+      border-radius: var(--dsw-radius-sm); background: transparent;
+      color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; cursor: pointer;
+    }
+    .drg-download-action:hover {
+      background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary);
+    }
+    .drg-download-track {
+      height: 4px; margin-top: 8px; overflow: hidden; border-radius: 999px;
+      background: var(--dsw-alias-bg-layer-1);
+    }
+    .drg-download-fill {
+      display: block; height: 100%; border-radius: inherit; background: var(--dsw-alias-state-business-primary);
+      transition: width 160ms ease;
+    }
+    .drg-download-track[data-indeterminate] .drg-download-fill {
+      animation: drg-download-pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes drg-download-pulse {
+      0% { transform: translateX(-120%); }
+      100% { transform: translateX(320%); }
+    }
+    .drg-download-meta {
+      display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11px;
+      color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums;
+    }
+    .drg-download-detail {
+      margin: 6px 0 0; font-size: 11px; line-height: 1.45; color: var(--dsw-alias-state-error-primary);
+    }
     .drg-linkbtn {
       padding: 0 2px; border: none; border-radius: var(--dsw-radius-xs); background: none; color: var(--dsw-alias-link);
       font-size: 12.5px; cursor: pointer;
@@ -4851,10 +5799,29 @@ window.__ModuleLoader__.load({
 
       const panelStore = createPanelRequestStore()
       const wizardStore = createWizardStore()
+      const toolStore = createToolRequestStore()
       const openWizard = (draft) => {
         wizardStore.open(draft)
       }
-      const sharedInject = () => ({ panelStore, wizardStore, openWizard, getLocaleId })
+      const sharedInject = () => ({
+        panelStore,
+        wizardStore,
+        toolStore,
+        openWizard,
+        getLocaleId,
+        pickDirectory: async () => {
+          try {
+            const workspaceUi = ctx.get('uiWorkspace')
+            if (workspaceUi && typeof workspaceUi.pickDirectory === 'function') {
+              const picked = await workspaceUi.pickDirectory()
+              return typeof picked === 'string' && picked !== '' ? picked : null
+            }
+          } catch (_error) {
+            // fall back to the desktop preload picker below
+          }
+          return undefined
+        },
+      })
 
       // Everything the plugin draws lives in the shell's overlay layer: the floating management window, the wizard and
       // the prompts. It sits above a remote window, so opening or closing them leaves the remote exactly as it was.
@@ -4871,10 +5838,10 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      // The window's one control is the switcher row drawn into the sidebar of whichever page owns the window: this one
-      // (local) or the remote guest's. It lists local plus every host, so picking one is all it takes to move the
-      // window. It is the plugin's only entry: there is no settings page, no sidebar panel and no main panel;
-      // management and the wizard are floating windows in the overlay layer.
+      // The window's one host control is the switcher row drawn into the sidebar of whichever page owns the
+      // window: this one (local) or the remote guest's. It lists local plus every host, so picking one is all it
+      // takes to move the window. It is the plugin's host entry: there is no settings page, no sidebar panel and
+      // no main panel; management and the wizard are floating windows in the overlay layer.
       ctx.effect(() => {
         switcher.labelsOf = () => ({
           local: t('switcherLocal'),
@@ -4911,6 +5878,17 @@ window.__ModuleLoader__.load({
       }
 
       switcher.dispatch = (intent) => {
+        if (intent.action === 'download-file') {
+          // The guest's own file menu only produced a path; the local half owns the
+          // SFTP read and the save, so no remote bytes ever cross the guest bridge.
+          toolStore.requestDownload({
+            hostId: intent.hostId,
+            kind: intent.kind,
+            path: intent.path,
+            name: intent.name,
+          })
+          return
+        }
         if (intent.action === 'add') {
           // The wizard floats over whatever is on screen — including a remote window.
           openWizard({ mode: 'add', host: null })
@@ -4957,6 +5935,8 @@ window.__ModuleLoader__.load({
       WizardDialog,
       DiagnoseDrawer,
       SettingsModal,
+      DownloadCenter,
+      DownloadProgress,
       StatusDot,
       Modal,
       Button,
@@ -4972,6 +5952,10 @@ window.__ModuleLoader__.load({
        * The Host-API client, exposed so unit tests can exercise the real security
        */
       api,
+      /** Download intents from the guest bridge, exposed for unit tests. */
+      toolRequests: {
+        create: createToolRequestStore,
+      },
       carrier: {
         open: showOverlay,
         close: closeOverlay,
@@ -4981,6 +5965,7 @@ window.__ModuleLoader__.load({
         shown: () => carrierPool.current,
         update: updateSwitcher,
         script: () => HOST_ROW_SCRIPT,
+        guestTools: () => GUEST_TOOLS_SCRIPT,
       },
     }
   },

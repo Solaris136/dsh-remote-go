@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.3）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.6）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -13,6 +13,18 @@
 >
 > **v2.3 变更**：`HostView` 增加 `authKeyPath`（已保存的私钥路径，供编辑表单预填；它不是秘密）。
 > 本插件不写远端 `~/.dsh`：没有同步端点，也没有 `sync` 字段。
+>
+> **v2.4 变更**：新增 `GET /hosts/:id/file?path=<绝对路径>`，把远端文件按原始字节交还给客户端；
+> 供远端文件树的“下载”菜单使用（桌面 guest 会话禁止 Chromium 自带下载）。
+> 只接受绝对 POSIX 路径，错误码 `remote-file-unavailable`。
+>
+> **v2.6 变更**：下载统一改为 Host 流式写入本地目录，不再提供二进制下载端点
+> `GET /hosts/:id/file` 与 `GET /downloads/:id`；`POST /downloads` 对文件和文件夹都要求
+> `destination`，并直接返回实际写入路径。单文件与文件夹都不设大小/数量上限。
+>
+> **v2.5 变更**：新增下载任务 `POST /downloads`、`GET /downloads/:id/status`、
+> `DELETE /downloads/:id`；SSE 增加 `download` 事件。`GET /hosts/:id/file` 与
+> `GET /downloads/:id` 只存在于 v2.5，已在 v2.6 移除。
 
 ## 0. 通用类型
 
@@ -114,6 +126,22 @@ interface HostView {
   updatedAt: string
 }
 
+interface DownloadJobView {
+  id: string
+  hostId: string
+  path: string
+  name: string                 // 最终本地文件名或文件夹名（含自动重命名后缀）
+  kind: 'file' | 'folder' | null
+  phase: 'preparing' | 'ready' | 'error'
+  totalBytes: number           // 远端总字节；枚举完成前为 0
+  doneBytes: number
+  totalFiles: number           // 文件夹的文件数；单文件为 1（读完前可为 0）
+  doneFiles: number
+  destination: string | null   // 实际写入的本机文件/目录绝对路径
+  startedAt: string
+  error: ErrorView | null
+}
+
 interface SettingsView {
   defaultPort: number
   defaultAuth: 'key' | 'password'
@@ -150,6 +178,9 @@ interface StateView {
 | `remote-dsh-start-failed` | 远端 DSH 启动失败 | ✅ |
 | `remote-dsh-running` | 手工 DSH 冲突且用户取消/停止失败 | ✅ |
 | `remote-ui-unreachable` | 隧道或远端界面校验失败 | ✅ |
+| `remote-file-unavailable` | 远端文件/文件夹不存在、不可读或超过下载上限 | ✅ |
+| `download-not-ready` | 下载任务尚在准备、已失败或已过期 | ✅ |
+| `download-busy` | 同时准备/保留的下载任务过多 | ✅ |
 | `version-mismatch` | npx 回读版本与本机不一致 | ✅ |
 | `unsupported-os` | 远端系统不支持 | ❌ |
 | `invalid-input` | 参数不合法 | ❌ |
@@ -173,13 +204,18 @@ interface StateView {
 event: state
 data: { ...StateView }
 
+event: download
+data: { ...DownloadJobView }
+
 event: ping
 data: {}
 ```
 
+`download` 只在下载任务启动、进度变化、完成或失败时推送；客户端仍应在收到 `POST /downloads` 后轮询 `/status` 一次，避免 EventSource 尚未订阅时漏帧。
+
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.2", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.6", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
@@ -251,6 +287,36 @@ data: {}
 { "ok": true, "url": "http://127.0.0.1:54321/?token=...", "localPort": 54321, "address": "127.0.0.1:54321" }
 ```
 URL 直接交给桌面端 guest；`?token=` 只用一次完成 cookie 种入，之后由远端重定向到干净地址。
+
+### `POST /downloads`
+启动一个后台下载任务（文件或文件夹），立即返回初始 `DownloadJobView`（`phase: "preparing"`）。Host 把远端内容**流式写入用户选择的本机目录**，不在内存里缓存文件字节；进度通过 SSE `download` 事件推送，也可用 `/status` 兜底轮询。
+
+```http
+POST /dsh-remote-go/api/downloads
+x-dsh-remote-go: 1
+content-type: application/json
+{ "hostId": "h_xxx", "path": "/home/ubuntu/project", "destination": "C:\\Users\\me\\Downloads" }
+```
+```json
+{ "ok": true, "job": { "id": "dl_...", "phase": "preparing", "...": "..." } }
+```
+
+约束：
+
+- `path` 必须是绝对 POSIX 路径；Host 会 `stat` 判断文件或文件夹。
+- **不设置文件或文件夹大小上限，也不限制文件个数。**
+- `destination` 必填（DSH 目录选择器 `uiWorkspace.pickDirectory` 返回的绝对本机目录）。
+  - 文件：写入 `<destination>/<远端文件名>`；同名文件已存在时改用 `<名字> (2).<扩展名>`、`<名字> (3).<扩展名>`……
+  - 文件夹：在 `destination` 下新建 `<远端文件夹名>`；同名文件夹或文件已存在时改用 `<名字> (2)`、`<名字> (3)`……
+- 文件夹不打包 ZIP：Host 递归枚举后逐个文件写到新建目录，保留子目录与空目录，跳过符号链接。
+- 所有文件都从 SFTP 直接写入本地文件；取消会销毁流并删除本次未完成的文件/目录。
+- 同一时刻最多 2 个任务在准备、最多保留 4 个任务；超出返回 `download-busy`（HTTP 409）。
+
+### `GET /downloads/:id/status`
+返回 `{ "ok": true, "job": DownloadJobView }`。任务不存在或过期时返回 `download-not-ready`（409）。
+
+### `DELETE /downloads/:id`
+取消并释放任务，返回 `{ "ok": true }`；任务已不存在也返回成功（幂等）。
 
 ### `POST /hosts/:id/activate`
 设置当前活动主机（客户端把窗口交给这台时调用）。无请求体，返回 `{ "ok": true }`。
