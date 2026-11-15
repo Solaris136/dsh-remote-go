@@ -39,7 +39,7 @@ pnpm install --frozen-lockfile --ignore-scripts
 | `pnpm run market:check` / `pack:check` | 校验包元数据、运行时文件与 format-1 市场索引条目 / `files[]` 覆盖与 `pnpm pack` 产物 |
 | `pnpm run test:unit` / `test:coverage` | `node --test "test/unit/*.test.js"`（Host + Client）/ 覆盖率门禁（行 ≥ 85%、分支 ≥ 70%、函数 ≥ 80%，不含 `vendor/` 与自己） |
 | `pnpm run test:integration` | 集成/E2E（模拟远端 + `Web E2E` + `Desktop E2E`；缺 harness/浏览器时跳过，`DSH_E2E_STRICT=1` 下改为失败） |
-| `pnpm run check:pr-title` / `build:vendor` | 按 Conventional Commits 校验 PR 标题 / 重新打包 `vendor/ssh2.bundle.cjs`（改动 ssh2 版本时） |
+| `pnpm run check:pr-title` / `build:vendor` | 按 Conventional Commits 校验 PR 标题 / 重新打包 `vendor/ssh2.bundle.cjs`（默认压缩，`--no-minify` 生成可读版） |
 
 `pnpm run verify` 依次执行 `lint` + `format:check` + `check:syntax` + `check:workflows` + `market:check` + `pack:check` +
 `test:unit` + `test:integration`，是本地与 CI 的同一套门禁；只跑单测而不跑校验脚本的 PR 会被 CI 打回。覆盖率门禁
