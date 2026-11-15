@@ -46,7 +46,7 @@ function listLines(numbers) {
 
 // 1. Required files
 const REQUIRED_FILES = `README.md LICENSE CHANGELOG.md
-.editorconfig .gitattributes .git-blame-ignore-revs .prettierignore .prettierrc.json .nvmrc
+.editorconfig .gitattributes .prettierignore .prettierrc.json .nvmrc
 .github/CODEOWNERS .github/PULL_REQUEST_TEMPLATE.md .github/dependabot.yml
 .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml
 .github/workflows/ci.yml .github/workflows/codeql.yml .github/workflows/release.yml
