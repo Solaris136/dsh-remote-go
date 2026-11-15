@@ -53,10 +53,11 @@ export function clamp(value, min, max) {
 }
 
 export function expandHome(value, home) {
-  if (typeof value !== 'string') return value
-  if (value === '~') return home
-  if (value.startsWith('~/') || value.startsWith('~\\')) return home.replace(/[\\/]+$/, '') + value.slice(1)
-  return value
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (text === '') return ''
+  if (text === '~') return home
+  if (text.startsWith('~/') || text.startsWith('~\\')) return home.replace(/[\\/]+$/, '') + text.slice(1)
+  return text
 }
 
 export function parseSshDestination(raw) {

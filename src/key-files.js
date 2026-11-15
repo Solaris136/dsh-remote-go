@@ -3,6 +3,7 @@
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { expandHome } from './util.js'
 
 const MAX_ENTRIES = 500
 
@@ -45,12 +46,4 @@ export async function listKeyFiles(options) {
     entries: shown,
     truncated: entries.length > shown.length,
   }
-}
-
-function expandHome(value, home) {
-  if (typeof value !== 'string' || value.trim() === '') return ''
-  const trimmed = value.trim()
-  if (trimmed === '~') return home
-  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) return path.join(home, trimmed.slice(2))
-  return trimmed
 }
