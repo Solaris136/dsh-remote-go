@@ -144,15 +144,6 @@ window.__ModuleLoader__.load({
       cardConnect: ['连接', 'Connect'],
       cardDisconnect: ['断开', 'Disconnect'],
       cardReconnect: ['重连', 'Reconnect'],
-      cardSync: ['同步', 'Sync'],
-      syncLabel: ['同步', 'Sync'],
-      syncIdle: ['已启用，连接时应用', 'Enabled; applied on connect'],
-      syncRunning: ['正在同步…', 'Syncing…'],
-      syncFailedShort: ['上次同步失败（见连接日志）', 'Last sync failed (see the connect log)'],
-      syncSummary: [
-        '已应用 {plugins} 插件 / {rows} 配置 / {keys} 密钥',
-        'Applied {plugins} plugins / {rows} config rows / {keys} keys',
-      ],
       cardDiagnose: ['诊断', 'Diagnose'],
       cardEdit: ['编辑', 'Edit'],
       cardDelete: ['删除', 'Delete'],
@@ -285,21 +276,7 @@ window.__ModuleLoader__.load({
       'wizard.keepAliveIdle': ['空闲停止', 'Stop when idle'],
       'wizard.idleMinutes': ['空闲分钟数', 'Idle minutes'],
       'wizard.autoReconnect': ['断线后自动重连', 'Reconnect automatically'],
-      'wizard.syncTitle': ['同步本地配置（可选）', 'Sync this machine’s configuration (optional)'],
-      'wizard.syncHint': [
-        '只在你勾选后写入远端；远端独有的插件、配置与凭据默认保留。',
-        'Nothing is written unless you opt in; plugins, config and credentials that exist only on the remote are kept.',
-      ],
-      'wizard.syncCredentials': ['同步 API key / 登录状态', 'Sync API keys and sign-in state'],
-      'wizard.syncCredentialsHint': [
-        '写入远端 ~/.dsh/.credentials.yaml：本机同名 key 覆盖远端，注册记录只补不改。',
-        'Writes the remote ~/.dsh/.credentials.yaml: local keys win over same-named remote ones, records are only added.',
-      ],
-      'wizard.syncPlugins': ['同步插件与插件配置', 'Sync plugins and their configuration'],
-      'wizard.syncPluginsHint': [
-        '只同步 npm registry 上、版本与本机一致的插件；本地路径、平台专用与需构建脚本的插件会跳过。',
-        'Only npm-registry plugins at the same version are synced; local paths, platform-only packages and build-script packages are skipped.',
-      ],
+      'wizard.advanced': ['高级选项', 'Advanced options'],
       'wizard.actionHint': [
         '保存只记下配置；连接会保存并立即连上去，首次连接需要确认主机指纹。',
         'Save only records the entry; Connect saves it and connects right away — the host key is confirmed on first use.',
@@ -772,9 +749,6 @@ window.__ModuleLoader__.load({
       },
       async reconnect(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
-      },
-      async sync(hostId) {
-        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/sync', { method: 'POST', body: {} })
       },
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
@@ -1257,22 +1231,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** The one-line sync state a host card shows when the host opted in. */
-    function syncCardText(t, host) {
-      const sync = host && host.sync ? host.sync : {}
-      const summary = sync.summary && typeof sync.summary === 'object' ? sync.summary : {}
-      if (sync.status === 'syncing') return t('syncRunning')
-      if (sync.status === 'failed') return t('syncFailedShort')
-      if (sync.status === 'applied' || sync.status === 'partial') {
-        return t('syncSummary', {
-          plugins: Number(summary.pluginsAdd) || 0,
-          rows: Number(summary.rowsApply) || 0,
-          keys: Number(summary.refs) || 0,
-        })
-      }
-      return t('syncIdle')
-    }
-
     function HostCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -1327,14 +1285,6 @@ window.__ModuleLoader__.load({
           'drg-card-meta',
           h('div', null, h('dt', null, t('remoteVersion')), h('dd', null, remoteVersion)),
           h('div', null, h('dt', null, t('lastOpened')), h('dd', null, lastOpened)),
-          host.sync && host.sync.enabled
-            ? h(
-                'div',
-                { 'data-testid': 'host-sync-state' },
-                h('dt', null, t('syncLabel')),
-                h('dd', null, syncCardText(t, host)),
-              )
-            : null,
         ),
         box(
           'div',
@@ -1374,18 +1324,6 @@ window.__ModuleLoader__.load({
                   disabled: busy,
                 },
                 t('cardReconnect'),
-              )
-            : null,
-          host.sync && host.sync.enabled
-            ? h(
-                Button,
-                {
-                  variant: 'ghost',
-                  testId: 'host-sync',
-                  onClick: () => props.onSync && props.onSync(host),
-                  disabled: busy || host.status === 'connecting',
-                },
-                t('cardSync'),
               )
             : null,
           box(
@@ -1463,7 +1401,6 @@ window.__ModuleLoader__.load({
                 onOpen: props.onOpenHost,
                 onDisconnect: props.onDisconnectHost,
                 onReconnect: props.onReconnectHost,
-                onSync: props.onSyncHost,
                 onEdit: props.onEditHost,
                 onDelete: props.onDeleteHost,
                 onDiagnose: props.onDiagnoseHost,
@@ -2808,10 +2745,6 @@ window.__ModuleLoader__.load({
         idleMinutes: toInt(draft.idleMinutes, 15),
         autoReconnect: draft.autoReconnect !== false,
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
-        sync: {
-          credentials: draft.syncCredentials === true,
-          plugins: draft.syncPlugins === true,
-        },
       }
       // Contract: an explicit empty string clears the jump host; an omitted field keeps the existing value on update.
       // Send it only when the HostView exposed it (edit) or when adding a host.
@@ -2830,14 +2763,19 @@ window.__ModuleLoader__.load({
       return host
     }
 
-    function validateHostDraft(draft) {
+    function validateHostDraft(draft, options = {}) {
       if (!String(draft.name || '').trim()) return 'wizard.validationName'
       const address = String(draft.address || '').trim()
       if (!address) return 'wizard.validationAddress'
       if (looksLikeWebAddress(address)) return 'wizard.validationAddressUrl'
       const port = toInt(draft.port, NaN)
       if (!Number.isFinite(port) || port < 1 || port > 65535) return 'wizard.validationPort'
-      if (draft.authType === 'key' && !String(draft.keyPath || '').trim()) return 'wizard.validationKeyPath'
+      // An edit that leaves authentication untouched keeps the stored key, so an
+      // empty field is only an error when this save actually sends auth.
+      const requireKeyPath = options.requireKeyPath !== false
+      if (draft.authType === 'key' && requireKeyPath && !String(draft.keyPath || '').trim()) {
+        return 'wizard.validationKeyPath'
+      }
       return null
     }
 
@@ -2856,14 +2794,13 @@ window.__ModuleLoader__.load({
           jumpHost: typeof host.jumpHost === 'string' ? host.jumpHost : '',
           jumpHostKnown: typeof host.jumpHost === 'string',
           authType: typeof host.authType === 'string' ? host.authType : defaults.defaultAuth || 'key',
-          // Empty means keep the stored path on the Host side.
-          keyPath: '',
+          // The Host exposes the configured path (not a secret) so an edit does not
+          // start with an empty field; touching nothing still keeps the stored key.
+          keyPath: typeof host.authKeyPath === 'string' ? host.authKeyPath : '',
           keepAlive: host.keepAlive || 'keep',
           idleMinutes: host.idleMinutes || 15,
           autoReconnect: host.autoReconnect !== false,
           hostKeyPolicy: host.hostKeyPolicy || defaults.hostKeyPolicy || 'first-use',
-          syncCredentials: host.sync?.credentials === true,
-          syncPlugins: host.sync?.plugins === true,
         }
       }
       return {
@@ -2879,8 +2816,6 @@ window.__ModuleLoader__.load({
         idleMinutes: 15,
         autoReconnect: auto.enabled !== false,
         hostKeyPolicy: defaults.hostKeyPolicy || 'first-use',
-        syncCredentials: false,
-        syncPlugins: false,
       }
     }
 
@@ -2953,7 +2888,7 @@ window.__ModuleLoader__.load({
       }
 
       const submit = async (intent) => {
-        const invalid = validateHostDraft(draft)
+        const invalid = validateHostDraft(draft, { requireKeyPath: mode === 'add' || authDirty })
         if (invalid !== null) {
           setFormError(invalid)
           return
@@ -3153,62 +3088,56 @@ window.__ModuleLoader__.load({
               }),
             )
           : null,
-        box(
-          'div',
-          'drg-form-grid drg-form-grid-3',
-          row({
-            key: 'keepAlive',
-            label: 'wizard.keepAlive',
-            testId: 'wizard-keep-alive',
-            options: [
-              ['keep', 'wizard.keepAliveKeep'],
-              ['stop', 'wizard.keepAliveStop'],
-              ['idle', 'wizard.keepAliveIdle'],
-            ],
-          }),
-          draft.keepAlive === 'idle'
-            ? row({ key: 'idleMinutes', kind: 'number', label: 'wizard.idleMinutes', testId: 'wizard-idle-minutes' })
-            : null,
-          h(
-            Field,
-            { label: t('settings.hostKeyPolicy') },
-            h(Select, {
-              value: draft.hostKeyPolicy,
-              ariaLabel: t('settings.hostKeyPolicy'),
-              testId: 'wizard-host-key-policy',
-              options: [
-                { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-              ],
-              onChange: (value) => patchDraft({ hostKeyPolicy: value }),
-            }),
-          ),
-        ),
         h(CheckRow, {
           checked: draft.autoReconnect !== false,
           label: t('wizard.autoReconnect'),
           testId: 'wizard-auto-reconnect',
           onChange: (checked) => patchDraft({ autoReconnect: checked }),
         }),
-        box(
-          'div',
-          'drg-sync-block',
-          box('div', 'drg-field-label', t('wizard.syncTitle')),
-          box('p', 'drg-field-hint', t('wizard.syncHint')),
-          h(CheckRow, {
-            checked: draft.syncCredentials === true,
-            label: t('wizard.syncCredentials'),
-            testId: 'wizard-sync-credentials',
-            onChange: (checked) => patchDraft({ syncCredentials: checked }),
-          }),
-          box('p', 'drg-field-hint', t('wizard.syncCredentialsHint')),
-          h(CheckRow, {
-            checked: draft.syncPlugins === true,
-            label: t('wizard.syncPlugins'),
-            testId: 'wizard-sync-plugins',
-            onChange: (checked) => patchDraft({ syncPlugins: checked }),
-          }),
-          box('p', 'drg-field-hint', t('wizard.syncPluginsHint')),
+        h(
+          'details',
+          { className: 'drg-advanced', 'data-testid': 'wizard-advanced' },
+          h('summary', null, t('wizard.advanced')),
+          box(
+            'div',
+            'drg-advanced-body',
+            box(
+              'div',
+              'drg-form-grid drg-form-grid-3',
+              row({
+                key: 'keepAlive',
+                label: 'wizard.keepAlive',
+                testId: 'wizard-keep-alive',
+                options: [
+                  ['keep', 'wizard.keepAliveKeep'],
+                  ['stop', 'wizard.keepAliveStop'],
+                  ['idle', 'wizard.keepAliveIdle'],
+                ],
+              }),
+              draft.keepAlive === 'idle'
+                ? row({
+                    key: 'idleMinutes',
+                    kind: 'number',
+                    label: 'wizard.idleMinutes',
+                    testId: 'wizard-idle-minutes',
+                  })
+                : null,
+              h(
+                Field,
+                { label: t('settings.hostKeyPolicy') },
+                h(Select, {
+                  value: draft.hostKeyPolicy,
+                  ariaLabel: t('settings.hostKeyPolicy'),
+                  testId: 'wizard-host-key-policy',
+                  options: [
+                    { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
+                    { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
+                  ],
+                  onChange: (value) => patchDraft({ hostKeyPolicy: value }),
+                }),
+              ),
+            ),
+          ),
         ),
         box('p', 'drg-field-hint', t('wizard.actionHint')),
         !isLoopbackAddress(draft.address) ? box('p', 'drg-field-hint', t('loopbackNote')) : null,
@@ -3894,7 +3823,6 @@ window.__ModuleLoader__.load({
                 onOpenHost: props.onOpenHost,
                 onDisconnectHost: props.onDisconnectHost,
                 onReconnectHost: props.onReconnectHost,
-                onSyncHost: props.onSyncHost,
                 onEditHost: props.onEditHost,
                 onDeleteHost: props.onDeleteHost,
                 onDiagnoseHost: props.onDiagnoseHost,
@@ -4254,13 +4182,6 @@ window.__ModuleLoader__.load({
         runAction(host, () => api.reconnect(host.id))
       }
 
-      const syncHost = (host) => {
-        if (!host) return
-        setRemoteUrl(null)
-        closeCarrier(host.id).catch(() => {})
-        runAction(host, () => api.sync(host.id))
-      }
-
       const resolveConflict = (host, action) => {
         if (!host || !host.id) return
         setConflictBusy(true)
@@ -4360,7 +4281,6 @@ window.__ModuleLoader__.load({
           onOpenHost: openHost,
           onDisconnectHost: disconnectHost,
           onReconnectHost: reconnectHost,
-          onSyncHost: syncHost,
           onEditHost: (host) => openWizard({ mode: 'edit', host }),
           onDeleteHost: (host) => setPendingDelete(host),
           onDiagnoseHost: runDiagnose,
@@ -4797,9 +4717,9 @@ window.__ModuleLoader__.load({
     .drg-input::-webkit-calendar-picker-indicator { display: none; opacity: 0; }
     .drg-check { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--dsw-alias-label-primary); font-size: 13px; cursor: pointer; }
     .drg-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--dsw-alias-brand-primary); cursor: pointer; }
-    .drg-sync-block { display: grid; gap: 2px; margin: 6px 0; }
-    .drg-sync-block .drg-check { margin: 4px 0 0; }
-    .drg-sync-block .drg-field-hint { margin: 0; }
+    .drg-advanced { margin: 8px 0; border-top: 0.5px solid var(--dsw-alias-border-l1); padding-top: 8px; }
+    .drg-advanced > summary { margin-bottom: 4px; font-size: 13px; cursor: pointer; }
+    .drg-advanced-body { display: grid; gap: 4px; }
     .drg-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: start; gap: 0 16px; }
     .drg-form-grid-3 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
     .drg-divider { height: 0.5px; margin: 14px 0; background: var(--dsw-alias-border-l1); }

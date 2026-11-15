@@ -13,6 +13,8 @@ export function hostView(runtime, ctx) {
     addressMasked: maskAddress(entry),
     /** Never the secret itself; lets the Client ask for a one-time password. */
     authType: entry.auth?.type ?? 'key',
+    /** The configured key file path (not a secret); lets the edit form prefill it. */
+    authKeyPath: entry.auth?.type === 'key' && typeof entry.auth.keyPath === 'string' ? entry.auth.keyPath : null,
     /** Whether a remembered password exists in the credential store (never the value). */
     passwordSaved: entry.auth?.type === 'password' ? runtime.passwordSaved === true || runtime.password != null : false,
     passwordStorageAvailable: ctx.passwordStorageAvailable,
@@ -22,12 +24,6 @@ export function hostView(runtime, ctx) {
     progress: runtime.progress,
     error: runtime.error,
     warning: runtime.warning,
-    sync: {
-      ...runtime.sync,
-      enabled: entry.sync?.credentials === true || entry.sync?.plugins === true,
-      credentials: entry.sync?.credentials === true,
-      plugins: entry.sync?.plugins === true,
-    },
     conflict: runtime.conflict,
     fingerprint: runtime.fingerprint,
     logs: connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],

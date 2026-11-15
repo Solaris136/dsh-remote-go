@@ -14,7 +14,6 @@ const ErrorCode = Object.freeze({
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
   VERSION_MISMATCH: 'version-mismatch',
   UNSUPPORTED_OS: 'unsupported-os',
-  SYNC_FAILED: 'sync-failed',
   INVALID_INPUT: 'invalid-input',
   INTERNAL: 'internal',
 })
@@ -51,10 +50,6 @@ const CODE_TABLE = {
   [ErrorCode.UNSUPPORTED_OS]: {
     retryable: false,
     title: { zh: '远端系统暂不支持', en: 'This remote system is not supported yet' },
-  },
-  [ErrorCode.SYNC_FAILED]: {
-    retryable: true,
-    title: { zh: '同步本地配置失败', en: 'Syncing the local configuration failed' },
   },
   [ErrorCode.INVALID_INPUT]: { retryable: false, title: { zh: '填写的信息有误', en: 'Some fields are invalid' } },
   [ErrorCode.INTERNAL]: { retryable: true, title: { zh: '插件内部错误', en: 'Internal plugin error' } },
@@ -226,26 +221,6 @@ export const errors = {
       say(`V1 仅支持 Linux 远端，检测到 ${os}。`, `V1 supports Linux remotes only; detected ${os}.`),
       [['换一台 Linux 服务器，或等待后续版本', 'Use a Linux server, or wait for a later release']],
       { retryable: false },
-    ),
-  syncFailed: (detail, options) =>
-    fail(
-      ErrorCode.SYNC_FAILED,
-      detail ??
-        say(
-          '把本机的插件与配置同步到远端时失败，远端文件已尽量恢复。',
-          'Syncing this machine’s plugins and configuration to the remote failed; the remote files were restored where possible.',
-        ),
-      [
-        [
-          '重试一次；若仍失败，可先关闭该主机的同步选项再连接',
-          'Retry; if it keeps failing, turn the host’s sync options off and connect again',
-        ],
-        [
-          '查看连接日志里的 sync: 行，确认是哪一步失败',
-          'Check the sync: lines in the connection log to see which step failed',
-        ],
-      ],
-      options,
     ),
   invalidInput: (field, detail) =>
     fail(

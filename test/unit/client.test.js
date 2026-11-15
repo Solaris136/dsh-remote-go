@@ -1460,42 +1460,13 @@ test('the add-host dialog is one form with save and connect, and no test step', 
   assert.match(html, /远端存活策略/)
   assert.match(html, /value="~\/\.ssh\/id_rsa"/)
   assert.match(html, /data-testid="wizard-auto-reconnect"/)
-  assert.match(html, /data-testid="wizard-sync-credentials"/)
-  assert.match(html, /data-testid="wizard-sync-plugins"/)
-  assert.match(html, /同步 API key \/ 登录状态/)
+  assert.match(html, /data-testid="wizard-advanced"/)
+  assert.match(html, />高级选项</)
+  assert.match(html, /data-testid="wizard-keep-alive"/)
+  assert.match(html, /主机指纹策略/)
   assert.match(html, /data-testid="wizard-key-path-pick"/)
   assert.match(html, /list="drg-ssh-alias-list"/)
   assert.match(html, /<datalist[^>]*id="drg-ssh-alias-list"/)
-})
-
-test('a host that opted into sync shows its result and a sync action', () => {
-  const noop = () => {}
-  const host = hostView({
-    sync: {
-      enabled: true,
-      credentials: true,
-      plugins: true,
-      status: 'applied',
-      at: '2026-11-15T00:00:00.000Z',
-      hash: 'abc',
-      error: null,
-      summary: { pluginsAdd: 2, rowsApply: 3, refs: 1 },
-    },
-  })
-  const html = render(
-    React.createElement(plugin.components.HostListView, {
-      t,
-      state: stateWith({ hosts: [host] }),
-      loading: false,
-      error: null,
-      onAdd: noop,
-      onRefresh: noop,
-      onOpenHost: noop,
-      onSyncHost: noop,
-    }),
-  )
-  assert.match(html, /已应用 2 插件 \/ 3 配置 \/ 1 密钥/)
-  assert.match(html, /data-testid="host-sync"/)
 })
 
 test('diagnostics drawer renders the checklist with statuses', () => {
