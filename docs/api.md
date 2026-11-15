@@ -113,7 +113,7 @@ interface HostView {
 interface SettingsView {
   defaultPort: number
   defaultAuth: 'key' | 'password'
-  defaultKeyPath: string        // 默认 ~/.ssh/id_ed25519
+  defaultKeyPath: string        // 默认 ~/.ssh/id_rsa
   connectTimeoutSec: number
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   hostKeyPolicy: 'first-use' | 'strict'
@@ -198,15 +198,15 @@ data: {}
 只读目录浏览，供客户端选择私钥文件；范围限用户主目录内，拒绝 `..` 与符号链接逃逸：
 ```json
 { "ok": true, "path": "C:\\Users\\me\\.ssh", "parent": "C:\\Users\\me",
-  "entries": [{ "name": "id_ed25519", "path": "C:\\Users\\me\\.ssh\\id_ed25519", "isDirectory": false }],
-  "truncated": false, "defaultKeyPath": "~/.ssh/id_ed25519", "defaultDir": "C:\\Users\\me\\.ssh" }
+  "entries": [{ "name": "id_rsa", "path": "C:\\Users\\me\\.ssh\\id_rsa", "isDirectory": false }],
+  "truncated": false, "defaultKeyPath": "~/.ssh/id_rsa", "defaultDir": "C:\\Users\\me\\.ssh" }
 ```
 
 ### `POST /hosts`
 新增或更新主机（带 `id` 为更新）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用 `SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
 ```json
 { "host": { "id": "h_xxx", "name": "构建服务器", "address": "my-server", "port": 22, "username": "ubuntu",
-  "auth": { "type": "key", "keyPath": "~/.ssh/id_ed25519" }, "jumpHost": null, "keepAlive": "keep",
+  "auth": { "type": "key", "keyPath": "~/.ssh/id_rsa" }, "jumpHost": null, "keepAlive": "keep",
   "idleMinutes": 15, "autoReconnect": true, "hostKeyPolicy": "first-use" } }
 ```
 响应 `{ "ok": true, "host": HostView }`；校验失败返回 `invalid-input`。

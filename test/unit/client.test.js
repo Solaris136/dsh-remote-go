@@ -1458,7 +1458,7 @@ test('the add-host dialog is one form with save and connect, and no test step', 
   assert.match(html, /密钥文件/)
   assert.doesNotMatch(html, /SSH Agent/)
   assert.match(html, /远端存活策略/)
-  assert.match(html, /value="~\/\.ssh\/id_ed25519"/)
+  assert.match(html, /value="~\/\.ssh\/id_rsa"/)
   assert.match(html, /data-testid="wizard-key-path-pick"/)
   assert.match(html, /list="drg-ssh-alias-list"/)
   assert.match(html, /<datalist[^>]*id="drg-ssh-alias-list"/)
