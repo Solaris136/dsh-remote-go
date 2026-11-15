@@ -31,6 +31,9 @@ const PLUGIN_ADD_TIMEOUT_MS = 10 * 60_000
 const PNPM_INSTALL_TIMEOUT_MS = 10 * 60_000
 const VERIFY_TIMEOUT_MS = 3 * 60_000
 
+/** The pnpm workspace file a DSH profile needs before `dsh plugin` can install into it. */
+const PROFILE_WORKSPACE_YAML = 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n'
+
 export function syncWanted(entry) {
   return entry?.sync?.credentials === true || entry?.sync?.plugins === true
 }
@@ -73,7 +76,14 @@ async function readRemoteSnapshot(ssh, layout, profile) {
     // swallow-ok: no sync state yet means the next apply writes one
     state = null
   }
-  return { packageJson, rows: patch.rows, rowsError: patch.error, credentialsText: texts[files[2]], state }
+  return {
+    packageJson,
+    rows: patch.rows,
+    rowsError: patch.error,
+    credentialsText: texts[files[2]],
+    state,
+    workspaceText: texts[files[4]],
+  }
 }
 
 function logPlanSummary(ctx, runtime, plan) {
@@ -142,6 +152,22 @@ export function skeletonProfilePackage(profile) {
     dependencies: {},
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
   }
+}
+
+/** The root files a fresh remote profile needs before `dsh plugin` can run in it. */
+export function skeletonProfileFiles(profile, packageJson = null) {
+  const pkg = isPlainObject(packageJson) ? packageJson : skeletonProfilePackage(profile)
+  return [
+    { path: `profiles/${profile}/package.json`, text: `${JSON.stringify(pkg, null, 2)}\n` },
+    {
+      path: `profiles/${profile}/cordis.yml`,
+      text: '# dsh profile root — an empty entry list; the tree is composed from bundles and cordis.patch.yml.\n[]\n',
+    },
+    {
+      path: `profiles/${profile}/pnpm-workspace.yaml`,
+      text: PROFILE_WORKSPACE_YAML,
+    },
+  ]
 }
 
 function nextProfilePackage(current, plan, profile) {
@@ -286,18 +312,34 @@ export async function applySync(ctx, runtime, prepared) {
     const profilePackage = nextProfilePackage(remote.packageJson, plan, profile)
     if (profilePackage.changed) {
       ctx.progress.phase(runtime, 'sync', 'sync-config')
-      await writeRemoteFile(
-        ssh,
-        `${layout.dshHome}/profiles/${profile}/package.json`,
-        `${JSON.stringify(profilePackage.packageJson, null, 2)}\n`,
-        { mode: '600' },
-      )
+      // A fresh remote profile needs the same root files `dsh --profile` bootstraps.
+      const writes =
+        remote.packageJson === null
+          ? skeletonProfileFiles(profile, profilePackage.packageJson)
+          : [
+              {
+                path: `profiles/${profile}/package.json`,
+                text: `${JSON.stringify(profilePackage.packageJson, null, 2)}\n`,
+              },
+            ]
+      for (const file of writes) {
+        await writeRemoteFile(ssh, `${layout.dshHome}/${file.path}`, file.text, { mode: '600' })
+      }
       ctx.progress.log(runtime, 'info', 'sync: remote profile manifest updated')
     }
 
     const added = plan.plugins.filter((item) => item.action === 'add')
     const failedPlugins = []
     if (added.length > 0) {
+      if (String(remote.workspaceText ?? '').trim() === '') {
+        await writeRemoteFile(
+          ssh,
+          `${layout.dshHome}/profiles/${profile}/pnpm-workspace.yaml`,
+          PROFILE_WORKSPACE_YAML,
+          { mode: '600' },
+        )
+        ctx.progress.log(runtime, 'info', 'sync: wrote the missing pnpm workspace file')
+      }
       const shimDir = await ensurePnpm(ctx, runtime, layout, facts)
       const nodeBinDir = facts.nodeBinDir ?? (facts.nodePath ? path.dirname(facts.nodePath) : '')
       const npxPath = facts.npxPath ?? (nodeBinDir ? `${nodeBinDir}/npx` : 'npx')
