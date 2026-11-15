@@ -68,8 +68,8 @@
     "@deepseek-ai/dsh-plugin-market-index": "0.2.2-rc.1",
     "esbuild": "^0.28.2",
     "js-yaml": "^5.5.0",
-    "prettier": "^3.9.10",
-    "puppeteer-core": "^25.16.0",
+    "prettier": "^3.10.0",
+    "puppeteer-core": "^25.17.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "ssh2": "1.17.0"
