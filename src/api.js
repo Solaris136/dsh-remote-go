@@ -193,6 +193,10 @@ export function createApi(options) {
       await service.reconnect(id)
       return { ok: true }
     },
+    'POST sync': async (id) => {
+      await service.syncNow(id)
+      return { ok: true, accepted: true }
+    },
     'POST fingerprint': async (id, req) => {
       const body = await readJson(req)
       await service.confirmFingerprint(id, {

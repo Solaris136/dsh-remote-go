@@ -243,6 +243,16 @@ export class SshConnection extends EventEmitter {
             stream.destroy()
           }, timeoutMs)
         }
+        // Optional stdin (file uploads): the command reads it, so a secret never
+        // appears on the remote command line.
+        if (options.stdin !== undefined) {
+          try {
+            stream.end(String(options.stdin))
+          } catch (writeError) {
+            finish(writeError)
+            return
+          }
+        }
         stream.on('data', (/** @type {Buffer} */ data) => {
           const text = data.toString('utf8')
           if (chunks.stdout.length < maxBytes) {

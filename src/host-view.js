@@ -22,6 +22,12 @@ export function hostView(runtime, ctx) {
     progress: runtime.progress,
     error: runtime.error,
     warning: runtime.warning,
+    sync: {
+      ...runtime.sync,
+      enabled: entry.sync?.credentials === true || entry.sync?.plugins === true,
+      credentials: entry.sync?.credentials === true,
+      plugins: entry.sync?.plugins === true,
+    },
     conflict: runtime.conflict,
     fingerprint: runtime.fingerprint,
     logs: connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],

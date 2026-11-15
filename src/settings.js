@@ -48,6 +48,16 @@ function boolean(value, fallback) {
   return typeof value === 'boolean' ? value : fallback
 }
 
+/** Per-host sync opt-ins; both default to off so a host never writes to the remote unless asked. */
+export function sanitizeHostSync(raw, existing) {
+  const input = isPlainObject(raw) ? raw : null
+  const base = isPlainObject(existing) ? existing : null
+  return {
+    credentials: boolean(input?.credentials, base?.credentials ?? false),
+    plugins: boolean(input?.plugins, base?.plugins ?? false),
+  }
+}
+
 export function sanitizeSettings(raw) {
   const defaults = defaultSettings()
   if (!isPlainObject(raw)) return defaults
@@ -124,6 +134,7 @@ export function sanitizeHostEntry(raw, options = {}) {
     idleMinutes: numberIn(raw.idleMinutes ?? existing?.idleMinutes, 1, 24 * 60, DEFAULT_IDLE_MINUTES),
     autoReconnect: boolean(raw.autoReconnect, existing?.autoReconnect ?? settings.autoReconnect.enabled),
     hostKeyPolicy,
+    sync: sanitizeHostSync(raw.sync, existing?.sync),
     pinnedFingerprint:
       typeof raw.pinnedFingerprint === 'string' && raw.pinnedFingerprint.startsWith('SHA256:')
         ? raw.pinnedFingerprint
