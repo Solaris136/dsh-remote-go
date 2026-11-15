@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { Readable } from 'node:stream'
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SshConnection, parseSshKeyType, toSshError } from '../../src/ssh.js'
@@ -219,4 +220,195 @@ test('post-connect ssh errors are contained and reach optional listeners', async
   ssh.on('error', (error) => seen.push(error.message))
   assert.doesNotThrow(() => fake.emit('error', new Error('connection lost')))
   assert.deepEqual(seen, ['connection lost'])
+})
+
+function fakeSftp(files, directories = {}) {
+  const ended = { value: false }
+  const wrapper = {
+    stat(path, callback) {
+      if (directories[path] !== undefined) {
+        callback(null, {
+          size: 0,
+          mtime: 0,
+          isDirectory: () => true,
+          isFile: () => false,
+        })
+        return
+      }
+      const file = files[path]
+      if (file === undefined) {
+        const error = new Error('No such file')
+        error.code = 2
+        callback(error)
+        return
+      }
+      callback(null, {
+        size: file.bytes.length,
+        mtime: 0,
+        isDirectory: () => file.directory === true,
+        isFile: () => file.directory !== true,
+      })
+    },
+    readdir(path, callback) {
+      const listing = directories[path]
+      if (listing === undefined) {
+        const error = new Error('No such directory')
+        error.code = 2
+        callback(error)
+        return
+      }
+      callback(null, listing)
+    },
+    createReadStream(path) {
+      const file = files[path]
+      if (file === undefined) {
+        const error = new Error('No such file')
+        error.code = 2
+        throw error
+      }
+      return Readable.from([file.bytes])
+    },
+    readFile(path, callback) {
+      const file = files[path]
+      if (file === undefined) {
+        const error = new Error('No such file')
+        error.code = 2
+        callback(error)
+        return
+      }
+      callback(null, file.bytes)
+    },
+    end() {
+      ended.value = true
+    },
+  }
+  return { wrapper, ended }
+}
+
+function sshWithSftp(files, directories) {
+  const ssh = new SshConnection({ host: 'example.com' })
+  const { wrapper, ended } = fakeSftp(files, directories)
+  ssh.client = { sftp: (callback) => callback(null, wrapper) }
+  ssh.closed = false
+  return { ssh, ended }
+}
+
+test('saveRemoteFile streams a regular file to disk and ends the session', async () => {
+  const { ssh, ended } = sshWithSftp({
+    '/home/ubuntu/report.md': { bytes: Buffer.from('hello remote') },
+  })
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-file-')), 'report.md')
+  const progress = []
+  const result = await ssh.saveRemoteFile('/home/ubuntu/report.md', target, {
+    onProgress: (info) => progress.push(info),
+  })
+  assert.equal(result.size, 12)
+  assert.equal(await readFile(target, 'utf8'), 'hello remote')
+  assert.equal(progress.at(-1).doneBytes, 12)
+  assert.equal(progress.at(-1).totalBytes, 12)
+  assert.equal(ended.value, true)
+})
+
+test('saveRemoteFile refuses directories and has no size cap', async () => {
+  const directory = sshWithSftp({ '/home/ubuntu/folder': { bytes: Buffer.alloc(0), directory: true } })
+  const first = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-dir-')), 'folder')
+  await assert.rejects(directory.ssh.saveRemoteFile('/home/ubuntu/folder', first), /remote-file-unavailable/)
+  assert.equal(directory.ended.value, true)
+  const large = sshWithSftp({ '/home/ubuntu/big.bin': { bytes: Buffer.alloc(32) } })
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-large-')), 'big.bin')
+  const result = await large.ssh.saveRemoteFile('/home/ubuntu/big.bin', target)
+  assert.equal(result.size, 32)
+  assert.equal((await readFile(target)).length, 32)
+  assert.equal(large.ended.value, true)
+})
+
+test('saveRemoteFile removes the partial file when cancelled mid-stream', async () => {
+  const { ssh } = sshWithSftp({ '/home/ubuntu/report.md': { bytes: Buffer.from('hello remote') } })
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-cancel-file-')), 'report.md')
+  await assert.rejects(
+    ssh.saveRemoteFile('/home/ubuntu/report.md', target, { isCancelled: () => true }),
+    /download-cancelled/,
+  )
+  await assert.rejects(readFile(target), /ENOENT/)
+})
+
+test('saveRemoteTree writes files and empty directories into a local target', async () => {
+  const { ssh, ended } = sshWithSftp(
+    {
+      '/home/ubuntu/project/a.txt': { bytes: Buffer.from('aaa') },
+      '/home/ubuntu/project/sub/b.txt': { bytes: Buffer.from('bbb') },
+    },
+    {
+      '/home/ubuntu/project': [
+        { filename: 'sub', attrs: { isDirectory: () => true, mtime: 0 } },
+        { filename: 'a.txt', attrs: { isFile: () => true, size: 3, mtime: 0 } },
+        { filename: 'empty', attrs: { isDirectory: () => true, mtime: 0 } },
+        { filename: 'link', attrs: { isSymbolicLink: () => true } },
+      ],
+      '/home/ubuntu/project/sub': [{ filename: 'b.txt', attrs: { isFile: () => true, size: 3, mtime: 0 } }],
+      '/home/ubuntu/project/empty': [],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-tree-')), 'project')
+  const inventory = []
+  const progress = []
+  const result = await ssh.saveRemoteTree('/home/ubuntu/project', target, {
+    onInventory: (info) => inventory.push(info),
+    onProgress: (info) => progress.push(info),
+  })
+  assert.deepEqual(inventory, [{ totalBytes: 6, totalFiles: 2 }])
+  assert.equal(result.destination, path.resolve(target))
+  assert.equal(await readFile(path.join(target, 'a.txt'), 'utf8'), 'aaa')
+  assert.equal(await readFile(path.join(target, 'sub', 'b.txt'), 'utf8'), 'bbb')
+  assert.deepEqual(await readdir(path.join(target, 'empty')), [])
+  assert.equal(progress.at(-1).doneFiles, 2)
+  assert.equal(progress.at(-1).doneBytes, 6)
+  assert.equal(ended.value, true)
+})
+
+test('saveRemoteTree has no byte or entry cap', async () => {
+  const files = {
+    '/home/ubuntu/big/a.bin': { bytes: Buffer.alloc(32) },
+    '/home/ubuntu/big/b.bin': { bytes: Buffer.alloc(32) },
+  }
+  const directories = {
+    '/home/ubuntu/big': [
+      { filename: 'a.bin', attrs: { isFile: () => true, size: 32 } },
+      { filename: 'b.bin', attrs: { isFile: () => true, size: 32 } },
+    ],
+  }
+  const { ssh } = sshWithSftp(files, directories)
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-big-')), 'big')
+  const result = await ssh.saveRemoteTree('/home/ubuntu/big', target)
+  assert.equal(result.totalBytes, 64)
+  assert.equal(result.totalFiles, 2)
+  assert.equal((await readFile(path.join(target, 'a.bin'))).length, 32)
+})
+
+test('saveRemoteTree can stop before the next file', async () => {
+  const { ssh } = sshWithSftp(
+    { '/home/ubuntu/project/a.txt': { bytes: Buffer.from('aaa') } },
+    {
+      '/home/ubuntu/project': [{ filename: 'a.txt', attrs: { isFile: () => true, size: 3 } }],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-cancel-')), 'project')
+  const result = await ssh.saveRemoteTree('/home/ubuntu/project', target, { isCancelled: () => true })
+  assert.equal(result.cancelled, true)
+  await assert.rejects(readdir(target), /ENOENT/)
+})
+
+test('saveRemoteTree rejects a non-directory root', async () => {
+  const { ssh } = sshWithSftp({ '/home/ubuntu/a.txt': { bytes: Buffer.from('a') } })
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-file-')), 'a.txt')
+  await assert.rejects(ssh.saveRemoteTree('/home/ubuntu/a.txt', target), /remote-file-unavailable/)
+})
+
+test('saveRemoteFile surfaces a missing SFTP session and a missing file', async () => {
+  const closed = new SshConnection({ host: 'example.com' })
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-closed-')), 'a')
+  await assert.rejects(closed.saveRemoteFile('/home/ubuntu/a', target), /SSH connection is not open/)
+  const missing = sshWithSftp({})
+  const missingTarget = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-missing-')), 'missing')
+  await assert.rejects(missing.ssh.saveRemoteFile('/home/ubuntu/missing', missingTarget), /No such file/)
 })

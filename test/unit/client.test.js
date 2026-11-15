@@ -26,6 +26,7 @@ function loadClientPlugin(options = {}) {
     fetch: options.fetch,
     document: options.document,
     getComputedStyle: options.getComputedStyle,
+    URL: options.URL,
   }
   sandbox.window = {
     fetch: options.fetch,
@@ -102,6 +103,9 @@ function fakeDocument(options = {}) {
         if (index >= 0) this.children.splice(index, 1)
         child.parentNode = null
         return child
+      },
+      remove() {
+        if (this.parentNode) this.parentNode.removeChild(this)
       },
       addEventListener(type, handler) {
         if (!this.listeners[type]) this.listeners[type] = []
@@ -202,6 +206,9 @@ function fakeDom(options = {}) {
         child.parentNode = null
         return child
       },
+      remove() {
+        if (this.parentNode) this.parentNode.removeChild(this)
+      },
       addEventListener(type, handler) {
         if (!this.listeners[type]) this.listeners[type] = []
         this.listeners[type].push(handler)
@@ -297,7 +304,7 @@ function translateFrom(dict) {
   }
 }
 
-function runApply(plugin) {
+function runApply(plugin, options = {}) {
   const calls = {
     effects: [],
     injects: [],
@@ -306,6 +313,7 @@ function runApply(plugin) {
     registerNamespace: null,
     bindNamespace: null,
     openWorkspace: [],
+    openTab: [],
   }
   const disposers = []
   let dicts = null
@@ -323,7 +331,8 @@ function runApply(plugin) {
       return dispose
     },
     get(name) {
-      return name === 'uiWorkspace' ? uiWorkspace : null
+      if (name === 'uiWorkspace') return uiWorkspace
+      return null
     },
     locale: {
       register(ns, dictionaries) {
@@ -436,6 +445,98 @@ test('factory injects slots and locale', () => {
   const injects = Array.from(plugin.inject)
   assert.deepEqual(injects, ['slots', 'locale'])
   assert.equal(injects.includes('layout'), false)
+})
+
+test('the guest scripts carry the file-menu selectors and the folder item', () => {
+  const tools = plugin.carrier.guestTools()
+  assert.match(tools, /li\[data-files-entry\]\[data-files-path\]/)
+  assert.match(tools, /data-drg-dir-download/)
+  assert.match(tools, /下载到本地/)
+  assert.match(tools, /dsw-icon-download-outline-regular/)
+  assert.match(tools, /download-file/)
+  assert.match(tools, /data-menu-backing/)
+})
+
+test('api.startDownload posts the host, path and destination and returns the job', async () => {
+  const calls = []
+  const fetch = async (url, init) => {
+    calls.push({ url, init })
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        job: { id: 'dl_1', phase: 'preparing', name: 'project', totalBytes: 0, doneBytes: 0 },
+      }),
+    }
+  }
+  const withFetch = loadClientPlugin({ fetch })
+  const job = await withFetch.api.startDownload('h_1', '/home/ubuntu/project', 'C:/Users/me/Downloads')
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].url, /\/downloads$/)
+  assert.equal(calls[0].init.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    hostId: 'h_1',
+    path: '/home/ubuntu/project',
+    destination: 'C:/Users/me/Downloads',
+  })
+  assert.equal(job.id, 'dl_1')
+})
+
+test('the guest download intent keeps the request kind and path', () => {
+  const store = plugin.toolRequests.create()
+  store.requestDownload({ hostId: 'h_1', kind: 'directory', path: '/home/ubuntu/project', name: 'project' })
+  store.requestDownload({ hostId: 'h_1', kind: 'file', path: '/home/ubuntu/a.txt', name: 'a.txt' })
+  const first = store.take()
+  assert.equal(first.kind, 'download')
+  assert.equal(first.path, '/home/ubuntu/project')
+  const second = store.take()
+  assert.equal(second.path, '/home/ubuntu/a.txt')
+  assert.equal(store.take(), null)
+})
+
+test('api.downloadStatus and cancelDownload use the job routes', async () => {
+  const calls = []
+  const fetch = async (url, init) => {
+    calls.push({ url, init })
+    if (init.method === 'DELETE') {
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, job: { id: 'dl_1', phase: 'ready' } }),
+    }
+  }
+  const withFetch = loadClientPlugin({ fetch })
+  const status = await withFetch.api.downloadStatus('dl_1')
+  assert.equal(status.phase, 'ready')
+  assert.match(calls[0].url, /\/downloads\/dl_1\/status$/)
+  assert.equal(await withFetch.api.cancelDownload('dl_1'), true)
+  assert.match(calls[1].url, /\/downloads\/dl_1$/)
+  assert.equal(calls[1].init.method, 'DELETE')
+})
+
+test('api.startDownload turns a Host error envelope into an ErrorView', async () => {
+  const fetch = async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      ok: false,
+      error: {
+        code: 'remote-file-unavailable',
+        title: { zh: '无法读取远端文件', en: 'Cannot read the remote file' },
+        detail: { zh: '文件不存在', en: 'The file is missing' },
+        nextSteps: [],
+        retryable: true,
+      },
+    }),
+  })
+  const withFetch = loadClientPlugin({ fetch })
+  await assert.rejects(
+    () => withFetch.api.startDownload('h_1', '/home/ubuntu/missing.txt', 'C:/Downloads'),
+    (error) => error.view && error.view.code === 'remote-file-unavailable',
+  )
 })
 
 test('components export is a non-empty map of renderable functions', () => {
@@ -1162,6 +1263,61 @@ test('a guest that refuses the caption script stays below the local band', async
   }
 })
 
+test('a carrier is revealed only after its guest has painted', async () => {
+  const doc = fakeDocument()
+  const takeover = loadClientPlugin({
+    document: doc,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-9', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async () => {},
+      },
+    },
+  })
+  const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  try {
+    const opened = await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    assert.equal(opened.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    assert.ok(root, 'the carrier must still mount on document.body')
+    // The switch starts transparent: revealing a hidden `<webview>` as-is would paint the
+    // carrier's own background for a frame before the guest has anything to show.
+    assert.equal(root.style.display, '')
+    assert.equal(root.style.opacity, '0')
+    assert.equal(root.style.pointerEvents, 'none')
+
+    const calls = []
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    view.executeJavaScript = (code) => {
+      calls.push(code)
+      return Promise.resolve(code.includes('requestAnimationFrame') ? 'ok' : 'installed')
+    }
+    fire(view, 'did-stop-loading')
+    await settle(140)
+    assert.ok(
+      calls.some((code) => code.includes('requestAnimationFrame')),
+      'the reveal must wait for a frame of the guest',
+    )
+    assert.equal(root.style.opacity, '', 'a painted guest lets the carrier become opaque')
+    assert.equal(root.style.pointerEvents, '')
+
+    // Leaving before the guest paints must not leave it opaque for the next visit.
+    takeover.carrier.hide()
+    assert.equal(root.style.display, 'none')
+    const again = await takeover.carrier.open({ hostId: 'h_a' })
+    assert.equal(again.ok, true)
+    assert.equal(again.reused, true)
+    assert.equal(root.style.opacity, '0', 'a reopen starts transparent again')
+    takeover.carrier.hide()
+    await settle(140)
+    assert.equal(root.style.display, 'none', 'a reveal that lost the window must not show it')
+    assert.equal(root.style.opacity, '0', 'nor make it opaque')
+  } finally {
+    await takeover.carrier.close()
+  }
+})
+
 test('the switcher row is drawn into the local sidebar and lists local, hosts and the actions', () => {
   const dom = fakeDom()
   const local = loadClientPlugin({ document: dom.document })
@@ -1570,6 +1726,81 @@ test('conflict prompt lists the foreign processes and offers three actions', () 
   assert.match(html, /保留它，另起一个/)
   assert.match(html, /取消连接/)
   assert.match(html, /data-testid="remote-conflict-prompt"/)
+})
+
+test('the download progress card renders a determinate bar, byte counts and file counts', () => {
+  const t = (key, params) => {
+    if (key === 'downloadPreparing') return 'Downloading ' + params.name
+    if (key === 'downloadFiles') return params.done + ' / ' + params.total + ' files'
+    return key
+  }
+  const element = plugin.components.DownloadProgress({
+    job: {
+      id: 'dl_1',
+      phase: 'preparing',
+      name: 'project',
+      totalBytes: 100,
+      doneBytes: 40,
+      totalFiles: 3,
+      doneFiles: 1,
+    },
+    t,
+    locale: 'en',
+    onCancel: () => {},
+  })
+  const html = render(element)
+  assert.match(html, /data-testid="dsh-remote-go-download"/)
+  assert.match(html, /Downloading project/)
+  assert.match(html, /aria-valuenow="40"/)
+  assert.match(html, /width:40%/)
+  assert.match(html, /40 B \/ 100 B/)
+  assert.match(html, /1 \/ 3 files/)
+  assert.match(html, /drg-download-grip/)
+  assert.match(html, />downloadCancel</)
+})
+
+test('the download stack is a draggable transform layer over the bottom-right anchor', () => {
+  const t = (key, params) => {
+    if (key === 'downloadPreparing') return 'Downloading ' + params.name
+    return key
+  }
+  const html = render(
+    React.createElement(plugin.components.DownloadCenter, {
+      jobs: [
+        { id: 'dl_1', phase: 'preparing', name: 'a', totalBytes: 10, doneBytes: 5 },
+        { id: 'dl_2', phase: 'preparing', name: 'b', totalBytes: 0, doneBytes: 0 },
+      ],
+      t,
+      locale: 'en',
+      onCancel: () => {},
+      onDismiss: () => {},
+    }),
+  )
+  assert.match(html, /data-testid="dsh-remote-go-downloads"/)
+  assert.match(html, /transform:translate\(0px, 0px\)/)
+  assert.equal((html.match(/data-testid="dsh-remote-go-download"/g) ?? []).length, 2)
+  assert.match(html, /drg-download-action/)
+})
+
+test('the download progress card shows an error view and hides the cancel action', () => {
+  const t = (key) => key
+  const element = plugin.components.DownloadProgress({
+    job: {
+      id: 'dl_2',
+      phase: 'error',
+      name: 'broken',
+      totalBytes: 0,
+      doneBytes: 0,
+      error: { title: { zh: '失败', en: 'Failed' }, detail: { zh: '没有权限', en: 'No permission' } },
+    },
+    t,
+    locale: 'en',
+    onCancel: () => assert.fail('an error card must not offer cancel'),
+  })
+  const html = render(element)
+  assert.match(html, /downloadFailed/)
+  assert.match(html, /No permission/)
+  assert.doesNotMatch(html, /downloadCancel/)
 })
 
 test('the overlay host carries the theme root and the stylesheet', () => {

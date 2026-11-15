@@ -29,6 +29,8 @@ export function createApi(options) {
 
   const broadcastState = () => writeAll(`event: state\ndata: ${JSON.stringify(service.snapshot())}\n\n`)
   service.on('state', broadcastState)
+  const broadcastDownload = (job) => writeAll(`event: download\ndata: ${JSON.stringify(job)}\n\n`)
+  service.on('download', broadcastDownload)
 
   const heartbeat = setInterval(() => writeAll('event: ping\ndata: {}\n\n'), 15_000)
   heartbeat.unref?.()
@@ -259,6 +261,38 @@ export function createApi(options) {
 
       await service.init()
 
+      // Download jobs save through the Host directly; no binary response route is
+      // needed, so these handlers only shape JSON.
+      const segments = path.split('/').filter(Boolean)
+      if (method === 'POST' && path === '/downloads') {
+        const body = await readJson(req)
+        const job = await service.startRemoteDownload(body.hostId, body.path, {
+          destination: body.destination,
+        })
+        sendJson(res, 200, { ok: true, job })
+        return
+      }
+      if (segments[0] === 'downloads' && segments.length >= 2 && segments.length <= 3) {
+        let jobId = ''
+        try {
+          jobId = decodeURIComponent(segments[1])
+        } catch {
+          throw errors.invalidInput('id', {
+            zh: '下载任务 id 不是合法的 URL 编码。',
+            en: 'The download job id is not valid URL encoding.',
+          })
+        }
+        if (method === 'GET' && segments.length === 3 && segments[2] === 'status') {
+          sendJson(res, 200, { ok: true, job: await service.remoteDownloadStatus(jobId) })
+          return
+        }
+        if (method === 'DELETE' && segments.length === 2) {
+          await service.cancelRemoteDownload(jobId)
+          sendJson(res, 200, { ok: true })
+          return
+        }
+      }
+
       const routeKey = `${method} ${path}`
       if (Object.hasOwn(ROUTES, routeKey)) {
         sendJson(res, 200, await ROUTES[routeKey](req, url))
@@ -293,6 +327,7 @@ export function createApi(options) {
     handler,
     dispose() {
       service.removeListener('state', broadcastState)
+      service.removeListener('download', broadcastDownload)
       clearInterval(heartbeat)
       for (const client of sseClients) {
         try {

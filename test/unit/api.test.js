@@ -127,6 +127,80 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
   }
 })
 
+test('POST /downloads starts a job; status and cancel are separate', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const started = []
+    let cancelled = null
+    service.downloads = {
+      start(runtime, path, options) {
+        started.push({ runtimeId: runtime.id, path, destination: options?.destination })
+        return {
+          id: 'dl_1',
+          hostId: runtime.id,
+          path,
+          name: 'report.bin',
+          kind: 'file',
+          phase: 'preparing',
+          totalBytes: 0,
+          doneBytes: 0,
+          totalFiles: 0,
+          doneFiles: 0,
+          destination: options?.destination ?? null,
+          error: null,
+        }
+      },
+      status(id) {
+        return {
+          id,
+          phase: 'ready',
+          name: 'report.bin',
+          kind: 'file',
+          totalBytes: 4,
+          doneBytes: 4,
+          totalFiles: 1,
+          doneFiles: 1,
+          destination: 'C:/Users/me/Downloads/report.bin',
+          error: null,
+        }
+      },
+      cancel(id) {
+        cancelled = id
+        return true
+      },
+      dispose() {},
+    }
+    const start = await call(api.base, '/downloads', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        hostId: host.id,
+        path: '/home/ubuntu/report.bin',
+        destination: 'C:/Users/me/Downloads',
+      }),
+    })
+    assert.equal(start.status, 200)
+    assert.equal(start.json.job.phase, 'preparing')
+    assert.deepEqual(started, [
+      { runtimeId: host.id, path: '/home/ubuntu/report.bin', destination: 'C:/Users/me/Downloads' },
+    ])
+
+    const status = await call(api.base, '/downloads/dl_1/status')
+    assert.equal(status.status, 200)
+    assert.equal(status.json.job.phase, 'ready')
+    assert.equal(status.json.job.destination, 'C:/Users/me/Downloads/report.bin')
+
+    const cancel = await call(api.base, '/downloads/dl_1', { method: 'DELETE' })
+    assert.equal(cancel.status, 200)
+    assert.equal(cancelled, 'dl_1')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('diagnose returns a redacted report', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)
@@ -260,6 +334,36 @@ test('SSE /events emits the first state frame immediately', async () => {
   }
 })
 
+test('SSE /events also broadcasts download progress frames', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const controller = new AbortController()
+    const response = await fetch(`${api.base}/events`, { signal: controller.signal })
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    const readUntil = async (needle) => {
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline && !text.includes(needle)) {
+        const { value, done } = await reader.read()
+        if (done) break
+        text += decoder.decode(value, { stream: true })
+      }
+    }
+    await readUntil('event: state')
+    service.emit('download', { id: 'dl_1', phase: 'preparing', doneBytes: 3, totalBytes: 10 })
+    await readUntil('event: download')
+    controller.abort()
+    assert.match(text, /event: download/)
+    assert.match(text, /"id":"dl_1"/)
+    assert.match(text, /"doneBytes":3/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('SSE still refuses cross-site callers without the header', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)
@@ -301,7 +405,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.3')
+    assert.equal(result.json.apiVersion, '2.6')
   } finally {
     await api.close()
     await service.shutdown()

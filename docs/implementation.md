@@ -32,6 +32,10 @@ dsh-remote-go
 │  ├─ webapp.js             远端 web 生命周期的公开再导出面（remote-web / remote-proc）
 │  ├─ remote-web.js         远端 dsh web 启动/停止/收养、启动脚本与 URL 解析
 │  ├─ remote-proc.js        进程扫描、foreign DSH、探活与 token 交换
+│  ├─ remote-path.js        远端绝对路径校验/命名、本地文件名清洗
+│  ├─ remote-files.js       远端路径校验、单文件/文件夹下载入口
+│  ├─ local-download.js     本机落盘：唯一文件/目录、流式写入、重名自动改名
+│  ├─ download-jobs.js      Host 侧下载任务：准备、进度节流、TTL/取消/容量上限
 │  ├─ tunnel.js             本地回环 TCP ↔ SSH forwardOut
 │  ├─ store.js              hosts/settings/secrets 持久化与内存缓存
 │  ├─ atomic-json.js        原子 JSON 写（tmp + wx + fsync + rename 重试）
@@ -85,7 +89,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 - 托管 Node 版本取本机 DSH `engines.node` 下限（`node-runtime.js` 负责下载、SHA-256 校验、解压与复用）；`remote-web.js` 持有全部远端 shell 命令模板：启动脚本写 `logs/web.log` 并读 `dsh web:` 行，`run/web.json` 只记录 pid/port/version/profile/dshHome/launch 标记（无 token）。
 
 ## 5. 本地 HTTP API
-`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；`authorize()`（`x-dsh-remote-go: 1` + Origin 同源 + 拒绝 cross-site），`/health` 开放、`/events` 只做 Origin 栅栏（EventSource 不能加头）；请求体上限 1 MiB；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、未知异常→500；SSE 在 `service.on('state')` 广播，连接先推一帧、15s 一次 `ping`。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行，用于验收/排障。
+`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；`authorize()`（`x-dsh-remote-go: 1` + Origin 同源 + 拒绝 cross-site），`/health` 开放、`/events` 只做 Origin 栅栏（EventSource 不能加头）；请求体上限 1 MiB；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、未知异常→500；SSE 在 `service.on('state')` 与 `service.on('download')` 上广播，连接先推一帧、15s 一次 `ping`。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行，用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`GET /downloads/:id` 取一次字节、`DELETE` 取消；两个二进制路由（`/downloads/:id` 与兼容的 `/hosts/:id/file`）都由 `sendFile()` 写出原始字节，并把 URL 编码后的文件名放进 `x-dsh-file-name`，仍在同一鉴权与错误信封里。
 
 ## 6. 持久化
 本地 `$DSH_HOME/remote-go/`：
@@ -101,19 +105,20 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 ## 7. Client 半端
 `client.js` 是**单文件、无构建**的浏览器插件：`window.__ModuleLoader__.load({ id, factory(require) })`，只 `require('react')`。
 
-- 注册：只注册 `shell.overlay`（唯一浮层宿主：管理清单 / 向导 / 提示）与主机条；不注册 `settings.section`、`main` 主面板或侧边栏任何行。主机条：`mountHostRow(win)` 是唯一实现——本地页面直接调用，远端 guest 里跑 `HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'`；每 1.5s（`SWITCHER_TICK_MS`）用 `updateSwitcher` 推状态，按 `[data-window-drag]` 找侧边栏，页面重渲染后行自动回位。
-- 远端窗口池：`carrierPool`（每主机一个 `<webview>` + 独立 partition，不设上限）；`showOverlay` 串行执行并记住 `wanted`，复用热窗口、只切 `display`；`hideOverlays` 隐藏不销毁，`closeCarrier` 释放。`[data-shell-overlay]` 被抬到远端窗口之上（`.drg-root.drg-overlay` 自身不绘制），所以远端开着时浮窗也在最前。
+- 注册：只注册 `shell.overlay`（唯一浮层宿主：管理清单 / 向导 / 提示 / 下载卡）与主机条；不注册 `settings.section`、`main` 主面板或侧边栏任何行。主机条：`mountHostRow(win)` 是唯一实现——本地页面直接调用，远端 guest 里跑 `HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'`；每 1.5s（`SWITCHER_TICK_MS`）用 `updateSwitcher` 推状态，按 `[data-window-drag]` 找侧边栏，页面重渲染后行自动回位。
+- 远端工具：`GUEST_TOOLS_SCRIPT`（`mountGuestTools` 字符串化）在每次 `did-stop-loading` 与主机条一起注入 guest，拦截远端文件树右键菜单的下载项，把 `{ action:'download-file', kind, path, name }` 放进同一条 `__drgBridgeQueue`；目录菜单没有原生下载项，脚本克隆一个菜单项追加「下载到本地」。路由到本地后由 `toolStore` 交给浮层里的下载任务。下载卡是右下角的 `DownloadCenter`（可拖动 transform + 视口夹取），`DownloadProgress` 订阅 SSE `download` 帧并在 ready 后调用 `saveAs`；准备阶段提供取消按钮。终端完全交给 DSH 自带的开始页卡片 / `Ctrl+\``，插件不再注入终端脚本或注册 `sidebarRight`。
+- 远端窗口池：`carrierPool`（每主机一个 `<webview>` + 独立 partition，不设上限）；`showOverlay` 串行执行并记住 `wanted`，复用热窗口；隐藏用 `display:none`，显示走 `revealCarrier`——先透明（`opacity:0` + `pointer-events:none`）挂上，等 `markCarrierReady`（`did-stop-loading`/主帧 `did-fail-load`）与 guest 自己画出的帧（`GUEST_PAINT_SCRIPT`，两帧 `requestAnimationFrame`，`CARRIER_READY_TIMEOUT_MS` / `CARRIER_PAINT_TIMEOUT_MS` 兜底），`revealToken` 与 `carrierPool.current` 决定这次显示还算不算数，最后才变不透明——被隐藏的 guest 没有 surface，直接显示会画出一帧（冷窗口是整段加载期）carrier 底色，那就是切换时的闪烁（design §4.2）；`hideOverlays` 隐藏不销毁，`closeCarrier` 释放。`[data-shell-overlay]` 被抬到远端窗口之上（`.drg-root.drg-overlay` 自身不绘制），所以远端开着时浮窗也在最前。
 - 数据：`GET /state` 为唯一真相，`EventSource /events` 实时推送、失败退化为 3s 轮询；常驻浮层宿主订阅一次，主机条与浮窗都读它。所有请求经 `apiRequest`，统一加 `x-dsh-remote-go: 1` 与 `credentials:'same-origin'`，错误转 `ErrorView`；i18n 用内置 `zh`/`en` 字典 + 宿主 locale 服务，两侧键集合由单元测试保证一致。
 - 接管：`showOverlay` 经 `window.dshDesktop.browser.acquire` 创建 guest，carrier 铺满整窗；`applyGuestCaption` 在每个 `dom-ready`/`did-stop-loading` 注入 `data-windows-titlebar`、高度与 `data-fullscreen`，`syncCarrierCaption` 决定让出标题栏或退回整体下移，并同步 `drg-carrier-grip` 拖拽条与 `html.drg-caption-live`；本地全屏状态由 `watchCaptionState` 的 MutationObserver 推给 guest；每次 `did-stop-loading` 在标题栏之后重注入主机条，`__drgBridgeQueue` 轮询把点击交回 `switcher.dispatch`。
 - 意图：`panelStore.requestIntent({ kind:'open'|'disconnect'|'manage'|'local' })` 与 `wizardStore.open({ mode, host })` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开并释放窗口、Host 确认后交回本地，`manage` 开清单，`local` 隐藏远端窗口并清 Host 侧 active。意图订阅在挂载时建立，回调读不到最新窗口状态，「窗口在哪台」的收尾一律走 ref 或 `setState(fn)`。
-- 安全不变量（测试读源码断言）：不开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。文件内分区（`//#region`）：常量 → i18n 字典/助手 → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 连接窗口（进度 + 连接日志）/远端窗口 → 主机条 → 密钥选择器 → 添加/编辑主机 → 诊断 → 设置 → 密码/冲突 → toast → 浮层宿主（`PluginOverlay`）→ 样式 → 注册。
+- 安全不变量（测试读源码断言）：不开外部窗口、不渲染 iframe、token/URL 不写 localStorage、只用回环 URL。文件内分区（`//#region`）：常量 → i18n 字典/助手 → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 连接窗口（进度 + 连接日志）/远端窗口 → 主机条 → 远端下载桥（`mountGuestTools`）→ 密钥选择器 → 添加/编辑主机 → 诊断 → 设置 → 密码/冲突 → toast → 浮层宿主（`PluginOverlay`，含可拖动下载卡）→ 样式 → 注册。
 
 ## 8. 测试、结构守卫与维护约定
 | 层 | 文件 | 覆盖 |
 |---|---|---|
-| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe` | 解析、比较、指纹、脱敏、校验 |
+| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe/remote-files/local-download` | 解析、比较、指纹、脱敏、校验、远端路径、本机落盘与重名改名 |
 | 运行时 | `node-runtime/bootstrap/remote-web/remote-proc/tunnel/ssh` | 托管 Node、npx 判定与命令模板、启动/收养、URL/token 握手、隧道、认证与指纹 |
-| 服务 | `service/api/store/secrets/key-files/host-key` | 连接管线、指纹确认、冲突、重连/存活、诊断、HTTP 鉴权/SSE、原子写 |
+| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs` | 连接管线、指纹确认、冲突、重连/存活、诊断、HTTP 鉴权/SSE、原子写、下载任务 |
 | 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、关键组件、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 浅/深色对比度、第三方主题 token 覆盖与恢复（同时覆盖发布路径的 tarball 安装） |
@@ -128,6 +133,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 ## 9. 维护约定
 - 文档引用**符号**，不写行号；重构后跑 `pnpm run verify` 发现断链。
 - 新增远端 shell 命令必须走 `webapp.js` 固定模板，不接受调用方拼接的任意 shell。
+- 远端下载只走 `remote-files.js` / `local-download.js` / `download-jobs.js`（绝对路径、文件或文件夹、SFTP）；不要把远端路径拼进 shell，也不要为“方便”开放任意目录浏览端点。不允许给文件大小、文件夹总字节或文件数量设上限：所有内容都从 SFTP 流式写进用户选择的本地目录，不打包 ZIP，也不写远端磁盘。
 - 新增可替换外部依赖从 `ServiceOptions` 注入（不要在 `service.js` 里直接 `new`）；新增 runtime 字段先改 `host-runtime.js`，新增对外字段先改 `host-view.js`，不要在管线里临时拼形状。
 - 新增设置项同时更新 `settings.js` 的默认值/清洗、`docs/api.md` 的 SettingsView 与 `docs/design.md` 的界面说明；日志 `#log(runtime, level, …)` 的 `level` 是真实级别，信息性 trace 用 `debug`，不要用 `info` 刷屏。
 - 远端 `~/.dsh` 是远端用户自己的数据：本插件的任何代码都不应读写它（版本探测、启动/停止、日志与 run registry 除外），新增功能先确认不越过这条线。

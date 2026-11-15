@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
 import { REMOTE_CONFLICT_TIMEOUT_MS } from './constants.js'
 import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
+import { createDownloadJobs } from './download-jobs.js'
 import { reconnectHost, startConnect } from './connect-pipeline.js'
 import { diagnoseHost } from './diagnostics.js'
 import { errors } from './errors.js'
@@ -100,6 +101,10 @@ export class RemoteGoService extends EventEmitter {
       logLevel: this.logLevel,
       getSettings: () => this.store.getSettings(),
       emitState: () => this.emitState(),
+    })
+    this.downloads = createDownloadJobs({
+      logger: this.logger,
+      emit: (job) => this.emit('download', job),
     })
   }
 
@@ -212,9 +217,34 @@ export class RemoteGoService extends EventEmitter {
     return diagnoseHost(runtimeOf(this.ctx, id), { targetVersion: this.localVersion })
   }
 
+  /**
+   * Start preparing one remote file or folder for the client's download.
+   * @param {string} id - host id.
+   * @param {unknown} path - absolute remote path.
+   * @param {{ destination?: string }} [options] - local destination directory.
+   * @returns {object} the initial download job view.
+   */
+  async startRemoteDownload(id, path, options = {}) {
+    await this.init()
+    return this.downloads.start(runtimeOf(this.ctx, id), path, options)
+  }
+
+  /** Current view of one download job. */
+  async remoteDownloadStatus(jobId) {
+    await this.init()
+    return this.downloads.status(jobId)
+  }
+
+  /** Cancel one download job. */
+  async cancelRemoteDownload(jobId) {
+    await this.init()
+    return this.downloads.cancel(jobId)
+  }
+
   async shutdown() {
     this.ctx.state.disposed = true
     this.ctx.progress.dispose()
+    this.downloads.dispose()
     await shutdownAll(this.ctx)
   }
 }

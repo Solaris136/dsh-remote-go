@@ -15,8 +15,8 @@ export const API_HEADER = 'x-dsh-remote-go'
 export const PLUGIN_ID = 'dsh-remote-go'
 export const PLUGIN_VERSION = '0.1.0'
 
-/** Host↔Client contract version served by `GET /version` (docs/api.md v2.3). */
-export const API_VERSION = '2.3'
+/** Host↔Client contract version served by `GET /version` (docs/api.md v2.4). */
+export const API_VERSION = '2.6'
 
 export const DEFAULT_KEY_PATH = '~/.ssh/id_rsa'
 
