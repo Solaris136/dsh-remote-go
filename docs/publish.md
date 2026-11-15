@@ -1,6 +1,6 @@
 # 发布到 npm 与插件市场
 > 目标：把 `dsh-remote-go` 作为标准 DSH bundle 发布到 npm，并进入插件市场索引（DSH Discover 可直接安装）。
-> 推荐路径：**推送 `v*` 标签触发 `.github/workflows/release.yml`**；手工发布仅作应急。
+> 推荐路径：**推送到 `release` 分支触发 `.github/workflows/release.yml`**（npm 发布走 OIDC 可信发布，不需要 token）；手工发布仅作应急。
 
 ## 0. 前置检查
 发布前在干净工作区跑与 CI 相同的门禁：
@@ -28,34 +28,41 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 3. 把 `CHANGELOG.md` 中 `## [Unreleased]` 的内容整理进新的 `## [x.y.z] - YYYY-MM-DD` 小节，并更新文件末尾的链接引用。
 4. 重新生成市场条目（发布时间取自最近一次 git commit，结果可复现）：`pnpm run market:entry`（写 `market/plugin-entry.json` 与 `market/index.json`）与 `pnpm run market:check`（校验；prepack 也会跑）。
 5. 提交并推送：`chore(release): v<x.y.z>`。
-6. 打标签并推送：`git tag -a v<x.y.z> -m "v<x.y.z>"` → `git push origin v<x.y.z>`。
+6. 推送到 `release` 分支：`git push origin release`（或把 `main` 合并/快进到 `release` 后再推送）。
 
-`release.yml` 会校验标签与 `package.json` 版本严格相等（`v0.1.0` ↔ `0.1.0`），不一致直接失败。
+`release.yml` 从 `package.json` 读取版本；该版本已存在于 npm 时跳过发布、只补 tag 与 GitHub Release，所以重复推送 `release` 分支是安全的。
 
 ## 2. 通过 GitHub Actions 发布（推荐）
-推送 `v*` 标签后，[`release.yml`](../.github/workflows/release.yml) 依次：
+推送到 `release` 分支后，[`release.yml`](../.github/workflows/release.yml) 依次：
 1. 检出代码、安装依赖（`--frozen-lockfile --ignore-scripts`），跑发布门禁（`lint` / `check:syntax` / `check:workflows` / `market:check` / `pack:check` / `test:unit`）。
-2. 校验标签与版本一致。
+2. 从 `package.json` 读取版本；`npm view <name>@<version>` 已存在则跳过发布（只补 tag / Release）。
 3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）。
-4. 配置了 secret `NPM_PUBLISH_TOKEN` 则 `npm publish --access public --provenance`；未配置则输出 notice 并跳过发布，仍创建 GitHub Release。
-5. `gh release create` 创建 GitHub Release，自动生成 notes 并附上 `.tgz`。
+4. `npm publish --access public`：npm CLI 用工作流的 OIDC 身份完成认证（`id-token: write`），provenance 自动生成，**不需要任何 token**。
+5. 自动创建并推送 `v<x.y.z>` 标签，`gh release create` 生成 notes 并附上 `.tgz`。
 
-需要的一次性配置：
+需要的一次性配置（在 npmjs.com 上）：
 
-| 类型 | 名称 | 说明 |
-|---|---|---|
-| Secret | `NPM_PUBLISH_TOKEN` | npm Automation token（仅发布用，可撤销）；不配置则只发 GitHub Release |
+| 位置 | 填写 |
+|---|---|
+| 包 → Settings → Trusted publishing → GitHub Actions | Organization or user：`Solaris136`；Repository：`dsh-remote-go`；Workflow filename：`release.yml`；Allowed actions：勾 `npm publish` |
 
-也可用 `workflow_dispatch` 手动触发并传入 `tag`；`dry_run=true`（默认）只演练不发布、不建 Release。
+注意：
+- 保存后 npm 不校验；仓库/文件名写错只会在第一次 CI 发布时报 `ENEEDAUTH`。
+- 新建的信任关系必须在 **2 天内**完成一次成功发布，否则过期；过期后删掉重建。
+- 工作流里**不要**设置 `NODE_AUTH_TOKEN`，否则会与 OIDC 认证冲突。
+
+`workflow_dispatch` 可手动触发一次（在默认分支上运行，已发布版本会自动跳过发布）。
 
 ## 3. 手工发布（应急）
 ```bash
-npm login                                    # 一次性
+npm login                                    # 一次性；npm 要求发布必须 2FA
 pnpm run verify                              # 门禁
 npm publish --dry-run                        # 预演（不上传）
-npm publish --access public --provenance     # 正式发布
+npm publish --access public --otp=<动态码>   # 正式发布
 ```
-> 手工发布没有 Release notes（`provenance` 签名仍在），除紧急情况外请走 §2。
+> - npm 全局要求「创建/发布包必须 2FA」，包级设置只能选「允许 token」或「禁止 token」，两者都要 2FA，无法关闭。
+> - 本地手工发布没有 provenance，也不会创建 GitHub Release；除应急外请走 §2。
+> - 新包若走 `npm stage publish`，会先公开一个 `0.0.0-stage` 占位版占名，真正的版本要在 npmjs.com 的 Staged Packages 里批准后才上线。
 
 发布后验证安装：
 ```bash
