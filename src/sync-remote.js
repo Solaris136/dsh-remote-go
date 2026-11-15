@@ -14,6 +14,7 @@ export function snapshotFiles(profile) {
     `profiles/${profile}/cordis.patch.yml`,
     '.credentials.yaml',
     'remote-go/sync/state.json',
+    `profiles/${profile}/pnpm-workspace.yaml`,
   ]
 }
 

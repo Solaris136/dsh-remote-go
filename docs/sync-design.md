@@ -67,7 +67,8 @@ connect: ssh → probe → managed node → [sync prepare] → adopt / conflict 
   1. `tar` 备份 `package.json`、`cordis.patch.yml`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、
      `.credentials.yaml` 到 `~/.dsh/remote-go/sync/backup-<ts>.tgz`；
   2. 合并凭据并写入（0600）；
-  3. 必要时补 profile 骨架 / 选中已安装插件的 bundle；
+  3. profile 不存在时先写骨架（`package.json` / `cordis.yml` / `pnpm-workspace.yaml`），已安装的插件补选 bundle，
+     缺 `pnpm-workspace.yaml` 时补写；
   4. 首次安装插件前，用托管 Node 的 npm 在 `~/.dsh/remote-go/pnpm` 准备 pnpm，并写一个
      `~/.dsh/remote-go/bin/pnpm` shim（`dsh plugin` 需要 `PATH` 上的 pnpm）；
   5. 逐包 `dsh plugin --profile <p> add <name>@<version>`（失败记入 `failedPlugins`，不整单回滚）；

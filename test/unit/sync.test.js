@@ -20,7 +20,7 @@ import {
   parseSnapshotOutput,
   snapshotFiles,
 } from '../../src/sync-remote.js'
-import { applySync, prepareSync } from '../../src/sync-run.js'
+import { applySync, prepareSync, skeletonProfileFiles } from '../../src/sync-run.js'
 import { satisfiesRange } from '../../src/version.js'
 
 function localSnapshot(overrides = {}) {
@@ -361,23 +361,23 @@ async function localFixture() {
   return { home, profileDir }
 }
 
-function remoteSnapshotText() {
+function remoteSnapshotText(options = {}) {
   const files = snapshotFiles('web')
   return [
     `@@dsh-remote-go:${files[0]}@@`,
-    '{"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base"]}}}',
+    options.packageJson ?? '{"dependencies":{},"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base"]}}}',
     '',
     `@@dsh-remote-go:${files[1]}@@`,
-    '[]',
+    options.patch ?? '[]',
     '',
     `@@dsh-remote-go:${files[2]}@@`,
-    'version: 1',
-    'refs:',
-    '  OTHER: keep',
-    'records: {}',
+    options.credentials ?? 'version: 1\nrefs:\n  OTHER: keep\nrecords: {}',
     '',
     `@@dsh-remote-go:${files[3]}@@`,
     '',
+    '',
+    `@@dsh-remote-go:${files[4]}@@`,
+    options.workspace ?? '',
     '',
   ].join('\n')
 }
@@ -388,7 +388,9 @@ function fakeSsh(options = {}) {
     writes: [],
     async exec(command, execOptions = {}) {
       ssh.commands.push(command)
-      if (command.includes('@@dsh-remote-go:')) return { code: 0, stdout: remoteSnapshotText(), stderr: '' }
+      if (command.includes('@@dsh-remote-go:')) {
+        return { code: 0, stdout: options.snapshot ?? remoteSnapshotText(), stderr: '' }
+      }
       if (command.includes('tar -xzf')) return { code: 0, stdout: 'RESTORED\n', stderr: '' }
       if (command.includes('tar -czf')) return { code: 0, stdout: 'BACKED-UP\n', stderr: '' }
       if (command.includes('cat > "$TMP"')) {
@@ -478,4 +480,29 @@ test('a failed verification restores the backup instead of failing the connectio
     ssh.commands.some((command) => command.includes('tar -xzf')),
     'the backup is restored',
   )
+})
+
+test('a fresh remote profile is created with the files dsh plugin needs', async () => {
+  const { home, profileDir } = await localFixture()
+  const ssh = fakeSsh({ snapshot: remoteSnapshotText({ packageJson: '' }) })
+  const ctx = syncContext({ home, profileDir })
+  const runtime = syncRuntime(ssh)
+  const prepared = await prepareSync(ctx, runtime)
+  runtime.forceSync = true
+  await applySync(ctx, runtime, prepared)
+  assert.equal(runtime.sync.status, 'applied')
+  const written = ssh.writes.map((entry) => entry.command).join('\n')
+  assert.match(written, /profiles\/web\/package\.json/)
+  assert.match(written, /profiles\/web\/cordis\.yml/)
+  assert.match(written, /profiles\/web\/pnpm-workspace\.yaml/)
+})
+
+test('the profile skeleton carries the root files a fresh profile boots from', () => {
+  const files = skeletonProfileFiles('web')
+  assert.equal(files.length, 3)
+  const pkg = JSON.parse(files[0].text)
+  assert.equal(pkg.name, 'dsh-profile-web')
+  assert.deepEqual(pkg.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+  assert.match(files[1].text, /\[\]\n$/)
+  assert.match(files[2].text, /nodeLinker: hoisted/)
 })
