@@ -6,7 +6,7 @@ test('defaultSettings matches the documented defaults', () => {
   const settings = defaultSettings()
   assert.equal(settings.defaultPort, 22)
   assert.equal(settings.defaultAuth, 'key')
-  assert.equal(settings.defaultKeyPath, '~/.ssh/id_ed25519')
+  assert.equal(settings.defaultKeyPath, '~/.ssh/id_rsa')
   assert.equal(settings.hostKeyPolicy, 'first-use')
   assert.equal(settings.saveTokens, false)
   assert.equal(settings.autoReconnect.enabled, true)
@@ -31,7 +31,7 @@ test('sanitizeSettings recovers from malformed input', () => {
   })
   assert.equal(settings.defaultPort, 65535)
   assert.equal(settings.defaultAuth, 'key')
-  assert.equal(settings.defaultKeyPath, '~/.ssh/id_ed25519')
+  assert.equal(settings.defaultKeyPath, '~/.ssh/id_rsa')
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.autoReconnect.maxAttempts, 0)
   assert.equal(settings.autoReconnect.baseDelayMs, 100)
@@ -47,7 +47,7 @@ test('sanitizeHostEntry validates and normalizes a first host', () => {
     {
       name: '  腾讯云  ',
       address: 'ubuntu@192.0.2.10:2222',
-      auth: { type: 'key', keyPath: '~/.ssh/id_ed25519' },
+      auth: { type: 'key', keyPath: '~/.ssh/id_rsa' },
       keepAlive: 'idle',
       idleMinutes: 30,
     },
@@ -58,7 +58,7 @@ test('sanitizeHostEntry validates and normalizes a first host', () => {
   assert.equal(entry.port, 2222)
   assert.equal(entry.username, 'ubuntu')
   assert.equal(entry.auth.type, 'key')
-  assert.equal(entry.auth.keyPath, '~/.ssh/id_ed25519')
+  assert.equal(entry.auth.keyPath, '~/.ssh/id_rsa')
   assert.equal(entry.keepAlive, 'idle')
   assert.equal(entry.idleMinutes, 30)
   assert.ok(entry.createdAt)

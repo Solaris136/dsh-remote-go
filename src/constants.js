@@ -18,7 +18,7 @@ export const PLUGIN_VERSION = '0.1.0'
 /** Host↔Client contract version served by `GET /version` (docs/api.md v2.2). */
 export const API_VERSION = '2.2'
 
-export const DEFAULT_KEY_PATH = '~/.ssh/id_ed25519'
+export const DEFAULT_KEY_PATH = '~/.ssh/id_rsa'
 
 export const REMOTE_START_TIMEOUT_MS = 300_000
 
