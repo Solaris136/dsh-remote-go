@@ -266,11 +266,6 @@ async function runRemote(ssh, command, options) {
   }
 }
 
-/** Diagnostic tail of one exec result: stderr when it said anything, else stdout. */
-function failureTail(result, max) {
-  return headTail(result.stderr || result.stdout, max)
-}
-
 async function scanManagedNode(ssh, layout) {
   let result
   try {
