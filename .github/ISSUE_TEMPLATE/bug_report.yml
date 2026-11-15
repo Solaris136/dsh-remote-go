@@ -11,7 +11,6 @@ body:
 
         - 已搜索 [已有 issue](https://github.com/Solaris136/dsh-remote-go/issues?q=is%3Aissue)，没有重复。
         - 已阅读 [README](https://github.com/Solaris136/dsh-remote-go#readme) 与 [docs/](https://github.com/Solaris136/dsh-remote-go/tree/main/docs)。
-        - 按 [贡献指南](https://github.com/Solaris136/dsh-remote-go/blob/main/CONTRIBUTING.md) 准备好最小复现信息。
 
         这个插件通过 SSH 把远端 DSH 的 Web 界面嵌在本地全局面板里，问题可能出在本地 Host、
         远端 Host、SSH 链路、隧道或面板 iframe 任一层，请尽量写清失败发生在哪一层。

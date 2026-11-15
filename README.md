@@ -13,7 +13,7 @@ and one host switcher ("Local" + every host) sits at the top of the sidebar on b
 
 ## 文档
 
-设计 [docs/design.md](docs/design.md)（职责边界、界面、连接生命周期、运行时与安全）· 代码地图 [docs/implementation.md](docs/implementation.md) · API 契约 [docs/api.md](docs/api.md)（v2.2）· 发布流程 [docs/publish.md](docs/publish.md) · 远端测试环境 [e2e/remote/README.md](e2e/remote/README.md)
+设计 [docs/design.md](docs/design.md)（职责边界、界面、连接生命周期、运行时与安全）· 代码地图 [docs/implementation.md](docs/implementation.md) · API 契约 [docs/api.md](docs/api.md)（v2.2）· 发布流程 [docs/publish.md](docs/publish.md) · 远端测试环境 [e2e/remote/README.md](e2e/remote/README.md) · 变更记录 [CHANGELOG.md](CHANGELOG.md)
 
 ## 它是什么
 
@@ -79,7 +79,7 @@ env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
 - 本地 HTTP API 要求同源 + 自定义请求头（`x-dsh-remote-go`）；跨站请求被拒绝。
 - 操作都在远端执行；首次进入提示「你正在操作远端服务器」，关闭时提示「远端任务会继续运行」。
 
-发现安全问题请**不要**公开提交 issue，按 [SECURITY.md](SECURITY.md) 私下报告。
+发现安全问题请**不要**公开提交 issue，通过 [GitHub Security Advisory](https://github.com/Solaris136/dsh-remote-go/security/advisories/new) 私密报告。
 
 ## 开发与测试
 
@@ -105,7 +105,7 @@ pnpm run sim:remote
 node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 ```
 
-它用 ssh2 在本机起一个真实 SSH 端点（回环地址、默认凭据，可用 `--ssh-user` / `--ssh-password` 覆盖），并只允许转发到自己的端口。环境变量与故障排查细节见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+它用 ssh2 在本机起一个真实 SSH 端点（回环地址、默认凭据，可用 `--ssh-user` / `--ssh-password` 覆盖），并只允许转发到自己的端口。运行参数见 `e2e/sim/simulated-remote.mjs` 开头的用法说明。
 
 ## CI 与发布
 
@@ -125,10 +125,6 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 - 不迁移旧版的独立状态目录（`~/.dsh-remote-go`）：升级后插件文件固定在 `~/.dsh/remote-go`。插件只收养自己启动的远端实例；远端已有手工启动的 DSH 时连接会暂停并列出这些进程，由你选择「停止它并启动受管实例」「保留它，另起一个」或「取消连接」。
 - 远端界面只能**整窗接管**：非桌面端（例如浏览器里的 `dsh web`）没有 guest 能力，此时没有可用的远端呈现方式；多台远端在同一时刻只能呈现一台。
 - 刷新本地页面后主机条会重新出现，点那台主机即可再次接管（远端任务不受影响）；修改 Host 插件代码需重启本地 DSH 生效（Client 半端随页面刷新加载）。
-
-## 参与贡献
-
-贡献指南 [CONTRIBUTING.md](CONTRIBUTING.md) · 行为准则 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · 安全策略 [SECURITY.md](SECURITY.md) · 变更记录 [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 

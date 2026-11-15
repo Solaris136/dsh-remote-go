@@ -117,7 +117,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 浅/深色对比度、第三方主题 token 覆盖与恢复（同时覆盖发布路径的 tarball 安装） |
 
-四条结构性约定（见 CONTRIBUTING §9，全部由 `test/unit/guards.test.js` 扫描源码强制）：
+四条结构性约定（全部由 `test/unit/guards.test.js` 扫描源码强制）：
 
 1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.js`。
 2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，条目失效判失败。

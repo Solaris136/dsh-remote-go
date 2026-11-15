@@ -87,7 +87,7 @@ PR 条目的中英标题与描述**不要手抄**：它们由 `locale/zh.json` /
 ## 5. 发布物内容与安全性
 - tarball 只含运行时文件（`index.js`、`client.js`、`src/`、`vendor/`、`locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、研究资料（`scripts/pack-check.mjs` 校验）。
 - 运行时依赖为空（`dependencies: {}`）；`ssh2` 以 vendored bundle 随包发布，安装不拉取任何依赖。
-- 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；令牌/密码/私钥绝不落盘（详见 README 安全节与 [SECURITY.md](../SECURITY.md)）。
+- 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；令牌/密码/私钥绝不落盘（详见 README 安全节）。
 
 ## 6. 首次发布后补 npm 徽章
 `README.md` 目前只有 CI / CodeQL / License / Node / DSH 徽章；npm 首次发布后可在徽章区补一行：
