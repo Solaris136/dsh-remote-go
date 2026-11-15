@@ -513,6 +513,7 @@ export function applyManagedNodeFacts(facts, managed) {
   return {
     ...facts,
     nodePath: managed.nodePath,
+    nodeBinDir: managed.nodeBinDir,
     nodeVersion: normalizeVersion(managed.version),
     npmPath: managed.npmPath ?? facts.npmPath,
     npxPath: managed.npxPath,

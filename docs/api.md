@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.2）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.3）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -10,6 +10,10 @@
 > **v2.1 变更**：`HostView` 增加 `logs`（连接窗口的日志尾），随 `/state` 与 SSE 一起下发；没有新增端点。
 >
 > **v2.2 变更**：移除客户端未使用的 `POST /hosts/:id/password` 与 `POST /hosts/:id/keepalive`；诊断报告去掉未使用的 `serverStatus` 字段；`keepAlive` / `idleMinutes` 随主机条目一起保存。
+>
+> **v2.3 变更**：新增本地 → 远端同步。主机条目接受 `sync: { credentials, plugins }`；`HostView` 增加
+> `sync`（状态、计划哈希、计数与错误）；新增 `POST /hosts/:id/sync` 与 `sync-*` 进度码；错误码增加
+> `sync-failed`。设计见 [sync-design.md](sync-design.md)。
 
 ## 0. 通用类型
 
@@ -67,6 +71,17 @@ interface RemoteView {
   startedAt: string | null      // ISO
 }
 
+interface SyncView {
+  enabled: boolean              // 两个勾选任一为真
+  credentials: boolean          // 同步 API key / 登录记录
+  plugins: boolean              // 同步插件与插件配置
+  status: 'idle' | 'planned' | 'syncing' | 'applied' | 'partial' | 'failed'
+  at: string | null             // ISO，最近一次应用的时刻
+  hash: string | null           // 计划哈希（凭据值只进哈希，不含明文）
+  error: ErrorView | null
+  summary: Record<string, number> | null  // 插件/配置行/凭据计数与失败插件数
+}
+
 interface HostView {
   id: string
   name: string
@@ -81,6 +96,7 @@ interface HostView {
   progress: Progress | null
   error: ErrorView | null
   warning: I18nText | null      // 非致命提示（如手工实例并存）
+  sync: SyncView                // 本地 → 远端同步的开关与最近一次结果
   fingerprint: FingerprintView | null
   conflict: {                   // 仅 conflict-pending 时非空
     detectedAt: string
@@ -148,6 +164,7 @@ interface StateView {
 | `remote-ui-unreachable` | 隧道或远端界面校验失败 | ✅ |
 | `version-mismatch` | npx 回读版本与本机不一致 | ✅ |
 | `unsupported-os` | 远端系统不支持 | ❌ |
+| `sync-failed` | 同步失败且远端文件未能回滚 | ✅ |
 | `invalid-input` | 参数不合法 | ❌ |
 | `internal` | 插件内部错误 | ✅ |
 
@@ -203,13 +220,14 @@ data: {}
 ```
 
 ### `POST /hosts`
-新增或更新主机（带 `id` 为更新）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用 `SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
+新增或更新主机（带 `id` 为更新）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用 `SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` / `sync` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
 ```json
 { "host": { "id": "h_xxx", "name": "构建服务器", "address": "my-server", "port": 22, "username": "ubuntu",
   "auth": { "type": "key", "keyPath": "~/.ssh/id_rsa" }, "jumpHost": null, "keepAlive": "keep",
-  "idleMinutes": 15, "autoReconnect": true, "hostKeyPolicy": "first-use" } }
+  "idleMinutes": 15, "autoReconnect": true, "hostKeyPolicy": "first-use",
+  "sync": { "credentials": true, "plugins": false } } }
 ```
-响应 `{ "ok": true, "host": HostView }`；校验失败返回 `invalid-input`。
+`sync` 编辑时省略表示保留原值；两个字段都默认 `false`。响应 `{ "ok": true, "host": HostView }`；校验失败返回 `invalid-input`。
 
 ### `DELETE /hosts/:id`
 断开（按存活策略决定是否停远端）并删除记录，同时取消该主机所有计时器。响应 `{ "ok": true }`。
@@ -225,6 +243,10 @@ data: {}
 
 ### `POST /hosts/:id/reconnect`
 等价于 disconnect（不停远端）+ connect。响应 `{ "ok": true }`。
+
+### `POST /hosts/:id/sync`
+立即应用该主机的同步选项：停止远端 web、丢弃传输，再以强制同步重新走连接管线（计划哈希已一致也重新应用）。
+正在连接时返回 `invalid-input`。响应 `{ "ok": true, "accepted": true }`；进度与结果经 `/state` 与 `/events` 推送。
 
 ### `POST /hosts/:id/fingerprint`
 ```json
@@ -275,6 +297,7 @@ URL 直接交给桌面端 guest；`?token=` 只用一次完成 cookie 种入，�
 
 - `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`）、`auth-checking`、`probing`
 - `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
+- `sync-planning`（`plugins` / `rows` / `refs`）、`sync-backup`、`sync-credentials`（`refs` / `records`）、`sync-config`（`rows`）、`sync-tooling`、`sync-plugins`（`name` / `index` / `total`）、`sync-verifying`
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
 
