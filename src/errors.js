@@ -2,7 +2,7 @@
  * Coded, bilingual errors; `toErrorView` is the only shape the Client ever sees.
  */
 
-export const ErrorCode = Object.freeze({
+const ErrorCode = Object.freeze({
   NETWORK: 'network',
   AUTH: 'auth',
   HOST_KEY_CHANGED: 'host-key-changed',

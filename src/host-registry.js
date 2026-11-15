@@ -11,7 +11,7 @@ import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import { cancelIdleStop, cancelReconnect, teardownRuntime } from './host-lifecycle.js'
 import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from './ssh-config.js'
 
-export function ensureRuntime(ctx, host) {
+function ensureRuntime(ctx, host) {
   const existing = ctx.state.runtimes.get(host.id)
   if (existing) {
     existing.entry = host
@@ -35,7 +35,7 @@ export async function initRegistry(ctx) {
   ctx.state.initialized = true
 }
 
-export function hostViewFor(ctx, runtime) {
+function hostViewFor(ctx, runtime) {
   return hostView(runtime, {
     targetVersion: ctx.localVersion(),
     passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,

@@ -26,7 +26,7 @@ export function remoteLayout(home = null) {
  * Expand a leading `~` (or `~/`) with a known remote home. When `home` is not
  * known yet the tilde is preserved; callers must expand before shell use.
  */
-export function expandRemoteTilde(value, home) {
+function expandRemoteTilde(value, home) {
   const text = String(value ?? '')
   if (!home) return text
   if (text === '~') return home

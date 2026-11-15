@@ -23,7 +23,7 @@ import {
   tail,
   writeFailureArtifacts,
 } from './harness-support.js'
-import { applyColorScheme, dismissOpenDialog, openManageWindow, waitForSelector } from './ui-steps.js'
+import { dismissOpenDialog, openManageWindow } from './ui-steps.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')

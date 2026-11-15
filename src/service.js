@@ -41,7 +41,7 @@ import {
 export { describePreflightEvent }
 
 /** Milliseconds a paused host-key handshake waits for the user. */
-export const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
+const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
 
 export class RemoteGoService extends EventEmitter {
   constructor(options) {

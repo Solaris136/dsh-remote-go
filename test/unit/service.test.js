@@ -3,8 +3,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
-import { RemoteGoService, describePreflightEvent } from '../../src/service.js'
-import { HostStore } from '../../src/store.js'
+import { describePreflightEvent } from '../../src/service.js'
 import { LOG_TAIL_LIMIT } from '../../src/connect-log.js'
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {

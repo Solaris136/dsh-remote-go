@@ -41,7 +41,7 @@ export function hostView(runtime, ctx) {
   }
 }
 
-export function maskAddress(entry) {
+function maskAddress(entry) {
   const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   const user = entry.username ? `${entry.username}@` : ''
   const host = entry.address || '?'

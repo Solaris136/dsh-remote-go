@@ -63,7 +63,7 @@ export function scheduleReconnect(ctx, runtime, onDue) {
   }, delay)
 }
 
-export function scheduleIdleStop(ctx, runtime) {
+function scheduleIdleStop(ctx, runtime) {
   cancelIdleStop(runtime)
   const minutes = Math.max(1, runtime.entry.idleMinutes ?? DEFAULT_IDLE_MINUTES)
   runtime.idleTimer = setTimeout(() => {
@@ -73,7 +73,7 @@ export function scheduleIdleStop(ctx, runtime) {
 }
 
 /** Best-effort stop of the remote web for the idle policy, then drop the transport. */
-export async function stopRemoteQuietly(ctx, runtime) {
+async function stopRemoteQuietly(ctx, runtime) {
   try {
     if (runtime.ssh?.connected) {
       await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {

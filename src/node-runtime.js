@@ -25,13 +25,13 @@ export function managedNodeVersionFromEngine(range, fallback = MANAGED_NODE_VERS
   return normalizeVersion(`${Number(match[1])}.${Number(match[2] ?? 0)}.${Number(match[3] ?? 0)}`)
 }
 
-export const NODE_SCAN_TIMEOUT_MS = 30_000
-export const NODE_CHECKSUM_TIMEOUT_MS = 240_000
-export const NODE_INSTALL_TIMEOUT_MS = 30 * 60_000
+const NODE_SCAN_TIMEOUT_MS = 30_000
+const NODE_CHECKSUM_TIMEOUT_MS = 240_000
+const NODE_INSTALL_TIMEOUT_MS = 30 * 60_000
 
-export const NODE_MIN_FREE_KB = 400 * 1024
+const NODE_MIN_FREE_KB = 400 * 1024
 
-export const NODE_MIN_GLIBC = '2.28'
+const NODE_MIN_GLIBC = '2.28'
 
 const DIST_ARCH = new Map([
   ['x86_64', 'x64'],

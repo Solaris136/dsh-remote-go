@@ -69,7 +69,7 @@ export async function reconnectHost(ctx, runtime) {
  * Re-enter the pipeline after a dropped link. Lives here rather than in the
  * lifecycle module so `scheduleReconnect` stays a pure timer with a callback.
  */
-export async function reconnectNow(ctx, runtime) {
+async function reconnectNow(ctx, runtime) {
   if (ctx.state.disposed || runtime.desired !== 'connected') return
   await disposeSsh(runtime)
   runtime.connectPromise = connectPipeline(ctx, runtime).finally(() => {
@@ -235,7 +235,7 @@ async function resolveForeignConflict(ctx, runtime, layout, profile) {
   ctx.progress.log(runtime, 'info', `stopped ${found.processes.length} manual remote DSH process(es)`)
 }
 
-export async function connectPipeline(ctx, runtime) {
+async function connectPipeline(ctx, runtime) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   runtime.closing = false

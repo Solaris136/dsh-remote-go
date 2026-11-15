@@ -90,7 +90,7 @@ export function apply(ctx, config = {}) {
   return service
 }
 
-export function describeSelf(ctx, info) {
+function describeSelf(ctx, info) {
   const out = {
     home: info.home,
     stateDir: info.stateDir,

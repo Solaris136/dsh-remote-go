@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createApi } from '../../src/api.js'
-import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 

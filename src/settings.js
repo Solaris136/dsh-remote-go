@@ -27,7 +27,7 @@ export function defaultSettings() {
  * A profile name DSH can boot: one safe path segment, and never `desktop`
  * (the Electron app reserves that profile and the CLI refuses it).
  */
-export function normalizeProfileName(value) {
+function normalizeProfileName(value) {
   const text = typeof value === 'string' ? value.trim() : ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(text)) return null
   if (text.toLowerCase() === 'desktop') return null
