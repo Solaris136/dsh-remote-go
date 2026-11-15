@@ -1,38 +1,9 @@
 /*
- * dsh-remote-go · Client half
- *
- * A single-file browser plugin (no build step) that contributes one host
- * switcher row at the top of the sidebar and floating windows. The row lists
- * the local page plus every SSH host and hands the whole window to the remote
- * DSH Web UI — reached through a local loopback tunnel — as a live browser
- * guest. Management, the add/edit wizard and every prompt float in the shell's
- * overlay layer, so they open over whichever page (local or remote) is showing
- * and leave it untouched. The row is the plugin's only entry: it registers no
- * settings page, no sidebar panel and no main panel.
- *
- * Contract: docs/api.md (frozen). The Host half lives in src/ and is the only
- * source of truth; this file renders that state and sends user intents back.
- *
- * Sections:
- *   1. constants
- *   2. i18n dictionaries
- *   3. i18n helpers
- *   4. misc utilities (security / formatting / storage)
- *   5. local error views
- *   6. HTTP + SSE API client
- *   7. icons and small UI primitives
- *   8. host list view
- *   9. takeover surface, connect window (progress + connect log) and carrier helpers
- *   9b. host switcher row + full-window remote carrier
- *   9c. key-file picker
- *  10. connect wizard
- *  11. diagnostics drawer
- *  12. settings modal
- *  13. one-time password prompt
- *  14. toast
- *  15. overlay host (floating windows + remote window)
- *  16. styles
- *  17. plugin registration (apply)
+ * dsh-remote-go · Client half — a single-file browser plugin with no build step: one host
+ * switcher row plus every floating window in the shell's overlay layer (the sections below are
+ * marked with //#region). It renders the Host's state (docs/api.md is the frozen contract; the
+ * Host half in src/ is the only source of truth) and sends user intents back. The row is the
+ * plugin's only entry — no settings page, no sidebar panel, no main panel.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-remote-go',
@@ -41,37 +12,24 @@ window.__ModuleLoader__.load({
 
     const React = require('react')
     const h = React.createElement
+    /** Element whose only prop is its class: h(tag, { className }, ...children) without the noise. */
+    const box = (tag, className, ...children) => h(tag, { className }, ...children)
+    /** A dialog's action strip: one right-aligned row of buttons. */
+    const footerRow = (...actions) => h('div', { className: 'drg-row drg-row-end' }, ...actions)
     const { useCallback, useEffect, useRef, useState } = React
 
     //#region 1. constants
 
-    /** Dictionary namespace owned by this plugin. */
     const NS = 'dsh-remote-go'
-    /** The plugin's id: namespace for its overlay seat and locale dictionary. */
     const PANEL_ID = 'dsh-remote-go'
-    /** Base path of the Host HTTP API (same origin as the page). */
     const API_BASE = '/dsh-remote-go/api'
-    /** SSE endpoint carrying `state` events; see docs/api.md. */
     const EVENT_PATH = '/dsh-remote-go/api/events'
-    /** Fallback polling cadence when SSE is unavailable (docs/api.md). */
     const POLL_INTERVAL_MS = 3000
-    /** Desktop browser-guest bridge (`window.dshDesktop`) protocol this build speaks. */
     const DESKTOP_BRIDGE_VERSION = 1
-    /** DOM id prefix of the full-window remote carriers (one per warm host). */
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
-    /**
-     * Caption band this window's page reserves when the desktop shell does not publish
-     * one (`--dsh-windows-titlebar-height`). Only a fallback: the published value wins.
-     */
     const CAPTION_FALLBACK_HEIGHT = 40
-    /** `<html>` marker the desktop preload sets on the window that owns the caption row. */
     const CAPTION_MARKER = 'data-windows-titlebar'
-    /** Set on `<html>` while a guest owns the caption band, so the shell's caption menus stay clickable. */
     const CAPTION_LIVE_CLASS = 'drg-caption-live'
-    /**
-     * Left inset of the carrier's drag strip: the band's first pixels belong to the guest
-     * page's own fixed caption controls (collapse toggle 12–40, collapsed new session 48–76).
-     */
     const CAPTION_GRIP_LEFT = 84
     /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
@@ -85,11 +43,11 @@ window.__ModuleLoader__.load({
       'tunnel',
       'remote-service',
       'remote-ui',
+      'remote-node',
       'remote-version',
       'model-credentials',
       'desktop-guard',
     ]
-    /** Status dot colours: the host theme's state aliases, nothing of our own. */
     const TONE_VARS = {
       idle: 'var(--dsw-alias-state-idle-primary)',
       info: 'var(--dsw-alias-state-business-primary)',
@@ -98,548 +56,326 @@ window.__ModuleLoader__.load({
       error: 'var(--dsw-alias-state-error-primary)',
       limited: 'var(--dsw-static-violet-400)',
     }
-    const STATUS_TONE = {
-      unconfigured: 'idle',
-      connecting: 'info',
-      'fingerprint-pending': 'warn',
-      'conflict-pending': 'warn',
-      connected: 'success',
-      disconnected: 'warn',
-      error: 'error',
-      limited: 'limited',
+    /** One entry per HostStatus, so the label, the strip and the primary action cannot disagree. */
+    const STATUS = {
+      unconfigured: { tone: 'idle', action: 'cardConnect', connect: true },
+      connecting: { tone: 'info', action: 'connecting', wait: true, window: true },
+      'fingerprint-pending': { tone: 'warn', action: 'confirmFingerprint', window: true },
+      'conflict-pending': { tone: 'warn', action: 'statusConflictPending', wait: true, strip: 'status' },
+      connected: { tone: 'success', action: 'cardOpen' },
+      disconnected: { tone: 'warn', action: 'cardConnect', connect: true, retry: true },
+      error: { tone: 'error', action: 'cardConnect', connect: true, retry: true, window: true, strip: 'alert' },
+      limited: { tone: 'limited', action: 'cardConnect', retry: true, strip: 'alert' },
     }
-
-    //#endregion
+    /** That status' entry plus its dictionary keys; every status names them `status<Name>`. */
+    function statusOf(status) {
+      const id = STATUS[status] === undefined ? 'unconfigured' : status
+      const name = id.replace(/(?:^|-)([a-z])/g, (_all, letter) => letter.toUpperCase())
+      return { ...STATUS[id], label: 'status' + name, hint: 'statusHint' + name }
+    }
 
     //#region 2. i18n dictionaries
 
     /**
-     * Simplified-Chinese dictionary. Every visible string in this file goes
-     * through a key in `zh`/`en`; the unit test asserts both sides match.
+     * Every visible string, zh and en side by side. `status*` / `statusHint*` are read through
+     * statusOf() in the constants region, which builds them from the HostStatus id.
      */
-    const zh = {
-      // -- navigation / common -------------------------------------------------
-      panelSubtitle: '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
-      addHost: '添加主机',
-      addFirstHost: '添加第一台服务器',
-      emptyTitle: '还没有远程主机',
-      emptyBody: '还没有远程主机。添加一台，然后打开它的远端 DSH 界面。',
-      refresh: '刷新状态',
-      settings: '设置',
-      close: '关闭',
-      cancel: '取消',
-      save: '保存',
-      saving: '保存中…',
-      delete: '删除',
-      deleting: '正在删除…',
-      edit: '编辑',
-      back: '返回',
-      retry: '重试',
-      diagnose: '诊断',
-      reconnect: '重连',
-      open: '打开',
-      connect: '连接',
-      disconnect: '断开',
-      connecting: '连接中…',
-      loading: '加载中…',
-      optional: '可选',
-      copy: '复制',
-      copied: '已复制',
-      next: '下一步',
-      done: '完成',
-      dismiss: '知道了',
-      actions: '操作',
-      host: '主机',
-      status: '状态',
-      name: '名称',
-
-      // -- host list -----------------------------------------------------------
-      hostsTitle: '远程主机',
-      summary: '已连接 {connected} / 共 {total}',
-      lastOpened: '上次打开',
-      neverOpened: '尚未打开',
-      remoteVersion: '远端 DSH',
-      versionPending: '连接后显示',
-      addHostTitle: '添加服务器',
-      editHostTitle: '编辑服务器',
-      deleteTitle: '删除这台服务器？',
-      deleteBody: '将删除「{name}」的连接配置，并断开当前连接。远端任务不受影响，之后可以重新添加。',
-      deleteConfirm: '删除',
-      deleteBusy: '正在删除…',
-      statusUnconfigured: '未配置',
-      statusConnecting: '连接中',
-      statusFingerprintPending: '指纹待确认',
-      statusConflictPending: '远端冲突待确认',
-      statusConnected: '已连接',
-      statusDisconnected: '断线',
-      statusError: '错误',
-      statusLimited: '受限',
-      statusHintUnconfigured: '尚未连接过',
-      statusHintConnecting: '正在建立连接',
-      statusHintFingerprintPending: '需要确认主机指纹',
-      statusHintConflictPending: '远端已有手工启动的 DSH，需要你选择如何处理',
-      statusHintConnected: '远端界面可用',
-      statusHintDisconnected: '连接断开，可重连',
-      statusHintError: '连接失败',
-      statusHintLimited: '能连上，但远端无法提供界面',
-      confirmFingerprint: '确认指纹',
-      cardOpen: '打开',
-      cardConnect: '连接',
-      cardDisconnect: '断开',
-      cardReconnect: '重连',
-      cardDiagnose: '诊断',
-      cardEdit: '编辑',
-      cardDelete: '删除',
-      errorReason: '原因：{detail}',
-      loopbackNote: '远端界面只经 SSH 隧道映射为 127.0.0.1 后嵌入；不会直接使用该地址，也不会暴露到公网。',
-
-      // -- viewport ------------------------------------------------------------
-      viewportConnecting: '正在连接「{name}」…',
-      viewportOverlayLoadFailed: '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
-      desktopRequired: '当前环境没有可用的桌面端窗口，远端界面只能在 DeepSeek Harness 桌面端打开。',
-      // -- connect window: the log the Host streams under the progress ----------
-      connectLogTitle: '连接日志',
-      connectLogHint: '关窗不中断连接',
-      connectLogCount: '{count} 行',
-      connectLogEmpty: '等待日志输出…',
-      // -- host switcher row (drawn in the local sidebar and the remote one) ----
-      switcherLocal: '本地',
-      switcherAddHost: '添加主机',
-      switcherManage: '管理界面',
-      switcherExit: '断开',
-
-      // -- connect progress (docs/api.md 进度 code) -------------------------------------
-      'progress.ssh-connecting': '正在连接 SSH…',
-      'progress.host-key-confirm': '等待确认主机指纹…',
-      'progress.auth-checking': '正在认证…',
-      'progress.probing': '正在探测远端环境…',
-      'progress.remote-dsh-running': '远端已有手工启动的 DSH，等待你的选择…',
-      'progress.bootstrapping': '正在准备远端运行时…',
-      'progress.installing-node': '正在自动准备远端 Node（{version}）…',
-      'progress.downloading-node': '正在下载 Node {version}（已下载 {mb} MB）…',
-      'progress.bootstrap-first-run': '首次运行：正在下载 @deepseek-ai/dsh@{version}…',
-      'progress.bootstrap-fetching': '正在下载 DSH 依赖包…',
-      'progress.bootstrap-installed': '依赖已安装，正在启动…',
-      'progress.bootstrap-progress': '自举进度：{detail}',
-      'progress.starting-remote': '正在启动远端 DSH…',
-      'progress.tunneling': '正在建立本地回环隧道…',
-      'progress.verifying': '正在验证远端界面…',
-      'progress.ready': '就绪',
-      'progress.reconnecting': '断线重连中（第 {attempt}/{max} 次）…',
-      'progress.default': '正在连接…',
-      'phase.ssh': 'SSH',
-      'phase.probe': '探测',
-      'phase.bootstrap': '准备运行时',
-      'phase.start': '启动',
-      'phase.tunnel': '隧道',
-      'phase.verifying': '校验界面',
-      'phase.ready': '就绪',
-
-      // -- fingerprint ---------------------------------------------------------
-      fingerprintTitle: '主机指纹待确认',
-      fingerprintBody: '首次连接需要确认这台服务器的 SSH 主机指纹。确认后会记住；指纹变化时会再次提示。',
-      fingerprintChanged: '主机指纹已变化',
-      fingerprintChangedBody:
-        '这台服务器的主机指纹与上次记录不一致，可能重装过系统，也可能存在中间人风险。确认无误后再继续。',
-      fingerprintKeyType: '密钥类型',
-      fingerprintSha: 'SHA256 指纹',
-      fingerprintPinned: '已记录指纹',
-      fingerprintAccept: '接受并记住',
-      fingerprintAcceptOnce: '仅本次接受',
-      fingerprintReject: '取消',
-      passwordPromptTitle: '输入 SSH 密码',
-      passwordPromptBody: '「{name}」使用密码认证。密码只用于本次连接；勾选后存进 DSH 的凭据存储（不写进主机配置）。',
-      passwordPromptRemember: '安全保存这个密码（DSH 凭据存储）',
-      passwordPromptNoStorage: '当前环境没有可用的凭据存储，密码只用于本次连接。',
-      passwordPromptLabel: '密码',
-      passwordPromptSubmit: '连接',
-      passwordPromptRequired: '请输入密码',
-      conflictTitle: '远端已有手工启动的 DSH',
-      conflictBody:
-        '「{name}」的远端检测到不是本插件启动的 DSH 进程（共 {count} 个）。它们与插件共用 ~/.dsh，同时运行可能争用同一会话或凭据文件。请选择如何处理：',
-      conflictHint: '「停止」会向这些进程发送 SIGTERM / SIGKILL；「并存」会另起一个受管实例并保留它们。',
-      conflictStop: '停止它并启动受管实例',
-      conflictAlongside: '保留它，另起一个',
-      conflictCancel: '取消连接',
-      conflictBusy: '正在提交选择…',
-
-      // -- wizard --------------------------------------------------------------
-      'wizard.name': '显示名',
-      'wizard.namePlaceholder': '例如：腾讯云测试机',
-      'wizard.address': 'SSH 地址或别名',
-      'wizard.addressPlaceholder': '例如：ubuntu@192.0.2.10 或 my-server',
-      'wizard.addressHint': '支持 ~/.ssh/config 中配置的别名。',
-      'wizard.port': '端口',
-      'wizard.username': '用户名',
-      'wizard.usernamePlaceholder': '例如：ubuntu',
-      'wizard.auth': '认证方式',
-      'wizard.authKey': '密钥文件',
-      'wizard.authPassword': '密码（仅本次，不保存）',
-      'wizard.keyPath': '密钥文件路径',
-      'wizard.keyPathPlaceholder': '例如：~/.ssh/id_ed25519',
-      'wizard.keyPathPick': '选择文件…',
-      'wizard.password': '密码',
-      'wizard.passwordPlaceholder': '仅用于本次连接，不会保存',
-      'wizard.authHint': '使用私钥文件认证；也可以改用密码（仅本次连接）。',
-      'wizard.jumpHost': '跳板机（可选）',
-      'wizard.jumpHostPlaceholder': '例如：另一台已添加主机的地址',
-      'wizard.keepAlive': '远端存活策略',
-      'wizard.keepAliveKeep': '保持运行（推荐）',
-      'wizard.keepAliveStop': '退出即停',
-      'wizard.keepAliveIdle': '空闲停止',
-      'wizard.idleMinutes': '空闲分钟数',
-      'wizard.autoReconnect': '断线后自动重连',
-      'wizard.actionHint': '保存只记下配置；连接会保存并立即连上去，首次连接需要确认主机指纹。',
-      'wizard.saved': '已保存',
-      'wizard.savingHost': '正在保存…',
-      'wizard.aliases': '从 SSH 配置选择',
-      'wizard.aliasesLoading': '正在读取 ~/.ssh/config…',
-      'wizard.aliasesEmpty': '没有发现可用的 SSH 别名',
-      'wizard.knownHosts': '已知主机 {count} 条',
-      'wizard.validationName': '请填写显示名',
-      'wizard.validationAddress': '请填写 SSH 地址或别名',
-      'wizard.validationAddressUrl': '请填写 SSH 地址或别名，不要填写网页地址',
-      'wizard.validationPort': '端口应为 1-65535',
-      'wizard.validationUsername': '请填写用户名',
-      'wizard.validationKeyPath': '请填写密钥文件路径',
-      'wizard.validationPassword': '请输入密码，或改用密钥文件',
-
-      // -- diagnostics ---------------------------------------------------------
-      'diag.title': '连接诊断',
-      'diag.running': '正在执行检查…',
-      'diag.summaryOk': '全部通过',
-      'diag.summaryWarning': '有需要留意的问题',
-      'diag.summaryError': '存在失败项',
-      'diag.checkPass': '通过',
-      'diag.checkFail': '失败',
-      'diag.checkUnknown': '未知',
-      'diag.empty': '还没有诊断结果。',
-      'diag.rerun': '重新检查',
-      'diag.copy': '复制诊断信息',
-      'diag.copyDone': '诊断信息已复制。',
-      'diag.redacted': '诊断信息已脱敏，不包含访问令牌。',
-      'diag.generatedAt': '生成时间',
-      'diag.host': '主机',
-      'diag.failed': '诊断执行失败',
-      'diag.close': '关闭',
-
-      // -- settings ------------------------------------------------------------
-      'settings.title': '设置',
-      'settings.ssh': 'SSH 默认值',
-      'settings.defaultPort': '默认端口',
-      'settings.defaultAuth': '默认认证方式',
-      'settings.defaultAuthKey': '密钥文件',
-      'settings.defaultAuthPassword': '密码（仅本次）',
-      'settings.defaultKeyPath': '默认密钥文件',
-      'settings.defaultKeyPathHint': '新增主机时预填这个路径；仍可在向导里改。',
-      'settings.keyPathPick': '选择文件…',
-      'keyFile.title': '选择 SSH 私钥文件',
-      'keyFile.hint': '只列出用户主目录内的文件；点击目录进入，点击文件选中。',
-      'keyFile.parent': '上一级',
-      'keyFile.loading': '正在读取目录…',
-      'keyFile.empty': '这个目录里没有可选项',
-      'keyFile.error': '读取目录失败',
-      'keyFile.retry': '重试',
-      'keyFile.pick': '选中此文件',
-      'settings.connectTimeout': '连接超时（秒）',
-      'settings.security': '安全',
-      'settings.hostKeyPolicy': '主机指纹策略',
-      'settings.hostKeyPolicyFirstUse': '首次连接时询问',
-      'settings.hostKeyPolicyStrict': '严格校验（指纹变化即失败）',
-      'settings.saveTokens': '允许保存访问令牌',
-      'settings.saveTokensHint':
-        '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
-      'settings.saveTokensRisk': '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
-      'settings.reconnect': '自动重连',
-      'settings.reconnectEnabled': '断线后自动重连',
-      'settings.maxAttempts': '最大重试次数',
-      'settings.baseDelay': '重试间隔（毫秒）',
-      'settings.other': '其他',
-      'settings.language': '语言',
-      'settings.languageAuto': '跟随 DSH',
-      'settings.languageZh': '中文',
-      'settings.languageEn': 'English',
-      'settings.logLevel': '日志级别',
-      'settings.bootstrap': '远端运行时',
-      'settings.profile': 'DSH profile',
-      'settings.profileHint': '默认 web；profile 配置在 ~/.dsh/profiles/<profile>',
-      'settings.bootstrapHint':
-        '用 npx 固定本机 DSH 版本启动；远端缺 Node 或版本过低时，插件自动装一份到 ~/.dsh/remote-go/node',
-      'settings.saveSettings': '保存设置',
-      'settings.saved': '设置已保存。',
-      'settings.saveFailed': '保存设置失败',
-
-      // -- local errors --------------------------------------------------------
-      'error.actionFailed': '操作失败',
-    }
-
-    /** English dictionary — complete parallel of `zh`. */
-    const en = {
-      panelSubtitle: 'Manage remote hosts and hand the whole window to one of their DSH instances.',
-      addHost: 'Add host',
-      addFirstHost: 'Add your first server',
-      emptyTitle: 'No remote hosts yet',
-      emptyBody: 'No remote hosts yet. Add one, then open its remote DSH interface.',
-      refresh: 'Refresh status',
-      settings: 'Settings',
-      close: 'Close',
-      cancel: 'Cancel',
-      save: 'Save',
-      saving: 'Saving…',
-      delete: 'Delete',
-      deleting: 'Deleting…',
-      edit: 'Edit',
-      back: 'Back',
-      retry: 'Retry',
-      diagnose: 'Diagnose',
-      reconnect: 'Reconnect',
-      open: 'Open',
-      connect: 'Connect',
-      disconnect: 'Disconnect',
-      connecting: 'Connecting…',
-      loading: 'Loading…',
-      optional: 'optional',
-      copy: 'Copy',
-      copied: 'Copied',
-      next: 'Next',
-      done: 'Done',
-      dismiss: 'Got it',
-      actions: 'Actions',
-      host: 'Host',
-      status: 'Status',
-      name: 'Name',
-
-      hostsTitle: 'Remote hosts',
-      summary: '{connected} connected / {total} total',
-      lastOpened: 'Last opened',
-      neverOpened: 'Never opened',
-      remoteVersion: 'Remote DSH',
-      versionPending: 'Shown after connecting',
-      addHostTitle: 'Add server',
-      editHostTitle: 'Edit server',
-      deleteTitle: 'Delete this server?',
-      deleteBody:
+    const STRINGS = {
+      panelSubtitle: [
+        '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
+        'Manage remote hosts and hand the whole window to one of their DSH instances.',
+      ],
+      addHost: ['添加主机', 'Add host'],
+      addFirstHost: ['添加第一台服务器', 'Add your first server'],
+      emptyTitle: ['还没有远程主机', 'No remote hosts yet'],
+      emptyBody: [
+        '还没有远程主机。添加一台，然后打开它的远端 DSH 界面。',
+        'No remote hosts yet. Add one, then open its remote DSH interface.',
+      ],
+      refresh: ['刷新状态', 'Refresh status'],
+      settings: ['设置', 'Settings'],
+      close: ['关闭', 'Close'],
+      cancel: ['取消', 'Cancel'],
+      save: ['保存', 'Save'],
+      back: ['返回', 'Back'],
+      retry: ['重试', 'Retry'],
+      diagnose: ['诊断', 'Diagnose'],
+      connect: ['连接', 'Connect'],
+      connecting: ['连接中…', 'Connecting…'],
+      loading: ['加载中…', 'Loading…'],
+      copied: ['已复制', 'Copied'],
+      next: ['下一步', 'Next'],
+      hostsTitle: ['远程主机', 'Remote hosts'],
+      summary: ['已连接 {connected} / 共 {total}', '{connected} connected / {total} total'],
+      lastOpened: ['上次打开', 'Last opened'],
+      neverOpened: ['尚未打开', 'Never opened'],
+      remoteVersion: ['远端 DSH', 'Remote DSH'],
+      versionPending: ['连接后显示', 'Shown after connecting'],
+      addHostTitle: ['添加服务器', 'Add server'],
+      editHostTitle: ['编辑服务器', 'Edit server'],
+      deleteTitle: ['删除这台服务器？', 'Delete this server?'],
+      deleteBody: [
+        '将删除「{name}」的连接配置，并断开当前连接。远端任务不受影响，之后可以重新添加。',
         'This removes the connection settings for "{name}" and disconnects it. Remote tasks keep running; you can add it again later.',
-      deleteConfirm: 'Delete',
-      deleteBusy: 'Deleting…',
-      statusUnconfigured: 'Not configured',
-      statusConnecting: 'Connecting',
-      statusFingerprintPending: 'Fingerprint pending',
-      statusConflictPending: 'Remote conflict',
-      statusConnected: 'Connected',
-      statusDisconnected: 'Disconnected',
-      statusError: 'Error',
-      statusLimited: 'Limited',
-      statusHintUnconfigured: 'Never connected',
-      statusHintConnecting: 'Establishing the connection',
-      statusHintFingerprintPending: 'Confirm the host fingerprint',
-      statusHintConflictPending: 'A manually started DSH is already running; choose how to proceed',
-      statusHintConnected: 'The remote UI is available',
-      statusHintDisconnected: 'Connection lost — reconnect available',
-      statusHintError: 'Connection failed',
-      statusHintLimited: 'Reachable, but the remote UI is unavailable',
-      confirmFingerprint: 'Confirm fingerprint',
-      cardOpen: 'Open',
-      cardConnect: 'Connect',
-      cardDisconnect: 'Disconnect',
-      cardReconnect: 'Reconnect',
-      cardDiagnose: 'Diagnose',
-      cardEdit: 'Edit',
-      cardDelete: 'Delete',
-      errorReason: 'Reason: {detail}',
-      loopbackNote:
+      ],
+      deleteConfirm: ['删除', 'Delete'],
+      deleteBusy: ['正在删除…', 'Deleting…'],
+      statusUnconfigured: ['未配置', 'Not configured'],
+      statusConnecting: ['连接中', 'Connecting'],
+      statusFingerprintPending: ['指纹待确认', 'Fingerprint pending'],
+      statusConflictPending: ['远端冲突待确认', 'Remote conflict'],
+      statusConnected: ['已连接', 'Connected'],
+      statusDisconnected: ['断线', 'Disconnected'],
+      statusError: ['错误', 'Error'],
+      statusLimited: ['受限', 'Limited'],
+      statusHintUnconfigured: ['尚未连接过', 'Never connected'],
+      statusHintConnecting: ['正在建立连接', 'Establishing the connection'],
+      statusHintFingerprintPending: ['需要确认主机指纹', 'Confirm the host fingerprint'],
+      statusHintConflictPending: [
+        '远端已有手工启动的 DSH，需要你选择如何处理',
+        'A manually started DSH is already running; choose how to proceed',
+      ],
+      statusHintConnected: ['远端界面可用', 'The remote UI is available'],
+      statusHintDisconnected: ['连接断开，可重连', 'Connection lost — reconnect available'],
+      statusHintError: ['连接失败', 'Connection failed'],
+      statusHintLimited: ['能连上，但远端无法提供界面', 'Reachable, but the remote UI is unavailable'],
+      confirmFingerprint: ['确认指纹', 'Confirm fingerprint'],
+      cardOpen: ['打开', 'Open'],
+      cardConnect: ['连接', 'Connect'],
+      cardDisconnect: ['断开', 'Disconnect'],
+      cardReconnect: ['重连', 'Reconnect'],
+      cardDiagnose: ['诊断', 'Diagnose'],
+      cardEdit: ['编辑', 'Edit'],
+      cardDelete: ['删除', 'Delete'],
+      errorReason: ['原因：{detail}', 'Reason: {detail}'],
+      loopbackNote: [
+        '远端界面只经 SSH 隧道映射为 127.0.0.1 后嵌入；不会直接使用该地址，也不会暴露到公网。',
         'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
-
-      viewportConnecting: 'Connecting to "{name}"…',
-      viewportOverlayLoadFailed:
+      ],
+      viewportConnecting: ['正在连接「{name}」…', 'Connecting to "{name}"…'],
+      viewportOverlayLoadFailed: [
+        '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
         'The remote UI failed to load. Pick “Local” in the sidebar switcher and open the host again.',
-      desktopRequired: 'This window has no desktop guest seat; the remote UI only opens in the DSH desktop app.',
-      // -- connect window: the log the Host streams under the progress ----------
-      connectLogTitle: 'Connect log',
-      connectLogHint: 'Closing keeps it running',
-      connectLogCount: '{count} lines',
-      connectLogEmpty: 'Waiting for log output…',
-      // -- host switcher row (drawn in the local sidebar and the remote one) ----
-      switcherLocal: 'Local',
-      switcherAddHost: 'Add host',
-      switcherManage: 'Manage hosts',
-      switcherExit: 'Disconnect',
-
-      'progress.ssh-connecting': 'Connecting over SSH…',
-      'progress.host-key-confirm': 'Waiting for you to confirm the host key…',
-      'progress.auth-checking': 'Authenticating…',
-      'progress.probing': 'Probing the remote environment…',
-      'progress.remote-dsh-running': 'A manually started DSH is running; waiting for your choice…',
-      'progress.bootstrapping': 'Preparing the remote runtime…',
-      'progress.installing-node': 'Preparing a managed Node on the remote ({version})…',
-      'progress.downloading-node': 'Downloading Node {version} ({mb} MB so far)…',
-      'progress.bootstrap-first-run': 'First run: fetching @deepseek-ai/dsh@{version}…',
-      'progress.bootstrap-fetching': 'Fetching DSH packages…',
-      'progress.bootstrap-installed': 'Packages installed; starting…',
-      'progress.bootstrap-progress': 'Bootstrap: {detail}',
-      'progress.starting-remote': 'Starting the remote DSH…',
-      'progress.tunneling': 'Opening the loopback tunnel…',
-      'progress.verifying': 'Verifying the remote UI…',
-      'progress.ready': 'Ready',
-      'progress.reconnecting': 'Reconnecting ({attempt}/{max})…',
-      'progress.default': 'Connecting…',
-      'phase.ssh': 'SSH',
-      'phase.probe': 'Probe',
-      'phase.bootstrap': 'Preparing runtime',
-      'phase.start': 'Start',
-      'phase.tunnel': 'Tunnel',
-      'phase.verifying': 'Verify UI',
-      'phase.ready': 'Ready',
-
-      fingerprintTitle: 'Confirm the host fingerprint',
-      fingerprintBody:
+      ],
+      desktopRequired: [
+        '当前环境没有可用的桌面端窗口，远端界面只能在 DeepSeek Harness 桌面端打开。',
+        'This window has no desktop guest seat; the remote UI only opens in the DSH desktop app.',
+      ],
+      connectLogTitle: ['连接日志', 'Connect log'],
+      connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
+      connectLogCount: ['{count} 行', '{count} lines'],
+      connectLogEmpty: ['等待日志输出…', 'Waiting for log output…'],
+      switcherLocal: ['本地', 'Local'],
+      switcherAddHost: ['添加主机', 'Add host'],
+      switcherManage: ['管理界面', 'Manage hosts'],
+      switcherExit: ['断开', 'Disconnect'],
+      'progress.ssh-connecting': ['正在连接 SSH…', 'Connecting over SSH…'],
+      'progress.host-key-confirm': ['等待确认主机指纹…', 'Waiting for you to confirm the host key…'],
+      'progress.auth-checking': ['正在认证…', 'Authenticating…'],
+      'progress.probing': ['正在探测远端环境…', 'Probing the remote environment…'],
+      'progress.remote-dsh-running': [
+        '远端已有手工启动的 DSH，等待你的选择…',
+        'A manually started DSH is running; waiting for your choice…',
+      ],
+      'progress.bootstrapping': ['正在准备远端运行时…', 'Preparing the remote runtime…'],
+      'progress.installing-node': [
+        '正在自动准备远端 Node（{version}）…',
+        'Preparing a managed Node on the remote ({version})…',
+      ],
+      'progress.downloading-node': [
+        '正在下载 Node {version}（已下载 {mb} MB）…',
+        'Downloading Node {version} ({mb} MB so far)…',
+      ],
+      'progress.bootstrap-first-run': [
+        '首次运行：正在下载 @deepseek-ai/dsh@{version}…',
+        'First run: fetching @deepseek-ai/dsh@{version}…',
+      ],
+      'progress.bootstrap-fetching': ['正在下载 DSH 依赖包…', 'Fetching DSH packages…'],
+      'progress.bootstrap-installed': ['依赖已安装，正在启动…', 'Packages installed; starting…'],
+      'progress.bootstrap-progress': ['自举进度：{detail}', 'Bootstrap: {detail}'],
+      'progress.starting-remote': ['正在启动远端 DSH…', 'Starting the remote DSH…'],
+      'progress.tunneling': ['正在建立本地回环隧道…', 'Opening the loopback tunnel…'],
+      'progress.verifying': ['正在验证远端界面…', 'Verifying the remote UI…'],
+      'progress.ready': ['就绪', 'Ready'],
+      'progress.reconnecting': ['断线重连中（第 {attempt}/{max} 次）…', 'Reconnecting ({attempt}/{max})…'],
+      'progress.default': ['正在连接…', 'Connecting…'],
+      'phase.ssh': ['SSH', 'SSH'],
+      'phase.probe': ['探测', 'Probe'],
+      'phase.bootstrap': ['准备运行时', 'Preparing runtime'],
+      'phase.start': ['启动', 'Start'],
+      'phase.tunnel': ['隧道', 'Tunnel'],
+      'phase.verifying': ['校验界面', 'Verify UI'],
+      'phase.ready': ['就绪', 'Ready'],
+      fingerprintTitle: ['主机指纹待确认', 'Confirm the host fingerprint'],
+      fingerprintBody: [
+        '首次连接需要确认这台服务器的 SSH 主机指纹。确认后会记住；指纹变化时会再次提示。',
         "Confirm this server's SSH host key on first use. It is remembered after acceptance, and you are asked again if it changes.",
-      fingerprintChanged: 'The host key has changed',
-      fingerprintChangedBody:
+      ],
+      fingerprintChanged: ['主机指纹已变化', 'The host key has changed'],
+      fingerprintChangedBody: [
+        '这台服务器的主机指纹与上次记录不一致，可能重装过系统，也可能存在中间人风险。确认无误后再继续。',
         'The host key differs from the recorded one. The server may have been reinstalled — or this could be a man-in-the-middle. Continue only if you are sure.',
-      fingerprintKeyType: 'Key type',
-      fingerprintSha: 'SHA256 fingerprint',
-      fingerprintPinned: 'Recorded fingerprint',
-      fingerprintAccept: 'Accept and remember',
-      fingerprintAcceptOnce: 'Accept once',
-      fingerprintReject: 'Cancel',
-      passwordPromptTitle: 'Enter the SSH password',
-      passwordPromptBody:
+      ],
+      fingerprintKeyType: ['密钥类型', 'Key type'],
+      fingerprintSha: ['SHA256 指纹', 'SHA256 fingerprint'],
+      fingerprintPinned: ['已记录指纹', 'Recorded fingerprint'],
+      fingerprintAccept: ['接受并记住', 'Accept and remember'],
+      fingerprintAcceptOnce: ['仅本次接受', 'Accept once'],
+      fingerprintReject: ['取消', 'Cancel'],
+      passwordPromptTitle: ['输入 SSH 密码', 'Enter the SSH password'],
+      passwordPromptBody: [
+        '「{name}」使用密码认证。密码只用于本次连接；勾选后存进 DSH 的凭据存储（不写进主机配置）。',
         '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
-      passwordPromptRemember: 'Remember this password (DSH credential store)',
-      passwordPromptNoStorage:
+      ],
+      passwordPromptRemember: ['安全保存这个密码（DSH 凭据存储）', 'Remember this password (DSH credential store)'],
+      passwordPromptNoStorage: [
+        '当前环境没有可用的凭据存储，密码只用于本次连接。',
         'No credential store is available here, so the password is used for this connection only.',
-      passwordPromptLabel: 'Password',
-      passwordPromptSubmit: 'Connect',
-      passwordPromptRequired: 'Enter the password',
-      conflictTitle: 'A DSH is already running on the remote host',
-      conflictBody:
+      ],
+      passwordPromptLabel: ['密码', 'Password'],
+      passwordPromptSubmit: ['连接', 'Connect'],
+      passwordPromptRequired: ['请输入密码', 'Enter the password'],
+      conflictTitle: ['远端已有手工启动的 DSH', 'A DSH is already running on the remote host'],
+      conflictBody: [
+        '「{name}」的远端检测到不是本插件启动的 DSH 进程（共 {count} 个）。它们与插件共用 ~/.dsh，同时运行可能争用同一会话或凭据文件。请选择如何处理：',
         'The remote for "{name}" has {count} DSH process(es) this plugin did not start. They share ~/.dsh with the plugin, so running both may contend over the same session or credential files. Choose how to proceed:',
-      conflictHint:
+      ],
+      conflictHint: [
+        '「停止」会向这些进程发送 SIGTERM / SIGKILL；「并存」会另起一个受管实例并保留它们。',
         '"Stop" sends SIGTERM / SIGKILL to those processes; "Keep alongside" starts a managed instance and leaves them running.',
-      conflictStop: 'Stop it and start the managed instance',
-      conflictAlongside: 'Keep it and start alongside',
-      conflictCancel: 'Cancel connection',
-      conflictBusy: 'Submitting…',
-
-      'wizard.name': 'Display name',
-      'wizard.namePlaceholder': 'e.g. Tencent test server',
-      'wizard.address': 'SSH address or alias',
-      'wizard.addressPlaceholder': 'e.g. ubuntu@192.0.2.10 or my-server',
-      'wizard.addressHint': 'Aliases from ~/.ssh/config are supported.',
-      'wizard.port': 'Port',
-      'wizard.username': 'User',
-      'wizard.usernamePlaceholder': 'e.g. ubuntu',
-      'wizard.auth': 'Authentication',
-      'wizard.authKey': 'Key file',
-      'wizard.authPassword': 'Password (this connection only)',
-      'wizard.keyPath': 'Key file path',
-      'wizard.keyPathPlaceholder': 'e.g. ~/.ssh/id_ed25519',
-      'wizard.keyPathPick': 'Choose file…',
-      'wizard.password': 'Password',
-      'wizard.passwordPlaceholder': 'Used for this connection only; never saved',
-      'wizard.authHint': 'Authenticates with a private-key file; a password works too, for this connection only.',
-      'wizard.jumpHost': 'Jump host (optional)',
-      'wizard.jumpHostPlaceholder': 'e.g. another saved host address',
-      'wizard.keepAlive': 'Remote keep-alive',
-      'wizard.keepAliveKeep': 'Keep running (recommended)',
-      'wizard.keepAliveStop': 'Stop on exit',
-      'wizard.keepAliveIdle': 'Stop when idle',
-      'wizard.idleMinutes': 'Idle minutes',
-      'wizard.autoReconnect': 'Reconnect automatically',
-      'wizard.actionHint':
+      ],
+      conflictStop: ['停止它并启动受管实例', 'Stop it and start the managed instance'],
+      conflictAlongside: ['保留它，另起一个', 'Keep it and start alongside'],
+      conflictCancel: ['取消连接', 'Cancel connection'],
+      conflictBusy: ['正在提交选择…', 'Submitting…'],
+      'wizard.name': ['显示名', 'Display name'],
+      'wizard.namePlaceholder': ['例如：腾讯云测试机', 'e.g. Tencent test server'],
+      'wizard.address': ['SSH 地址或别名', 'SSH address or alias'],
+      'wizard.addressPlaceholder': ['例如：ubuntu@192.0.2.10 或 my-server', 'e.g. ubuntu@192.0.2.10 or my-server'],
+      'wizard.addressHint': ['支持 ~/.ssh/config 中配置的别名。', 'Aliases from ~/.ssh/config are supported.'],
+      'wizard.port': ['端口', 'Port'],
+      'wizard.username': ['用户名', 'User'],
+      'wizard.usernamePlaceholder': ['例如：ubuntu', 'e.g. ubuntu'],
+      'wizard.auth': ['认证方式', 'Authentication'],
+      'wizard.authKey': ['密钥文件', 'Key file'],
+      'wizard.authPassword': ['密码（仅本次，不保存）', 'Password (this connection only)'],
+      'wizard.keyPath': ['密钥文件路径', 'Key file path'],
+      'wizard.keyPathPlaceholder': ['例如：~/.ssh/id_ed25519', 'e.g. ~/.ssh/id_ed25519'],
+      'wizard.keyPathPick': ['选择文件…', 'Choose file…'],
+      'wizard.password': ['密码', 'Password'],
+      'wizard.passwordPlaceholder': ['仅用于本次连接，不会保存', 'Used for this connection only; never saved'],
+      'wizard.authHint': [
+        '使用私钥文件认证；也可以改用密码（仅本次连接）。',
+        'Authenticates with a private-key file; a password works too, for this connection only.',
+      ],
+      'wizard.jumpHost': ['跳板机（可选）', 'Jump host (optional)'],
+      'wizard.jumpHostPlaceholder': ['例如：另一台已添加主机的地址', 'e.g. another saved host address'],
+      'wizard.keepAlive': ['远端存活策略', 'Remote keep-alive'],
+      'wizard.keepAliveKeep': ['保持运行（推荐）', 'Keep running (recommended)'],
+      'wizard.keepAliveStop': ['退出即停', 'Stop on exit'],
+      'wizard.keepAliveIdle': ['空闲停止', 'Stop when idle'],
+      'wizard.idleMinutes': ['空闲分钟数', 'Idle minutes'],
+      'wizard.autoReconnect': ['断线后自动重连', 'Reconnect automatically'],
+      'wizard.actionHint': [
+        '保存只记下配置；连接会保存并立即连上去，首次连接需要确认主机指纹。',
         'Save only records the entry; Connect saves it and connects right away — the host key is confirmed on first use.',
-      'wizard.saved': 'Saved',
-      'wizard.savingHost': 'Saving…',
-      'wizard.aliases': 'Pick from SSH config',
-      'wizard.aliasesLoading': 'Reading ~/.ssh/config…',
-      'wizard.aliasesEmpty': 'No SSH aliases found',
-      'wizard.knownHosts': '{count} known hosts',
-      'wizard.validationName': 'Enter a display name',
-      'wizard.validationAddress': 'Enter an SSH address or alias',
-      'wizard.validationAddressUrl': 'Enter an SSH address or alias, not a web URL',
-      'wizard.validationPort': 'The port must be 1–65535',
-      'wizard.validationUsername': 'Enter a user name',
-      'wizard.validationKeyPath': 'Enter the key file path',
-      'wizard.validationPassword': 'Enter the password, or switch to a key file',
-
-      'diag.title': 'Connection diagnostics',
-      'diag.running': 'Running checks…',
-      'diag.summaryOk': 'All checks passed',
-      'diag.summaryWarning': 'Some checks need attention',
-      'diag.summaryError': 'Some checks failed',
-      'diag.checkPass': 'Pass',
-      'diag.checkFail': 'Fail',
-      'diag.checkUnknown': 'Unknown',
-      'diag.empty': 'No diagnostics yet.',
-      'diag.rerun': 'Run again',
-      'diag.copy': 'Copy diagnostics',
-      'diag.copyDone': 'Diagnostics copied.',
-      'diag.redacted': 'Diagnostics are redacted and contain no access tokens.',
-      'diag.generatedAt': 'Generated',
-      'diag.host': 'Host',
-      'diag.failed': 'Diagnostics failed',
-      'diag.close': 'Close',
-
-      'settings.title': 'Settings',
-      'settings.ssh': 'SSH defaults',
-      'settings.defaultPort': 'Default port',
-      'settings.defaultAuth': 'Default authentication',
-      'settings.defaultAuthKey': 'Key file',
-      'settings.defaultAuthPassword': 'Password (this connection only)',
-      'settings.defaultKeyPath': 'Default key file',
-      'settings.defaultKeyPathHint': 'Pre-filled for a new host; the wizard can still override it.',
-      'settings.keyPathPick': 'Choose file…',
-      'keyFile.title': 'Choose an SSH private key',
-      'keyFile.hint':
+      ],
+      'wizard.saved': ['已保存', 'Saved'],
+      'wizard.savingHost': ['正在保存…', 'Saving…'],
+      'wizard.aliases': ['从 SSH 配置选择', 'Pick from SSH config'],
+      'wizard.aliasesLoading': ['正在读取 ~/.ssh/config…', 'Reading ~/.ssh/config…'],
+      'wizard.aliasesEmpty': ['没有发现可用的 SSH 别名', 'No SSH aliases found'],
+      'wizard.knownHosts': ['已知主机 {count} 条', '{count} known hosts'],
+      'wizard.validationName': ['请填写显示名', 'Enter a display name'],
+      'wizard.validationAddress': ['请填写 SSH 地址或别名', 'Enter an SSH address or alias'],
+      'wizard.validationAddressUrl': [
+        '请填写 SSH 地址或别名，不要填写网页地址',
+        'Enter an SSH address or alias, not a web URL',
+      ],
+      'wizard.validationPort': ['端口应为 1-65535', 'The port must be 1–65535'],
+      'wizard.validationUsername': ['请填写用户名', 'Enter a user name'],
+      'wizard.validationKeyPath': ['请填写密钥文件路径', 'Enter the key file path'],
+      'wizard.validationPassword': ['请输入密码，或改用密钥文件', 'Enter the password, or switch to a key file'],
+      'diag.title': ['连接诊断', 'Connection diagnostics'],
+      'diag.running': ['正在执行检查…', 'Running checks…'],
+      'diag.summaryOk': ['全部通过', 'All checks passed'],
+      'diag.summaryWarning': ['有需要留意的问题', 'Some checks need attention'],
+      'diag.summaryError': ['存在失败项', 'Some checks failed'],
+      'diag.checkPass': ['通过', 'Pass'],
+      'diag.checkFail': ['失败', 'Fail'],
+      'diag.checkUnknown': ['未知', 'Unknown'],
+      'diag.empty': ['还没有诊断结果。', 'No diagnostics yet.'],
+      'diag.rerun': ['重新检查', 'Run again'],
+      'diag.copy': ['复制诊断信息', 'Copy diagnostics'],
+      'diag.copyDone': ['诊断信息已复制。', 'Diagnostics copied.'],
+      'diag.redacted': ['诊断信息已脱敏，不包含访问令牌。', 'Diagnostics are redacted and contain no access tokens.'],
+      'diag.generatedAt': ['生成时间', 'Generated'],
+      'diag.host': ['主机', 'Host'],
+      'diag.failed': ['诊断执行失败', 'Diagnostics failed'],
+      'diag.close': ['关闭', 'Close'],
+      'settings.title': ['设置', 'Settings'],
+      'settings.ssh': ['SSH 默认值', 'SSH defaults'],
+      'settings.defaultPort': ['默认端口', 'Default port'],
+      'settings.defaultAuth': ['默认认证方式', 'Default authentication'],
+      'settings.defaultAuthKey': ['密钥文件', 'Key file'],
+      'settings.defaultAuthPassword': ['密码（仅本次）', 'Password (this connection only)'],
+      'settings.defaultKeyPath': ['默认密钥文件', 'Default key file'],
+      'settings.defaultKeyPathHint': [
+        '新增主机时预填这个路径；仍可在向导里改。',
+        'Pre-filled for a new host; the wizard can still override it.',
+      ],
+      'settings.keyPathPick': ['选择文件…', 'Choose file…'],
+      'keyFile.title': ['选择 SSH 私钥文件', 'Choose an SSH private key'],
+      'keyFile.hint': [
+        '只列出用户主目录内的文件；点击目录进入，点击文件选中。',
         'Only files under your home directory are listed. Click a folder to enter it, a file to select it.',
-      'keyFile.parent': 'Up',
-      'keyFile.loading': 'Reading the directory…',
-      'keyFile.empty': 'Nothing selectable in this directory',
-      'keyFile.error': 'The directory could not be read',
-      'keyFile.retry': 'Retry',
-      'keyFile.pick': 'Use this file',
-      'settings.connectTimeout': 'Connect timeout (seconds)',
-      'settings.security': 'Security',
-      'settings.hostKeyPolicy': 'Host key policy',
-      'settings.hostKeyPolicyFirstUse': 'Ask on first use',
-      'settings.hostKeyPolicyStrict': 'Strict (fail when the key changes)',
-      'settings.saveTokens': 'Allow saving access tokens',
-      'settings.saveTokensHint':
+      ],
+      'keyFile.parent': ['上一级', 'Up'],
+      'keyFile.loading': ['正在读取目录…', 'Reading the directory…'],
+      'keyFile.empty': ['这个目录里没有可选项', 'Nothing selectable in this directory'],
+      'settings.connectTimeout': ['连接超时（秒）', 'Connect timeout (seconds)'],
+      'settings.security': ['安全', 'Security'],
+      'settings.hostKeyPolicy': ['主机指纹策略', 'Host key policy'],
+      'settings.hostKeyPolicyFirstUse': ['首次连接时询问', 'Ask on first use'],
+      'settings.hostKeyPolicyStrict': ['严格校验（指纹变化即失败）', 'Strict (fail when the key changes)'],
+      'settings.saveTokens': ['允许保存访问令牌', 'Allow saving access tokens'],
+      'settings.saveTokensHint': [
+        '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
         'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
-      'settings.saveTokensRisk': 'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
-      'settings.reconnect': 'Auto reconnect',
-      'settings.reconnectEnabled': 'Reconnect after a drop',
-      'settings.maxAttempts': 'Max attempts',
-      'settings.baseDelay': 'Retry delay (ms)',
-      'settings.other': 'Other',
-      'settings.language': 'Language',
-      'settings.languageAuto': 'Follow DSH',
-      'settings.languageZh': '中文',
-      'settings.languageEn': 'English',
-      'settings.logLevel': 'Log level',
-      'settings.bootstrap': 'Remote runtime',
-      'settings.profile': 'DSH profile',
-      'settings.profileHint': 'Defaults to web; profile config lives in ~/.dsh/profiles/<profile>',
-      'settings.bootstrapHint':
+      ],
+      'settings.saveTokensRisk': [
+        '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
+        'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
+      ],
+      'settings.reconnect': ['自动重连', 'Auto reconnect'],
+      'settings.reconnectEnabled': ['断线后自动重连', 'Reconnect after a drop'],
+      'settings.maxAttempts': ['最大重试次数', 'Max attempts'],
+      'settings.baseDelay': ['重试间隔（毫秒）', 'Retry delay (ms)'],
+      'settings.other': ['其他', 'Other'],
+      'settings.language': ['语言', 'Language'],
+      'settings.languageAuto': ['跟随 DSH', 'Follow DSH'],
+      'settings.languageZh': ['中文', '中文'],
+      'settings.languageEn': ['English', 'English'],
+      'settings.logLevel': ['日志级别', 'Log level'],
+      'settings.bootstrap': ['远端运行时', 'Remote runtime'],
+      'settings.profile': ['DSH profile', 'DSH profile'],
+      'settings.profileHint': [
+        '默认 web；profile 配置在 ~/.dsh/profiles/<profile>',
+        'Defaults to web; profile config lives in ~/.dsh/profiles/<profile>',
+      ],
+      'settings.bootstrapHint': [
+        '用 npx 固定本机 DSH 版本启动；远端缺 Node 或版本过低时，插件自动装一份到 ~/.dsh/remote-go/node',
         'Launched with npx pinned to the local DSH version; when the remote Node is missing or too old, the plugin installs one under ~/.dsh/remote-go/node',
-      'settings.saveSettings': 'Save settings',
-      'settings.saved': 'Settings saved.',
-      'settings.saveFailed': 'Failed to save settings',
-
-      'error.actionFailed': 'Action failed',
+      ],
+      'settings.saveSettings': ['保存设置', 'Save settings'],
+      'settings.saved': ['设置已保存。', 'Settings saved.'],
+      'error.actionFailed': ['操作失败', 'Action failed'],
     }
-
-    //#endregion
+    const zh = Object.fromEntries(Object.entries(STRINGS).map(([key, pair]) => [key, pair[0]]))
+    const en = Object.fromEntries(Object.entries(STRINGS).map(([key, pair]) => [key, pair[1]]))
 
     //#region 3. i18n helpers
 
-    /**
-     * Replace `{name}` placeholders with values from `params`.
-     * @param {string} template - template text from a dictionary entry.
-     * @param {Record<string, unknown>|undefined} params - interpolation values.
-     * @returns {string} interpolated text.
-     */
     function interpolate(template, params) {
       if (params === undefined || params === null) return String(template)
       return String(template).replace(/\{(\w+)\}/g, (match, key) =>
@@ -647,11 +383,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Build a translate function over the local dictionaries. Only used when the
-     * @param {string} locale - `'zh'` or `'en'`.
-     * @returns {(key: string, params?: object) => string} translate function.
-     */
     function makeFallbackT(locale) {
       const dict = locale === 'en' ? en : zh
       return (key, params) => {
@@ -660,11 +391,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Resolve the active locale id from the injected props.
-     * @param {object} props - component props.
-     * @returns {string} `'zh'` or `'en'`.
-     */
     function localeOf(props) {
       if (props && typeof props.getLocaleId === 'function') {
         try {
@@ -681,22 +407,11 @@ window.__ModuleLoader__.load({
       return 'zh'
     }
 
-    /**
-     * Resolve the translate function from props, falling back to the local dict.
-     * @param {object} props - component props.
-     * @returns {(key: string, params?: object) => string} translate function.
-     */
     function translatorOf(props) {
       if (props && typeof props.t === 'function') return props.t
       return makeFallbackT(localeOf(props))
     }
 
-    /**
-     * Resolve a host-provided bilingual text (`{zh, en}`) for the active locale.
-     * @param {unknown} text - I18nText, string, or nothing.
-     * @param {string} locale - `'zh'` or `'en'`.
-     * @returns {string} display text.
-     */
     function resolveText(text, locale) {
       if (text === undefined || text === null) return ''
       if (typeof text === 'string') return text
@@ -708,26 +423,13 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /**
-     * Resolve a list of bilingual texts.
-     * @param {unknown} list - array of I18nText.
-     * @param {string} locale - active locale.
-     * @returns {string[]} display texts, empty strings removed.
-     */
     function resolveTextList(list, locale) {
       if (!Array.isArray(list)) return []
       return list.map((item) => resolveText(item, locale)).filter((item) => item.length > 0)
     }
 
-    //#endregion
-
     //#region 4. misc utilities
 
-    /**
-     * True when the address is a loopback literal (`127.0.0.0/8`, `localhost`, `::1`).
-     * @param {unknown} address - SSH address or alias.
-     * @returns {boolean} whether the address names the local machine.
-     */
     function isLoopbackAddress(address) {
       const value = String(address === undefined || address === null ? '' : address)
         .trim()
@@ -739,31 +441,15 @@ window.__ModuleLoader__.load({
       return false
     }
 
-    /**
-     * True when the address looks like a web URL rather than an SSH target.
-     * @param {string} address - candidate address text (already trimmed).
-     * @returns {boolean} whether a scheme or path was supplied by mistake.
-     */
     function looksLikeWebAddress(address) {
       const value = address.trim()
       return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
     }
 
-    /**
-     * Validate a URL returned by `GET /hosts/:id/open` before it may become an
-     * @param {unknown} url - candidate URL.
-     * @returns {boolean} whether the URL is a loopback http URL.
-     */
     function isValidLoopbackUrl(url) {
       return typeof url === 'string' && url.startsWith(LOOPBACK_PREFIX)
     }
 
-    /**
-     * Format an ISO timestamp for display.
-     * @param {string|null|undefined} iso - ISO timestamp.
-     * @param {string} locale - active locale.
-     * @returns {string} localized short date/time, or an empty string.
-     */
     function formatTime(iso, locale) {
       if (!iso) return ''
       const date = new Date(iso)
@@ -780,11 +466,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * The masked address shown on cards: `user@host:port` when the Host
-     * @param {object} host - HostView.
-     * @returns {string} display address.
-     */
     function displayAddress(host) {
       if (!host) return ''
       if (typeof host.addressMasked === 'string' && host.addressMasked.length > 0) return host.addressMasked
@@ -792,41 +473,16 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /**
-     * Detach a timer from the process lifetime where the platform allows it. In the
-     * browser `setInterval` returns a number and this is a no-op; under Node (unit tests
-     * and tooling) it keeps a background refresh from holding the process open.
-     * @param {unknown} timer - handle returned by setInterval/setTimeout.
-     * @returns {void}
-     */
     function unrefTimer(timer) {
-      if (timer === null || typeof timer !== 'object') return
-      if (typeof timer.unref !== 'function') return
-      timer.unref()
+      if (timer && typeof timer.unref === 'function') timer.unref()
     }
 
-    /**
-     * Read the local DSH release version from the page boot payload.
-     * @returns {string|undefined} release version, when available.
-     */
     function readBootVersion() {
-      try {
-        if (typeof window === 'undefined') return undefined
-        const boot = window.__DSH_BOOT__
-        if (!boot || typeof boot !== 'object') return undefined
-        const release = boot.release
-        if (!release || typeof release !== 'object') return undefined
-        return typeof release.version === 'string' && release.version.length > 0 ? release.version : undefined
-      } catch (_error) {
-        return undefined
-      }
+      const boot = typeof window === 'undefined' ? null : window.__DSH_BOOT__
+      const release = boot && typeof boot === 'object' ? boot.release : null
+      return release && typeof release.version === 'string' && release.version !== '' ? release.version : undefined
     }
 
-    /**
-     * Copy text with the Clipboard API, falling back to a hidden textarea plus
-     * @param {string} text - text to copy.
-     * @returns {Promise<boolean>} whether the copy succeeded.
-     */
     async function copyText(text) {
       try {
         if (
@@ -858,23 +514,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Bilingual name of a connect phase.
-     * @param {(key: string, params?: object) => string} t - translate function.
-     * @param {string|null|undefined} phase - ConnectPhase.
-     * @returns {string} phase label.
-     */
-    function phaseLabel(t, phase) {
-      if (!phase) return ''
-      return t('phase.' + phase)
-    }
-
-    /**
-     * Localized progress line for a host (docs/api.md 进度 code).
-     * @param {(key: string, params?: object) => string} t - translate function.
-     * @param {object|null} progress - host.progress.
-     * @returns {string} progress text.
-     */
     function progressText(t, progress) {
       if (!progress || typeof progress.code !== 'string' || progress.code.length === 0) {
         return t('progress.default')
@@ -886,105 +525,36 @@ window.__ModuleLoader__.load({
       return text === key ? t('progress.default') : text
     }
 
-    /**
-     * Index of the current connect phase, for the progress checklist.
-     * @param {string|null|undefined} phase - ConnectPhase.
-     * @returns {number} 0..PHASES.length-1, or -1 when unknown.
-     */
-    function phaseIndex(phase) {
-      return phase ? PHASES.indexOf(phase) : -1
-    }
-
-    /** Explicit status → dictionary-key map (status ids contain dashes). */
-    const STATUS_KEYS = {
-      unconfigured: { label: 'statusUnconfigured', hint: 'statusHintUnconfigured' },
-      connecting: { label: 'statusConnecting', hint: 'statusHintConnecting' },
-      'fingerprint-pending': { label: 'statusFingerprintPending', hint: 'statusHintFingerprintPending' },
-      'conflict-pending': { label: 'statusConflictPending', hint: 'statusHintConflictPending' },
-      connected: { label: 'statusConnected', hint: 'statusHintConnected' },
-      disconnected: { label: 'statusDisconnected', hint: 'statusHintDisconnected' },
-      error: { label: 'statusError', hint: 'statusHintError' },
-      limited: { label: 'statusLimited', hint: 'statusHintLimited' },
-    }
-
-    /**
-     * Status presentation: dictionary key and tone.
-     * @param {string} status - HostStatus.
-     * @returns {{labelKey: string, hintKey: string, tone: string}} presentation.
-     */
-    function statusMeta(status) {
-      const keys = STATUS_KEYS[status] || STATUS_KEYS.unconfigured
+    /** A one-slot store: `emit` wakes every listener, `subscribe` returns its release. */
+    function createStore() {
+      const listeners = new Set()
       return {
-        labelKey: keys.label,
-        hintKey: keys.hint,
-        tone: STATUS_TONE[status] || 'idle',
+        emit() {
+          for (const listener of [...listeners]) {
+            try {
+              listener()
+            } catch (_error) {
+              // a stale listener must not break the update
+            }
+          }
+        },
+        subscribe(listener) {
+          listeners.add(listener)
+          return () => listeners.delete(listener)
+        },
       }
     }
 
-    /**
-     * Value at a dotted path, or a fallback.
-     * @param {object|undefined} source - object to read.
-     * @param {string} path - dotted path.
-     * @param {unknown} fallback - value when the path is missing.
-     * @returns {unknown} resolved value.
-     */
-    function pathValue(source, path, fallback) {
-      let current = source
-      for (const part of String(path).split('.')) {
-        if (current === null || current === undefined || typeof current !== 'object') return fallback
-        current = current[part]
-      }
-      return current === undefined ? fallback : current
-    }
-
-    /**
-     * Pick the hosts that are currently connected.
-     * @param {object[]} hosts - HostView list.
-     * @returns {number} connected count.
-     */
-    function connectedCount(hosts) {
-      if (!Array.isArray(hosts)) return 0
-      let count = 0
-      for (const host of hosts) if (host && host.status === 'connected') count += 1
-      return count
-    }
-
-    /**
-     * One-shot request channel into the panel: the switcher row (and the settings page)
-     * ask the panel for one target — open a host, or start the add-host wizard — and then
-     * switch the layout to it. The panel consumes the request on mount or on subscribe,
-     * and an "open" waits for `/state` so it knows the host's status and auth type.
-     * @returns {{request: Function, requestIntent: Function, take: Function, subscribe: Function}} store handle.
-     */
     function createPanelRequestStore() {
       let pending = null
-      const listeners = new Set()
-      const emit = () => {
-        for (const listener of [...listeners]) {
-          try {
-            listener()
-          } catch (_error) {
-            // a stale listener must not break the request
-          }
-        }
-      }
+      const store = createStore()
       return {
-        /**
-         * Ask for one host by id (settings page shorthand).
-         * @param {string} hostId - host to open.
-         * @returns {void}
-         */
         request(hostId) {
           if (typeof hostId === 'string' && hostId.length > 0) {
             pending = { kind: 'open', hostId }
-            emit()
+            store.emit()
           }
         },
-        /**
-         * Ask for a target directly.
-         * @param {{kind: string, hostId?: string}} intent - `open` one host, `disconnect` one host, `manage` the list, or `local`.
-         * @returns {void}
-         */
         requestIntent(intent) {
           if (!intent || typeof intent !== 'object') return
           const kinds = ['open', 'disconnect', 'manage', 'local']
@@ -994,75 +564,41 @@ window.__ModuleLoader__.load({
             intent.kind === 'open' || intent.kind === 'disconnect'
               ? { kind: intent.kind, hostId: intent.hostId }
               : { kind: intent.kind }
-          emit()
+          store.emit()
         },
         take() {
           const intent = pending
           pending = null
           return intent
         },
-        subscribe(listener) {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
+        subscribe: store.subscribe,
       }
     }
 
-    /**
-     * The add/edit host wizard lives in the shell's overlay seat, not in the panel: opening
-     * it must work from any page (local content, host management, or over a remote window)
-     * and must not drag the management page along with it.
-     * @returns {{open: Function, close: Function, current: Function, subscribe: Function}} store handle.
-     */
+    /** The wizard floats in the overlay seat, so it opens from any page without dragging a page along. */
     function createWizardStore() {
       let draft = null
-      const listeners = new Set()
-      const emit = () => {
-        for (const listener of [...listeners]) {
-          try {
-            listener()
-          } catch (_error) {
-            // a stale listener must not break the wizard
-          }
-        }
-      }
+      const store = createStore()
       return {
-        /**
-         * Open the wizard on one draft.
-         * @param {{mode?: string, host?: object|null}} next - add or edit this host.
-         * @returns {void}
-         */
         open(next) {
           if (!next || typeof next !== 'object') return
           draft = { mode: next.mode === 'edit' ? 'edit' : 'add', host: next.host || null }
-          emit()
+          store.emit()
         },
-        /** @returns {void} */
         close() {
           if (draft === null) return
           draft = null
-          emit()
+          store.emit()
         },
-        /** @returns {{mode: string, host: object|null}|null} the open draft. */
         current() {
           return draft
         },
-        /** @returns {() => void} unsubscribe. */
-        subscribe(listener) {
-          listeners.add(listener)
-          return () => listeners.delete(listener)
-        },
+        subscribe: store.subscribe,
       }
     }
 
-    //#endregion
-
     //#region 5. local error views
 
-    /**
-     * Local fallback ErrorViews (docs/api.md ErrorView). Host responses carry
-     * their own ErrorView; these describe client-side and transport failures.
-     */
     const LOCAL_ERRORS = {
       network: {
         code: 'network',
@@ -1089,13 +625,6 @@ window.__ModuleLoader__.load({
           { zh: '如果问题持续，刷新页面', en: 'If it persists, refresh the page' },
         ],
       },
-      'invalid-input': {
-        code: 'invalid-input',
-        retryable: false,
-        title: { zh: '输入不合法', en: 'Invalid input' },
-        detail: { zh: '请检查填写的参数后重试。', en: 'Check the values you entered and try again.' },
-        nextSteps: [{ zh: '返回表单修正后重试', en: 'Go back to the form, fix it, and retry' }],
-      },
       'blocked-url': {
         code: 'blocked-url',
         retryable: false,
@@ -1111,12 +640,6 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /**
-     * Build a local ErrorView with optional technical detail.
-     * @param {string} code - key into LOCAL_ERRORS.
-     * @param {string|undefined} technical - optional technical detail.
-     * @returns {object} ErrorView.
-     */
     function localErrorView(code, technical) {
       const base = LOCAL_ERRORS[code] || LOCAL_ERRORS.internal
       const view = {
@@ -1130,11 +653,6 @@ window.__ModuleLoader__.load({
       return view
     }
 
-    /**
-     * Normalize anything thrown by the API layer into an ErrorView.
-     * @param {unknown} error - caught value.
-     * @returns {object} ErrorView.
-     */
     function toErrorView(error) {
       if (error && typeof error === 'object') {
         if (error.view && typeof error.view === 'object') return error.view
@@ -1144,27 +662,14 @@ window.__ModuleLoader__.load({
       return localErrorView('internal', technical)
     }
 
-    //#endregion
-
     //#region 6. HTTP + SSE API client
 
-    /** @returns {Function|null} fetch implementation or null when unavailable. */
     function getFetch() {
-      try {
-        if (typeof fetch === 'function') return fetch
-        if (typeof window !== 'undefined' && typeof window.fetch === 'function') return window.fetch.bind(window)
-      } catch (_error) {
-        return null
-      }
+      if (typeof fetch === 'function') return fetch
+      if (typeof window !== 'undefined' && typeof window.fetch === 'function') return window.fetch.bind(window)
       return null
     }
 
-    /**
-     * Wrap an ErrorView in an Error so callers can `catch`/`throw` it.
-     * @param {object} view - ErrorView.
-     * @param {unknown} [cause] - underlying cause.
-     * @returns {Error} error carrying `.view`.
-     */
     function apiError(view, cause) {
       const text =
         resolveText(view && view.detail, 'zh') ||
@@ -1177,13 +682,7 @@ window.__ModuleLoader__.load({
       return error
     }
 
-    /**
-     * One JSON request against the Host API. All requests carry the plugin
-     * marker header and same-origin credentials (docs/api.md 安全约束).
-     * @param {string} path - path below `/dsh-remote-go/api`.
-     * @param {{method?: string, body?: object, signal?: AbortSignal}} [options] - request options.
-     * @returns {Promise<object>} `{ok:true, ...}` payload.
-     */
+    /** One JSON request: the marker header and same-origin credentials are not optional (docs/api.md). */
     async function apiRequest(path, options) {
       const opts = options || {}
       const fetcher = getFetch()
@@ -1216,18 +715,11 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** Host API surface used by the UI. */
     const api = {
-      /** @returns {Promise<object>} StateView (docs/api.md `GET /state`). */
       async getState() {
         const payload = await apiRequest('/state')
         return payload.state
       },
-      /**
-       * Tell the Host the version the page booted with (tolerant, optional).
-       * @param {string|undefined} version - local DSH release version.
-       * @returns {Promise<void>} resolves even when the call fails.
-       */
       async reportLocalVersion(version) {
         if (typeof version !== 'string' || version.length === 0) return
         try {
@@ -1236,58 +728,45 @@ window.__ModuleLoader__.load({
           // Tolerated by contract: this only backfills the Host's probe.
         }
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} connect acknowledgement. */
       async connect(hostId, options) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/connect', {
           method: 'POST',
           body: options || {},
         })
       },
-      /** Answer the "manual DSH already running" prompt: stop | alongside | cancel. */
       async confirmConflict(hostId, action) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/conflict', {
           method: 'POST',
           body: { action },
         })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async disconnect(hostId, stopRemote) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/disconnect', {
           method: 'POST',
           body: { stopRemote: stopRemote === true },
         })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async reconnect(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
       },
-      /**
-       * Fetch the one-time loopback URL for the guest (docs/api.md `GET /hosts/:id/open`).
-       * @param {string} hostId - host id.
-       * @returns {Promise<string>} validated loopback URL.
-       */
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
         if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
         return payload.url
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async acceptFingerprint(hostId, accept, remember, sha256) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/fingerprint', {
           method: 'POST',
           body: { accept: accept === true, remember: remember === true, sha256: sha256 || '' },
         })
       },
-      /** @param {object} host - HostInput. @returns {Promise<object>} saved HostView. */
       async saveHost(host) {
         const payload = await apiRequest('/hosts', { method: 'POST', body: { host } })
         return payload.host
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} acknowledgement. */
       async deleteHost(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId), { method: 'DELETE' })
       },
-      /** @param {string} hostId - host id. @returns {Promise<object>} diagnose report. */
       async diagnose(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
           method: 'POST',
@@ -1295,27 +774,16 @@ window.__ModuleLoader__.load({
         })
         return payload.report
       },
-      /** @param {object} patch - partial SettingsView. @returns {Promise<object>} full SettingsView. */
       async saveSettings(patch) {
         const payload = await apiRequest('/settings', { method: 'POST', body: { patch } })
         return payload.settings
       },
-      /**
-       * Point the Host's active host at `hostId` so a reload reopens the same
-       * @param {string} hostId - host id.
-       * @returns {Promise<object>} acknowledgement.
-       */
       async activate(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
       },
-      /**
-       * Tell the Host that no host fills the window any more (docs/api.md `POST /active`).
-       * @returns {Promise<object>} acknowledgement.
-       */
       async clearActive() {
         return apiRequest('/active', { method: 'POST', body: { id: null } })
       },
-      /** @returns {Promise<{aliases: object[], knownHosts: object}>} SSH alias scan (docs/api.md). */
       async getAliases() {
         const payload = await apiRequest('/ssh/aliases')
         return {
@@ -1323,11 +791,6 @@ window.__ModuleLoader__.load({
           knownHosts: payload.knownHosts && typeof payload.knownHosts === 'object' ? payload.knownHosts : null,
         }
       },
-      /**
-       * Browse the user's home for a private-key file (docs/api.md `GET /keyfile/list`).
-       * @param {string} [dir] absolute directory to list; empty means the default one.
-       * @returns {Promise<{path: string, parent: string | null, entries: Array<{name: string, path: string, isDirectory: boolean}>, truncated: boolean, defaultKeyPath: string, defaultDir: string}>}
-       */
       async listKeyFiles(dir) {
         const query = dir ? '?path=' + encodeURIComponent(dir) : ''
         const payload = await apiRequest('/keyfile/list' + query)
@@ -1342,12 +805,6 @@ window.__ModuleLoader__.load({
       },
     }
 
-    /**
-     * Subscribe to live state: SSE first, 3s polling once the stream fails
-     * (docs/api.md). Always resolves the current state once up front.
-     * @param {{onState: (state: object) => void, onStatus?: (mode: string) => void, onError?: (error: unknown) => void}} handlers - callbacks.
-     * @returns {() => void} dispose function.
-     */
     function subscribeState(handlers) {
       const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
       const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
@@ -1416,8 +873,7 @@ window.__ModuleLoader__.load({
         })
       }
 
-      // Initial read in parallel with opening the stream, so the panel can paint
-      // immediately even when SSE is slow.
+      // Initial read in parallel with opening the stream, so the panel can paint immediately even when SSE is slow.
       fetchOnce()
       startStream()
 
@@ -1429,16 +885,8 @@ window.__ModuleLoader__.load({
       }
     }
 
-    //#endregion
-
     //#region 7. icons and small UI primitives
 
-    /**
-     * Sidebar/main-entry glyph: a local display with a tunnel arrow leaving it.
-     * Original artwork, drawn in `currentColor` only.
-     * @param {{size?: number, active?: boolean}} props - sidebar share (size, active).
-     * @returns {object} svg element.
-     */
     function RemoteIcon(props) {
       const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 18
       const active = props && props.active === true
@@ -1465,7 +913,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Generic stroke icon factory: paths only, currentColor. */
     function strokeIcon(paths, viewBox) {
       return function Icon(props) {
         const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
@@ -1502,14 +949,9 @@ window.__ModuleLoader__.load({
     const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
     const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
 
-    /**
-     * Status dot. Color comes from theme tokens with stable fallbacks.
-     * @param {{status?: string, title?: string}} props - host status.
-     * @returns {object} span element.
-     */
     function StatusDot(props) {
       const status = props && typeof props.status === 'string' ? props.status : 'unconfigured'
-      const tone = STATUS_TONE[status] || 'idle'
+      const tone = statusOf(status).tone
       const label = props && typeof props.title === 'string' ? props.title : undefined
       return h('span', {
         className: 'drg-dot',
@@ -1520,11 +962,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Small text badge.
-     * @param {{children?: unknown, tone?: string, title?: string}} props - badge props.
-     * @returns {object} span element.
-     */
     function Badge(props) {
       const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
       return h(
@@ -1533,17 +970,11 @@ window.__ModuleLoader__.load({
           className: 'drg-badge',
           'data-tone': tone,
           title: props && props.title,
-          'data-testid': props && props.testId,
         },
         props && props.children,
       )
     }
 
-    /**
-     * Button. Variants: primary | secondary | ghost | danger.
-     * @param {object} props - button props.
-     * @returns {object} button element.
-     */
     function Button(props) {
       const variant = props.variant || 'secondary'
       const className = ['drg-btn', 'drg-btn-' + variant].join(' ')
@@ -1556,20 +987,14 @@ window.__ModuleLoader__.load({
           onClick: typeof onClick === 'function' ? onClick : undefined,
           disabled: props.disabled === true || props.busy === true,
           title: props.title,
-          'aria-label': props.ariaLabel,
           'data-testid': props.testId,
           'data-busy': props.busy === true ? 'true' : undefined,
         },
         props.busy === true ? h(Spinner, { size: 14 }) : null,
-        h('span', { className: 'drg-btn-label' }, props.children),
+        box('span', 'drg-btn-label', props.children),
       )
     }
 
-    /**
-     * Icon-only button with an accessible label.
-     * @param {object} props - icon button props.
-     * @returns {object} button element.
-     */
     function IconButton(props) {
       return h(
         'button',
@@ -1586,11 +1011,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Spinner.
-     * @param {{size?: number}} props - size in px.
-     * @returns {object} span element.
-     */
     function Spinner(props) {
       return h('span', {
         className: 'drg-spinner',
@@ -1602,30 +1022,19 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Labeled form field wrapper.
-     * @param {{label?: string, hint?: string, error?: string, htmlFor?: string, children?: unknown}} props - field props.
-     * @returns {object} div element.
-     */
     function Field(props) {
       return h(
         'label',
         {
           className: 'drg-field' + (props.wide === true ? ' drg-field-wide' : ''),
-          htmlFor: props.htmlFor,
         },
-        props.label ? h('span', { className: 'drg-field-label' }, props.label) : null,
+        props.label ? box('span', 'drg-field-label', props.label) : null,
         props.children,
-        props.hint ? h('span', { className: 'drg-field-hint' }, props.hint) : null,
+        props.hint ? box('span', 'drg-field-hint', props.hint) : null,
         props.error ? h('span', { className: 'drg-field-error', role: 'alert' }, props.error) : null,
       )
     }
 
-    /**
-     * Text/number/password input styled for the theme.
-     * @param {object} props - input props.
-     * @returns {object} input element.
-     */
     function TextInput(props) {
       return h('input', {
         className: 'drg-input',
@@ -1634,7 +1043,6 @@ window.__ModuleLoader__.load({
         placeholder: props.placeholder,
         list: props.list,
         disabled: props.disabled === true,
-        readOnly: props.readOnly === true,
         autoComplete: props.autoComplete || 'off',
         spellCheck: false,
         'data-testid': props.testId,
@@ -1644,11 +1052,6 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Select control.
-     * @param {{value?: string, options?: Array<{value: string, label: string}>, onChange?: (value: string) => void, disabled?: boolean, ariaLabel?: string}} props - select props.
-     * @returns {object} select element.
-     */
     function Select(props) {
       const options = Array.isArray(props.options) ? props.options : []
       return h(
@@ -1665,15 +1068,39 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Checkbox row.
-     * @param {{checked?: boolean, label?: string, onChange?: (checked: boolean) => void, disabled?: boolean}} props - checkbox props.
-     * @returns {object} label element.
-     */
-    function CheckRow(props) {
+    /** One form field from a spec; `after` runs alongside the patch (touched/dirty flags). */
+    function formRow(t, draft, patch, spec) {
+      const label = t(spec.label)
+      const onChange = (next) => {
+        patch({ [spec.key]: next })
+        if (spec.after) spec.after(next)
+      }
       return h(
+        Field,
+        { label, hint: spec.hint ? t(spec.hint) : undefined },
+        spec.options
+          ? h(Select, {
+              value: draft[spec.key],
+              ariaLabel: label,
+              testId: spec.testId,
+              options: spec.options.map(([value, key]) => ({ value, label: t(key) })),
+              onChange,
+            })
+          : h(TextInput, {
+              type: spec.kind,
+              value: draft[spec.key],
+              placeholder: spec.placeholder ? t(spec.placeholder) : undefined,
+              ariaLabel: label,
+              testId: spec.testId,
+              onChange,
+            }),
+      )
+    }
+
+    function CheckRow(props) {
+      return box(
         'label',
-        { className: 'drg-check' },
+        'drg-check',
         h('input', {
           type: 'checkbox',
           checked: props.checked === true,
@@ -1685,11 +1112,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Notice banner. Tones: info | warn | error | success.
-     * @param {{tone?: string, title?: string, children?: unknown, onDismiss?: () => void, dismissLabel?: string}} props - notice props.
-     * @returns {object} div element.
-     */
     function Notice(props) {
       const tone = props.tone || 'info'
       return h(
@@ -1698,31 +1120,19 @@ window.__ModuleLoader__.load({
         h(
           'span',
           { className: 'drg-notice-icon', 'aria-hidden': 'true' },
-          tone === 'error' ? h(IconAlert) : tone === 'success' ? h(IconCheck) : h(IconAlert),
+          tone === 'success' ? h(IconCheck) : h(IconAlert),
         ),
-        h(
+        box(
           'div',
-          { className: 'drg-notice-body' },
-          props.title ? h('div', { className: 'drg-notice-title' }, props.title) : null,
+          'drg-notice-body',
+          props.title ? box('div', 'drg-notice-title', props.title) : null,
           props.children !== undefined && props.children !== null
-            ? h('div', { className: 'drg-notice-text' }, props.children)
+            ? box('div', 'drg-notice-text', props.children)
             : null,
         ),
-        typeof props.onDismiss === 'function'
-          ? h(
-              'button',
-              { type: 'button', className: 'drg-notice-dismiss', onClick: props.onDismiss },
-              props.dismissLabel || '×',
-            )
-          : null,
       )
     }
 
-    /**
-     * Modal shell: backdrop + centered card. Closes on backdrop click and Esc.
-     * @param {{title?: string, subtitle?: string, onClose?: () => void, footer?: unknown, children?: unknown, wide?: boolean, closeLabel?: string}} props - modal props.
-     * @returns {object} div element.
-     */
     function Modal(props) {
       const onClose = props.onClose
       // A dialog whose title is drawn by its own body (the host-management window) still
@@ -1736,9 +1146,9 @@ window.__ModuleLoader__.load({
         document.addEventListener('keydown', onKeyDown)
         return () => document.removeEventListener('keydown', onKeyDown)
       }, [onClose])
-      return h(
+      return box(
         'div',
-        { className: 'drg-modal-layer' },
+        'drg-modal-layer',
         h('div', {
           className: 'drg-modal-backdrop',
           onClick: typeof onClose === 'function' ? onClose : undefined,
@@ -1754,30 +1164,25 @@ window.__ModuleLoader__.load({
             'data-testid': props.testId,
             'data-bare': bare ? 'true' : undefined,
           },
-          h(
+          box(
             'div',
-            { className: 'drg-modal-head' },
-            h(
+            'drg-modal-head',
+            box(
               'div',
-              { className: 'drg-modal-titles' },
-              props.title ? h('h2', { className: 'drg-modal-title' }, props.title) : null,
-              props.subtitle ? h('p', { className: 'drg-modal-subtitle' }, props.subtitle) : null,
+              'drg-modal-titles',
+              props.title ? box('h2', 'drg-modal-title', props.title) : null,
+              props.subtitle ? box('p', 'drg-modal-subtitle', props.subtitle) : null,
             ),
             typeof onClose === 'function'
               ? h(IconButton, { icon: h(IconClose), label: props.closeLabel || 'Close', onClick: onClose })
               : null,
           ),
-          h('div', { className: 'drg-modal-body' }, props.children),
-          props.footer ? h('div', { className: 'drg-modal-foot' }, props.footer) : null,
+          box('div', 'drg-modal-body', props.children),
+          props.footer ? box('div', 'drg-modal-foot', props.footer) : null,
         ),
       )
     }
 
-    /**
-     * Confirmation dialog for destructive actions.
-     * @param {{title: string, body: unknown, confirmLabel: string, cancelLabel: string, busy?: boolean, onConfirm: () => void, onCancel: () => void}} props - dialog props.
-     * @returns {object} modal element.
-     */
     function ConfirmDialog(props) {
       return h(
         Modal,
@@ -1785,9 +1190,7 @@ window.__ModuleLoader__.load({
           title: props.title,
           onClose: props.onCancel,
           closeLabel: props.cancelLabel,
-          footer: h(
-            'div',
-            { className: 'drg-row drg-row-end' },
+          footer: footerRow(
             h(
               Button,
               { variant: 'secondary', onClick: props.onCancel, disabled: props.busy === true },
@@ -1796,42 +1199,25 @@ window.__ModuleLoader__.load({
             h(Button, { variant: 'danger', onClick: props.onConfirm, busy: props.busy === true }, props.confirmLabel),
           ),
         },
-        h('p', { className: 'drg-paragraph' }, props.body),
+        box('p', 'drg-paragraph', props.body),
       )
     }
-
-    //#endregion
 
     //#region 8. host list view
 
-    /**
-     * Loading placeholder used before the first `/state` response arrives.
-     * @param {{t: Function}} props - translate props.
-     * @returns {object} div element.
-     */
     function LoadingBlock(props) {
       const t = translatorOf(props)
-      return h(
-        'div',
-        { className: 'drg-loading' },
-        h(Spinner, { size: 20 }),
-        h('span', null, props.label || t('loading')),
-      )
+      return box('div', 'drg-loading', h(Spinner, { size: 20 }), h('span', null, props.label || t('loading')))
     }
 
-    /**
-     * Empty-state block shown when no hosts are configured.
-     * @param {{t: Function, onAdd: () => void}} props - callbacks.
-     * @returns {object} div element.
-     */
     function EmptyHosts(props) {
       const t = translatorOf(props)
       return h(
         'div',
         { className: 'drg-empty', 'data-testid': 'host-list-empty' },
         h('div', { className: 'drg-empty-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 40 })),
-        h('h3', { className: 'drg-empty-title' }, t('emptyTitle')),
-        h('p', { className: 'drg-empty-body' }, t('emptyBody')),
+        box('h3', 'drg-empty-title', t('emptyTitle')),
+        box('p', 'drg-empty-body', t('emptyBody')),
         h(
           Button,
           {
@@ -1844,98 +1230,76 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * One host card: status, address, remote version, last opened, and actions.
-     * @param {object} props - host and callbacks.
-     * @returns {object} li element.
-     */
     function HostCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
       const host = props.host || {}
       const busy = props.busy === true
-      const meta = statusMeta(host.status || 'unconfigured')
-      const statusLabel = t(meta.labelKey)
+      const meta = statusOf(host.status)
+      const statusLabel = t(meta.label)
       const remoteVersion =
         host.remote && typeof host.remote.version === 'string' && host.remote.version.length > 0
           ? host.remote.version
           : t('versionPending')
       const lastOpened = host.lastOpenedAt ? formatTime(host.lastOpenedAt, locale) : t('neverOpened')
-      const failing = host.status === 'error' || host.status === 'limited'
       const reason = host.error ? resolveText(host.error.detail, locale) || resolveText(host.error.title, locale) : ''
-      const primaryLabel =
-        host.status === 'connected'
-          ? t('cardOpen')
-          : host.status === 'fingerprint-pending'
-            ? t('confirmFingerprint')
-            : host.status === 'conflict-pending'
-              ? t('statusConflictPending')
-              : host.status === 'connecting'
-                ? t('connecting')
-                : t('cardConnect')
-      const primaryTestId = 'host-open'
-      const primaryDisabled = busy || host.status === 'connecting' || host.status === 'conflict-pending'
+      const primaryDisabled = busy || meta.wait === true
 
       return h(
         'li',
         { className: 'drg-host-card', 'data-status': host.status, 'data-testid': 'host-card', 'data-host-id': host.id },
-        host.status === 'conflict-pending'
+        meta.strip
           ? h(
               'div',
-              { className: 'drg-card-strip', role: 'status' },
+              { className: 'drg-card-strip', role: meta.strip },
               h(IconAlert, { size: 14 }),
-              h('span', { className: 'drg-card-strip-text' }, t('statusHintConflictPending')),
+              box(
+                'span',
+                'drg-card-strip-text',
+                meta.strip === 'alert' ? t('errorReason', { detail: reason || t(meta.hint) }) : t(meta.hint),
+              ),
+              meta.strip === 'alert'
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'drg-linkbtn',
+                      onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
+                    },
+                    t('cardDiagnose'),
+                  )
+                : null,
             )
-          : failing
-            ? h(
-                'div',
-                { className: 'drg-card-strip', role: 'alert' },
-                h(IconAlert, { size: 14 }),
-                h(
-                  'span',
-                  { className: 'drg-card-strip-text' },
-                  t('errorReason', { detail: reason || t(meta.hintKey) }),
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'drg-linkbtn',
-                    onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
-                  },
-                  t('cardDiagnose'),
-                ),
-              )
-            : null,
-        h(
+          : null,
+        box(
           'div',
-          { className: 'drg-card-head' },
+          'drg-card-head',
           h(StatusDot, { status: host.status, title: statusLabel }),
           h('h3', { className: 'drg-card-name', title: host.name }, host.name || host.id),
-          h(Badge, { tone: meta.tone, title: t(meta.hintKey) }, statusLabel),
+          h(Badge, { tone: meta.tone, title: t(meta.hint) }, statusLabel),
         ),
         h('div', { className: 'drg-card-address', title: displayAddress(host) }, displayAddress(host) || '—'),
-        h(
+        box(
           'dl',
-          { className: 'drg-card-meta' },
+          'drg-card-meta',
           h('div', null, h('dt', null, t('remoteVersion')), h('dd', null, remoteVersion)),
           h('div', null, h('dt', null, t('lastOpened')), h('dd', null, lastOpened)),
         ),
-        h(
+        box(
           'div',
-          { className: 'drg-card-actions' },
+          'drg-card-actions',
           h(
             Button,
             {
               variant: host.status === 'connected' ? 'primary' : 'secondary',
-              testId: primaryTestId,
+              testId: 'host-open',
               onClick: () => {
                 if (typeof props.onOpen === 'function') props.onOpen(host)
               },
               disabled: primaryDisabled,
               busy: busy && host.status !== 'connected' && host.status !== 'connecting',
             },
-            primaryLabel,
+            t(meta.action),
           ),
           host.status === 'connected'
             ? h(
@@ -1949,7 +1313,7 @@ window.__ModuleLoader__.load({
                 t('cardDisconnect'),
               )
             : null,
-          host.status === 'disconnected' || host.status === 'error' || host.status === 'limited'
+          meta.retry === true
             ? h(
                 Button,
                 {
@@ -1961,9 +1325,9 @@ window.__ModuleLoader__.load({
                 t('cardReconnect'),
               )
             : null,
-          h(
+          box(
             'div',
-            { className: 'drg-card-actions-end' },
+            'drg-card-actions-end',
             h(IconButton, {
               icon: h(IconPulse),
               label: t('cardDiagnose'),
@@ -1990,12 +1354,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Host list for the floating management window (docs/design.md（主机清单）). Pure
-     * presentation: all actions rise through callbacks.
-     * @param {object} props - state, errors, and callbacks.
-     * @returns {object} div element.
-     */
     function HostListView(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2003,7 +1361,7 @@ window.__ModuleLoader__.load({
       const loading = props.loading === true
       const error = props.error || null
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
-      const connected = connectedCount(hosts)
+      const connected = hosts.filter((host) => host && host.status === 'connected').length
       const total = hosts.length
       const busyHostId = props.busyHostId || null
 
@@ -2020,12 +1378,12 @@ window.__ModuleLoader__.load({
       } else if (hosts.length === 0) {
         content = h(EmptyHosts, { t, onAdd: props.onAdd })
       } else {
-        content = h(
+        content = box(
           'div',
-          { className: 'drg-host-body' },
-          h(
+          'drg-host-body',
+          box(
             'div',
-            { className: 'drg-summary' },
+            'drg-summary',
             h(StatusDot, { status: connected > 0 ? 'connected' : 'idle' }),
             h('span', null, t('summary', { connected, total })),
           ),
@@ -2040,7 +1398,6 @@ window.__ModuleLoader__.load({
                 host,
                 busy: busyHostId === host.id,
                 onOpen: props.onOpenHost,
-                onConnect: props.onConnectHost,
                 onDisconnect: props.onDisconnectHost,
                 onReconnect: props.onReconnectHost,
                 onEdit: props.onEditHost,
@@ -2052,21 +1409,21 @@ window.__ModuleLoader__.load({
         )
       }
 
-      return h(
+      return box(
         'div',
-        { className: 'drg-page drg-host-page' },
-        h(
+        'drg-page drg-host-page',
+        box(
           'header',
-          { className: 'drg-page-head' },
-          h(
+          'drg-page-head',
+          box(
             'div',
-            { className: 'drg-page-heading' },
-            h('h1', { className: 'drg-page-title' }, t('hostsTitle')),
-            h('p', { className: 'drg-page-subtitle' }, t('panelSubtitle')),
+            'drg-page-heading',
+            box('h1', 'drg-page-title', t('hostsTitle')),
+            box('p', 'drg-page-subtitle', t('panelSubtitle')),
           ),
-          h(
+          box(
             'div',
-            { className: 'drg-page-actions' },
+            'drg-page-actions',
             h(
               Button,
               {
@@ -2100,38 +1457,30 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#endregion
-
     //#region 9. takeover surface and carrier helpers
 
-    /**
-     * Staged connect progress: current progress line plus the phase checklist
-     * (docs/api.md 的 ConnectPhase / 进度 code).
-     * @param {{t: Function, host: object}} props - host being connected.
-     * @returns {object} div element.
-     */
     function ConnectProgress(props) {
       const t = translatorOf(props)
       const host = props.host || {}
-      const current = phaseIndex(host.phase)
+      const current = host.phase ? PHASES.indexOf(host.phase) : -1
       const name = host.name || host.id || ''
-      return h(
+      return box(
         'div',
-        { className: 'drg-progress' },
-        h(
+        'drg-progress',
+        box(
           'div',
-          { className: 'drg-progress-head' },
+          'drg-progress-head',
           h(Spinner, { size: 22 }),
-          h('h2', { className: 'drg-progress-title' }, t('viewportConnecting', { name })),
+          box('h2', 'drg-progress-title', t('viewportConnecting', { name })),
         ),
         h(
           'p',
           { className: 'drg-progress-line', 'data-progress': host.progress ? host.progress.code : undefined },
           progressText(t, host.progress),
         ),
-        h(
+        box(
           'ol',
-          { className: 'drg-phases' },
+          'drg-phases',
           PHASES.map((phase, index) => {
             const state = current < 0 ? 'pending' : index < current ? 'done' : index === current ? 'current' : 'pending'
             return h(
@@ -2142,18 +1491,13 @@ window.__ModuleLoader__.load({
                 { className: 'drg-phase-mark', 'aria-hidden': 'true' },
                 state === 'done' ? h(IconCheck, { size: 12 }) : null,
               ),
-              h('span', null, phaseLabel(t, phase)),
+              h('span', null, t('phase.' + phase)),
             )
           }),
         ),
       )
     }
 
-    /**
-     * Host-key confirmation card. Used by both the wizard's test step and the
-     * @param {object} props - host, busy flag, error, callbacks.
-     * @returns {object} div element.
-     */
     function FingerprintCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2177,29 +1521,19 @@ window.__ModuleLoader__.load({
           { className: 'drg-fingerprint-icon', 'data-tone': changed ? 'error' : 'warn', 'aria-hidden': 'true' },
           h(IconAlert, { size: 22 }),
         ),
-        h('h2', { className: 'drg-fingerprint-title' }, changed ? t('fingerprintChanged') : t('fingerprintTitle')),
-        h('p', { className: 'drg-fingerprint-body' }, changed ? t('fingerprintChangedBody') : t('fingerprintBody')),
-        h(
+        box('h2', 'drg-fingerprint-title', changed ? t('fingerprintChanged') : t('fingerprintTitle')),
+        box('p', 'drg-fingerprint-body', changed ? t('fingerprintChangedBody') : t('fingerprintBody')),
+        box(
           'dl',
-          { className: 'drg-kv' },
+          'drg-kv',
           keyType
             ? h('div', null, h('dt', null, t('fingerprintKeyType')), h('dd', null, h('code', null, keyType)))
             : null,
           sha256
-            ? h(
-                'div',
-                null,
-                h('dt', null, t('fingerprintSha')),
-                h('dd', null, h('code', { className: 'drg-break' }, sha256)),
-              )
+            ? h('div', null, h('dt', null, t('fingerprintSha')), h('dd', null, box('code', 'drg-break', sha256)))
             : null,
           pinned && changed
-            ? h(
-                'div',
-                null,
-                h('dt', null, t('fingerprintPinned')),
-                h('dd', null, h('code', { className: 'drg-break' }, pinned)),
-              )
+            ? h('div', null, h('dt', null, t('fingerprintPinned')), h('dd', null, box('code', 'drg-break', pinned)))
             : null,
         ),
         props.error
@@ -2209,9 +1543,9 @@ window.__ModuleLoader__.load({
               resolveText(toErrorView(props.error).detail, locale) || t('error.actionFailed'),
             )
           : null,
-        h(
+        box(
           'div',
-          { className: 'drg-row drg-row-wrap' },
+          'drg-row drg-row-wrap',
           h(
             Button,
             {
@@ -2241,11 +1575,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Error card: localized title/detail/next steps + retry/diagnose/back.
-     * @param {object} props - ErrorView plus callbacks.
-     * @returns {object} div element.
-     */
     function ErrorCard(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2257,13 +1586,13 @@ window.__ModuleLoader__.load({
         'div',
         { className: 'drg-error-card', role: 'alert', 'data-testid': 'error-card' },
         h('div', { className: 'drg-error-icon', 'aria-hidden': 'true' }, h(IconAlert, { size: 24 })),
-        h('h2', { className: 'drg-error-title' }, title),
-        detail ? h('p', { className: 'drg-error-detail' }, detail) : null,
+        box('h2', 'drg-error-title', title),
+        detail ? box('p', 'drg-error-detail', detail) : null,
         steps.length > 0
-          ? h(
+          ? box(
               'div',
-              { className: 'drg-error-steps' },
-              h('div', { className: 'drg-section-label' }, t('next')),
+              'drg-error-steps',
+              box('div', 'drg-section-label', t('next')),
               h(
                 'ul',
                 null,
@@ -2271,9 +1600,9 @@ window.__ModuleLoader__.load({
               ),
             )
           : null,
-        h(
+        box(
           'div',
-          { className: 'drg-row drg-row-wrap' },
+          'drg-row drg-row-wrap',
           view.retryable !== false && typeof props.onRetry === 'function'
             ? h(Button, { variant: 'primary', testId: 'error-retry', onClick: props.onRetry }, t('retry'))
             : null,
@@ -2287,22 +1616,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /**
-     * Statuses whose window prints the connect log. The Host gates its `logs` tail the same way
-     * (docs/api.md HostView.logs), so the console and the payload cannot drift apart: connecting,
-     * the host-key question, and the failure it ended in.
-     * @param {string} status - HostStatus.
-     * @returns {boolean} true when the window is the connect window.
-     */
-    function connectWindowOpen(status) {
-      return status === 'connecting' || status === 'fingerprint-pending' || status === 'error'
-    }
-
-    /**
-     * Clock for a log line: HH:MM:SS in the viewer's own zone.
-     * @param {string} iso - entry timestamp.
-     * @returns {string} clock text, or '' when the timestamp is unusable.
-     */
     function logClock(iso) {
       const when = typeof iso === 'string' && iso !== '' ? new Date(iso) : null
       if (when === null || Number.isNaN(when.getTime())) return ''
@@ -2310,12 +1623,6 @@ window.__ModuleLoader__.load({
       return pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' + pad(when.getSeconds())
     }
 
-    /**
-     * Connect console: the Host's log tail (`HostView.logs`), newest last, printed as it arrives.
-     * It follows the bottom of the list unless the reader scrolled up to read something older.
-     * @param {{t: Function, host: object}} props - host carrying `logs`.
-     * @returns {object} section element.
-     */
     function ConnectLog(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -2337,13 +1644,13 @@ window.__ModuleLoader__.load({
       return h(
         'section',
         { className: 'drg-connect-log', 'data-testid': 'connect-log' },
-        h(
+        box(
           'div',
-          { className: 'drg-connect-log-head' },
-          h('span', { className: 'drg-connect-log-title' }, t('connectLogTitle')),
+          'drg-connect-log-head',
+          box('span', 'drg-connect-log-title', t('connectLogTitle')),
           // "Closing keeps it running" is only true while a connection is still in flight.
-          host.status === 'error' ? null : h('span', { className: 'drg-connect-log-hint' }, t('connectLogHint')),
-          h('span', { className: 'drg-connect-log-count' }, t('connectLogCount', { count: entries.length })),
+          host.status === 'error' ? null : box('span', 'drg-connect-log-hint', t('connectLogHint')),
+          box('span', 'drg-connect-log-count', t('connectLogCount', { count: entries.length })),
         ),
         h(
           'div',
@@ -2367,21 +1674,13 @@ window.__ModuleLoader__.load({
                     'data-testid': 'connect-log-line',
                   },
                   h('span', { className: 'drg-connect-log-time', 'aria-hidden': 'true' }, logClock(entry.at)),
-                  h('span', { className: 'drg-connect-log-text' }, String(entry.message ?? '')),
+                  box('span', 'drg-connect-log-text', String(entry.message ?? '')),
                 ),
               ),
         ),
       )
     }
 
-    /**
-     * Where a connection watches itself: the staged progress — or the host-key question, or the
-     * failure it ended in — on top, the Host's own log lines streaming underneath. It takes the
-     * whole window for exactly as long as a connection is in flight; host management is a
-     * different body (and comes back the moment this window closes).
-     * @param {{t: Function, locale: string, host: object, fingerprintBusy?: boolean, onAcceptFingerprint: Function, onRejectFingerprint: Function, onRetry: Function, onDiagnose: Function, onBack: Function}} props - host plus callbacks.
-     * @returns {object} fragment with the progress block and the connect log.
-     */
     function ConnectWindow(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -2419,32 +1718,18 @@ window.__ModuleLoader__.load({
 
     //#region 9b. host switcher row + full-window remote carrier (DSH desktop only)
 
-    /** How often the row re-places itself and refreshes its payload (ms). */
     const SWITCHER_TICK_MS = 1500
 
-    /**
-     * What both copies of the row show. `/state` feeds the host list and the panel says
-     * which target the window is on; the row itself is plain DOM, so it never re-renders
-     * through React and keeps working while the local UI is behind a remote guest.
-     */
+    /** What both copies of the row show. The row is plain DOM: it must outlive React re-renders. */
     const switcher = {
-      /** `'local'` or a host id: where the window is right now. */
       current: 'local',
-      /** HostView list from `/state`, trimmed to what the row needs. */
       hosts: [],
-      /** Localized row text, refreshed on every push. */
       labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
-      /** Set by `apply`: turns a row intent into a plugin action. */
       dispatch: null,
-      /** Set by `apply`: current localized labels, so a language switch lands on the next push. */
       labelsOf: null,
-      /** Whether the local copy of the row is currently on screen. */
       installed: false,
     }
 
-    /**
-     * @returns {{current: string, hosts: object[], labels: object}} the payload both copies of the row render from.
-     */
     function switcherPayload() {
       const hosts = []
       for (const host of switcher.hosts) {
@@ -2471,12 +1756,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Push the switcher state into every live copy of the row: the local page's sidebar
-     * and, while a remote owns the window, the row injected into the guest.
-     * @param {{current?: string, hosts?: object[], labels?: object}} [patch] - merged into the state first.
-     * @returns {object} the payload that was pushed.
-     */
     function updateSwitcher(patch) {
       if (patch && typeof patch === 'object') {
         if (Array.isArray(patch.hosts)) {
@@ -2493,20 +1772,10 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** @returns {Window|null} this page's window, or null when the module runs outside a document. */
     function localWindow() {
-      if (typeof window === 'undefined' || window === null) return null
-      if (typeof window.document === 'undefined' || window.document === null) return null
-      return window
+      return typeof window === 'undefined' || !window.document ? null : window
     }
 
-    /**
-     * Draw (or refresh) the row in the local page's own sidebar. It is plain DOM beside
-     * React's children, so the shell may drop it on a re-render; this re-places it and
-     * refreshes the payload, and is cheap enough to call on every state push.
-     * @param {object} payload - state to render.
-     * @returns {boolean} whether the row is on screen.
-     */
     function pushLocalHostRow(payload) {
       const win = localWindow()
       if (win === null) return false
@@ -2533,11 +1802,6 @@ window.__ModuleLoader__.load({
       return switcher.installed
     }
 
-    /**
-     * Push the same payload into the shown remote guest's copy of the row.
-     * @param {object} payload - state to render.
-     * @returns {void}
-     */
     function pushGuestHostRow(payload) {
       const entry = shownCarrier()
       if (entry === null || entry.rowInstalled !== true || entry.view === null) return
@@ -2550,34 +1814,16 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Turn the row's intent into the plugin's action. The local row calls this straight
-     * from the click handler; the guest reaches it through the carrier's poll.
-     * @param {{target?: string, action?: string, hostId?: string}} intent - sidebar entry, an action, or one host's exit.
-     * @returns {void}
-     */
     function dispatchSwitcherIntent(intent) {
       if (!intent || typeof intent !== 'object') return
       if (typeof switcher.dispatch === 'function') switcher.dispatch(intent)
     }
 
     /**
-     * The host switcher, as one self-contained function.
-     *
-     * It runs directly in the local page and is stringified into the remote guest
-     * (`HOST_ROW_SCRIPT`), so both windows get the same markup, the same theme tokens and
-     * the same intents. It may therefore only touch `win` and its own locals - no closure
-     * over this module.
-     *
-     * Intents leave through `win.__drgBridgeSink` when the page sets one (the local page
-     * hands them straight to the plugin) and through `win.__drgBridgeQueue` otherwise (the
-     * guest, drained by the carrier).
-     *
-     * The sidebar row shows the current target only - no session title line; the menu
-     * lists "local" first, then one entry per host (a connected host carries a glowing
-     * green dot), then "add host" at the bottom.
-     * @param {Window} win - page to draw the row into.
-     * @returns {string} 'installed' once the row is placed, otherwise why it is not.
+     * The switcher row, stringified into the remote guest (`HOST_ROW_SCRIPT`): it may only touch
+     * `win` and its own locals — any closure over this module breaks the guest copy. Intents leave
+     * through `win.__drgBridgeSink` (local page) or `win.__drgBridgeQueue` (guest, drained by the
+     * carrier); both copies therefore need identical intents and identical tokens.
      */
     function mountHostRow(win) {
       try {
@@ -2713,9 +1959,8 @@ window.__ModuleLoader__.load({
             trailingNode.textContent = opts.trailing
             node.appendChild(trailingNode)
           }
-          // A live host carries its own exit control, on the same line, right-aligned and
-          // revealed on hover: switching to a host and leaving it are different actions,
-          // and the menu had no way to leave one.
+          // A live host carries its own exit control, on the same line, right-aligned and revealed on hover: switching
+          // to a host and leaving it are different actions, and the menu had no way to leave one.
           if (opts.exit) {
             var exitLabel = state.labels.exit || 'Disconnect'
             var exitNode = make('button', 'drg-hr-act')
@@ -2910,47 +2155,24 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** The same row, as the script the carrier evaluates inside the remote guest. */
     const HOST_ROW_SCRIPT = '(' + mountHostRow.toString() + ')(window)'
 
     /**
-     * The live guests, most recently shown first, plus which one fills the window.
-     *
-     * Keeping a guest warm is what makes switching instant: the remote page is never
-     * reloaded when you go away and come back, it is only hidden and shown. There is no
-     * count limit — every host you have opened keeps its window — so a guest is dropped
-     * only when its host disconnects or is deleted, or when the plugin is disposed.
+     * The live guests, most recently shown first. A guest is hidden, never reloaded — that is what
+     * makes switching instant — and is dropped only when its host goes away.
      */
     const carrierPool = {
-      /** @type {object[]} live guests, most recent first. */
       entries: [],
-      /** Host id filling the window right now, or null when the local page is up. */
       current: null,
-      /**
-       * Host id the window should end up on. A window is created asynchronously (the
-       * bridge hands out a lease), so this is what makes the *last* request win: a
-       * creation that finishes after the user picked something else is dropped.
-       */
       wanted: null,
-      /** The one intent poll, owned by the shown guest. */
       poll: null,
     }
 
-    /**
-     * Show/hide operations run one at a time, in order: two overlapping opens must never
-     * build two guests for the same host, and the later pick must land last.
-     * @type {Promise<unknown>}
-     */
+    /** Show/hide operations run one at a time: two overlapping opens must not build two guests. */
     let carrierQueue = Promise.resolve()
 
-    /** Watches the local page's fullscreen flag while a caption-aware guest exists. */
     let captionStateWatcher = null
 
-    /**
-     * Serialize one carrier operation behind the previous one.
-     * @param {Function} task - async work to run when the queue is free.
-     * @returns {Promise<unknown>} that task's result.
-     */
     function whenCarrierIdle(task) {
       const run = carrierQueue.then(task, task)
       carrierQueue = run.then(
@@ -2960,26 +2182,19 @@ window.__ModuleLoader__.load({
       return run
     }
 
-    /**
-     * @param {string} hostId - host to look up.
-     * @returns {object|null} that host's warm guest, if any.
-     */
     function carrierOf(hostId) {
       if (typeof hostId !== 'string' || hostId === '') return null
       return carrierPool.entries.find((entry) => entry.hostId === hostId) || null
     }
 
-    /** @returns {object|null} the guest filling the window, if any. */
     function shownCarrier() {
       return carrierPool.current === null ? null : carrierOf(carrierPool.current)
     }
 
-    /** @returns {boolean} whether this host already has a warm window (switching is instant). */
     function carrierWarm(hostId) {
       return carrierOf(hostId) !== null
     }
 
-    /** @returns {object|null} the desktop browser bridge, or null outside the desktop app. */
     function desktopBrowserBridge() {
       if (typeof window === 'undefined') return null
       const carrier = window.dshDesktop
@@ -2989,20 +2204,11 @@ window.__ModuleLoader__.load({
       return browser
     }
 
-    /**
-     * The carrier's own CSS. There is no local chrome left to style: the host switcher is
-     * drawn inside whichever page owns the window.
-     */
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:var(--dsw-alias-bg-base);pointer-events:auto}
       .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
     `
 
-    /**
-     * Install the switcher row inside one guest.
-     * @param {object} entry - warm guest to inject into.
-     * @returns {Promise<boolean>} whether that guest's copy of the row is live.
-     */
     async function installHostRow(entry) {
       const view = entry === null ? null : entry.view
       if (view === null || typeof view.executeJavaScript !== 'function') return false
@@ -3020,12 +2226,6 @@ window.__ModuleLoader__.load({
       return live
     }
 
-    /**
-     * Poll the shown guest's row for a click, then hand the intent to the plugin. A plain
-     * poll is the only channel a cross-origin guest offers without a preload script.
-     * @param {object} entry - warm guest to poll.
-     * @returns {void}
-     */
     function startHostRowPoll(entry) {
       stopHostRowPoll()
       const view = entry === null ? null : entry.view
@@ -3062,7 +2262,6 @@ window.__ModuleLoader__.load({
       unrefTimer(entry.timer)
     }
 
-    /** @returns {void} */
     function stopHostRowPoll() {
       const entry = carrierPool.poll
       carrierPool.poll = null
@@ -3073,22 +2272,13 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The caption band this window's own page reserves, or null when it reserves none.
-     *
-     * The desktop shell draws a frameless window with a caption overlay over the page, and
-     * its preload marks `<html data-windows-titlebar>` and publishes the band height, so the
-     * page lays its frame out below the band. A guest page has no preload, which is why the
-     * remote UI would otherwise lay out as the Web build inside a window that is not one.
-     * @returns {{ height: number } | null} band to mirror into the guest, or null.
+     * The caption band this page reserves, or null. A guest page has no preload, so the remote UI
+     * would otherwise lay out as the Web build inside a window that is not one.
      */
     function desktopCaption() {
       if (typeof document === 'undefined' || !document.documentElement) return null
       const root = document.documentElement
-      try {
-        if (typeof root.hasAttribute !== 'function' || !root.hasAttribute(CAPTION_MARKER)) return null
-      } catch (_error) {
-        return null
-      }
+      if (!root.hasAttribute(CAPTION_MARKER)) return null
       let height = CAPTION_FALLBACK_HEIGHT
       if (typeof getComputedStyle === 'function') {
         try {
@@ -3102,13 +2292,6 @@ window.__ModuleLoader__.load({
       return { height }
     }
 
-    /**
-     * Teach one guest page the desktop layout: same marker, same band height, same frame.
-     * Idempotent, and re-run after every navigation — a fresh document drops the marker,
-     * and the marker is the only thing that keeps both pages on one grid.
-     * @param {object} entry - warm guest.
-     * @returns {Promise<boolean>} whether the guest now lays out as the desktop build.
-     */
     async function applyGuestCaption(entry) {
       const caption = entry === null || entry === undefined ? null : entry.caption
       if (caption === null || caption === undefined) return false
@@ -3143,11 +2326,6 @@ window.__ModuleLoader__.load({
       return status === 'ok'
     }
 
-    /**
-     * Watch the local page's fullscreen flag: a guest that is already loaded cannot learn
-     * about the transition any other way, and its overlays would keep the band's inset.
-     * @returns {void}
-     */
     function watchCaptionState() {
       if (captionStateWatcher !== null || typeof MutationObserver !== 'function') return
       if (typeof document === 'undefined' || !document.documentElement) return
@@ -3162,14 +2340,7 @@ window.__ModuleLoader__.load({
       })
     }
 
-    /**
-     * Exactly one band, never two: the guest reserves the band itself once the marker
-     * landed, and is pushed below the window's own band when it did not (an older shell, or
-     * a guest that refuses the script). The drag strip only exists in the first case.
-     * @param {object} entry - guest whose load just settled.
-     * @param {boolean} applied - whether the caption marker is live in that guest.
-     * @returns {void}
-     */
+    /** Exactly one band, never two: the guest reserves it when the marker landed, else it is pushed below. */
     function syncCarrierCaption(entry, applied) {
       const caption = entry === null || entry === undefined ? null : entry.caption
       if (caption === null || caption === undefined) return
@@ -3181,28 +2352,12 @@ window.__ModuleLoader__.load({
       if (carrierPool.current === entry.hostId) setCaptionLive(entry.captionApplied)
     }
 
-    /**
-     * Raise or drop the shell's caption menus above the guest. While a remote window owns
-     * the caption band, the band's menus belong to the local page and only this class keeps
-     * them above the guest (see the stylesheet's `html.drg-caption-live` rule).
-     * @param {boolean} live - whether a guest currently owns the caption band.
-     * @returns {void}
-     */
     function setCaptionLive(live) {
       if (typeof document === 'undefined' || !document.documentElement) return
-      const classes = document.documentElement.classList
-      if (!classes || typeof classes.add !== 'function' || typeof classes.remove !== 'function') return
-      if (live === true) classes.add(CAPTION_LIVE_CLASS)
-      else classes.remove(CAPTION_LIVE_CLASS)
+      if (live === true) document.documentElement.classList.add(CAPTION_LIVE_CLASS)
+      else document.documentElement.classList.remove(CAPTION_LIVE_CLASS)
     }
 
-    /**
-     * Build one guest: a fresh partition, the switcher row, and the failure line.
-     * @param {string} hostId - host this window belongs to.
-     * @param {string} url - loopback launch URL (already validated by the caller).
-     * @param {string} message - load-failure line.
-     * @returns {Promise<object|null>} the warm guest, or null when it cannot be acquired.
-     */
     async function createCarrier(hostId, url, message) {
       const bridge = desktopBrowserBridge()
       if (bridge === null) return null
@@ -3228,10 +2383,9 @@ window.__ModuleLoader__.load({
       root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
       root.setAttribute('data-testid', 'remote-overlay')
       root.setAttribute('data-host-id', hostId)
-      // A guest that is taught the desktop layout reserves the caption band itself, so the
-      // carrier covers the whole window and both pages lay out on one grid. Without a band
-      // to mirror (the Web build, or a macOS window) the guest starts below the window's own
-      // band: clicks in it belong to the OS, not to this page.
+      // A guest that is taught the desktop layout reserves the caption band itself, so the carrier covers the whole
+      // window and both pages lay out on one grid. Without a band to mirror (the Web build, or a macOS window) the
+      // guest starts below the window's own band: clicks in it belong to the OS, not to this page.
       const top = caption === null ? CAPTION_FALLBACK_HEIGHT + 'px' : '0px'
       root.style.cssText = [
         'position:fixed;left:0;right:0;bottom:0;top:' + top + ';z-index:2147483000',
@@ -3248,10 +2402,9 @@ window.__ModuleLoader__.load({
       errorLayer.setAttribute('data-testid', 'remote-overlay-error')
       errorLayer.textContent = typeof message === 'string' ? message : ''
 
-      // A guest that covers the caption band takes the window drag away with it (Electron
-      // ignores app regions inside a guest). This strip hands the empty part of the band
-      // back to the window; the guest's own fixed caption controls sit left of it, and the
-      // shell's caption menus paint above the whole carrier.
+      // A guest that covers the caption band takes the window drag away with it (Electron ignores app regions inside a
+      // guest). This strip hands the empty part of the band back to the window; the guest's own fixed caption controls
+      // sit left of it, and the shell's caption menus paint above the whole carrier.
       let grip = null
       if (caption !== null) {
         grip = document.createElement('div')
@@ -3272,22 +2425,19 @@ window.__ModuleLoader__.load({
       view.setAttribute('allowpopups', '')
       view.setAttribute('src', 'about:blank#' + String(reservation.lease))
 
-      // Built before any listener is attached: the handlers below read it, and a guest
-      // that fired an event while the element was being appended would otherwise read a
-      // binding that is still in its temporal dead zone.
+      // Built before any listener is attached: the handlers below read it, and a guest that fired an event while the
+      // element was being appended would otherwise read a binding that is still in its temporal dead zone.
       const entry = {
         hostId,
         lease: String(reservation.lease),
         root,
         view,
         grip,
-        /** Caption band to mirror into this guest, or null when there is none. */
         caption,
         /** Set once the guest page carries the desktop marker (never in a band-less window). */
         captionApplied: false,
         url,
         rowInstalled: false,
-        /** Set when a main-frame load failed, so the next show retries instead of reusing it. */
         failed: false,
         timer: null,
       }
@@ -3313,10 +2463,9 @@ window.__ModuleLoader__.load({
         if (entry.view !== view) return
         errorLayer.style.display = 'none'
         entry.failed = false
-        // Re-install after *every* load stop: the remote page reloading wipes the
-        // injected DOM, and a one-shot install would leave the window without any
-        // control. Both scripts are idempotent inside the page, and the caption has to
-        // land before the row measures the sidebar it is placed into.
+        // Re-install after *every* load stop: the remote page reloading wipes the injected DOM, and a one-shot install
+        // would leave the window without any control. Both scripts are idempotent inside the page, and the caption has
+        // to land before the row measures the sidebar it is placed into.
         applyGuestCaption(entry)
           .then((applied) => {
             if (entry.view !== view) return false
@@ -3351,15 +2500,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Show one host's window, warming it first when this is its first visit. Everything
-     * else is hidden, never torn down: that is what makes coming back instant.
-     *
-     * Operations are queued, and a window is created asynchronously (the bridge hands out
-     * a lease), so two things can happen in between: the user picks another host, or the
-     * window has to go back to the local page. `carrierPool.wanted` remembers the last
-     * request; a creation that is no longer wanted is dropped instead of shown.
-     * @param {{hostId?: string, url?: string, message?: string}} options - target host and an optional fresh launch URL.
-     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
+     * Show one host's window, warming it on first visit. Creation is async (the bridge hands out a
+     * lease), so `carrierPool.wanted` makes the last request win: a superseded creation is dropped.
      */
     async function showOverlay(options) {
       const hostId = typeof options.hostId === 'string' ? options.hostId : ''
@@ -3367,11 +2509,6 @@ window.__ModuleLoader__.load({
       return whenCarrierIdle(() => showOverlayNow(hostId, options))
     }
 
-    /**
-     * @param {string} hostId - host to show.
-     * @param {{url?: string, message?: string}} options - launch URL / failure line.
-     * @returns {Promise<{ ok: boolean, reason?: string, reused?: boolean }>}
-     */
     async function showOverlayNow(hostId, options) {
       const url = typeof options.url === 'string' ? options.url : ''
       let entry = carrierOf(hostId)
@@ -3422,11 +2559,6 @@ window.__ModuleLoader__.load({
       return { ok: true, reused }
     }
 
-    /**
-     * Hide every guest and hand the window back to the local page, keeping all of them
-     * warm: leaving a remote is not the same as closing it.
-     * @returns {void}
-     */
     function hideOverlays() {
       carrierPool.wanted = null
       if (carrierPool.current === null) return
@@ -3437,20 +2569,14 @@ window.__ModuleLoader__.load({
       setCaptionLive(false)
     }
 
-    /**
-     * Tear one guest down: its row, its DOM, its renderer and its lease. Safe for a guest
-     * that never made it into the pool (a superseded creation).
-     * @param {object} entry - guest to drop.
-     * @returns {Promise<void>}
-     */
+    /** Tear one guest down: row, DOM, renderer, lease. Safe for one that never entered the pool. */
     async function disposeCarrier(entry) {
       if (entry === null || entry === undefined) return
       if (carrierPool.poll === entry) stopHostRowPoll()
       carrierPool.entries = carrierPool.entries.filter((item) => item !== entry)
-      // The guest that filled the window is going away, so the local page is next: the row
-      // has to follow here as well. The React state that asked for the teardown is not
-      // enough - a disconnect arrives through a subscription created at mount, whose
-      // closure holds the target from that render, so it cannot clear it.
+      // The guest that filled the window is going away, so the local page is next: the row has to follow here as well.
+      // The React state that asked for the teardown is not enough - a disconnect arrives through a subscription created
+      // at mount, whose closure holds the target from that render, so it cannot clear it.
       const wasShown = carrierPool.current === entry.hostId
       if (wasShown) {
         carrierPool.current = null
@@ -3475,22 +2601,12 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Drop one host's warm window: its host disconnected or was deleted, or the plugin is
-     * going away. There is no count-based eviction.
-     * @param {string} hostId - host whose window goes away.
-     * @returns {Promise<void>}
-     */
     async function closeCarrier(hostId) {
       const entry = carrierOf(hostId)
       if (entry === null) return
       await disposeCarrier(entry)
     }
 
-    /**
-     * Drop every warm window (plugin disposal, or a host that is no longer usable).
-     * @returns {Promise<void>}
-     */
     async function closeOverlay() {
       stopHostRowPoll()
       const hosts = carrierPool.entries.map((entry) => entry.hostId)
@@ -3503,15 +2619,8 @@ window.__ModuleLoader__.load({
       for (const hostId of hosts) await closeCarrier(hostId)
     }
 
-    //#endregion
-
     //#region 9c. key-file picker
 
-    /**
-     * Browse the user's home and pick a private-key file.
-     * @param {object} props - t, locale, initialDir, onPick(path), onClose().
-     * @returns {object} modal element.
-     */
     function KeyFilePicker(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -3543,12 +2652,15 @@ window.__ModuleLoader__.load({
       useEffect(() => load(props.initialDir || ''), [props.initialDir])
 
       const entries = listing && Array.isArray(listing.entries) ? listing.entries : []
-      const directories = entries.filter((entry) => entry && entry.isDirectory)
-      const files = entries.filter((entry) => entry && !entry.isDirectory)
+      // Directories first, then files; both rows are one button with a kind.
+      const sorted = [
+        ...entries.filter((entry) => entry && entry.isDirectory),
+        ...entries.filter((entry) => entry && !entry.isDirectory),
+      ]
 
       let body
       if (loading) {
-        body = h('p', { className: 'drg-field-hint' }, t('keyFile.loading'))
+        body = box('p', 'drg-field-hint', t('keyFile.loading'))
       } else if (error) {
         body = h(ErrorCard, {
           t,
@@ -3557,36 +2669,23 @@ window.__ModuleLoader__.load({
           onRetry: () => load(listing ? listing.path : props.initialDir || ''),
         })
       } else if (entries.length === 0) {
-        body = h('p', { className: 'drg-field-hint' }, t('keyFile.empty'))
+        body = box('p', 'drg-field-hint', t('keyFile.empty'))
       } else {
         body = h(
           'div',
           { className: 'drg-keyfile-list', 'data-testid': 'keyfile-list' },
-          directories.map((entry) =>
+          sorted.map((entry) =>
             h(
               'button',
               {
                 key: entry.path,
                 type: 'button',
                 className: 'drg-keyfile-row',
-                'data-kind': 'directory',
-                onClick: () => load(entry.path),
+                'data-kind': entry.isDirectory ? 'directory' : 'file',
+                title: entry.isDirectory ? undefined : entry.path,
+                onClick: () => (entry.isDirectory ? load(entry.path) : props.onPick(entry.path)),
               },
-              h('span', { className: 'drg-keyfile-name' }, entry.name + '/'),
-            ),
-          ),
-          files.map((entry) =>
-            h(
-              'button',
-              {
-                key: entry.path,
-                type: 'button',
-                className: 'drg-keyfile-row',
-                'data-kind': 'file',
-                title: entry.path,
-                onClick: () => props.onPick(entry.path),
-              },
-              h('span', { className: 'drg-keyfile-name' }, entry.name),
+              box('span', 'drg-keyfile-name', entry.isDirectory ? entry.name + '/' : entry.name),
             ),
           ),
         )
@@ -3610,24 +2709,20 @@ window.__ModuleLoader__.load({
             t('keyFile.parent'),
           ),
         },
-        h('p', { className: 'drg-field-hint' }, t('keyFile.hint')),
-        listing ? h('p', { className: 'drg-keyfile-path' }, listing.path) : null,
+        box('p', 'drg-field-hint', t('keyFile.hint')),
+        listing ? box('p', 'drg-keyfile-path', listing.path) : null,
         body,
       )
     }
 
-    //#endregion
-
     //#region 10. connect wizard
 
-    /** Parse a positive integer, falling back when the input is not numeric. */
     function toInt(value, fallback) {
       const number =
         typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
       return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
     }
 
-    /** Parse `user@host:port` (the masked form the Host exposes) for edit prefill. */
     function parseMaskedAddress(masked) {
       const text = String(masked || '')
       const result = { username: '', port: null }
@@ -3639,7 +2734,6 @@ window.__ModuleLoader__.load({
       return result
     }
 
-    /** Build the `POST /hosts` body from the wizard draft (docs/api.md). */
     function buildHostInput(draft, hostId, includeAuth) {
       const host = {
         name: String(draft.name || '').trim(),
@@ -3651,9 +2745,8 @@ window.__ModuleLoader__.load({
         autoReconnect: draft.autoReconnect !== false,
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
       }
-      // Contract: an explicit empty string clears the jump host; an omitted
-      // field keeps the existing value on update. Send it only when the
-      // HostView exposed it (edit) or when adding a host.
+      // Contract: an explicit empty string clears the jump host; an omitted field keeps the existing value on update.
+      // Send it only when the HostView exposed it (edit) or when adding a host.
       const jumpHost = String(draft.jumpHost || '').trim()
       if (!hostId || draft.jumpHostKnown !== false) host.jumpHost = jumpHost
       if (hostId) host.id = hostId
@@ -3669,11 +2762,6 @@ window.__ModuleLoader__.load({
       return host
     }
 
-    /**
-     * Validate the SSH form. Returns a dictionary key, or null when valid.
-     * @param {object} draft - form draft.
-     * @returns {string|null} validation failure key.
-     */
     function validateHostDraft(draft) {
       if (!String(draft.name || '').trim()) return 'wizard.validationName'
       const address = String(draft.address || '').trim()
@@ -3685,7 +2773,6 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    /** Create the initial wizard draft from an existing host and settings defaults. */
     function initialDraft(mode, host, settings) {
       const defaults = settings && typeof settings === 'object' ? settings : {}
       const auto = defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
@@ -3725,28 +2812,18 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Add / edit host dialog (docs/design.md（接入向导）). One step, two actions: the SSH form is
-     * the whole body, `保存` stores the entry and closes, and `连接` (add mode only) stores it and
-     * hands the connection to the connect window — staged progress, the host-key question and the
-     * live log — which takes the whole window once the host answers. There is no test step: a
-     * connection either happens for real, or it is not started at all.
-     * @param {object} props - mode, host, live state, callbacks.
-     * @returns {object} modal element.
-     */
     function WizardDialog(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
       const mode = props.mode === 'edit' ? 'edit' : 'add'
       const initialHost = props.initialHost || null
       const [draft, setDraft] = useState(() =>
-        initialDraft(mode, initialHost, pathValue(props.state, 'settings', null)),
+        initialDraft(mode, initialHost, props.state && props.state.settings ? props.state.settings : null),
       )
       const [password, setPassword] = useState('')
       const [authDirty, setAuthDirty] = useState(mode === 'add')
       const [nameTouched, setNameTouched] = useState(mode === 'edit')
       const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
-      /** Which button is in flight: `'save' | 'connect' | null`. */
       const [saving, setSaving] = useState(null)
       const [formError, setFormError] = useState(null)
       const [aliases, setAliases] = useState([])
@@ -3778,6 +2855,7 @@ window.__ModuleLoader__.load({
       }, [])
 
       const patchDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
+      const row = (spec) => formRow(t, draft, patchDraft, spec)
 
       const onAddressChange = (value) => {
         patchDraft({ address: value })
@@ -3802,13 +2880,6 @@ window.__ModuleLoader__.load({
         if (!nameTouched && mode === 'add') patchDraft({ name: alias.alias || alias.host || '' })
       }
 
-      /**
-       * Finish the dialog with the button that was pressed. `save` only stores the entry;
-       * `connect` stores it and hands the connection to the overlay (which opens the connect
-       * window and takes the whole window over once the host is up).
-       * @param {'save' | 'connect'} intent - which action to finish with.
-       * @returns {Promise<void>} resolves once the action settled.
-       */
       const submit = async (intent) => {
         const invalid = validateHostDraft(draft)
         if (invalid !== null) {
@@ -3872,11 +2943,11 @@ window.__ModuleLoader__.load({
               saving === 'connect' ? t('wizard.savingHost') : t('connect'),
             )
           : null
-      const footer = h('div', { className: 'drg-row drg-row-end' }, saveButton, connectButton)
+      const footer = box('div', 'drg-row drg-row-end', saveButton, connectButton)
       const addressOptions = aliases.filter((alias) => alias && typeof alias.alias === 'string')
-      const body = h(
+      const body = box(
         'div',
-        { className: 'drg-wizard-form' },
+        'drg-wizard-form',
         formError
           ? h(
               Notice,
@@ -3884,23 +2955,16 @@ window.__ModuleLoader__.load({
               typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale),
             )
           : null,
-        h(
+        box(
           'div',
-          { className: 'drg-form-grid' },
-          h(
-            Field,
-            { label: t('wizard.name') },
-            h(TextInput, {
-              value: draft.name,
-              placeholder: t('wizard.namePlaceholder'),
-              ariaLabel: t('wizard.name'),
-              testId: 'wizard-name',
-              onChange: (value) => {
-                setNameTouched(true)
-                patchDraft({ name: value })
-              },
-            }),
-          ),
+          'drg-form-grid',
+          row({
+            key: 'name',
+            label: 'wizard.name',
+            placeholder: 'wizard.namePlaceholder',
+            testId: 'wizard-name',
+            after: () => setNameTouched(true),
+          }),
           h(Field, { label: t('wizard.address'), hint: t('wizard.addressHint') }, [
             h(TextInput, {
               key: 'address',
@@ -3919,10 +2983,10 @@ window.__ModuleLoader__.load({
           ]),
         ),
         addressOptions.length > 0
-          ? h(
+          ? box(
               'div',
-              { className: 'drg-alias-row' },
-              h('span', { className: 'drg-alias-label' }, t('wizard.aliases')),
+              'drg-alias-row',
+              box('span', 'drg-alias-label', t('wizard.aliases')),
               addressOptions.map((alias) =>
                 h(
                   'button',
@@ -3937,73 +3001,47 @@ window.__ModuleLoader__.load({
                 ),
               ),
               knownHosts && knownHosts.entries
-                ? h('span', { className: 'drg-alias-known' }, t('wizard.knownHosts', { count: knownHosts.entries }))
+                ? box('span', 'drg-alias-known', t('wizard.knownHosts', { count: knownHosts.entries }))
                 : null,
             )
           : aliasesLoading
-            ? h('p', { className: 'drg-field-hint' }, t('wizard.aliasesLoading'))
-            : h('p', { className: 'drg-field-hint' }, t('wizard.aliasesEmpty')),
-        h(
+            ? box('p', 'drg-field-hint', t('wizard.aliasesLoading'))
+            : box('p', 'drg-field-hint', t('wizard.aliasesEmpty')),
+        box(
           'div',
-          { className: 'drg-form-grid drg-form-grid-3' },
-          h(
-            Field,
-            { label: t('wizard.port') },
-            h(TextInput, {
-              type: 'number',
-              value: draft.port,
-              ariaLabel: t('wizard.port'),
-              testId: 'wizard-port',
-              onChange: (value) => patchDraft({ port: value }),
-            }),
-          ),
-          h(
-            Field,
-            { label: t('wizard.username') },
-            h(TextInput, {
-              value: draft.username,
-              placeholder: t('wizard.usernamePlaceholder'),
-              ariaLabel: t('wizard.username'),
-              testId: 'wizard-username',
-              onChange: (value) => patchDraft({ username: value }),
-            }),
-          ),
-          h(
-            Field,
-            { label: t('wizard.jumpHost') },
-            h(TextInput, {
-              value: draft.jumpHost,
-              placeholder: t('wizard.jumpHostPlaceholder'),
-              ariaLabel: t('wizard.jumpHost'),
-              testId: 'wizard-jump-host',
-              onChange: (value) => patchDraft({ jumpHost: value }),
-            }),
-          ),
-        ),
-        h(
-          Field,
-          { label: t('wizard.auth'), hint: t('wizard.authHint') },
-          h(Select, {
-            value: draft.authType,
-            ariaLabel: t('wizard.auth'),
-            testId: 'wizard-auth',
-            options: [
-              { value: 'key', label: t('wizard.authKey') },
-              { value: 'password', label: t('wizard.authPassword') },
-            ],
-            onChange: (value) => {
-              setAuthDirty(true)
-              patchDraft({ authType: value })
-            },
+          'drg-form-grid drg-form-grid-3',
+          row({ key: 'port', kind: 'number', label: 'wizard.port', testId: 'wizard-port' }),
+          row({
+            key: 'username',
+            label: 'wizard.username',
+            placeholder: 'wizard.usernamePlaceholder',
+            testId: 'wizard-username',
+          }),
+          row({
+            key: 'jumpHost',
+            label: 'wizard.jumpHost',
+            placeholder: 'wizard.jumpHostPlaceholder',
+            testId: 'wizard-jump-host',
           }),
         ),
+        row({
+          key: 'authType',
+          label: 'wizard.auth',
+          hint: 'wizard.authHint',
+          testId: 'wizard-auth',
+          after: () => setAuthDirty(true),
+          options: [
+            ['key', 'wizard.authKey'],
+            ['password', 'wizard.authPassword'],
+          ],
+        }),
         draft.authType === 'key'
           ? h(
               Field,
               { label: t('wizard.keyPath') },
-              h(
+              box(
                 'div',
-                { className: 'drg-field-inline' },
+                'drg-field-inline',
                 h(TextInput, {
                   value: draft.keyPath,
                   placeholder: t('wizard.keyPathPlaceholder'),
@@ -4043,36 +3081,21 @@ window.__ModuleLoader__.load({
               }),
             )
           : null,
-        h(
+        box(
           'div',
-          { className: 'drg-form-grid drg-form-grid-3' },
-          h(
-            Field,
-            { label: t('wizard.keepAlive') },
-            h(Select, {
-              value: draft.keepAlive,
-              ariaLabel: t('wizard.keepAlive'),
-              testId: 'wizard-keep-alive',
-              options: [
-                { value: 'keep', label: t('wizard.keepAliveKeep') },
-                { value: 'stop', label: t('wizard.keepAliveStop') },
-                { value: 'idle', label: t('wizard.keepAliveIdle') },
-              ],
-              onChange: (value) => patchDraft({ keepAlive: value }),
-            }),
-          ),
+          'drg-form-grid drg-form-grid-3',
+          row({
+            key: 'keepAlive',
+            label: 'wizard.keepAlive',
+            testId: 'wizard-keep-alive',
+            options: [
+              ['keep', 'wizard.keepAliveKeep'],
+              ['stop', 'wizard.keepAliveStop'],
+              ['idle', 'wizard.keepAliveIdle'],
+            ],
+          }),
           draft.keepAlive === 'idle'
-            ? h(
-                Field,
-                { label: t('wizard.idleMinutes') },
-                h(TextInput, {
-                  type: 'number',
-                  value: draft.idleMinutes,
-                  ariaLabel: t('wizard.idleMinutes'),
-                  testId: 'wizard-idle-minutes',
-                  onChange: (value) => patchDraft({ idleMinutes: value }),
-                }),
-              )
+            ? row({ key: 'idleMinutes', kind: 'number', label: 'wizard.idleMinutes', testId: 'wizard-idle-minutes' })
             : null,
           h(
             Field,
@@ -4095,8 +3118,8 @@ window.__ModuleLoader__.load({
           testId: 'wizard-auto-reconnect',
           onChange: (checked) => patchDraft({ autoReconnect: checked }),
         }),
-        h('p', { className: 'drg-field-hint' }, t('wizard.actionHint')),
-        !isLoopbackAddress(draft.address) ? h('p', { className: 'drg-field-hint' }, t('loopbackNote')) : null,
+        box('p', 'drg-field-hint', t('wizard.actionHint')),
+        !isLoopbackAddress(draft.address) ? box('p', 'drg-field-hint', t('loopbackNote')) : null,
       )
 
       return h(
@@ -4130,8 +3153,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#endregion
-
     //#region 11. diagnostics drawer
 
     /** Sort diagnostic checks into the contract's fixed order, unknown ids last. */
@@ -4144,7 +3165,6 @@ window.__ModuleLoader__.load({
       return list.sort((a, b) => rank(a) - rank(b))
     }
 
-    /** Localized label for a diagnostic check status. */
     function checkStatusLabel(t, status) {
       if (status === 'pass') return t('diag.checkPass')
       if (status === 'fail') return t('diag.checkFail')
@@ -4177,11 +3197,6 @@ window.__ModuleLoader__.load({
       return lines.join('\n')
     }
 
-    /**
-     * Diagnostics drawer (docs/design.md（诊断）): a redacted checklist with re-run and
-     * @param {object} props - host, status, report, callbacks.
-     * @returns {object|null} drawer elements.
-     */
     function DiagnoseDrawer(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -4218,7 +3233,7 @@ window.__ModuleLoader__.load({
 
       let content
       if (status === 'loading') {
-        content = h('div', { className: 'drg-loading' }, h(Spinner, { size: 20 }), h('span', null, t('diag.running')))
+        content = box('div', 'drg-loading', h(Spinner, { size: 20 }), h('span', null, t('diag.running')))
       } else if (status === 'error') {
         content = h(ErrorCard, {
           t,
@@ -4227,26 +3242,22 @@ window.__ModuleLoader__.load({
           onRetry: props.onRun,
         })
       } else if (!report || !Array.isArray(report.checks) || report.checks.length === 0) {
-        content = h('p', { className: 'drg-paragraph' }, t('diag.empty'))
+        content = box('p', 'drg-paragraph', t('diag.empty'))
       } else {
-        content = h(
+        content = box(
           'div',
-          { className: 'drg-diag' },
-          h(
+          'drg-diag',
+          box(
             'div',
-            { className: 'drg-diag-head' },
+            'drg-diag-head',
             h(Badge, { tone: summaryTone }, summaryText),
             report.generatedAt
-              ? h(
-                  'span',
-                  { className: 'drg-diag-time' },
-                  t('diag.generatedAt') + ' ' + formatTime(report.generatedAt, locale),
-                )
+              ? box('span', 'drg-diag-time', t('diag.generatedAt') + ' ' + formatTime(report.generatedAt, locale))
               : null,
           ),
-          h(
+          box(
             'ul',
-            { className: 'drg-diag-list' },
+            'drg-diag-list',
             sortDiagnoseChecks(report.checks).map((check, index) =>
               h(
                 'li',
@@ -4256,29 +3267,25 @@ window.__ModuleLoader__.load({
                   { className: 'drg-diag-status', 'data-status': check.status },
                   checkStatusLabel(t, check.status),
                 ),
-                h(
+                box(
                   'div',
-                  { className: 'drg-diag-check-body' },
-                  h(
-                    'div',
-                    { className: 'drg-diag-check-title' },
-                    resolveText(check.title, locale) || String(check.id || ''),
-                  ),
+                  'drg-diag-check-body',
+                  box('div', 'drg-diag-check-title', resolveText(check.title, locale) || String(check.id || '')),
                   resolveText(check.detail, locale)
-                    ? h('div', { className: 'drg-diag-check-detail' }, resolveText(check.detail, locale))
+                    ? box('div', 'drg-diag-check-detail', resolveText(check.detail, locale))
                     : null,
                 ),
               ),
             ),
           ),
-          h('p', { className: 'drg-field-hint' }, t('diag.redacted')),
+          box('p', 'drg-field-hint', t('diag.redacted')),
           copied ? h(Notice, { tone: 'success' }, t('diag.copyDone')) : null,
         )
       }
 
-      return h(
+      return box(
         'div',
-        { className: 'drg-drawer-layer' },
+        'drg-drawer-layer',
         h('div', { className: 'drg-drawer-backdrop', onClick: props.onClose, 'aria-hidden': 'true' }),
         h(
           'aside',
@@ -4289,27 +3296,27 @@ window.__ModuleLoader__.load({
             'aria-label': t('diag.title'),
             'data-testid': 'diagnostics',
           },
-          h(
+          box(
             'div',
-            { className: 'drg-drawer-head' },
+            'drg-drawer-head',
             h(
               'div',
               null,
-              h('h2', { className: 'drg-drawer-title' }, t('diag.title')),
+              box('h2', 'drg-drawer-title', t('diag.title')),
               host
-                ? h(
+                ? box(
                     'p',
-                    { className: 'drg-drawer-subtitle' },
+                    'drg-drawer-subtitle',
                     (host.name || host.id) + (displayAddress(host) ? ' · ' + displayAddress(host) : ''),
                   )
                 : null,
             ),
             h(IconButton, { icon: h(IconClose), label: t('diag.close'), onClick: props.onClose }),
           ),
-          h('div', { className: 'drg-drawer-body' }, content),
-          h(
+          box('div', 'drg-drawer-body', content),
+          box(
             'div',
-            { className: 'drg-drawer-foot' },
+            'drg-drawer-foot',
             h(
               Button,
               { variant: 'secondary', testId: 'diagnose-rerun', busy: status === 'loading', onClick: props.onRun },
@@ -4325,11 +3332,8 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#endregion
-
     //#region 12. settings modal
 
-    /** Build the partial SettingsView sent by `POST /settings` (docs/api.md). */
     function settingsPatchFromDraft(draft) {
       return {
         defaultPort: toInt(draft.defaultPort, 22),
@@ -4351,7 +3355,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Create the editable settings draft from a SettingsView. */
     function settingsDraft(settings) {
       const view = settings && typeof settings === 'object' ? settings : {}
       const auto = view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
@@ -4372,11 +3375,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Settings modal (docs/design.md（设置） / contract SettingsView).
-     * @param {object} props - settings, onSave(patch), onClose.
-     * @returns {object} modal element.
-     */
+    /** Settings modal (contract SettingsView). */
     function SettingsModal(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
@@ -4387,6 +3386,8 @@ window.__ModuleLoader__.load({
       const [keyPicker, setKeyPicker] = useState(false)
       const patch = (patchValue) => setDraft((current) => ({ ...current, ...patchValue }))
       const set = (field) => (value) => patch({ [field]: value })
+
+      const fieldRow = (spec) => formRow(t, draft, patch, spec)
 
       const handleSave = async () => {
         setSaving(true)
@@ -4401,9 +3402,7 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const footer = h(
-        'div',
-        { className: 'drg-row drg-row-end' },
+      const footer = footerRow(
         h(Button, { variant: 'ghost', onClick: props.onClose }, t('cancel')),
         h(
           Button,
@@ -4425,55 +3424,35 @@ window.__ModuleLoader__.load({
             testId: 'settings',
             footer,
           },
-          h(
+          box(
             'div',
-            { className: 'drg-settings' },
-            h(
+            'drg-settings',
+            box(
               'section',
-              { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.ssh')),
-              h(
+              'drg-settings-section',
+              box('h3', 'drg-section-title', t('settings.ssh')),
+              box(
                 'div',
-                { className: 'drg-form-grid drg-form-grid-3' },
-                h(
-                  Field,
-                  { label: t('settings.defaultPort') },
-                  h(TextInput, {
-                    type: 'number',
-                    value: draft.defaultPort,
-                    ariaLabel: t('settings.defaultPort'),
-                    onChange: set('defaultPort'),
-                  }),
-                ),
-                h(
-                  Field,
-                  { label: t('settings.defaultAuth') },
-                  h(Select, {
-                    value: draft.defaultAuth,
-                    ariaLabel: t('settings.defaultAuth'),
+                'drg-form-grid drg-form-grid-3',
+                [
+                  { kind: 'number', key: 'defaultPort', label: 'settings.defaultPort' },
+                  {
+                    kind: 'select',
+                    key: 'defaultAuth',
+                    label: 'settings.defaultAuth',
                     options: [
-                      { value: 'key', label: t('settings.defaultAuthKey') },
-                      { value: 'password', label: t('settings.defaultAuthPassword') },
+                      ['key', 'settings.defaultAuthKey'],
+                      ['password', 'settings.defaultAuthPassword'],
                     ],
-                    onChange: set('defaultAuth'),
-                  }),
-                ),
-                h(
-                  Field,
-                  { label: t('settings.connectTimeout') },
-                  h(TextInput, {
-                    type: 'number',
-                    value: draft.connectTimeoutSec,
-                    ariaLabel: t('settings.connectTimeout'),
-                    onChange: set('connectTimeoutSec'),
-                  }),
-                ),
+                  },
+                  { kind: 'number', key: 'connectTimeoutSec', label: 'settings.connectTimeout' },
+                ].map(fieldRow),
                 h(
                   Field,
                   { label: t('settings.defaultKeyPath'), hint: t('settings.defaultKeyPathHint'), wide: true },
-                  h(
+                  box(
                     'div',
-                    { className: 'drg-field-inline' },
+                    'drg-field-inline',
                     h(TextInput, {
                       value: draft.defaultKeyPath,
                       placeholder: t('wizard.keyPathPlaceholder'),
@@ -4494,10 +3473,10 @@ window.__ModuleLoader__.load({
                 ),
               ),
             ),
-            h(
+            box(
               'section',
-              { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.security')),
+              'drg-settings-section',
+              box('h3', 'drg-section-title', t('settings.security')),
               h(
                 Field,
                 { label: t('settings.hostKeyPolicy') },
@@ -4516,90 +3495,62 @@ window.__ModuleLoader__.load({
                 label: t('settings.saveTokens'),
                 onChange: set('saveTokens'),
               }),
-              h('p', { className: 'drg-field-hint' }, t('settings.saveTokensHint')),
+              box('p', 'drg-field-hint', t('settings.saveTokensHint')),
               draft.saveTokens === true ? h(Notice, { tone: 'warn', title: t('settings.saveTokensRisk') }) : null,
               h('div', { className: 'drg-divider' }),
-              h('h3', { className: 'drg-section-title' }, t('settings.reconnect')),
+              box('h3', 'drg-section-title', t('settings.reconnect')),
               h(CheckRow, {
                 checked: draft.autoReconnectEnabled === true,
                 label: t('settings.reconnectEnabled'),
                 onChange: set('autoReconnectEnabled'),
               }),
-              h(
+              box(
                 'div',
-                { className: 'drg-form-grid' },
-                h(
-                  Field,
-                  { label: t('settings.maxAttempts') },
-                  h(TextInput, {
-                    type: 'number',
-                    value: draft.maxAttempts,
-                    ariaLabel: t('settings.maxAttempts'),
-                    onChange: set('maxAttempts'),
-                  }),
-                ),
-                h(
-                  Field,
-                  { label: t('settings.baseDelay') },
-                  h(TextInput, {
-                    type: 'number',
-                    value: draft.baseDelayMs,
-                    ariaLabel: t('settings.baseDelay'),
-                    onChange: set('baseDelayMs'),
-                  }),
+                'drg-form-grid',
+                [
+                  { kind: 'number', key: 'maxAttempts', label: 'settings.maxAttempts' },
+                  { kind: 'number', key: 'baseDelayMs', label: 'settings.baseDelay' },
+                ].map(fieldRow),
+              ),
+            ),
+            box(
+              'section',
+              'drg-settings-section',
+              box('h3', 'drg-section-title', t('settings.bootstrap')),
+              box('p', 'drg-field-hint', t('settings.bootstrapHint')),
+              box(
+                'div',
+                'drg-form-grid',
+                [{ kind: 'text', key: 'profile', label: 'settings.profile', hint: 'settings.profileHint' }].map(
+                  fieldRow,
                 ),
               ),
             ),
-            h(
+            box(
               'section',
-              { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.bootstrap')),
-              h('p', { className: 'drg-field-hint' }, t('settings.bootstrapHint')),
-              h(
+              'drg-settings-section',
+              box('h3', 'drg-section-title', t('settings.other')),
+              box(
                 'div',
-                { className: 'drg-form-grid' },
-                h(
-                  Field,
-                  { label: t('settings.profile'), hint: t('settings.profileHint') },
-                  h(TextInput, {
-                    value: draft.profile,
-                    ariaLabel: t('settings.profile'),
-                    onChange: set('profile'),
-                  }),
-                ),
-              ),
-            ),
-            h(
-              'section',
-              { className: 'drg-settings-section' },
-              h('h3', { className: 'drg-section-title' }, t('settings.other')),
-              h(
-                'div',
-                { className: 'drg-form-grid drg-form-grid-3' },
-                h(
-                  Field,
-                  { label: t('settings.language') },
-                  h(Select, {
-                    value: draft.language,
-                    ariaLabel: t('settings.language'),
+                'drg-form-grid drg-form-grid-3',
+                [
+                  {
+                    kind: 'select',
+                    key: 'language',
+                    label: 'settings.language',
                     options: [
-                      { value: 'auto', label: t('settings.languageAuto') },
-                      { value: 'zh', label: t('settings.languageZh') },
-                      { value: 'en', label: t('settings.languageEn') },
+                      ['auto', 'settings.languageAuto'],
+                      ['zh', 'settings.languageZh'],
+                      ['en', 'settings.languageEn'],
                     ],
-                    onChange: set('language'),
-                  }),
-                ),
-                h(
-                  Field,
-                  { label: t('settings.logLevel') },
-                  h(Select, {
-                    value: draft.logLevel,
-                    ariaLabel: t('settings.logLevel'),
-                    options: ['error', 'warn', 'info', 'debug'].map((level) => ({ value: level, label: level })),
-                    onChange: set('logLevel'),
-                  }),
-                ),
+                  },
+                  {
+                    kind: 'select',
+                    key: 'logLevel',
+                    label: 'settings.logLevel',
+                    options: ['error', 'warn', 'info', 'debug'].map((level) => [level, level]),
+                  },
+                ].map(fieldRow),
               ),
             ),
             error ? h(Notice, { tone: 'error' }, resolveText(error.detail, locale)) : null,
@@ -4620,15 +3571,8 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#endregion
-
     //#region 13. one-time password prompt
 
-    /**
-     * SSH password prompt for hosts whose `authType` is `password`. The value stays
-     * @param {object} props - host, busy flag, error, submit({password, remember})/cancel callbacks.
-     * @returns {object} modal element.
-     */
     function PasswordPrompt(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -4651,9 +3595,7 @@ window.__ModuleLoader__.load({
           onClose: props.onCancel,
           closeLabel: t('cancel'),
           testId: 'password-prompt',
-          footer: h(
-            'div',
-            { className: 'drg-row drg-row-end' },
+          footer: footerRow(
             h(Button, { variant: 'ghost', onClick: props.onCancel }, t('cancel')),
             h(
               Button,
@@ -4662,7 +3604,7 @@ window.__ModuleLoader__.load({
             ),
           ),
         },
-        h('p', { className: 'drg-paragraph' }, t('passwordPromptBody', { name: host.name || host.id || '' })),
+        box('p', 'drg-paragraph', t('passwordPromptBody', { name: host.name || host.id || '' })),
         h(
           Field,
           {
@@ -4696,15 +3638,11 @@ window.__ModuleLoader__.load({
               }),
               h('span', null, t('passwordPromptRemember')),
             )
-          : h('p', { className: 'drg-field-hint' }, t('passwordPromptNoStorage')),
+          : box('p', 'drg-field-hint', t('passwordPromptNoStorage')),
       )
     }
 
-    /**
-     * Prompt shown when the remote already runs a DSH this plugin did not start.
-     * The user must choose explicitly; the pipeline is paused meanwhile.
-     * @param {{ t: Function, host: object, busy?: boolean, error?: string, onResolve: (host: object, action: string) => void }} props
-     */
+    /** The remote already runs a DSH this plugin did not start: the choices are explicit, the pipeline waits. */
     function RemoteConflictPrompt(props) {
       const t = translatorOf(props)
       const host = props.host || {}
@@ -4723,9 +3661,7 @@ window.__ModuleLoader__.load({
           closeLabel: t('cancel'),
           testId: 'remote-conflict-prompt',
           wide: true,
-          footer: h(
-            'div',
-            { className: 'drg-row drg-row-end' },
+          footer: footerRow(
             h(
               Button,
               { variant: 'ghost', onClick: () => resolve('cancel'), disabled: busy, testId: 'conflict-cancel' },
@@ -4743,14 +3679,10 @@ window.__ModuleLoader__.load({
             ),
           ),
         },
-        h(
-          'p',
-          { className: 'drg-paragraph' },
-          t('conflictBody', { name: host.name || host.id || '', count: processes.length }),
-        ),
-        h(
+        box('p', 'drg-paragraph', t('conflictBody', { name: host.name || host.id || '', count: processes.length })),
+        box(
           'ul',
-          { className: 'drg-conflict-processes' },
+          'drg-conflict-processes',
           processes.map((process) =>
             h(
               'li',
@@ -4761,21 +3693,14 @@ window.__ModuleLoader__.load({
             ),
           ),
         ),
-        h('p', { className: 'drg-field-hint' }, t('conflictHint')),
+        box('p', 'drg-field-hint', t('conflictHint')),
         props.error ? h(Notice, { tone: 'error' }, props.error) : null,
-        busy ? h('p', { className: 'drg-field-hint' }, t('conflictBusy')) : null,
+        busy ? box('p', 'drg-field-hint', t('conflictBusy')) : null,
       )
     }
 
-    //#endregion
-
     //#region 14. toast
 
-    /**
-     * Lightweight toast for action results.
-     * @param {{toast: {text: string, tone?: string}|null}} props - toast payload.
-     * @returns {object|null} toast element.
-     */
     function Toast(props) {
       if (!props || !props.toast) return null
       return h(
@@ -4785,17 +3710,8 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#endregion
-
     //#region 15. overlay host (floating windows + remote window)
 
-    /**
-     * Owns the plugin's live state: one initial `/state` read, then SSE with a
-     * 3s polling fallback (docs/api.md). Disposal closes the stream and timers.
-     * An optional `initialState` is a test/preview seam; production callers omit it.
-     * @param {object|undefined} [initialState] - state used for the first render.
-     * @returns {{state: object|null, error: object|null, loading: boolean, mode: string, refresh: Function, patch: Function}} remote state handle.
-     */
     function useRemoteState(initialState) {
       const hasInitial = initialState !== undefined && initialState !== null
       const [state, setState] = useState(hasInitial ? initialState : null)
@@ -4848,21 +3764,12 @@ window.__ModuleLoader__.load({
       return { state, error, loading, mode, refresh, patch }
     }
 
-    /**
-     * The floating window, with two bodies behind one shell. A host that is connecting — or
-     * waiting for its host key, or has just failed — gets the connect window: staged progress on
-     * top and the Host's log streaming underneath. That is the whole point of opening a host
-     * that is not up yet, so the host list is deliberately not part of it; management is what
-     * the window shows when nothing is connecting, and it is one close away.
-     * @param {object} props - window state, the active host, and every callback the bodies use.
-     * @returns {object|null} the window element, or null while it is closed.
-     */
     function ManageWindow(props) {
       const t = translatorOf(props)
       const locale = localeOf(props)
       if (props.open !== true) return null
       const host = props.host || null
-      const connecting = props.view === 'connect' && host !== null && connectWindowOpen(host.status)
+      const connecting = props.view === 'connect' && host !== null && statusOf(host.status).window === true
       return h(
         'div',
         { className: 'drg-manage-window', 'data-testid': 'manage-window' },
@@ -4893,7 +3800,6 @@ window.__ModuleLoader__.load({
                 onRefresh: props.onRefresh,
                 onOpenSettings: props.onOpenSettings,
                 onOpenHost: props.onOpenHost,
-                onConnectHost: props.onConnectHost,
                 onDisconnectHost: props.onDisconnectHost,
                 onReconnectHost: props.onReconnectHost,
                 onEditHost: props.onEditHost,
@@ -4905,14 +3811,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The plugin's overlay host, mounted once in the shell's overlay layer.
-     *
-     * It owns everything that is not the sidebar row: the host state, the remote window, the
-     * floating host-management window, the add/edit wizard, and every prompt. Because it
-     * sits above the remote window, opening or closing one of those never changes what is
-     * behind it — a remote stays exactly as it was.
-     * @param {object} props - slot props (`t`) plus the injected stores.
-     * @returns {object} overlay element.
+     * The overlay host: everything that is not the sidebar row. It sits above the remote window,
+     * so opening or closing a dialog never changes what is behind it.
      */
     function PluginOverlay(props) {
       const t = translatorOf(props)
@@ -4921,19 +3821,12 @@ window.__ModuleLoader__.load({
       // remote window all read from it.
       const remote = useRemoteState(props.initialState)
       const state = remote.state
-      /** Host filling the window, or null when the local page is in front. */
       const [target, setTarget] = useState(() => {
         const initial = props.initialState
         return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
       })
       const [manageOpen, setManageOpen] = useState(false)
-      /**
-       * What the floating window shows: the host list (`'list'`, the explicit 管理界面 entry) or
-       * the window of a connection that is in flight (`'connect'`). Separate from the host's own
-       * status on purpose: after a failed connection the log stays on screen, but opening
-       * 管理界面 again must still bring the list back instead of the failure.
-       * @type {['list' | 'connect', Function]}
-       */
+      /** Which body the floating window shows. Separate from the host status: 管理界面 always brings the list back. */
       const [manageView, setManageView] = useState('list')
       // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
       // one-shot launch token, so it is fetched on demand and never persisted.
@@ -4969,6 +3862,24 @@ window.__ModuleLoader__.load({
         const title = resolveText(viewOfError.title, locale)
         const detail = resolveText(viewOfError.detail, locale)
         return detail ? title + ' ' + detail : title
+      }
+
+      /**
+       * One Host-API call with the window's choreography: the host goes busy, success refreshes
+       * the state, a failure reaches the toast, and the flag clears either way.
+       */
+      const runAction = (host, work, done) => {
+        if (!host || !host.id) return
+        setBusyHostId(host.id)
+        work()
+          .then(
+            (result) => {
+              if (done) done(result)
+              remote.refresh()
+            },
+            (error) => notify(errorMessage(error), 'error'),
+          )
+          .finally(() => setBusyHostId(null))
       }
 
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
@@ -5075,62 +3986,30 @@ window.__ModuleLoader__.load({
         }
       }, [state])
 
-      // While the plugin is loaded its windows stay warm; the plugin's own disposal (in
-      // `apply`) tears them down.
+      // While the plugin is loaded its windows stay warm; the plugin's own disposal (in `apply`) tears them down.
       useEffect(() => {
         return () => {
           hideOverlays()
         }
       }, [])
 
-      /** Connect with an optional one-time password (memory only). */
-      const performConnect = (host, password) => {
-        if (!host || !host.id) return
-        setBusyHostId(host.id)
-        api
-          .connect(host.id, typeof password === 'string' ? { password } : {})
-          .then(
-            () => {
-              setPasswordPrompt(null)
-              remote.refresh()
-            },
-            (error) => {
-              const message = errorMessage(error)
-              setPasswordPrompt(null)
-              notify(message, 'error')
-            },
-          )
-          .finally(() => setBusyHostId(null))
-      }
+      // A failed connect drops the prompt too; the toast carries the reason.
+      const performConnect = (host, password) =>
+        runAction(
+          host,
+          () => api.connect(host.id, typeof password === 'string' ? { password } : {}),
+          () => setPasswordPrompt(null),
+        )
 
       /**
        * Start a connection, asking for the one-time password first when the
        * host uses password auth (contract: password never persisted).
        */
-      const connectHost = (host, options) => {
-        if (!host || !host.id) return
-        const opts = options || {}
-        if (host.authType === 'password' && typeof opts.password !== 'string') {
-          setPasswordPrompt({ host, intent: 'connect', error: null, busy: false })
-          return
-        }
-        performConnect(host, opts.password)
-      }
-
-      /**
-       * Hand the window to one host: the management window steps aside for a host that is
-       * up, and stays up while one that is not (connecting, waiting for a fingerprint, in
-       * conflict) gets there, so its progress, log or prompt is visible.
-       * @param {object} host - HostView to open.
-       * @param {{password?: string}} [options] - a one-time password typed elsewhere (the
-       *   add-host dialog hands the one it collected here instead of asking again).
-       * @returns {void}
-       */
       const openHost = (host, options) => {
         if (!host) return
         const opts = options || {}
         const password = typeof opts.password === 'string' && opts.password !== '' ? opts.password : null
-        const needsConnect = host.status === 'unconfigured' || host.status === 'disconnected' || host.status === 'error'
+        const needsConnect = statusOf(host.status).connect === true
         const ready = host.status === 'connected'
         if (needsConnect && host.authType === 'password' && password === null) {
           pendingSwitch.current = host.id
@@ -5172,9 +4051,8 @@ window.__ModuleLoader__.load({
         const host = hostsRef.current.find((item) => item && item.id === intent.hostId) || null
         if (intent.kind === 'disconnect') {
           pendingIntent.current = null
-          // Disconnecting hands the window back once the Host confirms (see
-          // `disconnectHost`): doing it here would show the local page even if the
-          // disconnect then failed.
+          // Disconnecting hands the window back once the Host confirms (see `disconnectHost`): doing it here would show
+          // the local page even if the disconnect then failed.
           if (host !== null) disconnectHost(host)
           return
         }
@@ -5210,7 +4088,6 @@ window.__ModuleLoader__.load({
         if (store && typeof store.close === 'function') store.close()
       }
 
-      /** Submit the one-time password for the pending open/connect/reconnect. */
       const submitPassword = (submitted) => {
         const pending = passwordPrompt
         if (!pending || !pending.host) return
@@ -5259,26 +4136,19 @@ window.__ModuleLoader__.load({
         setPasswordPrompt(null)
       }
 
-      const disconnectHost = (host) => {
-        if (!host) return
-        setBusyHostId(host.id)
-        api
-          .disconnect(host.id, false)
-          .then(
-            () => {
-              // The remote UI goes away with the connection: give its renderer back now,
-              // and hand the window back if that is where it is pointing. The update is
-              // functional on purpose: this callback runs from the long-lived intent
-              // subscription, whose closure still holds the target it was created with,
-              // so a captured value would miss the host the window is really on.
-              setTarget((current) => (current === host.id ? null : current))
-              closeCarrier(host.id).catch(() => {})
-              remote.refresh()
-            },
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setBusyHostId(null))
-      }
+      // The remote UI goes away with the connection: give its renderer back now, and hand the
+      // window back if that is where it is pointing. The update is functional on purpose: this
+      // callback runs from the long-lived intent subscription, whose closure still holds the
+      // target it was created with, so a captured value would miss the host the window is on.
+      const disconnectHost = (host) =>
+        runAction(
+          host,
+          () => api.disconnect(host.id, false),
+          () => {
+            setTarget((current) => (current === host.id ? null : current))
+            closeCarrier(host.id).catch(() => {})
+          },
+        )
 
       const reconnectHost = (host) => {
         if (!host) return
@@ -5288,14 +4158,7 @@ window.__ModuleLoader__.load({
         }
         setRemoteUrl(null)
         closeCarrier(host.id).catch(() => {})
-        setBusyHostId(host.id)
-        api
-          .reconnect(host.id)
-          .then(
-            () => remote.refresh(),
-            (error) => notify(errorMessage(error), 'error'),
-          )
-          .finally(() => setBusyHostId(null))
+        runAction(host, () => api.reconnect(host.id))
       }
 
       const resolveConflict = (host, action) => {
@@ -5354,15 +4217,6 @@ window.__ModuleLoader__.load({
         notify(t('settings.saved'), 'success')
       }
 
-      /**
-       * Confirm or refuse the host key the window is waiting on. The wizard asks the same
-       * question in its second step; this is the same call, reached from the floating list
-       * so a host opened straight from the switcher can get past that step too.
-       * @param {object} host - HostView waiting for its fingerprint.
-       * @param {boolean} accept - true to pin it, false to refuse it (which drops the link).
-       * @param {boolean} [remember] - pin permanently (accept only).
-       * @returns {void}
-       */
       const answerFingerprint = (host, accept, remember) => {
         if (!host || !host.id) return
         const sha256 = host.fingerprint && typeof host.fingerprint.sha256 === 'string' ? host.fingerprint.sha256 : ''
@@ -5379,14 +4233,8 @@ window.__ModuleLoader__.load({
         )
       }
 
-      /** Open the add/edit wizard; it floats over whatever is on screen. */
       const openWizard = (draft) => {
-        if (typeof props.openWizard === 'function') {
-          props.openWizard(draft)
-          return
-        }
-        const store = props.wizardStore
-        if (store && typeof store.open === 'function') store.open(draft)
+        if (props.wizardStore) props.wizardStore.open(draft)
       }
 
       return h(
@@ -5410,7 +4258,6 @@ window.__ModuleLoader__.load({
           onRefresh: remote.refresh,
           onOpenSettings: () => setSettingsOpen(true),
           onOpenHost: openHost,
-          onConnectHost: connectHost,
           onDisconnectHost: disconnectHost,
           onReconnectHost: reconnectHost,
           onEditHost: (host) => openWizard({ mode: 'edit', host }),
@@ -5501,42 +4348,15 @@ window.__ModuleLoader__.load({
 
     //#region 16. styles
 
-    /**
-     * Panel styles. No local palette and no local token layer: every colour, surface,
-     * radius and shadow is the host's own --dsw-* alias, and a theme change restyles
-     * the whole surface on the next paint.
-     */
     const CSS = `
     /*
-     * Panel styles.
-     *
-     * Theme contract: nothing here owns a colour, a surface or a geometry constant.
-     * Every value comes straight from the host's --dsw-* tokens (the same aliases the
-     * host's own Dialog and Menu components read), so a theme plugin — built-in
-     * light/dark, a registered theme, or ctx.theme.overrideTokens() — restyles every
-     * surface on the next paint. There is deliberately no local token layer: the
-     * plugin adds no palette of its own, and a token DSH renames fails the tests
-     * instead of silently falling back to a look-alike.
-     *
-     * Surface choices mirror the host:
-     *   dialog  = --dsw-alias-bg-layer-2, --dsw-radius-panel, --dsw-elevation-prominent
-     *   menu    = --dsw-specific-menu + --dsw-menu-backdrop-filter, --dsw-elevation-panel
-     *   scrim   = --dsw-alias-bg-mask-1 + --dsw-mask-blur
-     *   field   = --dsw-alias-bg-layer-3 + .5px --dsw-alias-border-l4
+     * No local token layer: every colour, surface, radius and shadow is the host's own --dsw-*
+     * alias, so a theme change restyles the whole surface on the next paint.
      */
     .drg-root {
-      color-scheme: inherit;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      min-height: 0;
-      color: var(--dsw-alias-label-primary);
-      background: var(--dsw-alias-bg-base);
-      font-family: var(--dsw-font-family);
-      font-size: 13px;
-      line-height: 1.5;
-      box-sizing: border-box;
-      -webkit-font-smoothing: antialiased;
+      color-scheme: inherit; display: flex; flex-direction: column; height: 100%; min-height: 0;
+      color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); font-family: var(--dsw-font-family);
+      font-size: 13px; line-height: 1.5; box-sizing: border-box; -webkit-font-smoothing: antialiased;
     }
     .drg-root *, .drg-root *::before, .drg-root *::after { box-sizing: border-box; }
     .drg-root ::selection { background: color-mix(in srgb, var(--dsw-alias-brand-primary) 30%, transparent); }
@@ -5553,9 +4373,7 @@ window.__ModuleLoader__.load({
     }
     .drg-root ::-webkit-scrollbar { width: 10px; height: 10px; }
     .drg-root ::-webkit-scrollbar-thumb {
-      border: 2px solid transparent;
-      background-clip: content-box;
-      background-color: var(--dsw-alias-scrollbar-bg-l2);
+      border: 2px solid transparent; background-clip: content-box; background-color: var(--dsw-alias-scrollbar-bg-l2);
       border-radius: 999px;
     }
     .drg-root ::-webkit-scrollbar-thumb:hover { background-color: var(--dsw-alias-scrollbar-hover-l2); }
@@ -5567,13 +4385,7 @@ window.__ModuleLoader__.load({
 
     /* ---- page --------------------------------------------------------------- */
     .drg-page {
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
-      padding: 22px 24px 24px;
+      display: flex; flex-direction: column; gap: 20px; flex: 1; min-height: 0; overflow: auto; padding: 22px 24px 24px;
     }
     .drg-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
     .drg-page-heading { min-width: 0; }
@@ -5585,27 +4397,14 @@ window.__ModuleLoader__.load({
     .drg-row { display: flex; align-items: center; gap: 8px; }
     .drg-row-wrap { flex-wrap: wrap; }
     .drg-row-end { justify-content: flex-end; }
-    .drg-row-spread { justify-content: space-between; width: 100%; gap: 12px; }
-    .drg-paragraph { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
+    .drg-paragraph, .drg-fingerprint-body, .drg-error-detail { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
     .drg-section-label { margin-bottom: 4px; color: var(--dsw-alias-label-tertiary); font-size: 11.5px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
 
     /* ---- buttons ------------------------------------------------------------ */
     .drg-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      height: 32px;
-      padding: 0 12px;
-      border: 0.5px solid transparent;
-      border-radius: var(--dsw-radius-md);
-      background: transparent;
-      color: inherit;
-      font-size: 13px;
-      font-weight: 500;
-      line-height: 20px;
-      white-space: nowrap;
-      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px;
+      border: 0.5px solid transparent; border-radius: var(--dsw-radius-md); background: transparent; color: inherit;
+      font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap; cursor: pointer;
       transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
     }
     .drg-btn:disabled { cursor: default; opacity: 0.5; }
@@ -5616,8 +4415,7 @@ window.__ModuleLoader__.load({
        fill (invisible text on the primary button). */
     .drg-btn.drg-btn-primary,
     .drg-btn.drg-btn-primary .drg-btn-label { color: var(--dsw-alias-label-primary-foreground); }
-    .drg-btn-primary:hover:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
-    .drg-btn-primary:active:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
+    .drg-btn-primary:hover:not(:disabled), .drg-btn-primary:active:not(:disabled) { background: var(--dsw-alias-button-primary-hover); }
     .drg-btn-secondary { border-color: var(--dsw-alias-border-l3); color: var(--dsw-alias-label-primary); }
     .drg-btn-secondary:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); border-color: var(--dsw-alias-border-l4); }
     .drg-btn-ghost { color: var(--dsw-alias-label-secondary); }
@@ -5629,50 +4427,26 @@ window.__ModuleLoader__.load({
     }
     .drg-btn-label { display: inline-flex; align-items: center; gap: 6px; }
     .drg-iconbtn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 28px;
-      height: 28px;
-      flex: none;
-      padding: 0;
-      border: none;
-      border-radius: var(--dsw-radius-sm);
-      background: transparent;
-      color: var(--dsw-alias-label-secondary);
-      cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: none;
+      padding: 0; border: none; border-radius: var(--dsw-radius-sm); background: transparent;
+      color: var(--dsw-alias-label-secondary); cursor: pointer;
     }
     .drg-iconbtn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
     .drg-iconbtn:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-active); }
     .drg-iconbtn:disabled { opacity: 0.5; cursor: default; }
     .drg-linkbtn {
-      padding: 0 2px;
-      border: none;
-      border-radius: var(--dsw-radius-xs);
-      background: none;
-      color: var(--dsw-alias-link);
-      font-size: 12.5px;
-      cursor: pointer;
+      padding: 0 2px; border: none; border-radius: var(--dsw-radius-xs); background: none; color: var(--dsw-alias-link);
+      font-size: 12.5px; cursor: pointer;
     }
     .drg-linkbtn:hover { text-decoration: underline; text-underline-offset: 2px; }
 
     /* ---- status ------------------------------------------------------------- */
     .drg-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; }
-    .drg-dot[data-tone="success"],
-    .drg-dot[data-tone="local"] { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent); }
+    .drg-dot[data-tone="success"] { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent); }
     .drg-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      height: 20px;
-      padding: 0 8px;
-      border: 0.5px solid var(--dsw-alias-border-l2);
-      border-radius: 999px;
-      background: transparent;
-      color: var(--dsw-alias-label-secondary);
-      font-size: 11.5px;
-      font-weight: 500;
-      line-height: 18px;
+      display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px;
+      border: 0.5px solid var(--dsw-alias-border-l2); border-radius: 999px; background: transparent;
+      color: var(--dsw-alias-label-secondary); font-size: 11.5px; font-weight: 500; line-height: 18px;
       white-space: nowrap;
     }
     .drg-badge[data-tone="success"] { color: var(--dsw-alias-state-success-primary); background: var(--dsw-alias-state-success-tertiary); border-color: transparent; }
@@ -5683,34 +4457,19 @@ window.__ModuleLoader__.load({
 
     /* ---- loading / empty ---------------------------------------------------- */
     .drg-spinner {
-      display: inline-block;
-      flex: none;
-      border-radius: 50%;
-      border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
-      border-top-color: currentColor;
+      display: inline-block; flex: none; border-radius: 50%;
+      border: 2px solid color-mix(in srgb, currentColor 22%, transparent); border-top-color: currentColor;
       animation: drg-spin 0.8s linear infinite;
     }
     @keyframes drg-spin { to { transform: rotate(360deg); } }
     .drg-loading { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 48px 16px; color: var(--dsw-alias-label-secondary); }
     .drg-empty {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 10px;
-      padding: 56px 24px;
-      text-align: center;
-      border: 1px dashed var(--dsw-alias-border-l2);
-      border-radius: var(--dsw-radius-lg);
+      display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 56px 24px; text-align: center;
+      border: 1px dashed var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-lg);
     }
     .drg-empty-icon {
-      display: grid;
-      place-items: center;
-      width: 56px;
-      height: 56px;
-      margin-bottom: 2px;
-      border-radius: 50%;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      background: var(--dsw-alias-bg-layer-1);
+      display: grid; place-items: center; width: 56px; height: 56px; margin-bottom: 2px; border-radius: 50%;
+      border: 0.5px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1);
       color: var(--dsw-alias-label-tertiary);
     }
     .drg-empty-title { font-size: 16px; font-weight: 500; }
@@ -5721,35 +4480,23 @@ window.__ModuleLoader__.load({
     .drg-summary { display: flex; align-items: center; gap: 8px; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
     .drg-host-list { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
     .drg-host-card {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      min-width: 0;
-      padding: 16px;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      border-radius: var(--dsw-radius-lg);
-      background: var(--dsw-alias-bg-layer-1);
-      transition: border-color 160ms ease, background-color 160ms ease;
+      display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 16px;
+      border: 0.5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-lg);
+      background: var(--dsw-alias-bg-layer-1); transition: border-color 160ms ease, background-color 160ms ease;
     }
     .drg-host-card:hover { border-color: var(--dsw-alias-border-l4); }
     .drg-host-card[data-status="connected"] { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 35%, var(--dsw-alias-border-l1)); }
     .drg-card-strip {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin: -16px -16px 0;
-      padding: 6px 14px;
-      border-radius: var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;
-      background: var(--dsw-alias-state-warn-tertiary);
-      color: var(--dsw-alias-state-warn-label);
-      font-size: 12px;
+      display: flex; align-items: center; gap: 6px; margin: -16px -16px 0; padding: 6px 14px;
+      border-radius: var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0; background: var(--dsw-alias-state-warn-tertiary);
+      color: var(--dsw-alias-state-warn-label); font-size: 12px;
     }
     .drg-host-card[data-status="error"] .drg-card-strip,
     .drg-host-card[data-status="limited"] .drg-card-strip {
       background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);
       color: var(--dsw-alias-state-error-primary);
     }
-    .drg-card-strip-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .drg-card-strip-text, .drg-conflict-processes span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .drg-card-strip .drg-linkbtn { margin-left: auto; flex: none; color: inherit; }
     .drg-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
     .drg-card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 500; line-height: 22px; }
@@ -5759,42 +4506,21 @@ window.__ModuleLoader__.load({
     .drg-card-meta dt { color: var(--dsw-alias-label-caption); font-size: 11px; }
     .drg-card-meta dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: 12px; }
     .drg-card-actions {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 2px;
-      padding-top: 12px;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 2px; padding-top: 12px;
       border-top: 0.5px solid var(--dsw-alias-border-l1);
     }
     .drg-card-actions-end { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 
     /* ---- notices ------------------------------------------------------------ */
     .drg-notice {
-      display: flex;
-      align-items: flex-start;
-      gap: 10px;
-      padding: 10px 12px;
-      border: 0.5px solid var(--dsw-alias-border-l2);
-      border-radius: var(--dsw-radius-md);
+      display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
+      border: 0.5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md);
       background: var(--dsw-alias-bg-layer-1);
     }
     .drg-notice-icon { flex: none; margin-top: 1px; color: var(--dsw-alias-label-tertiary); }
     .drg-notice-body { flex: 1; min-width: 0; }
     .drg-notice-title { font-weight: 500; }
     .drg-notice-text { color: var(--dsw-alias-label-secondary); font-size: 12.5px; line-height: 19px; }
-    .drg-notice-dismiss {
-      flex: none;
-      padding: 0 4px;
-      border: none;
-      border-radius: var(--dsw-radius-xs);
-      background: transparent;
-      color: var(--dsw-alias-label-tertiary);
-      font-size: 16px;
-      line-height: 1;
-      cursor: pointer;
-    }
-    .drg-notice-dismiss:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
     .drg-notice[data-tone="warn"] { background: var(--dsw-alias-state-warn-tertiary); border-color: transparent; }
     .drg-notice[data-tone="warn"] .drg-notice-icon { color: var(--dsw-alias-state-warn-primary); }
     .drg-notice[data-tone="error"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent); border-color: transparent; }
@@ -5809,13 +4535,8 @@ window.__ModuleLoader__.load({
     .drg-progress-line { color: var(--dsw-alias-label-secondary); font-size: 12.5px; }
     .drg-phases { display: flex; gap: 6px; flex-wrap: wrap; }
     .drg-phase {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 4px 10px;
-      border: 0.5px solid var(--dsw-alias-border-l2);
-      border-radius: 999px;
-      color: var(--dsw-alias-label-tertiary);
+      display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;
+      border: 0.5px solid var(--dsw-alias-border-l2); border-radius: 999px; color: var(--dsw-alias-label-tertiary);
       font-size: 11.5px;
     }
     .drg-phase[data-state="current"] {
@@ -5827,76 +4548,49 @@ window.__ModuleLoader__.load({
     .drg-phase-mark { display: inline-flex; width: 12px; height: 12px; align-items: center; justify-content: center; }
 
     .drg-fingerprint {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      width: min(640px, 100%);
-      margin: auto;
-      padding: 20px;
+      display: flex; flex-direction: column; gap: 12px; width: min(640px, 100%); margin: auto; padding: 20px;
       border: 0.5px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary) 36%, var(--dsw-alias-border-l2));
-      border-radius: var(--dsw-radius-lg);
-      background: var(--dsw-alias-state-warn-tertiary);
+      border-radius: var(--dsw-radius-lg); background: var(--dsw-alias-state-warn-tertiary);
     }
     .drg-fingerprint-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 14%, transparent); color: var(--dsw-alias-state-warn-label); }
     .drg-fingerprint-icon[data-tone="error"] { background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); color: var(--dsw-alias-state-error-primary); }
-    .drg-fingerprint-title { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; }
-    .drg-fingerprint-body { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
+    .drg-fingerprint-title, .drg-error-title { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; }
 
     .drg-kv { display: flex; flex-direction: column; gap: 0; padding: 4px 14px; border: 0.5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1); }
     .drg-kv > div { display: flex; align-items: baseline; gap: 14px; padding: 8px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l1); }
-    .drg-kv > div:last-child { border-bottom: 0; }
+    .drg-kv > div:last-child, .drg-keyfile-row:last-child { border-bottom: 0; }
     .drg-kv dt { flex: none; min-width: 108px; color: var(--dsw-alias-label-caption); font-size: 12px; }
     .drg-kv dd { min-width: 0; margin: 0; color: var(--dsw-alias-label-primary); word-break: break-word; }
 
     .drg-error-card {
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 12px;
-      width: min(640px, 100%);
-      margin: auto;
+      display: flex; flex-direction: column; align-items: flex-start; gap: 12px; width: min(640px, 100%); margin: auto;
       padding: 20px;
       border: 0.5px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, var(--dsw-alias-border-l2));
       border-radius: var(--dsw-radius-lg);
       background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 6%, transparent);
     }
     .drg-error-icon { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); color: var(--dsw-alias-state-error-primary); }
-    .drg-error-title { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; }
-    .drg-error-detail { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
     .drg-error-steps { width: 100%; }
     .drg-error-steps ul { display: flex; flex-direction: column; gap: 4px; color: var(--dsw-alias-label-secondary); font-size: 12.5px; }
     .drg-error-steps li::before { content: "· "; color: var(--dsw-alias-label-caption); }
 
     /* ---- dialogs ------------------------------------------------------------ */
     .drg-modal-layer { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 24px; }
-    .drg-modal-backdrop {
-      position: absolute;
-      inset: 0;
-      background: var(--dsw-alias-bg-mask-1);
-      backdrop-filter: var(--dsw-mask-blur);
+    .drg-modal-backdrop, .drg-drawer-backdrop {
+      position: absolute; inset: 0; background: var(--dsw-alias-bg-mask-1); backdrop-filter: var(--dsw-mask-blur);
       animation: drg-fade-in 140ms ease-out;
     }
     .drg-modal {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      width: min(600px, 100%);
-      max-height: min(86vh, 900px);
-      padding-bottom: 24px;
-      border: 0;
-      border-radius: var(--dsw-radius-panel);
-      background: var(--dsw-alias-bg-layer-2);
-      color: var(--dsw-alias-label-primary);
-      box-shadow: var(--dsw-elevation-prominent);
-      overflow: hidden;
+      position: relative; z-index: 1; display: flex; flex-direction: column; gap: 20px; width: min(600px, 100%);
+      max-height: min(86vh, 900px); padding-bottom: 24px; border: 0; border-radius: var(--dsw-radius-panel);
+      background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+      box-shadow: var(--dsw-elevation-prominent); overflow: hidden;
       animation: drg-dialog-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
     }
     .drg-modal-wide { width: min(880px, 100%); }
     .drg-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 22px 14px 0 24px; }
     .drg-modal-titles { min-width: 0; }
-    .drg-modal-title { font-size: 16px; font-weight: 500; line-height: 24px; }
+    .drg-modal-title, .drg-drawer-title { font-size: 16px; font-weight: 500; line-height: 24px; }
     .drg-modal-subtitle { margin-top: 2px; color: var(--dsw-alias-label-secondary); font-size: 12.5px; line-height: 18px; }
     .drg-modal-body { padding: 0 24px; overflow: auto; min-height: 0; }
     .drg-modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 0 24px; }
@@ -5924,26 +4618,15 @@ window.__ModuleLoader__.load({
     .drg-connect-log-title { color: var(--dsw-alias-label-secondary); font-size: 12.5px; font-weight: 500; }
     .drg-connect-log-hint { color: var(--dsw-alias-label-caption); font-size: 11.5px; }
     .drg-connect-log-count {
-      margin-left: auto;
-      color: var(--dsw-alias-label-caption);
-      font-size: 11.5px;
-      font-variant-numeric: tabular-nums;
+      margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11.5px; font-variant-numeric: tabular-nums;
     }
     .drg-connect-log-body {
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
-      padding: 10px 12px;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      border-radius: var(--dsw-radius-md);
-      background: var(--dsw-alias-bg-layer-1);
-      color: var(--dsw-alias-label-primary);
-      font-family: var(--dsw-font-markdown-code-font-family);
-      font-size: 11.5px;
-      line-height: 1.7;
-      overflow-wrap: anywhere;
+      flex: 1; min-height: 0; overflow: auto; padding: 10px 12px; border: 0.5px solid var(--dsw-alias-border-l1);
+      border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
+      color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-markdown-code-font-family); font-size: 11.5px;
+      line-height: 1.7; overflow-wrap: anywhere;
     }
-    .drg-connect-log-body:focus-visible { outline-offset: -2px; }
+    .drg-connect-log-body:focus-visible, .drg-keyfile-row:focus-visible { outline-offset: -2px; }
     .drg-connect-log-line { display: flex; align-items: baseline; gap: 10px; }
     .drg-connect-log-time { flex: none; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
     .drg-connect-log-text { min-width: 0; white-space: pre-wrap; }
@@ -5951,38 +4634,19 @@ window.__ModuleLoader__.load({
     .drg-connect-log-line[data-level="warn"] .drg-connect-log-text { color: var(--dsw-alias-state-warn-primary); }
     .drg-connect-log-line[data-level="error"] .drg-connect-log-text { color: var(--dsw-alias-state-error-primary); }
     .drg-connect-log-empty { color: var(--dsw-alias-label-caption); font-family: var(--dsw-font-family); }
-    /* In the wizard the console is a fixed pane: the dialog scrolls, the log keeps its own box. */
-    .drg-wizard-test .drg-connect-log { padding: 6px 0 0; }
-    .drg-wizard-test .drg-connect-log-head { padding-right: 0; }
-    .drg-wizard-test .drg-connect-log-body { flex: none; height: 220px; }
 
     @keyframes drg-fade-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes drg-dialog-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: none; } }
 
     /* ---- drawer ------------------------------------------------------------- */
     .drg-drawer-layer { position: fixed; inset: 0; z-index: 70; display: flex; justify-content: flex-end; }
-    .drg-drawer-backdrop {
-      position: absolute;
-      inset: 0;
-      background: var(--dsw-alias-bg-mask-1);
-      backdrop-filter: var(--dsw-mask-blur);
-      animation: drg-fade-in 140ms ease-out;
-    }
     .drg-drawer {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      flex-direction: column;
-      width: min(520px, 100%);
-      height: 100%;
-      background: var(--dsw-alias-bg-layer-2);
-      color: var(--dsw-alias-label-primary);
-      box-shadow: var(--dsw-elevation-panel);
-      animation: drg-drawer-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      position: relative; z-index: 1; display: flex; flex-direction: column; width: min(520px, 100%); height: 100%;
+      background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+      box-shadow: var(--dsw-elevation-panel); animation: drg-drawer-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
     }
     @keyframes drg-drawer-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
     .drg-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 22px 14px 14px 24px; border-bottom: 0.5px solid var(--dsw-alias-border-l1); }
-    .drg-drawer-title { font-size: 16px; font-weight: 500; line-height: 24px; }
     .drg-drawer-subtitle { margin-top: 2px; color: var(--dsw-alias-label-secondary); font-size: 12px; overflow-wrap: anywhere; }
     .drg-drawer-body { flex: 1; min-height: 0; overflow: auto; padding: 20px 24px; }
     .drg-drawer-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 24px; border-top: 0.5px solid var(--dsw-alias-border-l1); }
@@ -5991,27 +4655,13 @@ window.__ModuleLoader__.load({
     .drg-diag-time { margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11.5px; font-variant-numeric: tabular-nums; }
     .drg-diag-list { display: flex; flex-direction: column; gap: 6px; }
     .drg-diag-check {
-      display: flex;
-      gap: 10px;
-      padding: 10px 12px;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      border-radius: var(--dsw-radius-md);
-      background: var(--dsw-alias-bg-layer-1);
+      display: flex; gap: 10px; padding: 10px 12px; border: 0.5px solid var(--dsw-alias-border-l1);
+      border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-1);
     }
     .drg-diag-status {
-      flex: none;
-      align-self: flex-start;
-      min-width: 46px;
-      height: 20px;
-      padding: 0 6px;
-      border-radius: 999px;
-      background: var(--dsw-alias-bg-layer-3);
-      color: var(--dsw-alias-label-secondary);
-      font-size: 10.5px;
-      font-weight: 600;
-      line-height: 20px;
-      text-align: center;
-      text-transform: uppercase;
+      flex: none; align-self: flex-start; min-width: 46px; height: 20px; padding: 0 6px; border-radius: 999px;
+      background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary); font-size: 10.5px;
+      font-weight: 600; line-height: 20px; text-align: center; text-transform: uppercase;
     }
     .drg-diag-status[data-status="pass"] { color: var(--dsw-alias-state-success-primary); background: var(--dsw-alias-state-success-tertiary); }
     .drg-diag-status[data-status="fail"] { color: var(--dsw-alias-state-error-primary); background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent); }
@@ -6028,16 +4678,9 @@ window.__ModuleLoader__.load({
     .drg-field-inline { display: flex; align-items: center; gap: 8px; }
     .drg-field-inline > :first-child { flex: 1; min-width: 0; }
     .drg-input, .drg-select {
-      width: 100%;
-      height: 36px;
-      padding: 0 12px;
-      border: 0.5px solid var(--dsw-alias-border-l4);
-      border-radius: var(--dsw-radius-md);
-      background: var(--dsw-alias-bg-layer-3);
-      color: var(--dsw-alias-label-primary);
-      font: inherit;
-      font-size: 13px;
-      outline: none;
+      width: 100%; height: 36px; padding: 0 12px; border: 0.5px solid var(--dsw-alias-border-l4);
+      border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3);
+      color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; outline: none;
       transition: border-color 140ms ease, box-shadow 140ms ease;
     }
     .drg-input:hover:not(:disabled), .drg-select:hover:not(:disabled) { border-color: var(--dsw-alias-label-caption); }
@@ -6058,82 +4701,26 @@ window.__ModuleLoader__.load({
     .drg-divider { height: 0.5px; margin: 14px 0; background: var(--dsw-alias-border-l1); }
 
     /* ---- wizard ------------------------------------------------------------- */
-    /* ol.… outranks the .drg-root ol margin reset, so the steps keep their separation
-       from the form below. */
-    ol.drg-wizard-steps { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 18px; }
-    .drg-wizard-step {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 4px 12px 4px 5px;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      border-radius: var(--dsw-radius-md);
-      background: var(--dsw-alias-bg-layer-1);
-      color: var(--dsw-alias-label-tertiary);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .drg-wizard-step[data-state="current"] {
-      color: var(--dsw-alias-label-primary);
-      border-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 40%, transparent);
-      background: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
-    }
-    .drg-wizard-step[data-state="done"] { color: var(--dsw-alias-state-success-primary); }
-    .drg-wizard-step-index {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 18px;
-      height: 18px;
-      border-radius: 50%;
-      border: 0.5px solid var(--dsw-alias-border-l2);
-      background: var(--dsw-alias-bg-layer-3);
-      color: var(--dsw-alias-label-tertiary);
-      font-size: 10.5px;
-      font-weight: 600;
-    }
-    .drg-wizard-step[data-state="current"] .drg-wizard-step-index { border-color: transparent; background: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-primary-foreground); }
-    .drg-wizard-step[data-state="done"] .drg-wizard-step-index { border-color: transparent; background: var(--dsw-alias-state-success-tertiary); color: var(--dsw-alias-state-success-primary); }
     .drg-wizard-body { min-width: 0; }
-    .drg-wizard-form, .drg-wizard-test, .drg-wizard-done { display: flex; flex-direction: column; gap: 10px; }
+    .drg-wizard-form { display: flex; flex-direction: column; gap: 10px; }
     .drg-alias-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
     .drg-alias-label { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
     .drg-alias-known { margin-left: auto; color: var(--dsw-alias-label-caption); font-size: 11px; }
     .drg-chip {
-      padding: 3px 10px;
-      border: 0.5px solid var(--dsw-alias-border-l3);
-      border-radius: 999px;
-      background: transparent;
-      color: var(--dsw-alias-label-secondary);
-      font-size: 12px;
-      cursor: pointer;
+      padding: 3px 10px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 999px; background: transparent;
+      color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer;
     }
     .drg-chip:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
-    .drg-done-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--dsw-alias-state-success-tertiary); color: var(--dsw-alias-state-success-primary); }
-    .drg-done-title { font-size: 17px; font-weight: 500; letter-spacing: -0.01em; }
-    .drg-done-body { color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; }
 
     /* ---- key-file picker ---------------------------------------------------- */
     .drg-keyfile-path { margin: 2px 0 8px; color: var(--dsw-alias-label-caption); font-family: var(--ds-font-family-code, var(--dsw-font-markdown-code-font-family, monospace)); font-size: 11.5px; word-break: break-all; }
     .drg-keyfile-list { max-height: 320px; overflow-y: auto; border: 0.5px solid var(--dsw-alias-border-l2); border-radius: var(--dsw-radius-md); }
     .drg-keyfile-row {
-      display: flex;
-      align-items: center;
-      width: 100%;
-      gap: 8px;
-      padding: 8px 12px;
-      border: 0;
-      border-bottom: 0.5px solid var(--dsw-alias-border-l1);
-      background: transparent;
-      color: var(--dsw-alias-label-primary);
-      font: inherit;
-      font-size: 13px;
-      text-align: left;
-      cursor: pointer;
+      display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 12px; border: 0;
+      border-bottom: 0.5px solid var(--dsw-alias-border-l1); background: transparent;
+      color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
     }
-    .drg-keyfile-row:last-child { border-bottom: 0; }
     .drg-keyfile-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
-    .drg-keyfile-row:focus-visible { outline-offset: -2px; }
     .drg-keyfile-row[data-kind='directory'] .drg-keyfile-name { font-weight: 500; }
     .drg-keyfile-row[data-kind='directory'] .drg-keyfile-name::before { content: "▸ "; color: var(--dsw-alias-label-caption); }
     .drg-keyfile-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6141,12 +4728,8 @@ window.__ModuleLoader__.load({
     /* ---- settings ----------------------------------------------------------- */
     .drg-settings { display: flex; flex-direction: column; gap: 20px; }
     .drg-settings-section {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 16px 18px;
-      border: 0.5px solid var(--dsw-alias-border-l1);
-      border-radius: var(--dsw-radius-lg);
+      display: flex; flex-direction: column; gap: 8px; padding: 16px 18px;
+      border: 0.5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-lg);
       background: var(--dsw-alias-bg-layer-1);
     }
     .drg-settings-section .drg-field { margin-bottom: 8px; }
@@ -6158,24 +4741,13 @@ window.__ModuleLoader__.load({
     .drg-conflict-processes { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
     .drg-conflict-processes li { display: flex; align-items: baseline; gap: 6px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; }
     .drg-conflict-processes code { padding: 1px 6px; border: 0.5px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-xs); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-secondary); }
-    .drg-conflict-processes span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* ---- toast -------------------------------------------------------------- */
     .drg-toast {
-      position: fixed;
-      left: 50%;
-      bottom: 24px;
-      z-index: 80;
-      max-width: min(560px, calc(100vw - 32px));
-      padding: 10px 16px;
-      transform: translateX(-50%);
-      border: none;
-      border-left: 3px solid transparent;
-      border-radius: var(--dsw-radius-md);
-      background: var(--dsw-alias-toast-bg);
-      color: var(--dsw-alias-toast-label);
-      font-size: 12.5px;
-      box-shadow: var(--dsw-elevation-prominent);
+      position: fixed; left: 50%; bottom: 24px; z-index: 80; max-width: min(560px, calc(100vw - 32px));
+      padding: 10px 16px; transform: translateX(-50%); border: none; border-left: 3px solid transparent;
+      border-radius: var(--dsw-radius-md); background: var(--dsw-alias-toast-bg); color: var(--dsw-alias-toast-label);
+      font-size: 12.5px; box-shadow: var(--dsw-elevation-prominent);
       animation: drg-toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
     }
     /* The tone is carried by the accent edge, not by filling the toast with a state colour:
@@ -6219,22 +4791,12 @@ window.__ModuleLoader__.load({
     html.drg-caption-live body > [data-windows-menu] { z-index: 2147483002; }
 `
 
-    /** Injects the panel styles once per mounted panel (removed on unmount). */
     function StyleSheet() {
       return h('style', { 'data-dsh-remote-go': 'styles', dangerouslySetInnerHTML: { __html: CSS } })
     }
 
-    //#endregion
-
     //#region 17. plugin registration
 
-    /**
-     * Register the dictionaries, the overlay host (floating windows + remote window),
-     * and the sidebar switcher row. The switcher row is the plugin's only entry: no
-     * settings page and no sidebar or main panel are registered.
-     * @param {object} ctx - browser plugin context.
-     * @returns {void}
-     */
     function apply(ctx) {
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-remote-go: dictionaries')
       const t = ctx.locale.bind(NS)
@@ -6263,24 +4825,15 @@ window.__ModuleLoader__.load({
         return 'zh'
       }
 
-      /** Command channel into the overlay host: open one host, show management, go local. */
       const panelStore = createPanelRequestStore()
-      /** The add/edit wizard's own channel, so it can open from anywhere. */
       const wizardStore = createWizardStore()
-      /**
-       * Open the host wizard. It floats in the shell's overlay layer, above a remote window,
-       * so nothing behind it changes.
-       * @param {{mode?: string, host?: object|null}} draft - what the dialog edits.
-       * @returns {void}
-       */
       const openWizard = (draft) => {
         wizardStore.open(draft)
       }
       const sharedInject = () => ({ panelStore, wizardStore, openWizard, getLocaleId })
 
-      // Everything the plugin draws lives in the shell's overlay layer: the floating
-      // management window, the wizard and the prompts. It sits above a remote window, so
-      // opening or closing them leaves the remote exactly as it was.
+      // Everything the plugin draws lives in the shell's overlay layer: the floating management window, the wizard and
+      // the prompts. It sits above a remote window, so opening or closing them leaves the remote exactly as it was.
       ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register(
           {
@@ -6294,10 +4847,9 @@ window.__ModuleLoader__.load({
         ),
       )
 
-      // The window's one control is the switcher row drawn into the sidebar of whichever
-      // page owns the window: this one (local) or the remote guest's. It lists local plus
-      // every host, so picking one is all it takes to move the window. It is the plugin's
-      // only entry: there is no settings page, no sidebar panel and no main panel;
+      // The window's one control is the switcher row drawn into the sidebar of whichever page owns the window: this one
+      // (local) or the remote guest's. It lists local plus every host, so picking one is all it takes to move the
+      // window. It is the plugin's only entry: there is no settings page, no sidebar panel and no main panel;
       // management and the wizard are floating windows in the overlay layer.
       ctx.effect(() => {
         switcher.labelsOf = () => ({
@@ -6325,12 +4877,7 @@ window.__ModuleLoader__.load({
         }
       }, 'dsh-remote-go: host switcher row')
 
-      /**
-       * Hand the window back to the local UI. The SSH link, the tunnel and the remote task
-       * stay up, so returning to that host later is instant; the row's "local" entry is the
-       * only way back, which is why it is always the first menu item.
-       * @returns {void}
-       */
+      /** Hand the window back: the SSH link and the warm guest stay up, so coming back is instant. */
       function returnToLocal() {
         switcher.current = 'local'
         updateSwitcher({ current: 'local' })
@@ -6351,8 +4898,7 @@ window.__ModuleLoader__.load({
           return
         }
         if (intent.action === 'disconnect' && typeof intent.hostId === 'string') {
-          // The row's exit control: drop that host's link (and its warm window) without
-          // switching to it.
+          // The row's exit control: drop that host's link (and its warm window) without switching to it.
           panelStore.requestIntent({ kind: 'disconnect', hostId: intent.hostId })
           return
         }
@@ -6369,7 +4915,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** Components exported for tests and host-side tooling. */
     const components = {
       RemoteIcon,
       PluginOverlay,
@@ -6403,10 +4948,6 @@ window.__ModuleLoader__.load({
        * The Host-API client, exposed so unit tests can exercise the real security
        */
       api,
-      /**
-       * The takeover carrier's seams, exposed for unit tests: the warm-window pool, the
-       * injected row, the local/guest pushes and the intent dispatcher.
-       */
       carrier: {
         open: showOverlay,
         close: closeOverlay,
@@ -6415,12 +4956,8 @@ window.__ModuleLoader__.load({
         warm: carrierWarm,
         shown: () => carrierPool.current,
         update: updateSwitcher,
-        dispatch: (intent) => dispatchSwitcherIntent(intent),
-        row: mountHostRow,
         script: () => HOST_ROW_SCRIPT,
       },
     }
-
-    //#endregion
   },
 })

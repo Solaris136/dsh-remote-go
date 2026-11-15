@@ -1,12 +1,3 @@
-/**
- * Integration coverage for the simulated remote host (e2e/sim): spawn it as a
- * real child process, then drive it only through the plugin's own code paths.
- *
- * Why a spawned child instead of an in-process import: the simulator's value is
- * that it is a real SSH endpoint and a real HTTP server, plus the exit/cleanup
- * behaviour (state file, Ctrl+C) that this suite must keep honest. Importing it
- * would make it a mock and would hide the very regressions this file guards.
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -23,23 +14,13 @@ const ROOT = path.resolve(HERE, '..', '..')
 const SIM_SCRIPT = path.join(ROOT, 'e2e', 'sim', 'simulated-remote.mjs')
 const STATE_FILE = path.join(ROOT, 'e2e', 'sim', '.state.json')
 
-/** The single credential pair the simulator accepts (its defaults). */
 const CREDENTIALS = { username: 'sim', password: 'sim' }
 
-/** @param {string[]} lines */
 function tail(lines) {
   return lines.slice(-12).join('')
 }
 
-/**
- * @template T
- * @param {Promise<T>} promise
- * @param {number} ms
- * @param {string} label
- * @returns {Promise<T>}
- */
 function withTimeout(promise, ms, label) {
-  /** @type {NodeJS.Timeout | null} */
   let timer = null
   const timeout = new Promise((_resolve, reject) => {
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
@@ -50,16 +31,8 @@ function withTimeout(promise, ms, label) {
   })
 }
 
-/**
- * Wait until the child has published its state file (ports, pid). Reading the
- * published state is what real tooling does, so the test exercises that path.
- * @param {import('node:child_process').ChildProcess} child
- * @param {string[]} logs
- * @param {number} [timeoutMs]
- */
 async function waitForState(child, logs, timeoutMs = 30_000) {
   const started = Date.now()
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (child.exitCode !== null) throw new Error(`simulator exited early (${child.exitCode})\n${tail(logs)}`)
     if (existsSync(STATE_FILE)) {
@@ -68,35 +41,25 @@ async function waitForState(child, logs, timeoutMs = 30_000) {
         if (Number(state.pid) === child.pid && Number(state.sshPort) > 0 && Number(state.remotePort) > 0) {
           return state
         }
-      } catch {
-        // The child may be mid-write; retry until the timeout.
-      }
+      } catch {}
     }
     if (Date.now() - started > timeoutMs) throw new Error(`simulator state never appeared\n${tail(logs)}`)
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
 
-/**
- * Start `--serve` mode and wait for its published ports.
- * @returns {Promise<{ child: import('node:child_process').ChildProcess, state: any, logs: string[] }>}
- */
 async function startSimulator() {
   rmSync(STATE_FILE, { force: true })
-  /** @type {string[]} */
   const logs = []
   const child = spawn(process.execPath, [SIM_SCRIPT, '--serve'], {
     cwd: ROOT,
     env: {
       ...process.env,
-      // The local test host has no `node` on PATH and runs the harness binary
-      // as Node instead; real Node ignores this variable.
       ELECTRON_RUN_AS_NODE: '1',
       SIM_SSH_USER: CREDENTIALS.username,
       SIM_SSH_PASSWORD: CREDENTIALS.password,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
-    // windowsHide keeps a console from flashing for every child the suite starts.
     windowsHide: true,
   })
   child.stdout?.on('data', (chunk) => logs.push(chunk.toString('utf8')))
@@ -105,12 +68,6 @@ async function startSimulator() {
   return { child, state, logs }
 }
 
-/**
- * Stop the child and remove the state file it owned. Never throws: a failure to
- * stop is asserted by the test body, so cleanup must not mask the real error.
- * @param {import('node:child_process').ChildProcess} child
- * @returns {Promise<boolean>}
- */
 async function stopSimulator(child) {
   if (child.exitCode !== null) return true
   const exited = new Promise((resolve) => child.once('exit', resolve))
@@ -131,21 +88,13 @@ async function stopSimulator(child) {
   } catch {
     stopped = child.exitCode !== null
   }
-  // Only remove the state file this child published, never a concurrent sim's.
   try {
     const state = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
     if (Number(state.pid) === child.pid) rmSync(STATE_FILE, { force: true })
-  } catch {
-    /* nothing published, or already gone */
-  }
+  } catch {}
   return stopped || child.exitCode !== null
 }
 
-/**
- * One HTTP/1.1 request over an already-forwarded duplex stream.
- * @param {import('node:stream').Duplex} stream
- * @param {string} request
- */
 function httpOver(stream, request) {
   const call = new Promise((resolve, reject) => {
     let response = ''
@@ -170,10 +119,7 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
   })
   try {
     await ssh.connect()
-
     await t.test('answers the real probe script with supported facts', async () => {
-      // Drive the simulator with the plugin's own script builder: this is the
-      // regression that made the probe fall through to `os: unknown`.
       const result = await ssh.exec(buildProbeScript(), { timeoutMs: 30_000 })
       assert.equal(result.code, 0, `probe exited ${result.code}: ${result.stderr}`)
       const facts = toProbeFacts(parseProbeOutput(result.stdout))
@@ -188,15 +134,11 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
       assert.doesNotThrow(() => assertSupportedRemote(facts))
       const plan = planNpx({ facts, targetVersion: '0.2.2-rc.1', profile: 'web' })
       assert.equal(plan.level, 'npx')
+      const remote = await probeRemote(ssh, { timeoutMs: 30_000 })
+      assert.equal(remote.os, 'Linux')
+      assert.equal(remote.arch, 'x86_64')
+      assert.equal(remote.sshConnection, true)
     })
-
-    await t.test('probeRemote() sees the same facts over the SSH connection', async () => {
-      const facts = await probeRemote(ssh, { timeoutMs: 30_000 })
-      assert.equal(facts.os, 'Linux')
-      assert.equal(facts.arch, 'x86_64')
-      assert.equal(facts.sshConnection, true)
-    })
-
     await t.test('forwardOut to the simulated remote port reaches the stub web', async () => {
       const stream = await withTimeout(ssh.forwardOut('127.0.0.1', state.remotePort), 15_000, 'forwardOut')
       try {
@@ -210,19 +152,18 @@ test('simulated remote host serves the plugin probe and the loopback tunnel', { 
         stream.destroy()
       }
     })
-
-    await t.test('refuses a tunnel to any other loopback port', async () => {
-      await assert.rejects(
-        withTimeout(ssh.forwardOut('127.0.0.1', state.remotePort + 1), 15_000, 'foreign-port forwardOut'),
-      )
+    await t.test('refuses any destination outside the single allowed loopback port', async () => {
+      const forbidden = [
+        { host: '127.0.0.1', port: state.remotePort + 1, label: 'foreign-port forwardOut' },
+        { host: '192.0.2.1', port: state.remotePort, label: 'foreign-host forwardOut' },
+      ]
+      for (const destination of forbidden) {
+        await assert.rejects(
+          withTimeout(ssh.forwardOut(destination.host, destination.port), 15_000, destination.label),
+          `forwardOut to ${destination.host}:${destination.port} should have been refused`,
+        )
+      }
     })
-
-    await t.test('refuses a tunnel to a non-loopback destination', async () => {
-      await assert.rejects(
-        withTimeout(ssh.forwardOut('192.0.2.1', state.remotePort), 15_000, 'foreign-host forwardOut'),
-      )
-    })
-
     await t.test('refuses a wrong password', async () => {
       const rogue = new SshConnection({
         host: '127.0.0.1',

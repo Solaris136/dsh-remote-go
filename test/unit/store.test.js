@@ -6,12 +6,6 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore, resolveDshHome, resolveStateDir } from '../../src/store.js'
 
-/**
- * An fs shim that gates the first temp-file write so a test can interleave a
- * second write deterministically. It works for both writer shapes the stores have
- * used (`open(tmp, 'wx')` + handle write, and `writeFile(tmp, …)`), so the same
- * test fails on a writer without a lock.
- */
 function gatedFirstWriteFs() {
   let openFirst = () => {}
   const firstOpened = new Promise((resolve) => {
@@ -22,19 +16,15 @@ function gatedFirstWriteFs() {
     release = () => resolve(undefined)
   })
   let gated = false
-  /** @type {string[]} */
   const opened = []
-  /** @type {string[]} */
   const unlinked = []
   let signalRename = () => {}
   const renamed = new Promise((resolve) => {
     signalRename = () => {
       resolve(undefined)
-      // Keep later renames from re-resolving (Promise ignores them anyway).
       signalRename = () => {}
     }
   })
-  /** @param {unknown} target */
   const gateOnce = (target) => {
     if (gated || typeof target !== 'string' || !target.endsWith('.tmp')) return false
     gated = true
@@ -84,12 +74,6 @@ function gatedFirstWriteFs() {
   return { fs: fsImpl, firstOpened, release, renamed, opened, unlinked }
 }
 
-/**
- * Wrap the real fs and throw `EPERM` on the first `failures` renames whose target
- * ends with `suffix` (Windows behaviour when another process briefly holds it).
- * @param {string} suffix
- * @param {number} failures
- */
 function flakyRenameFs(suffix, failures) {
   let remaining = failures
   return new Proxy(realFs, {
@@ -125,12 +109,11 @@ test('a fresh store has defaults and no hosts', async () => {
   assert.equal(store.getSettings().saveTokens, false)
 })
 
-test('upsertHost persists and is reloaded by a new store instance', async () => {
+test('upsertHost persists, updates in place and is reloaded by a new instance', async () => {
   const { store, dir } = await tempStore()
   const created = await store.upsertHost({ name: 'VM', address: 'ubuntu@example.com', port: 2222 })
   assert.ok(created.id.startsWith('h_'))
   assert.equal(store.listHosts().length, 1)
-
   const reloaded = new HostStore({ dir, logger: { warn() {} } })
   await reloaded.load()
   const hosts = reloaded.listHosts()
@@ -138,11 +121,6 @@ test('upsertHost persists and is reloaded by a new store instance', async () => 
   assert.equal(hosts[0].address, 'ubuntu@example.com')
   assert.equal(hosts[0].port, 2222)
   assert.equal(hosts[0].username, 'ubuntu')
-})
-
-test('upsertHost with an existing id updates instead of duplicating', async () => {
-  const { store } = await tempStore()
-  const created = await store.upsertHost({ address: 'host-a' })
   const updated = await store.upsertHost({ id: created.id, address: 'host-b', name: 'renamed' })
   assert.equal(store.listHosts().length, 1)
   assert.equal(updated.address, 'host-b')
@@ -171,7 +149,6 @@ test('settings round-trip and malformed file recovery', async () => {
   await reloaded.load()
   assert.equal(reloaded.getSettings().defaultPort, 2200)
   assert.equal(reloaded.getSettings().language, 'zh')
-
   await writeFile(path.join(dir, 'settings.json'), '{not json', 'utf8')
   const recovered = new HostStore({ dir, logger: { warn() {} } })
   await recovered.load()
@@ -182,14 +159,11 @@ test('tokens are only stored when saveTokens is enabled', async () => {
   const { store, dir } = await tempStore()
   const host = await store.upsertHost({ address: 'example.com' })
   await store.saveToken(host.id, 'token-a')
-  assert.equal(store.getToken(host.id), null)
-
+  await assert.rejects(readFile(path.join(dir, 'secrets.json'), 'utf8'))
   await store.saveSettings({ saveTokens: true })
   await store.saveToken(host.id, 'token-a')
-  assert.equal(store.getToken(host.id), 'token-a')
   const secrets = JSON.parse(await readFile(path.join(dir, 'secrets.json'), 'utf8'))
   assert.equal(secrets[host.id], 'token-a')
-
   await store.saveSettings({ saveTokens: false })
   assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'secrets.json'), 'utf8')), {})
 })
@@ -198,7 +172,6 @@ test('hosts.json never contains password fields', async () => {
   const { store, dir } = await tempStore()
   await store.upsertHost({ address: 'example.com', auth: { type: 'password' } })
   const raw = await readFile(path.join(dir, 'hosts.json'), 'utf8')
-  // The auth *type* is fine; no secret value or token may ever be persisted.
   assert.doesNotMatch(raw, /"(passwordValue|passwordActual|passphrase|secret|token)"/)
   const parsed = JSON.parse(raw)
   assert.deepEqual(Object.keys(parsed[0].auth), ['type'])
@@ -212,7 +185,6 @@ test('resolveDshHome prefers DSH_HOME and falls back to the user home', () => {
 
 test('the shared atomic writer retries a busy rename for hosts.json', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-retry-'))
-  // Two transient EPERM failures, then success: the old writer threw at once.
   const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: flakyRenameFs('hosts.json', 2) })
   await store.load()
   const host = await store.upsertHost({ address: 'retry.example.com' })
@@ -237,19 +209,12 @@ test('concurrent host writes are serialized by the file lock (no lost update)', 
   const shim = gatedFirstWriteFs()
   const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: shim.fs })
   await store.load()
-
-  // Hold the first write's temp file open, start a second upsert, then let the
-  // first finish. Without a lock the older [one] snapshot lands last and drops
-  // host two; with the lock the second writer waits and persists both.
   const first = store.upsertHost({ name: 'one', address: 'one.example.com' })
   await shim.firstOpened
   const second = store.upsertHost({ name: 'two', address: 'two.example.com' })
-  // Unlocked: the second rename lands while the first is still gated. Locked: it
-  // cannot, so the race times out and the gate is released.
   await Promise.race([shim.renamed, new Promise((resolve) => setTimeout(resolve, 100))])
   shim.release()
   await Promise.all([first, second])
-
   const onDisk = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
   assert.deepEqual(
     onDisk.map((host) => host.name).sort(),
@@ -259,7 +224,6 @@ test('concurrent host writes are serialized by the file lock (no lost update)', 
       .sort(),
   )
   assert.equal(onDisk.length, 2, 'both concurrent hosts must survive')
-  // The lock is real: it was created for the write and removed afterwards.
   assert.equal(
     shim.opened.some((file) => file.endsWith('hosts.json.lock')),
     true,

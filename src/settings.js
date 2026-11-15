@@ -1,27 +1,9 @@
 /**
- * Plugin settings: defaults, validation and sanitization. Unknown or invalid
- * fields fall back to defaults instead of failing activation (a malformed saved
- * setting must never brick the plugin).
+ * Plugin settings: defaults, validation and sanitization; unknown or invalid fields fall back to defaults instead of failing activation.
  */
 import { DEFAULT_IDLE_MINUTES, DEFAULT_KEY_PATH, DEFAULT_REMOTE_PROFILE, SSH_READY_TIMEOUT_MS } from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
 
-/**
- * @typedef {{
- *   defaultPort: number,
- *   defaultAuth: 'key' | 'password',
- *   defaultKeyPath: string,
- *   connectTimeoutSec: number,
- *   autoReconnect: { enabled: boolean, maxAttempts: number, baseDelayMs: number },
- *   hostKeyPolicy: 'first-use' | 'strict',
- *   saveTokens: boolean,
- *   language: 'auto' | 'zh' | 'en',
- *   logLevel: 'error' | 'warn' | 'info' | 'debug',
- *   bootstrap: { profile: string },
- * }} Settings
- */
-
-/** @returns {Settings} */
 export function defaultSettings() {
   return {
     defaultPort: 22,
@@ -44,38 +26,28 @@ export function defaultSettings() {
 /**
  * A profile name DSH can boot: one safe path segment, and never `desktop`
  * (the Electron app reserves that profile and the CLI refuses it).
- * @param {unknown} value
- * @returns {string | null}
  */
-export function normalizeProfileName(value) {
+function normalizeProfileName(value) {
   const text = typeof value === 'string' ? value.trim() : ''
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(text)) return null
   if (text.toLowerCase() === 'desktop') return null
   return text
 }
 
-/** @param {unknown} value @param {unknown[]} allowed @param {any} fallback */
 function oneOf(value, allowed, fallback) {
   return allowed.includes(value) ? value : fallback
 }
 
-/** @param {unknown} value @param {number} min @param {number} max @param {number} fallback */
 function numberIn(value, min, max, fallback) {
   const num = typeof value === 'number' ? value : Number(value)
   if (!Number.isFinite(num)) return fallback
   return clamp(Math.round(num), min, max)
 }
 
-/** @param {unknown} value @param {boolean} fallback */
 function boolean(value, fallback) {
   return typeof value === 'boolean' ? value : fallback
 }
 
-/**
- * Merge a saved/partial settings object over defaults with validation.
- * @param {unknown} raw
- * @returns {Settings}
- */
 export function sanitizeSettings(raw) {
   const defaults = defaultSettings()
   if (!isPlainObject(raw)) return defaults
@@ -109,12 +81,6 @@ export function sanitizeSettings(raw) {
   }
 }
 
-/**
- * Validate and normalize a host entry coming from the Client.
- * @param {unknown} raw
- * @param {{ settings?: Settings, existing?: Record<string, any> | null, idFactory?: () => string }} [options]
- * @returns {Record<string, any>}
- */
 export function sanitizeHostEntry(raw, options = {}) {
   const settings = options.settings ?? defaultSettings()
   const existing = options.existing ?? null

@@ -1,17 +1,9 @@
 /**
- * Version parsing/comparison and the design's exact-version parity rule (§16.3).
- * Supports the version shapes DSH and Node actually publish: `0.2.2-rc.1`,
- * `24.22.2`, optional leading `v`, optional build metadata.
+ * Version parsing/comparison and the exact-version parity rule, covering the shapes DSH and Node publish (`0.2.2-rc.1`, `24.22.2`, optional `v`).
  */
-
-/** @typedef {{ raw: string, major: number, minor: number, patch: number, prerelease: (string|number)[], build: string | null }} ParsedVersion */
 
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/
 
-/**
- * @param {string} input
- * @returns {ParsedVersion | null}
- */
 export function parseVersion(input) {
   if (typeof input !== 'string') return null
   const match = VERSION_RE.exec(input.trim())
@@ -27,7 +19,6 @@ export function parseVersion(input) {
   }
 }
 
-/** @param {string} input */
 export function normalizeVersion(input) {
   const parsed = parseVersion(input)
   if (!parsed) return String(input ?? '').trim()
@@ -35,7 +26,6 @@ export function normalizeVersion(input) {
   return parsed.prerelease.length > 0 ? `${core}-${parsed.prerelease.join('.')}` : core
 }
 
-/** @param {unknown} a @param {unknown} b */
 function compareIdentifiers(a, b) {
   const aNum = typeof a === 'number'
   const bNum = typeof b === 'number'
@@ -45,12 +35,6 @@ function compareIdentifiers(a, b) {
   return a === b ? 0 : String(a) < String(b) ? -1 : 1
 }
 
-/**
- * Semver ordering (build metadata is ignored, as in semver).
- * @param {string} a
- * @param {string} b
- * @returns {-1 | 0 | 1 | number}
- */
 export function compareVersions(a, b) {
   const pa = parseVersion(a)
   const pb = parseVersion(b)
@@ -77,17 +61,10 @@ export function compareVersions(a, b) {
   return 0
 }
 
-/** Exact version equality after normalization (`v` prefix and build ignored). */
 export function versionsEqual(a, b) {
   return compareVersions(normalizeVersion(a), normalizeVersion(b)) === 0
 }
 
-/**
- * Design §16.3: the remote target is the local DSH version, and a mismatch is
- * surfaced instead of silently mixing UIs.
- * @param {string | null} localVersion
- * @param {string | null} remoteVersion
- */
 export function versionParity(localVersion, remoteVersion) {
   if (!localVersion || !remoteVersion) {
     return {
@@ -116,23 +93,11 @@ export function versionParity(localVersion, remoteVersion) {
   }
 }
 
-/** Node.js >= 24.9.0 is required by the DSH runtime (`engines.node`). */
 export const MIN_NODE_VERSION = '24.9.0'
 
-/** @param {string | null | undefined} version */
 export function isNodeVersionSupported(version) {
   if (!version) return false
   // node -v prints "v24.22.2"; a bare "24" from a fallback should not pass.
   if (!parseVersion(version)) return false
   return compareVersions(normalizeVersion(version), MIN_NODE_VERSION) >= 0
-}
-
-/**
- * Pick an exact version from a list of strings matching a semver range prefix.
- * Only used by tests/fixtures; runtime always pins exact versions.
- * @param {string[]} candidates
- * @param {string} wanted
- */
-export function pickExactVersion(candidates, wanted) {
-  return candidates.find((candidate) => versionsEqual(candidate, wanted)) ?? null
 }

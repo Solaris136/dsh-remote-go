@@ -1,30 +1,8 @@
 /**
- * Remote directory layout.
- *
- * Everything the plugin writes on the remote lives inside the remote DSH home:
- * `$DSH_HOME/remote-go` holds logs, the run registry and the managed Node runtime,
- * so a host only ever gets `~/.dsh` (the user's own DSH data) plus this one
- * subdirectory — no root, no global installs.
- *
- * `home` comes from the probe. Before the probe the tilde is preserved; callers
- * must expand it before any shell use (every connect-time caller has the facts).
+ * Remote directory layout: everything the plugin writes lives under `$DSH_HOME/remote-go`, so a host only gets `~/.dsh` plus that one subdirectory.
  */
 import { REMOTE_DSH_DIR, REMOTE_STATE_DIR } from './constants.js'
 
-/**
- * @param {string | null} [home] remote user home directory reported by the probe
- * @returns {{
- *   root: string,
- *   stateHome: string,
- *   dshHome: string,
- *   nodeDir: string,
- *   downloadDir: string,
- *   logsDir: string,
- *   logFile: string,
- *   runDir: string,
- *   runFile: string,
- * }}
- */
 export function remoteLayout(home = null) {
   const dshHome = expandRemoteTilde(`~/${REMOTE_DSH_DIR}`, home).replace(/\/+$/, '')
   const root = `${dshHome}/${REMOTE_STATE_DIR}`
@@ -47,10 +25,8 @@ export function remoteLayout(home = null) {
 /**
  * Expand a leading `~` (or `~/`) with a known remote home. When `home` is not
  * known yet the tilde is preserved; callers must expand before shell use.
- * @param {string} value
- * @param {string | null | undefined} home
  */
-export function expandRemoteTilde(value, home) {
+function expandRemoteTilde(value, home) {
   const text = String(value ?? '')
   if (!home) return text
   if (text === '~') return home

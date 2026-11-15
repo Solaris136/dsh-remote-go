@@ -43,7 +43,6 @@ test('parseSshConfig records Include/Match as unsupported instead of guessing', 
   const parsed = parseSshConfig(`Include ~/.ssh/other.conf\nMatch exec "true"\n  User x\nHost a\n  User b\n`)
   assert.ok(parsed.unsupported.some((item) => item.keyword === 'Include'))
   assert.ok(parsed.unsupported.some((item) => item.keyword === 'Match'))
-  // The option inside the Match block must not leak into host `a`.
   const alias = resolveSshAlias(parsed, 'a', { home: '/home/u' })
   assert.equal(alias.user, 'b')
 })
@@ -54,7 +53,6 @@ test('resolveSshAlias applies host block options and identity files accumulate',
   assert.equal(alias.host, '2001:db8::1')
   assert.equal(alias.user, 'ubuntu')
   assert.equal(alias.port, 22)
-  // IdentityFile is additive in OpenSSH: global then host-specific.
   assert.deepEqual(alias.identityFiles, ['/home/u/.ssh/id_rsa', '/home/u/.ssh/id_ed25519'])
   assert.equal(alias.source, 'config')
 })
@@ -62,7 +60,6 @@ test('resolveSshAlias applies host block options and identity files accumulate',
 test('first obtained value wins across matching blocks', () => {
   const parsed = parseSshConfig(CONFIG)
   const alias = resolveSshAlias(parsed, 'web-1', { home: '/home/u' })
-  // web-* sets User deploy + Port 2222; identity files accumulate from every match.
   assert.equal(alias.user, 'deploy')
   assert.equal(alias.port, 2222)
   assert.deepEqual(alias.identityFiles, ['/home/u/.ssh/id_rsa', '/home/u/.ssh/deploy_rsa'])
@@ -104,6 +101,5 @@ test('host pattern matching supports wildcards, case folding and negation', () =
 test('expandTokens replaces %h/%r/%p/%d', () => {
   const parsed = parseSshConfig('Host x\n  HostName %h.example.com\n  User %r\n')
   const alias = resolveSshAlias(parsed, 'x', { home: '/home/u' })
-  // %h expands to the alias when no hostname was set yet; harmless and deterministic.
   assert.equal(alias.host, 'x.example.com')
 })

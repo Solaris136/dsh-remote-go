@@ -1,33 +1,10 @@
 /**
- * One read-only remote probe (design §4.2 step 2–3, §16.2): a single POSIX `sh`
- * script prints `key<TAB>value` lines that this module turns into facts used by
- * the runtime planner, the managed-Node installer, the wizard's capability list
- * and diagnostics.
- *
- * Deliberately small now that the runtime is always npx-pinned: the probe only
- * needs to prove what the remote has (Node, npm/npx, curl/wget, libc, home) so
- * the plugin knows whether it has to provision a managed Node itself.
+ * One read-only remote probe: a single POSIX `sh` script prints `key<TAB>value` lines that become the facts used by the planner, the Node installer and diagnostics.
  */
 import { headTail } from './util.js'
 import { errors } from './errors.js'
-import { normalizeVersion, isNodeVersionSupported } from './version.js'
+import { normalizeVersion } from './version.js'
 
-/**
- * @typedef {{
- *   os: string, arch: string, osName: string, user: string, home: string, shell: string,
- *   nodePath: string | null, nodeVersion: string | null,
- *   npmPath: string | null, npxPath: string | null,
- *   curlPath: string | null, wgetPath: string | null,
- *   libc: 'glibc' | 'musl' | 'unknown', glibcVersion: string | null,
- *   diskFreeKb: number | null,
- *   sshConnection: boolean,
- *   credentialsFile: boolean, deepseekKeyEnv: boolean, providerEnvKeys: string[],
- * }} ProbeFacts
- */
-
-/**
- * @returns {string}
- */
 export function buildProbeScript() {
   return `set -u
 echo "os\t$(uname -s 2>/dev/null || echo unknown)"
@@ -59,12 +36,7 @@ echo "provider_env_keys\t$(env 2>/dev/null | sed -n 's/^\\([A-Z0-9_]*\\)_API_KEY
 `
 }
 
-/**
- * @param {string} stdout
- * @returns {Record<string, string>}
- */
 export function parseProbeOutput(stdout) {
-  /** @type {Record<string, string>} */
   const values = {}
   for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
     const tab = rawLine.indexOf('\t')
@@ -76,10 +48,6 @@ export function parseProbeOutput(stdout) {
   return values
 }
 
-/**
- * @param {Record<string, string>} values
- * @returns {ProbeFacts}
- */
 export function toProbeFacts(values) {
   const num = (/** @type {string} */ value) => {
     const n = Number(value)
@@ -108,12 +76,6 @@ export function toProbeFacts(values) {
   }
 }
 
-/**
- * Run the probe against one SSH connection.
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {{ timeoutMs?: number }} [options]
- * @returns {Promise<ProbeFacts>}
- */
 export async function probeRemote(ssh, options = {}) {
   const script = buildProbeScript()
   const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 60_000 })
@@ -124,41 +86,4 @@ export async function probeRemote(ssh, options = {}) {
     })
   }
   return toProbeFacts(parseProbeOutput(result.stdout))
-}
-
-/**
- * Capability summary for the wizard and diagnostics.
- * @param {ProbeFacts} facts
- */
-export function describeProbeCapabilities(facts) {
-  return {
-    system: {
-      os: facts.os,
-      arch: facts.arch,
-      name: facts.osName || `${facts.os} ${facts.arch}`,
-      supported: facts.os === 'Linux',
-    },
-    node: {
-      version: facts.nodeVersion,
-      supported: isNodeVersionSupported(facts.nodeVersion),
-      path: facts.nodePath,
-    },
-    npx: {
-      path: facts.npxPath,
-      available: Boolean(facts.npxPath),
-    },
-    network: {
-      curl: Boolean(facts.curlPath),
-      wget: Boolean(facts.wgetPath),
-    },
-    libc: facts.libc,
-    glibcVersion: facts.glibcVersion,
-    modelCredentials: {
-      credentialsFile: facts.credentialsFile,
-      deepseekKeyEnv: facts.deepseekKeyEnv,
-      providerKeys: facts.providerEnvKeys,
-    },
-    sshSession: facts.sshConnection,
-    diskFreeKb: facts.diskFreeKb,
-  }
 }

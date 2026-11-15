@@ -1,7 +1,7 @@
 {
   "name": "dsh-remote-go",
   "version": "0.1.0",
-  "description": "DSH 插件：通过 SSH 在本机 DSH 的整窗里使用远端 DSH；远端 DSH 用 npx 固定本机版本启动，Node 运行时由插件按 DSH 的 engines.node 固定安装到 ~/.dsh/remote-go/node（不碰系统 Node），数据在远端 ~/.dsh | DSH plugin: use a remote DSH over SSH in the whole window; it runs via npx pinned to the local version on a plugin-managed Node (installed at the lower bound of DSH's engines.node under ~/.dsh/remote-go/node, never the system one) with data in the remote ~/.dsh",
+  "description": "DSH 插件：通过 SSH 在本地 DSH 的整窗里使用远端 DSH（主机条切换、插件托管 Node + npx 固定本机版本、数据留在远端 ~/.dsh） | DSH plugin: use a remote DSH over SSH in the whole local window with one host switcher; the remote runs on a plugin-managed Node with npx pinned to the local version and keeps its data in the remote ~/.dsh",
   "keywords": [
     "deepseek",
     "harness",
@@ -77,7 +77,6 @@
   "scripts": {
     "test": "node --test \"test/unit/*.test.js\"",
     "test:unit": "node --test \"test/unit/*.test.js\"",
-    "test:e2e": "node --test \"test/e2e/*.e2e.js\"",
     "test:web": "node --test \"test/integration/web.e2e.js\"",
     "test:desktop": "node --test \"test/integration/desktop.e2e.js\"",
     "test:integration": "node --test \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",

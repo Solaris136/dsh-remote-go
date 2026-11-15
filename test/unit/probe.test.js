@@ -1,13 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  buildProbeScript,
-  describeProbeCapabilities,
-  parseProbeOutput,
-  probeRemote,
-  toProbeFacts,
-} from '../../src/probe.js'
-import { makeFacts } from '../helpers/fake-remote.js'
+import { buildProbeScript, parseProbeOutput, probeRemote, toProbeFacts } from '../../src/probe.js'
 
 test('buildProbeScript emits every fact line', () => {
   const script = buildProbeScript()
@@ -90,7 +83,6 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
   const facts = await probeRemote(ssh)
   assert.equal(facts.os, 'Linux')
   assert.equal(facts.nodeVersion, '24.22.2')
-
   const failing = {
     async exec() {
       return { code: 2, stdout: '', stderr: 'permission denied' }
@@ -100,20 +92,4 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
     () => probeRemote(failing),
     (error) => error.code === 'remote-dsh-missing',
   )
-})
-
-test('describeProbeCapabilities reports support and credentials', () => {
-  const capabilities = describeProbeCapabilities(
-    makeFacts({
-      nodeVersion: '22.19.0',
-      npxPath: null,
-      credentialsFile: false,
-      deepseekKeyEnv: false,
-      providerEnvKeys: [],
-    }),
-  )
-  assert.equal(capabilities.system.supported, true)
-  assert.equal(capabilities.node.supported, false)
-  assert.equal(capabilities.npx.available, false)
-  assert.equal(capabilities.modelCredentials.credentialsFile, false)
 })

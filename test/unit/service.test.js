@@ -3,24 +3,20 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
-import { RemoteGoService, describePreflightEvent } from '../../src/service.js'
-import { HostStore } from '../../src/store.js'
+import { describePreflightEvent } from '../../src/service.js'
 import { LOG_TAIL_LIMIT } from '../../src/connect-log.js'
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {
   const { service, store } = await makeTestService()
   const host = await createHost(service)
   assert.equal(service.snapshot().hosts[0].status, 'unconfigured')
-
   const codes = []
   service.on('state', (state) => {
     const progress = state.hosts[0]?.progress?.code
     if (progress) codes.push(progress)
   })
-
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-
   const view = service.snapshot().hosts[0]
   assert.equal(view.phase, 'ready')
   assert.equal(view.remote.uiReady, true)
@@ -32,11 +28,9 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   assert.ok(codes.includes('probing'))
   assert.ok(codes.includes('tunneling'))
   assert.ok(codes.includes('verifying'))
-
   const open = service.openInfo(host.id)
   assert.match(open.url, /^http:\/\/127\.0\.0\.1:45123\/\?token=tok_test_123$/)
   assert.equal(open.localPort, 45123)
-
   const persisted = store.getHost(host.id)
   assert.ok(persisted.lastOpenedAt, 'lastOpenedAt must be persisted')
   assert.equal(service.snapshot().activeHostId, host.id)
@@ -49,9 +43,7 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
 })
 
 test('connect always launches on the plugin-managed Node', async () => {
-  /** @type {any[]} */
   const provisining = []
-  /** @type {any[]} */
   const plans = []
   const { service } = await makeTestService({
     ensureNode: async (_ssh, options) => {
@@ -76,10 +68,7 @@ test('connect always launches on the plugin-managed Node', async () => {
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-
   const view = service.snapshot().hosts[0]
-  // The remote already had a supported Node; the plugin still provisions its own,
-  // so a shared system/nvm runtime can never leak into the remote DSH.
   assert.deepEqual(provisining, [{ facts: '24.22.2', version: '24.9.0' }])
   assert.equal(view.remote.nodeSource, 'managed')
   assert.equal(view.remote.nodeVersion, '24.9.0')
@@ -90,7 +79,6 @@ test('connect always launches on the plugin-managed Node', async () => {
 })
 
 test('the managed Node version follows the local DSH engines.node', async () => {
-  /** @type {string[]} */
   const versions = []
   const { service } = await makeTestService({
     engineNodeRange: '>=25.1.0',
@@ -108,7 +96,6 @@ test('the managed Node version follows the local DSH engines.node', async () => 
 
 test('a failed managed install is fatal even when the system Node looks usable', async () => {
   const { service } = await makeTestService({
-    // The system Node is perfectly fine; strict mode must not fall back to it.
     facts: makeFacts({ nodeVersion: '24.22.2', npxPath: '/usr/bin/npx' }),
     ensureNode: async () => {
       throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'network blocked' })
@@ -117,7 +104,6 @@ test('a failed managed install is fatal even when the system Node looks usable',
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
-
   const view = service.snapshot().hosts[0]
   assert.equal(view.error.code, 'remote-node-install-failed')
   await service.shutdown()
@@ -136,7 +122,6 @@ test('describePreflightEvent turns npm output into localized progress codes', ()
     { code: 'bootstrap-fetching' },
   )
   assert.deepEqual(describePreflightEvent('added 120 packages in 8s', 'x'), { code: 'bootstrap-installed' })
-  // The version line is the success signal, not a progress message.
   assert.equal(describePreflightEvent('0.2.2-rc.1', 'x'), null)
   assert.equal(describePreflightEvent('   ', 'x'), null)
   assert.deepEqual(describePreflightEvent('some other line', 'x'), {
@@ -146,26 +131,22 @@ test('describePreflightEvent turns npm output into localized progress codes', ()
 })
 
 test('the connect log streams to /state while connecting and stops once the host is up', async () => {
-  /** @type {() => void} */
   let release = () => {}
   const gate = new Promise((resolve) => {
     release = resolve
   })
   const { service } = await makeTestService({
     ensureNode: async (_ssh, options) => {
-      // Hold the pipeline mid-connect so the log tail can be inspected in flight.
       await gate
       return managedNodeFixture(options.version)
     },
   })
-  /** @type {any[]} */
   const frames = []
   service.on('state', (state) => frames.push(state))
   const host = await createHost(service)
   const connecting = service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connecting', { label: 'connecting' })
   await waitFor(() => (service.snapshot().hosts[0].logs ?? []).length >= 2, { label: 'two log lines' })
-
   const live = service.snapshot().hosts[0]
   assert.ok(live.logs.length > 0, 'a connecting host must carry its log tail')
   for (const entry of live.logs) {
@@ -181,21 +162,17 @@ test('the connect log streams to /state while connecting and stops once the host
     'the log keeps the order it was written in',
   )
   assert.equal(new Set(seqs).size, seqs.length, 'every line has its own seq')
-  // The lines are the real steps, not a synthetic summary.
   const text = live.logs.map((entry) => entry.message).join('\n')
   assert.match(text, /^connect: /m)
   assert.match(text, /SSH connected to /)
   assert.match(text, /probe: /)
-  // Some frame carried the log: that is what keeps the console live.
   assert.ok(
     frames.some((frame) => (frame.hosts[0]?.logs ?? []).length > 0),
     'expected a /state frame carrying the connect log',
   )
-
   release()
   await connecting
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-  // The window is gone with the connection, so the tail is not shipped any more.
   assert.deepEqual(service.snapshot().hosts[0].logs, [])
   await service.shutdown()
 })
@@ -210,7 +187,6 @@ test('the connect log is capped while the ring keeps the newest lines', async ()
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
   const failed = service.snapshot().hosts[0]
-  // A failure keeps the log on screen: the reason and the lines before it are one story.
   assert.ok(failed.logs.length > 0)
   assert.ok(failed.logs.length <= LOG_TAIL_LIMIT)
   assert.match(failed.error.code, /node-install-failed/)
@@ -223,7 +199,6 @@ test('the npx preflight reports npm output as connect progress', async () => {
       return '0.2.2-rc.1'
     },
   })
-  /** @type {any[]} */
   const progress = []
   service.on('state', (state) => {
     const line = state.hosts[0]?.progress
@@ -238,10 +213,8 @@ test('the npx preflight reports npm output as connect progress', async () => {
 })
 
 test('a remote web instance from an older launch path is replaced before starting', async () => {
-  /** @type {number[]} */
   const stopped = []
   const { service } = await makeTestService({
-    // The registry row is valid, but it predates the browser-carrier launch tag.
     readRegistry: async () => ({
       pid: 777,
       port: 39123,
@@ -263,7 +236,6 @@ test('a remote web instance from an older launch path is replaced before startin
 
 test('connect pauses on the first host key and resumes after confirmation', async () => {
   let sshInstance = null
-  /** @type {{ sha256: string, keyType: string, pinned: boolean } | null} */
   let asked = null
   const { service, store } = await makeTestService({
     sshFactory: (options) => {
@@ -288,7 +260,6 @@ test('connect pauses on the first host key and resumes after confirmation', asyn
   const pending = service.snapshot().hosts[0]
   assert.equal(pending.fingerprint.sha256, 'SHA256:abc123')
   assert.equal(pending.fingerprint.status, 'pending')
-
   await service.confirmFingerprint(host.id, { accept: true, remember: true, sha256: 'SHA256:abc123' })
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected after confirm' })
   assert.equal(store.getHost(host.id).pinnedFingerprint, 'SHA256:abc123')
@@ -468,19 +439,13 @@ test('an unreachable remote UI fails with a coded error and cleans the tunnel', 
 })
 
 test('a page that refuses framing still connects cleanly and reports no warning', async () => {
-  // The remote UI is rendered by the desktop guest, never embedded in a frame, so
-  // X-Frame-Options / CSP are irrelevant: such a host must connect exactly like any
-  // other, with no "blocked embedding" warning left over from the iframe era.
   const { service } = await makeTestService({
     exchange: async () => ({
       ok: true,
       firstStatus: 302,
-      cookieNames: ['dsh-auth-x'],
       location: './',
       status: 200,
       title: 'DSH',
-      frameBlocked: true,
-      xFrameOptions: 'DENY',
       csp: null,
       bodyLength: 100,
     }),
@@ -504,7 +469,6 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.equal(events.filter((event) => event.type === 'ssh').length, 1)
-
   events[0].ssh.simulateClose()
   await waitFor(
     () => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting',
@@ -578,8 +542,6 @@ test('diagnose returns the documented checklist', async () => {
   assert.equal(report.checks.find((check) => check.id === 'ssh-reachable').status, 'pass')
   assert.equal(report.checks.find((check) => check.id === 'desktop-guard').status, 'pass')
   assert.equal(report.checks.find((check) => check.id === 'model-credentials').status, 'pass')
-  // The session fingerprint is observed but not pinned yet, so the checklist is
-  // honest about that rather than claiming an all-green result.
   assert.equal(report.checks.find((check) => check.id === 'host-key').status, 'unknown')
   assert.equal(report.summary, 'warning')
   await service.shutdown()
@@ -609,13 +571,4 @@ test('setLocalVersion enables local-version parity resolution', async () => {
   service.setLocalVersion('v0.2.2-rc.1', 'client')
   assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
   assert.equal(service.snapshot().targetVersion, '0.2.2-rc.1')
-})
-
-test('updateHostPolicy patches keep-alive fields', async () => {
-  const { service, store } = await makeTestService()
-  const host = await createHost(service)
-  const view = await service.updateHostPolicy(host.id, { keepAlive: 'idle', idleMinutes: 45 })
-  assert.equal(view.keepAlive, 'idle')
-  assert.equal(view.idleMinutes, 45)
-  assert.equal(store.getHost(host.id).keepAlive, 'idle')
 })

@@ -5,8 +5,6 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { listKeyFiles } from '../../src/key-files.js'
 
-// The Host reports the resolved directory (realpath), and on Windows the temp
-// directory may be an 8.3 short path, so expectations resolve it the same way.
 async function makeHome() {
   const home = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-keyfiles-'))
   await mkdir(path.join(home, '.ssh'), { recursive: true })
@@ -17,15 +15,6 @@ async function makeHome() {
   return home
 }
 
-/**
- * Assert two paths name the same directory.
- *
- * Windows may hand out an 8.3 short path (`C:\Users\RUNNER~1\...`) for the same
- * directory that `realpath` reports in long form, so both sides are resolved before
- * comparing instead of relying on the input's spelling.
- * @param {string} actual
- * @param {string} expected
- */
 async function assertSamePath(actual, expected) {
   assert.equal(await realpath(actual), await realpath(expected))
 }
@@ -34,13 +23,11 @@ test('listKeyFiles defaults to ~/.ssh and lists folders before files', async () 
   const home = await makeHome()
   const listing = await listKeyFiles({ home })
   await assertSamePath(listing.path, path.join(home, '.ssh'))
-  // Directories sort first, then names alphabetically.
   assert.equal(listing.entries[0].isDirectory, true)
   assert.equal(listing.entries[0].name, 'sub')
   const names = listing.entries.filter((entry) => !entry.isDirectory).map((entry) => entry.name)
   assert.deepEqual(names, ['config', 'id_ed25519', 'notes.txt'])
   assert.equal(listing.truncated, false)
-  // The parent of ~/.ssh is the home directory, never the filesystem root.
   await assertSamePath(listing.parent, home)
 })
 
@@ -56,7 +43,6 @@ test('listKeyFiles refuses to escape the home directory', async () => {
   const home = await makeHome()
   await assert.rejects(() => listKeyFiles({ home, dir: path.join(home, '..') }), /inside the home directory/)
   await assert.rejects(() => listKeyFiles({ home, dir: path.join(home, '..', '..') }), /inside the home directory/)
-  // An absolute path outside home is refused too, not clamped to it.
   await assert.rejects(() => listKeyFiles({ home, dir: tmpdir() }), /inside the home directory/)
 })
 
@@ -70,16 +56,12 @@ test('listKeyFiles only reports regular files and directories', async () => {
   const listing = await listKeyFiles({ home })
   for (const entry of listing.entries) {
     assert.equal(typeof entry.name, 'string')
-    // Resolved on both sides: the Host may report an 8.3 short path on Windows.
     await assertSamePath(path.dirname(entry.path), path.join(home, '.ssh'))
     assert.equal(typeof entry.isDirectory, 'boolean')
   }
 })
 
 test('listKeyFiles stays internally consistent when realpath reports another spelling', async () => {
-  // Windows CI hands out a short path while realpath answers with the long form for
-  // the same directory. Whatever spelling realpath returns must be used for every
-  // returned path, or `parent` stops being the parent of `path`.
   const requested = path.resolve(path.join('spelling-input'))
   const canonical = requested + '-canonical'
   const fsImpl = {

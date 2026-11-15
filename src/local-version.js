@@ -1,17 +1,11 @@
 /**
- * Detect the DSH version of the *local* installation. The design pins the
- * remote runtime to this exact version (§16.3), so the value must come from the
- * running installation rather than npm `latest`.
+ * Detect the DSH version of the local installation; the remote runtime is pinned to this exact version, never to npm `latest`.
  */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { normalizeVersion, parseVersion } from './version.js'
 
-/**
- * @param {{ ctx?: any, env?: NodeJS.ProcessEnv, resourcesPath?: string, argv1?: string }} [input]
- * @returns {Promise<{ version: string | null, source: string }>}
- */
 export async function detectLocalVersion(input = {}) {
   const env = input.env ?? process.env
   const explicit = env.DSH_VERSION || env.DSH_RUNTIME_VERSION
@@ -39,9 +33,7 @@ export async function detectLocalVersion(input = {}) {
       if (parsed?.name === '@deepseek-ai/dsh' && parsed?.version && parseVersion(normalizeVersion(parsed.version))) {
         return { version: normalizeVersion(parsed.version), source: `package.json:${candidate}` }
       }
-    } catch {
-      /* keep looking */
-    }
+    } catch {}
   }
   return { version: null, source: 'unknown' }
 }
@@ -53,8 +45,6 @@ export async function detectLocalVersion(input = {}) {
  *
  * Best-effort like the version probe: an unreadable or missing package yields
  * `range: null` and the caller falls back to the plugin's own floor.
- * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} [input]
- * @returns {Promise<{ range: string | null, source: string }>}
  */
 export async function detectLocalEnginesNode(input = {}) {
   for (const candidate of candidatePackageJsons(input)) {
@@ -65,17 +55,11 @@ export async function detectLocalEnginesNode(input = {}) {
       if (typeof range === 'string' && range.trim() !== '') {
         return { range: range.trim(), source: `package.json:${candidate}` }
       }
-    } catch {
-      /* keep looking */
-    }
+    } catch {}
   }
   return { range: null, source: 'unknown' }
 }
 
-/**
- * @param {{ resourcesPath?: string, argv1?: string, cwd?: string }} input
- * @returns {string[]}
- */
 export function candidatePackageJsons(input = {}) {
   const out = []
   const argv1 = input.argv1 ?? process.argv[1] ?? ''

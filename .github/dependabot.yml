@@ -1,8 +1,7 @@
 version: 2
 updates:
-  # Shipped package dependencies (root workspace only). The lockfiles under
-  # e2e/control and e2e/remote/embed-check belong to test fixtures, not to the
-  # published package, so they are intentionally not tracked here.
+  # Shipped package dependencies (root workspace only). All dev dependencies and
+  # lockfiles live here; no test fixture keeps its own lockfile any more.
   - package-ecosystem: npm
     directory: /
     schedule:

@@ -1,11 +1,3 @@
-/**
- * Client-half unit tests for dsh-remote-go.
- *
- * Loads `client.js` inside a `node:vm` sandbox with a fake
- * `window.__ModuleLoader__.load`, injects the real React from the workspace,
- * then exercises registration (`apply`) and server-renders the key components
- * with `react-dom/server`.
- */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -24,15 +16,6 @@ const SOURCE = readFileSync(CLIENT_PATH, 'utf8')
 
 const PANEL_ID = 'dsh-remote-go'
 
-/**
- * Execute client.js in a VM with a fake module loader and materialize the
- * registered factory with the real React. Returns the factory's plugin object.
- *
- * `options.fetch` is installed as the sandbox's global `fetch`, which the client
- * resolves per request through `getFetch()`; that is what lets a unit test drive
- * the real API layer (`api.openHost`) instead of matching source text.
- * @param {{ fetch?: (input: any, init?: any) => Promise<any> }} [options]
- */
 function loadClientPlugin(options = {}) {
   const sandbox = {
     console,
@@ -58,7 +41,6 @@ function loadClientPlugin(options = {}) {
   sandbox.globalThis = sandbox
   vm.createContext(sandbox)
   vm.runInContext(SOURCE, sandbox, { filename: 'client.js' })
-
   const declaration = sandbox.__declaration
   assert.ok(declaration, 'client.js must call window.__ModuleLoader__.load')
   assert.equal(declaration.id, 'dsh-remote-go')
@@ -71,20 +53,7 @@ function loadClientPlugin(options = {}) {
   return plugin
 }
 
-/**
- * Minimal DOM for the imperative takeover carrier: elements with attributes,
- * inline style, children, listeners and a body. Enough to build and inspect the
- * carrier inside the VM without adding a DOM implementation to the dev
- * dependencies. `style` is a plain bag: the carrier only assigns cssText and
- * individual values, it never reads computed styles.
- *
- * `options.captionHeight` marks `<html data-windows-titlebar>` the way the desktop
- * preload does on Windows, so the carrier can be exercised in a caption window.
- * @param {{ captionHeight?: string }} [options]
- * @returns {{ body: object, documentElement: object, createElement: Function, createElementNS: Function }}
- */
 function fakeDocument(options = {}) {
-  /** @param {string} tag */
   const create = (tag) => {
     const node = {
       tagName: String(tag).toUpperCase(),
@@ -98,11 +67,9 @@ function fakeDocument(options = {}) {
       type: '',
       parentNode: null,
       style: {},
-      /** @param {string} name @param {string} value */
       setAttribute(name, value) {
         this.attributes[name] = String(value)
       },
-      /** @param {string} name */
       hasAttribute(name) {
         return Object.prototype.hasOwnProperty.call(this.attributes, name)
       },
@@ -122,24 +89,20 @@ function fakeDocument(options = {}) {
           return node.className.split(' ').includes(name)
         },
       },
-      /** @param {object} child */
       appendChild(child) {
         child.parentNode = this
         this.children.push(child)
         return child
       },
-      /** @param {...object} items */
       append(...items) {
         for (const item of items) this.appendChild(item)
       },
-      /** @param {object} child */
       removeChild(child) {
         const index = this.children.indexOf(child)
         if (index >= 0) this.children.splice(index, 1)
         child.parentNode = null
         return child
       },
-      /** @param {string} type @param {Function} handler */
       addEventListener(type, handler) {
         if (!this.listeners[type]) this.listeners[type] = []
         this.listeners[type].push(handler)
@@ -171,27 +134,12 @@ function fakeDocument(options = {}) {
   }
 }
 
-/**
- * Fire one guest event. The carrier registers more than one handler for some
- * types (`dom-ready` both navigates and mirrors the caption), so the fake node
- * keeps them in order instead of overwriting.
- * @param {object} node @param {string} type @param {object} [event]
- * @returns {void}
- */
 function fire(node, type, event) {
   for (const handler of node.listeners[type] || []) handler(event)
 }
 
-/**
- * A DOM rich enough for the injected host switcher: elements with attributes, classes,
- * children, listeners and a rect; a document whose `querySelectorAll` answers the two
- * lookups the row uses to find the sidebar; a `head` for its stylesheet.
- * @param {{ sidebarWidth?: number, brand?: boolean, hostRowStyle?: boolean }} [options]
- * @returns {{ document: object, column: object, brand: object|null, head: object }}
- */
 function fakeDom(options = {}) {
   const columnWidth = options.sidebarWidth === undefined ? 280 : options.sidebarWidth
-  /** @param {string} tag */
   const create = (tag) => {
     const node = {
       tagName: String(tag).toUpperCase(),
@@ -254,13 +202,11 @@ function fakeDom(options = {}) {
         child.parentNode = null
         return child
       },
-      /** @param {string} type @param {Function} handler */
       addEventListener(type, handler) {
         if (!this.listeners[type]) this.listeners[type] = []
         this.listeners[type].push(handler)
       },
       removeEventListener() {},
-      /** @param {object} candidate */
       contains(candidate) {
         let node2 = candidate
         while (node2) {
@@ -275,7 +221,6 @@ function fakeDom(options = {}) {
     }
     return node
   }
-
   const head = create('head')
   const body = create('body')
   const column = create('div')
@@ -291,7 +236,6 @@ function fakeDom(options = {}) {
   const region = create('div')
   region.rect = { left: 0, top: 80, width: columnWidth, height: 700, right: columnWidth, bottom: 780 }
   column.appendChild(region)
-
   const document = {
     head,
     body,
@@ -303,7 +247,6 @@ function fakeDom(options = {}) {
       this.listeners[type].push(handler)
     },
     removeEventListener() {},
-    /** The two lookups `mountHostRow` performs, and nothing else. */
     querySelectorAll(selector) {
       if (selector === '[data-window-drag]') return brand === null ? [] : [brand]
       if (selector === 'div,aside,nav,section') return [column]
@@ -313,48 +256,40 @@ function fakeDom(options = {}) {
   return { document, column, brand, head }
 }
 
-/** The switcher row a fake document holds, if any. @param {{ column: object }} dom */
 function rowOf(dom) {
   return dom.column.children.find((child) => child.id === 'drg-host-row') || null
 }
 
-/** Text of the row's current-target label. @param {object} row */
 function rowName(row) {
   const node = row.children.find((child) => child.className === 'drg-hr-name')
   return node ? node.textContent : null
 }
 
-/** Menu entries in order, skipping the separator. @param {object} row */
 function rowItems(row) {
   const menu = row.children.find((child) => child.className === 'drg-hr-menu')
   return menu.children.filter((child) => child.className === 'drg-hr-item')
 }
 
-/** @param {object} item */
 function itemLabel(item) {
   const node = item.children.find((child) => child.className === 'drg-hr-item-name')
   return node ? node.textContent : null
 }
 
-/** @param {object} item */
 function itemDotState(item) {
   const dot = item.children.find((child) => child.className === 'drg-hr-dot')
   return dot ? dot.getAttribute('data-state') : null
 }
 
-/** Fire a click at `target`, the way a browser would bubble it into the row. */
 function clickInside(row, target) {
   for (const handler of row.listeners.click || []) handler({ target })
 }
 
-/** Minimal dictionary interpolation, mirroring the locale service. */
 function interpolate(template, params) {
   return String(template).replace(/\{(\w+)\}/g, (match, key) =>
     params[key] === undefined || params[key] === null ? match : String(params[key]),
   )
 }
 
-/** Build a translate function over a flat dictionary. */
 function translateFrom(dict) {
   return (key, params) => {
     const text = dict[key] === undefined ? key : dict[key]
@@ -362,10 +297,6 @@ function translateFrom(dict) {
   }
 }
 
-/**
- * Run `apply` against a recording mock context.
- * @returns {{ctx: object, calls: object, t: Function, dicts: object, disposers: Function[]}}
- */
 function runApply(plugin) {
   const calls = {
     effects: [],
@@ -384,7 +315,6 @@ function runApply(plugin) {
       calls.openWorkspace.push(workspaceId)
     },
   }
-
   const ctx = {
     effect(callback, label) {
       calls.effects.push(label)
@@ -428,7 +358,6 @@ function runApply(plugin) {
       },
     },
   }
-
   plugin.apply(ctx)
   return { ctx, calls, t, dicts, disposers }
 }
@@ -441,18 +370,11 @@ const zhDict = (() => {
 const t = translateFrom(zhDict)
 const enT = translateFrom(runApply(plugin).dicts.en)
 
-/** Render a component to static markup with a stable `t`. */
 function render(element) {
   return renderToStaticMarkup(element)
 }
 
-/**
- * Every `data-testid="…"` value in static markup.
- * @param {string} markup
- * @returns {string[]}
- */
 function testIdsOf(markup) {
-  /** @type {string[]} */
   const ids = []
   const marker = 'data-testid="'
   let from = 0
@@ -468,34 +390,6 @@ function testIdsOf(markup) {
   return ids
 }
 
-/**
- * Every `src="…"` attribute value in static markup.
- *
- * Structural extraction (no pattern matching on the URL itself): the assertions
- * then parse each value and compare protocol/host/port, so a lookalike host cannot
- * satisfy them the way a substring test could.
- * @param {string} markup
- * @returns {string[]}
- */
-function srcAttributes(markup) {
-  const marker = 'src="'
-  /** @type {string[]} */
-  const values = []
-  let from = 0
-  for (;;) {
-    const start = markup.indexOf(marker, from)
-    if (start === -1) break
-    const valueStart = start + marker.length
-    const end = markup.indexOf('"', valueStart)
-    if (end === -1) break
-    // Attribute serialization escapes `&`; a URL comparison needs the literal.
-    values.push(markup.slice(valueStart, end).split('&amp;').join('&'))
-    from = end + 1
-  }
-  return values
-}
-
-/** Minimal HostView factory for render tests. */
 function hostView(overrides) {
   return {
     id: 'h_test',
@@ -507,7 +401,6 @@ function hostView(overrides) {
     progress: null,
     error: null,
     fingerprint: null,
-    /** Connect log tail (docs/api.md HostView.logs); empty unless a connection is on screen. */
     logs: [],
     remote: {
       version: '0.2.2-rc.1',
@@ -530,14 +423,9 @@ function hostView(overrides) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 1. module format
-// ---------------------------------------------------------------------------
-
 test('client.js registers one lazy factory through window.__ModuleLoader__', () => {
   assert.match(SOURCE, /window\.__ModuleLoader__\.load\(/)
   assert.match(SOURCE, /id:\s*'dsh-remote-go'/)
-  // Only React may be required (no Node APIs, no other packages).
   const specifiers = [...SOURCE.matchAll(/require\(([^)]*)\)/g)].map((match) => match[1].trim())
   for (const specifier of specifiers) {
     assert.equal(specifier, "'react'", 'unexpected require: ' + specifier)
@@ -547,8 +435,6 @@ test('client.js registers one lazy factory through window.__ModuleLoader__', () 
 test('factory injects slots and locale', () => {
   const injects = Array.from(plugin.inject)
   assert.deepEqual(injects, ['slots', 'locale'])
-  // No panel registration means no layout service either: the plugin draws into the shell
-  // overlay layer and the sidebar it finds, never into the main column.
   assert.equal(injects.includes('layout'), false)
 })
 
@@ -568,10 +454,6 @@ test('components export is a non-empty map of renderable functions', () => {
   assert.equal(plugin.components.SettingsSection, undefined, 'the plugin must not ship a settings-page component')
   assert.equal(typeof plugin.components.RemoteIcon, 'function')
 })
-
-// ---------------------------------------------------------------------------
-// 2. apply() registration behaviour
-// ---------------------------------------------------------------------------
 
 test('apply registers zh/en dictionaries and binds the namespace', () => {
   const { calls, dicts, disposers } = runApply(plugin)
@@ -595,9 +477,6 @@ test('dictionaries are bilingual and balanced', () => {
     assert.ok(dicts.zh[key].length > 0, 'zh.' + key + ' must not be empty')
     assert.ok(dicts.en[key].length > 0, 'en.' + key + ' must not be empty')
   }
-
-  // Every connect phase gets a labelled pill; a missing key renders the raw `phase.<id>`
-  // in the progress row, which is how `phase.verifying` once shipped.
   const phases = [...(SOURCE.match(/const PHASES = \[([\s\S]*?)\]/)?.[1] ?? '').matchAll(/'([a-z-]+)'/g)].map(
     (found) => found[1],
   )
@@ -612,15 +491,11 @@ test('apply registers only the overlay host: the switcher row is the plugin sole
   const { calls } = runApply(plugin)
   assert.deepEqual(calls.injects, ['shell.overlay'])
   assert.equal(calls.registers.length, 1)
-  // Nothing takes the main column, no sidebar row is registered, and no settings page
-  // is added: the switcher row and the floating windows are the plugin's whole surface.
   assert.ok(!calls.injects.includes('main'), 'the plugin must not own the main column')
   assert.ok(!calls.injects.includes('settings.section'), 'no settings page may be registered')
   assert.ok(!calls.injects.includes('sidebar.panellist'), 'no global-panel row may be registered')
   assert.ok(!calls.injects.includes('sidebar.workspaces'), 'no sidebar workspace entry may be registered')
   assert.ok(!calls.injects.includes('sidebar.footer.action'), 'no footer action may be registered')
-
-  // Everything floats in the shell overlay layer, above a remote window.
   const overlay = calls.registers.find((entry) => entry.options.name === 'shell.overlay')
   assert.ok(overlay, 'the overlay host must be registered')
   assert.equal(overlay.component, plugin.components.PluginOverlay)
@@ -638,8 +513,6 @@ test('shared inject face carries the command channels, not a panel', () => {
   assert.ok(face.panelStore && typeof face.panelStore.request === 'function')
   assert.ok(face.wizardStore && typeof face.wizardStore.open === 'function')
   assert.equal(typeof face.openWizard, 'function')
-
-  // The panel store carries one command at a time.
   face.panelStore.request('h_test')
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'open', hostId: 'h_test' })
   assert.equal(face.panelStore.take(), null)
@@ -649,23 +522,16 @@ test('shared inject face carries the command channels, not a panel', () => {
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' })
   face.panelStore.requestIntent({ kind: 'open' })
   assert.equal(face.panelStore.take(), null, 'an open intent without a host is refused')
-
-  // The wizard store opens and closes one draft.
   face.openWizard({ mode: 'edit', host: { id: 'h_test' } })
   assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'edit', host: { id: 'h_test' } })
   face.wizardStore.close()
   assert.equal(face.wizardStore.current(), null)
 })
 
-// ---------------------------------------------------------------------------
-// 3. security invariants
-// ---------------------------------------------------------------------------
-
 test('client code never logs and never persists remote URLs / tokens', () => {
   assert.doesNotMatch(SOURCE, /console\.(log|debug|info|warn|error)\s*\(/)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*token/i)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*url/i)
-  // Every fetch call is centralised in the one API helper that adds the header.
   assert.match(SOURCE, /'x-dsh-remote-go':\s*'1'/)
   assert.match(SOURCE, /credentials:\s*'same-origin'/)
   assert.match(SOURCE, /const LOOPBACK_PREFIX = 'http:\/\/127\.0\.0\.1:'/)
@@ -673,28 +539,16 @@ test('client code never logs and never persists remote URLs / tokens', () => {
 })
 
 test('the client embeds no remote page and opens no extra window', () => {
-  // The embedded-panel presentation is gone: the remote UI only ever reaches the
-  // desktop browser guest, so no iframe element, sandbox attribute or
-  // window.open call may survive in the client half.
   assert.doesNotMatch(SOURCE, /h\(\s*'iframe'/, 'no iframe element may be rendered')
   assert.doesNotMatch(SOURCE, /IFRAME_SANDBOX/, 'no iframe sandbox may be configured')
   assert.doesNotMatch(SOURCE, /window\.open\s*\(/, 'the client must not open an external window')
   assert.doesNotMatch(SOURCE, /sandbox:?\s*['"]allow-scripts/, 'no iframe sandbox attribute may remain')
   assert.doesNotMatch(SOURCE, /RemoteViewport/, 'the embedded viewport component must be gone')
-  // The loopback guard itself is still enforced before a URL reaches the guest.
   assert.match(SOURCE, /function isValidLoopbackUrl\(url\)/)
 })
 
-// ---------------------------------------------------------------------------
-// 4. key component renders (react-dom/server)
-// ---------------------------------------------------------------------------
-
 test('openHost rejects a non-loopback remote URL (API-layer guard)', async () => {
-  // Drive the real `api.openHost` through a stubbed transport. The positive
-  // control matters: a test that only checks rejection would also pass if the
-  // method rejected everything.
   const requests = []
-  /** @type {string} */
   let answer = 'http://127.0.0.1:54321/?token=abc123'
   const client = loadClientPlugin({
     fetch: async (endpoint) => {
@@ -709,11 +563,9 @@ test('openHost rejects a non-loopback remote URL (API-layer guard)', async () =>
     },
   })
   assert.equal(typeof client.api?.openHost, 'function', 'client.js must expose the Host-API client for this test')
-
   const allowed = await client.api.openHost('h_test')
   assert.equal(allowed, 'http://127.0.0.1:54321/?token=abc123')
   assert.equal(requests.at(-1), '/dsh-remote-go/api/hosts/h_test/open')
-
   for (const refusedUrl of [
     'https://evil.example.com/?token=secret',
     'http://10.0.0.5:54321/?token=secret',
@@ -723,93 +575,56 @@ test('openHost rejects a non-loopback remote URL (API-layer guard)', async () =>
     answer = refusedUrl
     await assert.rejects(client.api.openHost('h_test'), (error) => {
       assert.equal(error?.view?.code, 'blocked-url', `unexpected error view for ${refusedUrl}`)
-      // The refused URL must not be echoed back: compare the whole message with
-      // the documented localized detail instead of searching for host text.
       assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止。')
       return true
     })
   }
 })
 
-test('empty host list renders the empty state and the first-server action', () => {
-  const state = {
-    hostVersion: '0.2.2-rc.1',
-    targetVersion: '0.2.2-rc.1',
-    hosts: [],
-    settings: {},
-    activeHostId: null,
-    firstRun: true,
-  }
-  const html = render(
+const stateWith = (overrides = {}) => ({
+  hostVersion: '0.2.2-rc.1',
+  targetVersion: '0.2.2-rc.1',
+  hosts: [],
+  settings: {},
+  activeHostId: null,
+  firstRun: false,
+  ...overrides,
+})
+
+test('host list renders the empty state and a connected card', () => {
+  const noop = () => {}
+  const empty = render(
     React.createElement(plugin.components.HostListView, {
       t,
-      state,
+      state: stateWith({ firstRun: true }),
       loading: false,
       error: null,
-      onAdd: () => {},
-      onRefresh: () => {},
+      onAdd: noop,
+      onRefresh: noop,
     }),
   )
-  assert.match(html, /远程主机/)
-  assert.match(html, /还没有远程主机/)
-  assert.match(html, /添加第一台服务器/)
-  assert.match(html, /drg-empty/)
-  assert.doesNotMatch(html, /drg-host-card/)
-})
-
-test('host list renders a connected host card with remote version and actions', () => {
-  const state = {
-    hostVersion: '0.2.2-rc.1',
-    targetVersion: '0.2.2-rc.1',
-    hosts: [hostView()],
-    settings: {},
-    activeHostId: null,
-    firstRun: false,
-  }
-  const html = render(
+  for (const pattern of [/远程主机/, /还没有远程主机/, /添加第一台服务器/, /drg-empty/]) assert.match(empty, pattern)
+  assert.doesNotMatch(empty, /drg-host-card/)
+  const list = render(
     React.createElement(plugin.components.HostListView, {
       t,
-      state,
+      state: stateWith({ hosts: [hostView()] }),
       loading: false,
       error: null,
-      onAdd: () => {},
-      onRefresh: () => {},
-      onOpenHost: () => {},
-      onDisconnectHost: () => {},
-      onEditHost: () => {},
-      onDeleteHost: () => {},
-      onDiagnoseHost: () => {},
+      onAdd: noop,
+      onRefresh: noop,
+      onOpenHost: noop,
+      onDisconnectHost: noop,
+      onEditHost: noop,
+      onDeleteHost: noop,
+      onDiagnoseHost: noop,
     }),
   )
-  assert.match(html, /测试机/)
-  assert.match(html, /ubuntu@10\.0\.0\.5:22/)
-  assert.match(html, /0\.2\.2-rc\.1/)
-  assert.match(html, /已连接/)
-  assert.match(html, /共 1/)
-  assert.match(html, /断开/)
-  assert.match(html, /诊断/)
+  for (const pattern of [/测试机/, /ubuntu@10\.0\.0\.5:22/, /0\.2\.2-rc\.1/, /已连接/, /共 1/, /断开/, /诊断/]) {
+    assert.match(list, pattern)
+  }
 })
 
-test('connecting host renders staged progress text', () => {
-  const host = hostView({
-    status: 'connecting',
-    phase: 'ssh',
-    progress: { code: 'ssh-connecting' },
-    remote: { ...hostView().remote, version: null, uiReady: false },
-  })
-  const html = render(React.createElement(plugin.components.ConnectProgress, { t, host }))
-  assert.match(html, /正在连接「测试机」/)
-  assert.match(html, /正在连接 SSH…/)
-  assert.match(html, /SSH/)
-  assert.match(html, /隧道/)
-})
-
-/**
- * Every prop the connect window's callbacks need, so each test states only the host and the
- * window state it is about.
- * @param {object} overrides - host and window fields to override.
- * @returns {object} props for ManageWindow.
- */
 function manageWindowProps(overrides = {}) {
   return {
     open: true,
@@ -870,14 +685,12 @@ test('a connecting host prints the connect log instead of the host list', () => 
   assert.match(html, /data-testid="connect-log"/)
   assert.match(html, /连接日志/)
   assert.match(html, /3 行/)
-  // The Host's own lines, in the order they happened, with their levels intact.
   const lines = [...html.matchAll(/data-level="(\w+)"[^>]*>(?:<!-- -->)?/g)].map((match) => match[1])
   assert.deepEqual(lines, ['info', 'debug', 'warn'])
   const infoAt = html.indexOf('SSH connected to 10.0.0.5:22')
   const debugAt = html.indexOf('remote: dsh web listening')
   const warnAt = html.indexOf('adopt check failed')
   assert.ok(infoAt > 0 && debugAt > infoAt && warnAt > debugAt, 'the log must keep the order it was written in')
-  // A connection is not management: the list and its header actions are not in this window.
   assert.doesNotMatch(html, /data-testid="host-list"/)
   assert.doesNotMatch(html, /data-testid="host-add"/)
   assert.doesNotMatch(html, /data-testid="host-refresh"/)
@@ -937,8 +750,6 @@ test('a host that is not connecting gets the management list back', () => {
 })
 
 test('opening 管理界 interface shows the list even for a host that just failed', () => {
-  // The failure keeps its log in the connect window, but the explicit management entry must
-  // not be hijacked by it: one 返回 (or a fresh open) brings the host list back.
   const host = hostView({
     status: 'error',
     error: {
@@ -972,14 +783,21 @@ test('the closed window renders nothing', () => {
   assert.equal(html, '')
 })
 
-test('the connect console prints raw lines and says so when the Host has none yet', () => {
+test('the connect console prints raw lines, staged progress and says so when the Host has none yet', () => {
+  const progress = hostView({
+    status: 'connecting',
+    phase: 'ssh',
+    progress: { code: 'ssh-connecting' },
+    remote: { ...hostView().remote, version: null, uiReady: false },
+  })
+  const staged = render(React.createElement(plugin.components.ConnectProgress, { t, host: progress }))
+  for (const pattern of [/正在连接「测试机」/, /正在连接 SSH…/, /SSH/, /隧道/]) assert.match(staged, pattern)
   const empty = render(
     React.createElement(plugin.components.ConnectLog, { t, host: hostView({ status: 'connecting', logs: [] }) }),
   )
   assert.match(empty, /data-testid="connect-log-empty"/)
   assert.match(empty, /等待日志输出/)
   assert.match(empty, /关闭窗口|关窗不中断连接/)
-
   const html = render(
     React.createElement(plugin.components.ConnectLog, {
       t,
@@ -996,8 +814,6 @@ test('the connect console prints raw lines and says so when the Host has none ye
       }),
     }),
   )
-  // Everything the Host wrote is printed as it was written: no trimming, no rewriting, no
-  // tag of this plugin added in front of it.
   assert.match(html, /installing @deepseek-ai\/dsh@0\.2\.2-rc\.3 with a token=secret query string/)
   assert.match(html, /data-level="debug"/)
   assert.match(html, /1 行/)
@@ -1108,7 +924,6 @@ test('the overlay host takes no page of its own until a window is asked for', ()
       },
     }),
   )
-  // The plugin owns no page: closed windows render nothing but the theme root.
   assert.match(html, /data-testid="dsh-remote-go-overlay-host"/)
   assert.doesNotMatch(html, /data-testid="host-list"/)
   assert.doesNotMatch(html, /data-testid="manage-window"/)
@@ -1117,17 +932,13 @@ test('the overlay host takes no page of its own until a window is asked for', ()
 })
 
 test('the plugin never selects a main panel or renders the remote page itself', () => {
-  // docs/design.md §4: the switcher row and the floating windows are the whole surface;
-  // the remote UI only ever reaches the desktop guest. No page can be taken over.
   assert.doesNotMatch(SOURCE, /selectPanel/, 'the plugin must not select a layout panel')
   assert.doesNotMatch(SOURCE, /'main'/, 'the plugin must not register the main slot')
   assert.doesNotMatch(SOURCE, /<iframe|h\(\s*'iframe'/, 'no iframe may be rendered')
-  // The takeover still has one explicit trigger: opening a host from the row or the list.
   assert.match(SOURCE, /const openHost = \(host(?:, options)?\) => \{[\s\S]*?setTarget\(host\.id\)/)
 })
 
 test('the warm pool keeps every opened host and the last request wins a race', async () => {
-  // No count limit: every host you have opened keeps its window.
   const doc = fakeDocument()
   const released = []
   let lease = 0
@@ -1153,15 +964,10 @@ test('the warm pool keeps every opened host and the last request wins a race', a
       assert.equal(takeover.carrier.warm(hostId), true, hostId + ' must stay warm')
     }
     assert.equal(takeover.carrier.shown(), 'h_d')
-
-    // Switching back is a show, not a reload.
     const again = await takeover.carrier.open({ hostId: 'h_a' })
     assert.equal(again.reused, true)
     assert.equal(takeover.carrier.shown(), 'h_a')
     assert.deepEqual(released, [], 'nothing may be released while a host is still up')
-
-    // Two opens in the same tick: the later one is what the window ends up on, and the
-    // window built for the earlier request is dropped instead of stealing it.
     const [first, second] = await Promise.all([
       takeover.carrier.open({ hostId: 'h_e', url: url('h_e') }),
       takeover.carrier.open({ hostId: 'h_f', url: url('h_f') }),
@@ -1205,8 +1011,6 @@ test('the takeover carrier hands the window to the guest and injects the switche
     assert.equal(result.ok, true)
     const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
     assert.ok(root, 'the carrier must be mounted on document.body')
-    // Whole window, no local chrome: style + guest + the load-error line only. The host
-    // switcher lives inside the page, so there is nothing local to render.
     assert.match(root.style.cssText, /left:0/)
     assert.equal(root.children.length, 3)
     assert.equal(
@@ -1216,8 +1020,6 @@ test('the takeover carrier hands the window to the guest and injects the switche
     const view = root.children.find((node) => node.className === 'drg-carrier-view')
     assert.ok(view, 'the guest must be mounted')
     assert.equal(view.tagName, 'WEBVIEW')
-
-    // The row script is injected after the guest settles; a state push follows it.
     const calls = []
     view.executeJavaScript = (code) => {
       calls.push(code)
@@ -1229,7 +1031,6 @@ test('the takeover carrier hands the window to the guest and injects the switche
       calls.some((code) => code.includes('function mountHostRow')),
       'the injected row script must run inside the guest',
     )
-
     takeover.carrier.update({ hosts, current: 'h_a' })
     await settle()
     assert.ok(
@@ -1240,14 +1041,10 @@ test('the takeover carrier hands the window to the guest and injects the switche
       calls.some((code) => code.includes('"current":"h_a"')),
       'the current target must be pushed too',
     )
-    // The session title line is gone: the row names the target and nothing else.
     assert.equal(
       calls.some((code) => code.includes('drg-hr-title')),
       false,
     )
-
-    // A guest reload wipes the injected DOM, so every load stop re-installs it: the
-    // control must never disappear.
     const scriptRuns = calls.filter((code) => code.includes('function mountHostRow')).length
     fire(view, 'did-stop-loading')
     await settle()
@@ -1260,9 +1057,6 @@ test('the takeover carrier hands the window to the guest and injects the switche
 })
 
 test('a caption window hands the band to the guest and keeps the window draggable', async () => {
-  // The local page reserves the Windows caption band inside its own frame; a guest page
-  // (no preload) would lay out as the Web build unless it is taught the same band. That
-  // is what makes the two pages one grid instead of two grids 40px apart.
   const doc = fakeDocument({ captionHeight: '40px' })
   const released = []
   const takeover = loadClientPlugin({
@@ -1284,17 +1078,12 @@ test('a caption window hands the band to the guest and keeps the window draggabl
     assert.equal(result.ok, true)
     const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
     assert.ok(root, 'the carrier must be mounted on document.body')
-    // The guest covers the whole window: the band it paints is the window's band.
     assert.match(root.style.cssText, /top:0/)
-
-    // Electron ignores app regions inside a guest, so the band needs a drag strip of the
-    // carrier's own — right of the guest's fixed caption controls.
     const grip = root.children.find((node) => node.className === 'drg-carrier-grip')
     assert.ok(grip, 'a guest that covers the band must give the window drag back')
     assert.match(grip.style.cssText, /app-region:drag/)
     assert.match(grip.style.cssText, /left:84px/)
     assert.match(grip.style.cssText, /height:40px/)
-
     const view = root.children.find((node) => node.className === 'drg-carrier-view')
     const calls = []
     view.loadURL = () => Promise.resolve()
@@ -1302,7 +1091,6 @@ test('a caption window hands the band to the guest and keeps the window draggabl
       calls.push(code)
       return Promise.resolve(code.includes('function mountHostRow') ? 'installed' : 'ok')
     }
-
     fire(view, 'dom-ready')
     await settle()
     assert.ok(
@@ -1319,9 +1107,6 @@ test('a caption window hands the band to the guest and keeps the window draggabl
       true,
       'the shell caption menus have to stay above a guest that owns the band',
     )
-
-    // The band has to land before the injected row measures the sidebar it goes into, and
-    // fullscreen (which drops the insets the band implies) has to travel with it.
     doc.documentElement.setAttribute('data-fullscreen', 'true')
     calls.length = 0
     fire(view, 'did-stop-loading')
@@ -1331,15 +1116,10 @@ test('a caption window hands the band to the guest and keeps the window draggabl
     assert.ok(rowAt >= 0, 'the row script must still run')
     assert.ok(captionAt >= 0 && captionAt < rowAt, 'the caption must be applied first')
     assert.match(calls[captionAt], /toggleAttribute\("data-fullscreen",true\)/)
-
-    // A main-frame failure hands the band back to the local page: the failure line is not
-    // allowed to hide the window's own caption menus with it.
     fire(view, 'did-fail-load', { isMainFrame: true, errorCode: -2 })
     await settle()
     assert.equal(root.style.top, '40px')
     assert.equal(grip.style.display, 'none')
-
-    // Back to the local page: the band is the local page's again.
     takeover.carrier.hide()
     assert.equal(doc.documentElement.classList.contains('drg-caption-live'), false)
   } finally {
@@ -1350,8 +1130,6 @@ test('a caption window hands the band to the guest and keeps the window draggabl
 })
 
 test('a guest that refuses the caption script stays below the local band', async () => {
-  // One band, never two: if the guest cannot take the marker, the carrier falls back to
-  // sitting below the window's own band (the pre-0.x framing) instead of overlapping it.
   const doc = fakeDocument({ captionHeight: '40px' })
   const takeover = loadClientPlugin({
     document: doc,
@@ -1374,10 +1152,8 @@ test('a guest that refuses the caption script stays below the local band', async
     const view = root.children.find((node) => node.className === 'drg-carrier-view')
     view.loadURL = () => Promise.resolve()
     view.executeJavaScript = () => Promise.resolve(null)
-
     fire(view, 'dom-ready')
     await settle()
-
     assert.equal(root.style.top, '40px', 'the guest must not overlap the local band')
     assert.equal(grip.style.display, 'none', 'the drag strip is only for the covered band')
     assert.equal(doc.documentElement.classList.contains('drg-caption-live'), false)
@@ -1391,16 +1167,13 @@ test('the switcher row is drawn into the local sidebar and lists local, hosts an
   const local = loadClientPlugin({ document: dom.document })
   const connected = hostView({ id: 'h_a', name: '43.133.80.40', address: '43.133.80.40', status: 'connected' })
   const idle = hostView({ id: 'h_b', name: '生产机 ubuntu', address: 'ubuntu@10.0.0.7', status: 'disconnected' })
-
   local.carrier.update({
     hosts: [connected, idle],
     labels: { local: '本地', addHost: '添加主机', manage: '管理界面' },
   })
-
   const row = rowOf(dom)
   assert.ok(row, 'the row must be placed in the local sidebar')
   assert.equal(row.parentNode, dom.column)
-  // The row sits right under the brand row, exactly like the copy in the remote page.
   assert.equal(dom.brand.nextSibling, row)
   assert.equal(rowName(row), '本地', 'the closed row names the current target only')
   const menu = row.children.find((child) => child.className === 'drg-hr-menu')
@@ -1409,10 +1182,8 @@ test('the switcher row is drawn into the local sidebar and lists local, hosts an
     0,
     'the session-title line is gone',
   )
-
   const items = rowItems(row)
   assert.deepEqual(items.map(itemLabel), ['本地', '43.133.80.40', '生产机 ubuntu', '添加主机', '管理界面'])
-  // A connected host carries the glowing green dot; the rest keep their status tone.
   assert.equal(itemDotState(items[0]), 'local')
   assert.equal(itemDotState(items[1]), 'connected')
   assert.equal(itemDotState(items[2]), 'disconnected')
@@ -1421,14 +1192,12 @@ test('the switcher row is drawn into the local sidebar and lists local, hosts an
   assert.equal(items[2].getAttribute('data-target'), 'h_b')
   assert.equal(items[3].getAttribute('data-action'), 'add')
   assert.equal(items[4].getAttribute('data-action'), 'manage', 'management is the last entry')
-  // An action carries a glyph where a target carries its connection dot.
   for (const action of [items[3], items[4]]) {
     assert.ok(
       action.children.some((child) => child.className === 'drg-hr-glyph'),
       'an action must not look like an unconnected host',
     )
   }
-  // One separator, after the hosts and before the two actions; no refresh/exit entries.
   const kinds = menu.children.map((child) => child.className)
   assert.deepEqual(kinds, ['drg-hr-item', 'drg-hr-item', 'drg-hr-item', 'drg-hr-sep', 'drg-hr-item', 'drg-hr-item'])
 })
@@ -1445,25 +1214,19 @@ test('the switcher menu opens on the row, closes on a second click and on a pick
   assert.equal(row.getAttribute('aria-expanded'), 'true')
   assert.equal(row.classList.contains('drg-open'), true)
   const menu = row.children.find((child) => child.className === 'drg-hr-menu')
-  // The sidebar clips its children, so the menu is fixed and anchored under the row.
   assert.equal(menu.style.top, '804px')
   assert.equal(menu.style.width, '280px')
-
   clickInside(row, row)
   assert.equal(row.getAttribute('aria-expanded'), 'false')
   clickInside(row, row)
   clickInside(row, rowItems(row)[1])
   assert.equal(row.getAttribute('aria-expanded'), 'false', 'a pick closes the menu')
-
-  // A deleted host must not leave the row naming a target that no longer exists.
   local.carrier.update({ hosts: [] })
   assert.equal(rowName(row), '本地')
   assert.deepEqual(rowItems(row).map(itemLabel), ['本地', '添加主机', '管理界面'])
 })
 
 test('the switcher menu surface does not inherit the row hand', () => {
-  // The row is a button, so the menu sits inside a pointer surface: its own padding, the
-  // separator and the slack beside a short label must not promise a click either.
   const dom = fakeDom()
   const local = loadClientPlugin({ document: dom.document })
   local.carrier.update({ hosts: [], labels: { local: '本地', addHost: '添加主机', manage: '管理界面' } })
@@ -1482,8 +1245,6 @@ test('the guest script installs the same row and leaves intents on the page brid
   const local = loadClientPlugin({ document: dom.document })
   const script = local.carrier.script()
   assert.match(script, /^\(function mountHostRow\(win\)/)
-
-  // The guest is a foreign page: no sink, so the row queues intents on `window.__drgBridgeQueue`.
   const guestDom = fakeDom()
   const guestWindow = { document: guestDom.document, innerHeight: 800 }
   const factory = new Function('window', 'return ' + script)
@@ -1498,11 +1259,9 @@ test('the guest script installs the same row and leaves intents on the page brid
   assert.equal(rowName(row), '43.133.80.40')
   const items = rowItems(row)
   clickInside(row, items[items.length - 2])
-  // Two clicks inside one poll must both survive: the queue is drained in order.
   clickInside(row, items[items.length - 1])
   clickInside(row, items[0])
   assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'add' }, { action: 'manage' }, { target: 'local' }])
-  // A live host carries its own exit control on the row, right after the address.
   const exit = items[1].children.find((child) => child.className === 'drg-hr-act')
   assert.ok(exit, 'a connected host must expose an exit control')
   assert.equal(exit.textContent, 'Exit remote')
@@ -1523,13 +1282,11 @@ test('the exit control disconnects that host instead of switching to it', () => 
   })
   const row = rowOf(dom)
   const items = rowItems(row)
-  // Only a connected host is worth leaving; a disconnected one has nothing to close.
   const exitA = items[1].children.find((child) => child.className === 'drg-hr-act')
   const exitB = items[2].children.find((child) => child.className === 'drg-hr-act')
   assert.ok(exitA, 'the connected host must carry the exit control')
   assert.equal(exitB, undefined, 'a host that is not up must not')
   assert.equal(exitA.textContent, '断开')
-
   clickInside(row, exitA)
   const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'disconnect', hostId: 'h_a' })
@@ -1544,32 +1301,23 @@ test('apply installs the local switcher row with the dictionary labels', () => {
   assert.ok(row, 'apply must place the switcher row')
   assert.equal(rowName(row), '本地')
   assert.deepEqual(rowItems(row).map(itemLabel), ['本地', '添加主机', '管理界面'])
-
-  // Local is always first: it is how the window gets back from a remote.
   const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
   clickInside(row, rowItems(row)[0])
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' }, 'picking local hands the window back')
-
-  // A host click goes to the overlay host, which decides how to show it.
   local.carrier.update({ hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })] })
   clickInside(row, rowItems(row)[1])
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'open', hostId: 'h_a' })
   assert.equal(rowName(row), '43.133.80.40')
-
-  // Add-host opens the wizard; management asks the overlay host for the floating list.
   clickInside(row, rowItems(row).at(-2))
   assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'add', host: null })
   face.wizardStore.close()
   assert.equal(face.wizardStore.current(), null)
   clickInside(row, rowItems(row).at(-1))
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'manage' })
-  // No page is ever selected: the plugin owns no main column.
   assert.deepEqual(calls.selectPanel, [])
 })
 
 test('opening a host or a window from the remote keeps the remote behind it', async () => {
-  // Picking a host anywhere — including from the remote page's own switcher — must not
-  // hand the window back to the local page. Only "local" does that.
   const dom = fakeDom()
   const released = []
   const local = loadClientPlugin({
@@ -1586,29 +1334,22 @@ test('opening a host or a window from the remote keeps the remote behind it', as
   const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
   const roots = () =>
     dom.document.body.children.filter((node) => String(node.id).indexOf('dsh-remote-go-overlay-') === 0)
-
   const opened = await local.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
   assert.equal(opened.ok, true)
   assert.equal(opened.reused, false)
   assert.equal(roots().length, 1)
   await local.carrier.update({ hosts: [hostView({ id: 'h_a', status: 'connected' })], current: 'h_a' })
   assert.equal(local.carrier.shown(), 'h_a')
-
   const row = rowOf(dom)
   assert.ok(row, 'the row must be installed in the local page')
-
-  // Management and the wizard are floating windows: the remote stays shown behind them.
   clickInside(row, rowItems(row).at(-1))
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'manage' })
   assert.equal(local.carrier.shown(), 'h_a', 'the remote must stay in front of the local page')
-
   clickInside(row, rowItems(row).at(-2))
   assert.deepEqual({ ...face.wizardStore.current() }, { mode: 'add', host: null })
   assert.equal(local.carrier.shown(), 'h_a', 'the wizard floats over the remote')
   face.wizardStore.close()
-
-  // Only "local" hands the window back, and it keeps the guest warm.
   clickInside(row, rowItems(row)[0])
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert.deepEqual({ ...face.panelStore.take() }, { kind: 'local' })
@@ -1616,23 +1357,16 @@ test('opening a host or a window from the remote keeps the remote behind it', as
   assert.equal(local.carrier.warm('h_a'), true, 'the window stays warm for the next visit')
   const hidden = roots()[0]
   assert.equal(hidden.style.display, 'none')
-
-  // Coming back is a show, not a reload.
   const again = await local.carrier.open({ hostId: 'h_a' })
   assert.equal(again.reused, true)
   assert.equal(roots().length, 1)
   assert.notEqual(roots()[0].style.display, 'none')
-
   await local.carrier.close()
   assert.equal(roots().length, 0)
   assert.deepEqual(released, ['lease-1'])
 })
 
 test('dropping the window that fills the screen hands the row back to the local page', async () => {
-  // The exit control lives in the remote page, so the disconnect comes back through the
-  // intent subscription - a closure created at mount that can no longer see which host
-  // the window is on. The renderer goes away with the connection all the same, and the
-  // row must follow the window it actually has: local, not the host that just left.
   const dom = fakeDom()
   const released = []
   let leases = 0
@@ -1659,17 +1393,12 @@ test('dropping the window that fills the screen hands the row back to the local 
   const row = rowOf(dom)
   assert.equal(rowName(row), '43.133.80.40')
   assert.equal(local.carrier.shown(), 'h_a')
-
-  // A warm window that is not in front may go away without moving the row.
   await open('h_b', 'http://127.0.0.1:43211/?token=def')
   await open('h_a', '')
   assert.equal(local.carrier.shown(), 'h_a')
   await local.carrier.closeOne('h_b')
   assert.equal(local.carrier.warm('h_b'), false)
   assert.equal(rowName(rowOf(dom)), '43.133.80.40', 'a hidden window must not move the row')
-
-  // What `disconnectHost` runs once the Host confirms: the shown renderer is dropped and
-  // the local page is what is left.
   await local.carrier.closeOne('h_a')
   assert.equal(local.carrier.shown(), null)
   assert.equal(local.carrier.warm('h_a'), false)
@@ -1678,10 +1407,6 @@ test('dropping the window that fills the screen hands the row back to the local 
 })
 
 test('the disconnect handover reads the live window target, not the mount-time one', () => {
-  // `target` is captured by the panel subscription when the overlay mounts, so it is
-  // always the initial value there: a comparison against it never hands the window back,
-  // and the row keeps naming the remote host over the local page. The handover has to be
-  // a functional update on the live state instead.
   const captured = /if \(target === (?:host\.id|intent\.hostId)\) setTarget\(null\)/.test(SOURCE)
   assert.equal(captured, false, 'the disconnect must not decide from a captured target')
   const live = /setTarget\(\(current\) => \(current === host\.id \? null : current\)\)/.test(SOURCE)
@@ -1723,8 +1448,6 @@ test('the add-host dialog is one form with save and connect, and no test step', 
   assert.match(html, /添加服务器/)
   assert.match(html, /显示名/)
   assert.match(html, /SSH 地址或别名/)
-  // Two actions, both about the host itself: saving stores the entry, connecting does that
-  // and then hands the connection to the connect window. There is no test step any more.
   assert.match(html, /data-testid="wizard-save"/)
   assert.match(html, /data-testid="wizard-connect"/)
   assert.match(html, />保存</)
@@ -1732,14 +1455,11 @@ test('the add-host dialog is one form with save and connect, and no test step', 
   assert.doesNotMatch(html, /保存并测试|保存和测试/)
   assert.doesNotMatch(html, /wizard-step-|连接测试|稍后再说/)
   assert.doesNotMatch(html, /data-testid="wizard-cancel"/)
-  // Key files and passwords are the only methods; the agent choice is gone.
   assert.match(html, /密钥文件/)
   assert.doesNotMatch(html, /SSH Agent/)
   assert.match(html, /远端存活策略/)
-  // The key path starts at the documented default and can be picked from disk.
   assert.match(html, /value="~\/\.ssh\/id_ed25519"/)
   assert.match(html, /data-testid="wizard-key-path-pick"/)
-  // The address field is wired to the SSH alias datalist loaded from /ssh/aliases.
   assert.match(html, /list="drg-ssh-alias-list"/)
   assert.match(html, /<datalist[^>]*id="drg-ssh-alias-list"/)
 })
@@ -1812,21 +1532,16 @@ test('settings modal renders contract fields and the save action', () => {
     }),
   )
   assert.match(html, /设置/)
-  // The embedded-panel presentation choice is gone: the window takeover is the
-  // only way a remote UI is shown, so no mode selector may be offered.
   assert.doesNotMatch(html, /呈现形态/)
   assert.doesNotMatch(html, /面板内嵌/)
   assert.match(html, /主机指纹策略/)
   assert.match(html, /允许保存访问令牌/)
   assert.match(html, /风险提示|0600/)
-  // The fixed "window / close behavior" block and the sidebar mirroring toggle are
-  // gone: neither had a real choice after the whole-window takeover.
   assert.doesNotMatch(html, /关闭视窗行为/)
   assert.doesNotMatch(html, /镜像会话/)
   assert.doesNotMatch(html, /显示在本地侧边栏/)
   assert.match(html, /远端运行时/)
   assert.match(html, /DSH profile/)
-  // The plugin state directory is fixed under ~/.dsh now, so it is not a field.
   assert.doesNotMatch(html, /插件远端目录/)
   assert.match(html, /保存设置/)
 })
@@ -1863,7 +1578,6 @@ test('the overlay host carries the theme root and the stylesheet', () => {
   assert.match(html, /data-testid="dsh-remote-go-overlay-host"/)
   assert.match(html, /data-dsh-remote-go="styles"/)
   assert.match(html, /--dsw-alias-label-primary/)
-  // The overlay seat must float above a remote window.
   assert.match(html, /\[data-shell-overlay\] \{ z-index: 2147483001; \}/)
 })
 
@@ -1928,7 +1642,6 @@ test('host management list offers open/connect actions per host', () => {
   assert.match(html, /data-testid="host-open"/)
   assert.match(html, /data-host-id="h_connected"/)
   assert.match(html, /data-host-id="h_offline"/)
-  // The card's one primary action follows the host state: open when up, connect when down.
   assert.match(html, />打开</)
   assert.match(html, />连接</)
   assert.match(html, /data-testid="host-reconnect"/)
@@ -1936,7 +1649,7 @@ test('host management list offers open/connect actions per host', () => {
 
 test('every automation data-testid required by acceptance is rendered', () => {
   const host = hostView({ authType: 'password' })
-  const baseState = {
+  const base = {
     hostVersion: '0.2.2-rc.1',
     targetVersion: '0.2.2-rc.1',
     hosts: [host],
@@ -1944,46 +1657,65 @@ test('every automation data-testid required by acceptance is rendered', () => {
     activeHostId: null,
     firstRun: false,
   }
-  const emptyState = { ...baseState, hosts: [] }
-  const markup = {
-    overlay: render(React.createElement(plugin.components.PluginOverlay, { t, getLocaleId: () => 'zh' })),
-    empty: render(
-      React.createElement(plugin.components.HostListView, {
+  const empty = { ...base, hosts: [] }
+  const noop = () => {}
+  const el = React.createElement
+  const checks = [
+    {
+      id: 'ssh-reachable',
+      title: { zh: 'SSH 可达性', en: 'SSH reachability' },
+      status: 'pass',
+      detail: { zh: '可连接', en: 'Reachable' },
+    },
+  ]
+  const error = {
+    code: 'auth',
+    title: { zh: '认证失败', en: 'Authentication failed' },
+    detail: { zh: '检查密钥', en: 'Check the key' },
+    nextSteps: [],
+    retryable: true,
+  }
+  const fingerprint = { sha256: 'SHA256:test', keyType: 'ssh-ed25519', status: 'pending', pinned: null }
+  const markup = [
+    render(el(plugin.components.PluginOverlay, { t, getLocaleId: () => 'zh' })),
+    render(
+      el(plugin.components.HostListView, {
         t,
-        state: emptyState,
+        state: empty,
         loading: false,
         error: null,
-        onAdd: () => {},
-        onRefresh: () => {},
+        onAdd: noop,
+        onRefresh: noop,
       }),
     ),
-    list: render(
-      React.createElement(plugin.components.HostListView, {
+    render(
+      el(plugin.components.HostListView, {
         t,
-        state: baseState,
+        state: base,
         loading: false,
         error: null,
-        onAdd: () => {},
-        onRefresh: () => {},
-        onOpenHost: () => {},
-        onDisconnectHost: () => {},
-        onReconnectHost: () => {},
-        onEditHost: () => {},
-        onDeleteHost: () => {},
-        onDiagnoseHost: () => {},
+        onAdd: noop,
+        onRefresh: noop,
+        onOpenHost: noop,
+        onDisconnectHost: noop,
+        onReconnectHost: noop,
+        onEditHost: noop,
+        onDeleteHost: noop,
+        onDiagnoseHost: noop,
       }),
     ),
-    wizard: render(
-      React.createElement(plugin.components.WizardDialog, {
+    render(el(plugin.components.WizardDialog, { t, mode: 'add', initialHost: null, state: empty, onClose: noop })),
+    render(
+      el(plugin.components.WizardDialog, {
         t,
         mode: 'add',
         initialHost: null,
-        state: emptyState,
-        onClose: () => {},
+        state: { ...empty, settings: { defaultAuth: 'password' } },
+        onClose: noop,
       }),
     ),
-    connectWindow: render(
-      React.createElement(
+    render(
+      el(
         plugin.components.ManageWindow,
         manageWindowProps({
           host: hostView({
@@ -1995,120 +1727,38 @@ test('every automation data-testid required by acceptance is rendered', () => {
         }),
       ),
     ),
-    wizardPassword: render(
-      React.createElement(plugin.components.WizardDialog, {
-        t,
-        mode: 'add',
-        initialHost: null,
-        state: { ...emptyState, settings: { defaultAuth: 'password' } },
-        onClose: () => {},
-      }),
-    ),
-    diagnostics: render(
-      React.createElement(plugin.components.DiagnoseDrawer, {
+    render(
+      el(plugin.components.DiagnoseDrawer, {
         t,
         host,
         status: 'done',
-        report: {
-          summary: 'ok',
-          checks: [
-            {
-              id: 'ssh-reachable',
-              title: { zh: 'SSH 可达性', en: 'SSH reachability' },
-              status: 'pass',
-              detail: { zh: '可连接', en: 'Reachable' },
-            },
-          ],
-        },
-        onClose: () => {},
-        onRun: () => {},
+        report: { summary: 'ok', checks },
+        onClose: noop,
+        onRun: noop,
       }),
     ),
-    settings: render(
-      React.createElement(plugin.components.SettingsModal, {
+    render(el(plugin.components.SettingsModal, { t, settings: {}, onClose: noop, onSave: async () => {} })),
+    render(el(plugin.components.ErrorCard, { t, error, onRetry: noop })),
+    render(el(plugin.components.PasswordPrompt, { t, host, onSubmit: noop, onCancel: noop })),
+    render(
+      el(plugin.components.FingerprintCard, {
         t,
-        settings: {},
-        onClose: () => {},
-        onSave: async () => {},
+        host: hostView({ status: 'fingerprint-pending', fingerprint }),
+        onAccept: noop,
+        onReject: noop,
       }),
     ),
-    error: render(
-      React.createElement(plugin.components.ErrorCard, {
-        t,
-        error: {
-          code: 'auth',
-          title: { zh: '认证失败', en: 'Authentication failed' },
-          detail: { zh: '检查密钥', en: 'Check the key' },
-          nextSteps: [],
-          retryable: true,
-        },
-        onRetry: () => {},
-      }),
-    ),
-    password: render(
-      React.createElement(plugin.components.PasswordPrompt, {
-        t,
-        host,
-        onSubmit: () => {},
-        onCancel: () => {},
-      }),
-    ),
-    fingerprint: render(
-      React.createElement(plugin.components.FingerprintCard, {
-        t,
-        host: hostView({
-          status: 'fingerprint-pending',
-          fingerprint: { sha256: 'SHA256:test', keyType: 'ssh-ed25519', status: 'pending', pinned: null },
-        }),
-        onAccept: () => {},
-        onReject: () => {},
-      }),
-    ),
-  }
-  const required = [
-    'dsh-remote-go-overlay-host',
-    'host-list',
-    'host-list-empty',
-    'host-add',
-    'host-card',
-    'host-open',
-    'host-diagnose',
-    'host-edit',
-    'host-delete',
-    'host-wizard',
-    'wizard-form',
-    'wizard-save',
-    'wizard-connect',
-    'wizard-name',
-    'wizard-address',
-    'wizard-auth',
-    'wizard-password',
-    'connect-log',
-    'connect-log-line',
-    'manage-live',
-    'diagnostics',
-    'diagnose-rerun',
-    'diagnose-copy',
-    'settings',
-    'settings-save',
-    // Key-file authentication: the default path field and its picker buttons.
-    'settings-default-key-path',
-    'settings-default-key-path-pick',
-    'wizard-key-path-pick',
-    'host-settings',
-    'error-card',
-    'error-retry',
-    'fingerprint-card',
-    'fingerprint-accept',
-    'password-prompt',
   ]
-  const ids = new Set(Object.values(markup).flatMap(testIdsOf))
-  for (const id of required) assert.ok(ids.has(id), 'missing data-testid="' + id + '"')
-  assert.match(markup.list, /data-host-id="h_test"/)
-  assert.match(markup.password, /type="password"/)
-  // With no credential store in the test composition, the prompt says so instead of
-  // promising a save it cannot perform.
-  assert.match(markup.password, /没有可用的凭据存储|凭据存储/)
+  const required =
+    'dsh-remote-go-overlay-host host-list host-list-empty host-add host-card host-open host-diagnose host-edit host-delete host-wizard wizard-form wizard-save wizard-connect wizard-name wizard-address wizard-auth wizard-password connect-log connect-log-line manage-live diagnostics diagnose-rerun diagnose-copy settings settings-save settings-default-key-path settings-default-key-path-pick wizard-key-path-pick host-settings error-card error-retry fingerprint-card fingerprint-accept password-prompt'.split(
+      ' ',
+    )
+  assert.equal(required.length, 34)
+  const ids = new Set(markup.flatMap(testIdsOf))
+  for (const id of required) assert.ok(ids.has(id), `missing data-testid="${id}"`)
+  assert.match(markup[2], /data-host-id="h_test"/)
+  assert.match(markup[9], /type="password"/)
+  assert.match(markup[9], /没有可用的凭据存储|凭据存储/)
   assert.doesNotMatch(JSON.stringify(markup), /dsh-remote-go-sidebar/)
 })
 

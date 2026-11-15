@@ -1,49 +1,16 @@
 /**
- * Remote runtime preparation, reduced to the one supported shape: run DSH with
- * `npx` pinned to the local DSH version, against the remote's real `$DSH_HOME`
- * (`~/.dsh`). There is no isolated install and no Node download — a remote that
- * cannot run `npx` fails with instructions instead.
- *
- * The planner is pure and testable; the executor only runs the planner's fixed
- * command template (design §16.8: never a user-composed shell).
+ * Remote runtime preparation: `npx` pinned to the local DSH version against the remote's real `$DSH_HOME`; the executor runs only fixed templates.
  */
 import { errors } from './errors.js'
 import { headTail, shellQuote } from './util.js'
 import { isNodeVersionSupported, normalizeVersion, parseVersion, versionsEqual } from './version.js'
 
-/**
- * @typedef {{
- *   kind: 'npx',
- *   npxPath: string,
- *   nodePath?: string,
- *   nodeBinDir?: string,
- *   targetVersion: string,
- * }} StartPlan
- * @typedef {{
- *   level: 'npx',
- *   profile: string,
- *   targetVersion: string,
- *   reason: { zh: string, en: string },
- *   start: StartPlan,
- * }} RuntimePlan
- */
-
-/** @param {import('./probe.js').ProbeFacts} facts */
 export function assertSupportedRemote(facts) {
   if (facts.os !== 'Linux') {
     throw errors.unsupportedOs(`${facts.os} ${facts.arch}`.trim())
   }
 }
 
-/**
- * Decide how to launch the remote runtime. Pure: no filesystem, no SSH.
- * @param {{
- *   facts: import('./probe.js').ProbeFacts,
- *   targetVersion: string,
- *   profile: string,
- * }} input
- * @returns {RuntimePlan}
- */
 export function planNpx(input) {
   const targetVersion = normalizeVersion(input.targetVersion)
   if (!parseVersion(targetVersion)) {
@@ -98,8 +65,6 @@ export function planNpx(input) {
  * `npm_config_loglevel=http` is deliberate: over an SSH channel npm has no TTY and
  * would otherwise print nothing until it finishes. At `http` it reports fetches
  * on stderr, which the caller turns into progress.
- * @param {RuntimePlan} plan
- * @returns {string}
  */
 export function buildPreflightCommand(plan) {
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
@@ -107,19 +72,6 @@ export function buildPreflightCommand(plan) {
 ${pathPrefix}npm_config_loglevel=http ${shellQuote(plan.start.npxPath)} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} --version`
 }
 
-/**
- * Verify that `npx` can run exactly the local DSH version. Returns the version
- * actually reported, or throws a typed error. This also warms the npx cache for
- * the detached start that follows.
- *
- * There is no deadline: a cold cache can legitimately take minutes, and a hung
- * fetch is better handled by showing its progress than by guessing a timeout.
- * The SSH channel still closes (and the promise rejects) if the transport dies.
- * @param {{ exec: (command: string, options?: any) => Promise<{ code: number | null, stdout: string, stderr: string }> }} ssh
- * @param {RuntimePlan} plan
- * @param {{ timeoutMs?: number, maxBytes?: number, onStdout?: (chunk: string) => void, onStderr?: (chunk: string) => void }} [options]
- * @returns {Promise<string>}
- */
 export async function verifyNpxVersion(ssh, plan, options = {}) {
   const result = await ssh.exec(buildPreflightCommand(plan), {
     timeoutMs: options.timeoutMs ?? 0,

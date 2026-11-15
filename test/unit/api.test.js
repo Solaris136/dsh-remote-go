@@ -2,13 +2,11 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createApi } from '../../src/api.js'
-import { FakeSsh, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 
-/** @param {any} service @param {{ diagnostics?: () => Record<string, unknown> }} [options] */
 async function startApi(service, options = {}) {
-  /** @type {import('node:http').Server} */
   let server
   const api = createApi({
     service,
@@ -34,7 +32,6 @@ async function startApi(service, options = {}) {
   }
 }
 
-/** @param {string} base @param {string} path @param {RequestInit} [init] */
 async function call(base, path, init = {}) {
   const headers = { ...HEADER, ...(init.headers ?? {}) }
   const response = await fetch(`${base}${path}`, { ...init, headers })
@@ -57,7 +54,6 @@ test('health is open, every other endpoint requires the local plugin header', as
     const healthJson = await health.json()
     assert.equal(healthJson.ok, true)
     assert.equal(typeof healthJson.version, 'string')
-
     const unauth = await fetch(`${api.base}/state`)
     assert.equal(unauth.status, 403)
     const body = await unauth.json()
@@ -103,7 +99,6 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     assert.equal(created.json.ok, true)
     const hostId = created.json.host.id
     assert.ok(hostId)
-
     const connect = await call(api.base, `/hosts/${hostId}/connect`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -112,21 +107,10 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     assert.equal(connect.status, 200)
     assert.equal(connect.json.ok, true)
     await waitFor(() => service.snapshot().hosts[0].status === 'connected')
-
     const open = await call(api.base, `/hosts/${hostId}/open`)
     assert.equal(open.status, 200)
     assert.match(open.json.url, /^http:\/\/127\.0\.0\.1:45123\/\?token=/)
     assert.equal(open.json.localPort, 45123)
-
-    const keepalive = await call(api.base, `/hosts/${hostId}/keepalive`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ keepAlive: 'idle', idleMinutes: 20 }),
-    })
-    assert.equal(keepalive.status, 200)
-    assert.equal(keepalive.json.host.keepAlive, 'idle')
-    assert.equal(keepalive.json.host.idleMinutes, 20)
-
     const disconnected = await call(api.base, `/hosts/${hostId}/disconnect`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -134,7 +118,6 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     })
     assert.equal(disconnected.status, 200)
     assert.equal(service.snapshot().hosts[0].status, 'disconnected')
-
     const removed = await call(api.base, `/hosts/${hostId}`, { method: 'DELETE' })
     assert.equal(removed.status, 200)
     assert.equal(service.snapshot().hosts.length, 0)
@@ -193,7 +176,6 @@ test('settings and local-version endpoints update the snapshot', async () => {
     })
     assert.equal(version.status, 200)
     assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
-
     const settings = await call(api.base, '/settings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -238,10 +220,8 @@ test('invalid host payloads answer 400 and unknown paths answer 404', async () =
     assert.equal(invalid.status, 400)
     assert.equal(invalid.json.ok, false)
     assert.equal(invalid.json.error.code, 'invalid-input')
-
     const missing = await call(api.base, '/nope')
     assert.equal(missing.status, 404)
-
     const badJson = await call(api.base, '/hosts', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -259,7 +239,6 @@ test('SSE /events emits the first state frame immediately', async () => {
   const api = await startApi(service)
   try {
     const controller = new AbortController()
-    // EventSource cannot set the custom header: the origin fence alone must admit it.
     const response = await fetch(`${api.base}/events`, { signal: controller.signal })
     assert.equal(response.status, 200)
     assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/)
@@ -322,8 +301,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    // v2.0 removes mirror/workspace endpoints; an unknown settings field is ignored.
-    assert.equal(result.json.apiVersion, '2.1')
+    assert.equal(result.json.apiVersion, '2.2')
   } finally {
     await api.close()
     await service.shutdown()

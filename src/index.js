@@ -1,10 +1,5 @@
 /**
- * dsh-remote-go — Host half.
- *
- * Registers the local HTTP API used by the browser panel and owns the SSH /
- * bootstrap / tunnel lifecycle. The remote DSH UI itself is rendered by the
- * remote host through a window takeover; this half never proxies UI bytes
- * (design §2, §7.0).
+ * dsh-remote-go — Host half: registers the local HTTP API the browser panel uses and owns the SSH / bootstrap / tunnel lifecycle; it never proxies UI bytes.
  */
 import { API_PREFIX, PLUGIN_ID } from './constants.js'
 import { statSync } from 'node:fs'
@@ -14,17 +9,13 @@ import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
+import { messageOf } from './util.js'
 
 export const name = PLUGIN_ID
 export const inject = ['webServer']
 
-/** Services the plugin can use when the composition provides them. */
 export const optional = ['connection', 'credentials']
 
-/**
- * @param {any} ctx Cordis context.
- * @param {Record<string, any>} [config]
- */
 export function apply(ctx, config = {}) {
   const logger = createLogger()
   const home = config.home ? String(config.home) : resolveDshHome(process.env)
@@ -99,20 +90,11 @@ export function apply(ctx, config = {}) {
   return service
 }
 
-/**
- * Live self-description for diagnostics and end-to-end acceptance: proves the
- * host row is loaded and whether the browser half is registered in the client
- * module graph (with a readable bundle path).
- * @param {any} ctx
- * @param {{ home: string, stateDir: string, localVersion: string | null, engineNodeRange?: string | null }} info
- */
-export function describeSelf(ctx, info) {
-  /** @type {Record<string, unknown>} */
+function describeSelf(ctx, info) {
   const out = {
     home: info.home,
     stateDir: info.stateDir,
     hostVersion: info.localVersion,
-    /** Local DSH `engines.node`; the managed Node version is its lower bound. */
     engineNodeRange: info.engineNodeRange ?? null,
     entry: null,
     client: null,
@@ -131,14 +113,13 @@ export function describeSelf(ctx, info) {
     const graph = clientModules?.graph?.()
     const clientPath = clientModules?.clientPath?.(PLUGIN_ID) ?? null
     const row = Array.isArray(graph?.entries) ? (graph.entries.find((item) => item.id === PLUGIN_ID) ?? null) : null
-    /** @type {Record<string, unknown> | null} */
     let bundle = null
     if (clientPath) {
       try {
         const stat = statSync(clientPath)
         bundle = { path: clientPath, size: stat.size, mtimeMs: stat.mtimeMs }
       } catch (error) {
-        bundle = { path: clientPath, error: error instanceof Error ? error.message : String(error) }
+        bundle = { path: clientPath, error: messageOf(error) }
       }
     }
     out.client = {
@@ -150,12 +131,11 @@ export function describeSelf(ctx, info) {
       bundle,
     }
   } catch (error) {
-    out.client = { error: error instanceof Error ? error.message : String(error) }
+    out.client = { error: messageOf(error) }
   }
   return out
 }
 
-/** @returns {Record<string, (...args: any[]) => void>} */
 function createLogger() {
   const tag = '[dsh-remote-go]'
   const write = (/** @type {'info'|'warn'|'error'|'debug'} */ level, /** @type {any[]} */ args) => {

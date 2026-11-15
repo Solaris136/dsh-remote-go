@@ -1,26 +1,8 @@
 /**
- * Local loopback TCP listener that pipes every connection through the SSH
- * transport (`ssh -L host:port`). The desktop guest points at this listener,
- * so cookies stay scoped to a `127.0.0.1:<port>` authority and never mix with
- * the local DSH GUI cookie (design §7.0, §9.2).
+ * Local loopback TCP listener piped through the SSH transport; the guest points at it, so its cookies never mix with the local GUI's.
  */
 import net from 'node:net'
 
-/**
- * @typedef {{
- *   ssh: { forwardOut: (destHost: string, destPort: number, srcHost?: string, srcPort?: number) => Promise<import('node:stream').Duplex> },
- *   remoteHost?: string,
- *   remotePort: number,
- *   listenHost?: string,
- *   listenPort?: number,
- *   onError?: (error: Error) => void,
- * }} TunnelOptions
- */
-
-/**
- * @param {TunnelOptions} options
- * @returns {Promise<{ localPort: number, listenHost: string, urlHost: string, connections: number, close: () => Promise<void> }>}
- */
 export async function createTunnel(options) {
   const remoteHost = options.remoteHost ?? '127.0.0.1'
   const listenHost = options.listenHost ?? '127.0.0.1'

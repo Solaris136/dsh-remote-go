@@ -1,13 +1,5 @@
 /**
- * Durable local state under `$DSH_HOME/remote-go/`:
- *  - hosts.json    — host registry (never contains passwords; pinned host keys only)
- *  - settings.json — plugin settings
- *  - secrets.json  — only when `saveTokens` is enabled; 0600, holds launch tokens
- *
- * Writes go through the shared atomic writer (`./atomic-json.js`): 0700 directory,
- * 0600 file, unique fsynced temp file, rename retry on Windows, cleanup on
- * failure, and a cross-process lock. Reads stay tolerant (a corrupt file falls
- * back to defaults instead of throwing).
+ * Durable local state under `$DSH_HOME/remote-go/`: hosts.json, settings.json and secrets.json; writes are atomic, a corrupt file falls back to defaults.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -15,12 +7,7 @@ import { readJsonFile, withProcessLock, writeJsonAtomic } from './atomic-json.js
 import { nowIso, randomId } from './util.js'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from './settings.js'
 
-/** @typedef {{ hosts: Record<string, any>[], settings: import('./settings.js').Settings }} StoreData */
-
 export class HostStore {
-  /**
-   * @param {{ dir: string, logger?: { warn: (...args: any[]) => void }, fsImpl?: typeof fs }} options
-   */
   constructor(options) {
     this.dir = options.dir
     this.logger = options.logger ?? console
@@ -28,9 +15,7 @@ export class HostStore {
     this.hostsFile = path.join(this.dir, 'hosts.json')
     this.settingsFile = path.join(this.dir, 'settings.json')
     this.secretsFile = path.join(this.dir, 'secrets.json')
-    /** @type {StoreData} */
     this.data = { hosts: [], settings: defaultSettings() }
-    /** @type {Record<string, string>} */
     this.secrets = {}
     this.loaded = false
   }
@@ -53,24 +38,11 @@ export class HostStore {
     return this.data
   }
 
-  /**
-   * @param {string} file
-   * @param {any} fallback
-   */
   async #readJson(file, fallback) {
     const result = await readJsonFile(file, { fs: this.fs, logger: this.logger })
     return result.status === 'ok' ? result.value : fallback
   }
 
-  /**
-   * Serialize one file's writes through its own cross-process lock
-   * (`<file>.lock`) and the shared atomic writer. Each state file has a distinct
-   * lock path, and no caller holds one lock while taking another (`saveSettings`
-   * writes settings then secrets sequentially), so there is no lock nesting.
-   * @param {string} file
-   * @param {unknown} value
-   * @param {number} mode
-   */
   #writeJson(file, value, mode = 0o600) {
     return withProcessLock(`${file}.lock`, { fs: this.fs, logger: this.logger }, () =>
       writeJsonAtomic(file, value, {
@@ -94,22 +66,15 @@ export class HostStore {
     await this.#writeJson(this.secretsFile, this.secrets)
   }
 
-  /** @returns {Record<string, any>[]} */
   listHosts() {
     return this.data.hosts.map((host) => ({ ...host }))
   }
 
-  /** @param {string} id */
   getHost(id) {
     const host = this.data.hosts.find((item) => item.id === id)
     return host ? { ...host } : null
   }
 
-  /**
-   * Create or update one host.
-   * @param {unknown} rawEntry
-   * @param {{ settings?: import('./settings.js').Settings }} [options]
-   */
   async upsertHost(rawEntry, options = {}) {
     await this.load()
     const existing =
@@ -123,7 +88,6 @@ export class HostStore {
     return this.getHost(entry.id)
   }
 
-  /** @param {string} id */
   async removeHost(id) {
     await this.load()
     const before = this.data.hosts.length
@@ -136,10 +100,6 @@ export class HostStore {
     return before !== this.data.hosts.length
   }
 
-  /**
-   * @param {string} id
-   * @param {Record<string, any>} patch
-   */
   async patchHost(id, patch) {
     await this.load()
     const host = this.data.hosts.find((item) => item.id === id)
@@ -149,15 +109,10 @@ export class HostStore {
     return { ...host }
   }
 
-  /** @returns {import('./settings.js').Settings} */
   getSettings() {
     return this.data.settings
   }
 
-  /**
-   * @param {unknown} raw
-   * @returns {Promise<import('./settings.js').Settings>}
-   */
   async saveSettings(raw) {
     await this.load()
     this.data.settings = sanitizeSettings({ ...this.data.settings, ...(raw && typeof raw === 'object' ? raw : {}) })
@@ -169,23 +124,13 @@ export class HostStore {
     return this.data.settings
   }
 
-  /** @param {string} hostId @param {string} token */
   async saveToken(hostId, token) {
     if (!this.data.settings.saveTokens) return
     this.secrets[hostId] = token
     await this.#persistSecrets()
   }
-
-  /** @param {string} hostId */
-  getToken(hostId) {
-    return this.data.settings.saveTokens ? (this.secrets[hostId] ?? null) : null
-  }
 }
 
-/**
- * Resolve the DSH home directory in the host plugin process.
- * @param {NodeJS.ProcessEnv} [env]
- */
 export function resolveDshHome(env = process.env) {
   const home = env.DSH_HOME && env.DSH_HOME.trim() !== '' ? env.DSH_HOME.trim() : null
   if (home) return home
@@ -193,9 +138,6 @@ export function resolveDshHome(env = process.env) {
   return path.join(userHome, '.dsh')
 }
 
-/**
- * @param {string} home
- */
 export function resolveStateDir(home) {
   return path.join(home, 'remote-go')
 }

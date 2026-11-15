@@ -60,12 +60,10 @@ test('versionParity reports same/different/unknown', () => {
   assert.equal(same.status, 'same')
   assert.equal(same.same, true)
   assert.match(same.message.zh, /一致/)
-
   const different = versionParity('0.2.2-rc.1', '0.2.1')
   assert.equal(different.status, 'different')
   assert.equal(different.same, false)
   assert.match(different.message.en, /differs/)
-
   const unknown = versionParity('0.2.2-rc.1', null)
   assert.equal(unknown.status, 'unknown')
   assert.equal(unknown.same, false)

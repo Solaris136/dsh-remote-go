@@ -1,25 +1,12 @@
 /**
- * Read-only directory browsing used by the key-file picker.
- *
- * The plugin authenticates with a private-key file only, so the client needs a way
- * to *choose* one without typing an absolute path. DSH ships a directory picker,
- * not a file picker, so the Host lists directories itself: a caller walks to a
- * folder and picks a file from it.
- *
- * Everything stays inside the user's home directory: the picker never becomes a
- * general filesystem browser, and a path that resolves outside home (through `..`
- * or a symlink) is refused rather than clamped.
+ * Read-only directory browsing for the key-file picker; a path that resolves outside the user home directory (through `..` or a symlink) is refused.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
+import { expandHome } from './util.js'
 
-/** Entries beyond this count are dropped and reported as truncated. */
 const MAX_ENTRIES = 500
 
-/**
- * @param {{ home: string, dir?: string, fsImpl?: typeof fs }} options
- * @returns {Promise<{ path: string, parent: string | null, entries: Array<{ name: string, path: string, isDirectory: boolean }>, truncated: boolean }>}
- */
 export async function listKeyFiles(options) {
   const home = path.resolve(options.home)
   const impl = options.fsImpl ?? fs
@@ -59,18 +46,4 @@ export async function listKeyFiles(options) {
     entries: shown,
     truncated: entries.length > shown.length,
   }
-}
-
-/**
- * Expand a leading `~` against the resolved home; a bare relative path stays
- * relative so the caller's `path.resolve` keeps its meaning.
- * @param {string | undefined} value
- * @param {string} home
- */
-function expandHome(value, home) {
-  if (typeof value !== 'string' || value.trim() === '') return ''
-  const trimmed = value.trim()
-  if (trimmed === '~') return home
-  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) return path.join(home, trimmed.slice(2))
-  return trimmed
 }

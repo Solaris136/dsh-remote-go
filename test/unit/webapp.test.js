@@ -24,7 +24,6 @@ import { remoteLayout } from '../../src/layout.js'
 
 const LAYOUT = remoteLayout('/home/ubuntu')
 
-/** @returns {import('../../src/bootstrap.js').RuntimePlan} */
 function npxPlan(overrides = {}) {
   return {
     level: 'npx',
@@ -72,7 +71,6 @@ test('buildBrowserCarrierProbe dumps the profile and only then writes the overla
   assert.match(script, /grep -A6 'id: api-remotes'/)
   assert.ok(script.includes('- id: api-remotes\n  disabled: false'), script)
   assert.ok(script.includes(`/home/ubuntu/.dsh/remote-go/${BROWSER_CARRIER_PATCH_FILE}`), script)
-  // The overlay is only written when the dumped profile actually disables the row.
   assert.ok(script.indexOf('disabled: true') < script.indexOf('cat >'), script)
 })
 
@@ -119,7 +117,6 @@ test('buildStartScript detaches, waits for the readiness line and records the ru
 })
 
 test('startRemoteWeb parses the combined stdout and returns pid/port/token', async () => {
-  /** @type {string[]} */
   const commands = []
   const ssh = {
     async exec(command, options) {
@@ -142,7 +139,6 @@ test('startRemoteWeb parses the combined stdout and returns pid/port/token', asy
 })
 
 test('startRemoteWeb re-enables api-remotes with --patch when the profile disables it', async () => {
-  /** @type {string[]} */
   const commands = []
   const ssh = {
     async exec(command, options) {
@@ -155,8 +151,6 @@ test('startRemoteWeb re-enables api-remotes with --patch when the profile disabl
   const info = await startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT })
   assert.equal(info.browserCarrier, 'patched')
   const start = commands.find((command) => command.includes('setsid nohup'))
-  // The script embeds the launch command through shellQuote, so the path appears
-  // escaped; the exact flag spelling is covered by the buildStartCommand test.
   assert.ok(start.includes('--patch'), start)
   assert.ok(start.includes(BROWSER_CARRIER_PATCH_FILE), start)
 })
@@ -231,7 +225,6 @@ test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL
   assert.equal(adopted.token, 'adopted')
   assert.equal(adopted.version, '0.2.2-rc.1')
   assert.equal(adopted.dshHome, '/home/ubuntu/.dsh')
-
   const dead = {
     async exec() {
       return { code: 1, stdout: '', stderr: '' }
@@ -245,7 +238,6 @@ test('adoptRemoteWeb refuses a registry from another home/profile or an older la
     { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh-remote-go/home', launch: LAUNCH_MARKER },
     { pid: 1, port: 2, profile: 'headless', dshHome: '/home/ubuntu/.dsh', launch: LAUNCH_MARKER },
     { pid: 1, port: 2, version: '0.2.2-rc.1', launch: LAUNCH_MARKER },
-    // Started before the browser-carrier overlay existed: no launch tag.
     { pid: 1, port: 2, profile: 'web', dshHome: '/home/ubuntu/.dsh', version: '0.2.2-rc.1' },
   ]) {
     const ssh = {
@@ -263,7 +255,6 @@ test('foreign DSH detection scans ps, ignores pids and respects DSH_HOME', async
   assert.match(command, /IGNORE=" 111 222 "/)
   assert.match(command, /node\|dsh\|npm\|npx/)
   assert.match(command, /DSH_HOME/)
-
   const stdout = '4242\t/bin/node /home/u/.npm/_npx/x/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web\n'
   const ssh = {
     async exec(got) {
@@ -298,7 +289,6 @@ test('stopForeignDshProcesses sends TERM/KILL and reports survivors', async () =
   assert.match(calls[0], /PIDS="42"/)
   assert.match(calls[0], /kill -TERM/)
   assert.match(calls[0], /kill -KILL/)
-
   const survivor = {
     async exec() {
       return { code: 0, stdout: 'ALIVE:42\nSTOPPED\n', stderr: '' }
@@ -320,7 +310,7 @@ test('readWebLineFromLog reads the last readiness line', async () => {
   assert.equal(parsed.port, 5000)
 })
 
-async function startFakeDsh({ xFrameOptions = null, csp = null } = {}) {
+async function startFakeDsh() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1')
     if (url.pathname === '/' && url.searchParams.has('token')) {
@@ -338,11 +328,7 @@ async function startFakeDsh({ xFrameOptions = null, csp = null } = {}) {
         res.end('unauthorized')
         return
       }
-      /** @type {Record<string, string>} */
-      const headers = { 'content-type': 'text/html; charset=utf-8' }
-      if (xFrameOptions) headers['x-frame-options'] = xFrameOptions
-      if (csp) headers['content-security-policy'] = csp
-      res.writeHead(200, headers)
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       res.end('<!doctype html><html><head><title>DSH</title></head><body>app</body></html>')
       return
     }
@@ -362,19 +348,6 @@ test('exchangeTokenOverTunnel performs the token → cookie → index handshake'
     assert.equal(result.firstStatus, 302)
     assert.equal(result.status, 200)
     assert.equal(result.title, 'DSH')
-    assert.deepEqual(result.cookieNames, ['dsh-auth-test', 'other'])
-    assert.equal(result.frameBlocked, false)
-  } finally {
-    server.close()
-  }
-})
-
-test('exchangeTokenOverTunnel flags frame-blocking headers', async () => {
-  const { server, port } = await startFakeDsh({ xFrameOptions: 'DENY' })
-  try {
-    const result = await exchangeTokenOverTunnel(port, 'tok-2')
-    assert.equal(result.frameBlocked, true)
-    assert.equal(result.xFrameOptions, 'DENY')
   } finally {
     server.close()
   }

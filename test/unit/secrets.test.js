@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSecretStore } from '../../src/secrets.js'
 
-/** A minimal in-memory stand-in for DSH's credential record space. */
 function fakeCredentials() {
   const records = new Map()
   return {
@@ -33,12 +32,10 @@ test('the secret store round-trips one password per host', async () => {
   const credentials = fakeCredentials()
   const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
   assert.equal(secrets.available(), true)
-
   assert.equal(await secrets.get('h_1'), null)
   assert.equal(await secrets.set('h_1', 's3cret'), true)
   assert.equal(await secrets.get('h_1'), 's3cret')
   assert.equal(await secrets.get('h_2'), null, 'hosts must not share a record')
-
   await secrets.remove('h_1')
   assert.equal(await secrets.get('h_1'), null)
 })
@@ -47,7 +44,6 @@ test('records are tagged as grants with a versioned payload, never a plain strin
   const credentials = fakeCredentials()
   const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
   await secrets.set('h_1', 's3cret')
-
   const [key, record] = [...credentials.records.entries()][0]
   assert.match(key, /dsh-remote-go:ssh-password:h_1/)
   assert.equal(record.kind, 'grant')

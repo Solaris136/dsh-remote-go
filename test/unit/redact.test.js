@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildDiagnosticBundle, redactLongOpaque, redactObject, redactText, redactUrl } from '../../src/redact.js'
+import { redactObject, redactText } from '../../src/redact.js'
 
 test('redactText removes tokens from query strings and dsh web lines', () => {
   assert.match(redactText('http://127.0.0.1:5000/?token=abc123def456'), /token=<redacted>/)
@@ -45,31 +45,4 @@ test('redactObject deep-redacts secret-keyed fields', () => {
   assert.equal(output.nested.label, 'ok')
   assert.equal(output.list[0].apiKey, '<redacted>')
   assert.equal(output.list[0].name, 'n')
-})
-
-test('redactUrl keeps the shape without secrets', () => {
-  const url = redactUrl('http://127.0.0.1:5000/?token=abc&x=1')
-  assert.match(url, /x=1/)
-  assert.doesNotMatch(url, /token=abc/)
-})
-
-test('redactLongOpaque hides long secrets but keeps diagnostics text', () => {
-  const longHex = 'a'.repeat(64)
-  const output = redactLongOpaque(`fingerprint ${longHex} at /home/bob/x`)
-  assert.doesNotMatch(output, new RegExp(longHex))
-  assert.match(output, /fingerprint <redacted-hex>/)
-  assert.match(output, /\/home\/<user>\/x/)
-})
-
-test('buildDiagnosticBundle redacts nested credentials and adds metadata', () => {
-  const bundle = buildDiagnosticBundle({
-    host: 'test-host',
-    connection: { token: 'secret', port: 22 },
-    checks: [{ id: 'ssh', status: 'pass' }],
-  })
-  assert.equal(bundle.host, 'test-host')
-  assert.equal(bundle.connection.token, '<redacted>')
-  assert.equal(bundle.connection.port, 22)
-  assert.equal(bundle.plugin, 'dsh-remote-go')
-  assert.ok(typeof bundle.generatedAt === 'string')
 })

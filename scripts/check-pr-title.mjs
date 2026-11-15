@@ -1,11 +1,8 @@
-// Validate a pull request title as a Conventional Commit.
-// Squash merges use the PR title as the commit subject on main, so the title is
-// gated here: type/scope prefix, subject present, sane length, no placeholder
-// text. Reads the title from PR_TITLE (CI) or the first CLI argument.
+// Validate a pull request title as a Conventional Commit — squash merges put it on main as the
+// commit subject. Reads the title from PR_TITLE (CI) or the first CLI argument.
 import process from 'node:process'
 
 const EXAMPLE = 'feat(panel): add SSH tunnel keepalive backoff'
-
 const TYPES = 'build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
 const CONVENTIONAL = new RegExp(`^(${TYPES})(\\([a-z0-9][a-z0-9-]*\\))?!?: .+$`)
 const MAX_LENGTH = 72
@@ -13,7 +10,7 @@ const WIP_PREFIX = /^wip\b/i
 
 const title = process.env.PR_TITLE ?? process.argv[2] ?? ''
 
-/** Report a validation failure and stop the run. @param {string} reason */
+/** Report a validation failure and stop the run. */
 function fail(reason) {
   console.error(`[check-pr-title] FAIL: ${reason}`)
   console.error(`[check-pr-title] example: ${EXAMPLE}`)

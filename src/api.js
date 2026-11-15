@@ -1,8 +1,5 @@
 /**
- * Local HTTP API used by the browser half (contract: docs/api.md). Mounted on
- * the local DSH Web server as a prefix route; every request must carry the
- * `x-dsh-remote-go` header and, when a browser supplies an Origin, be same-origin
- * (design §9.1: the remote UI is never exposed, only the local plugin state).
+ * Local HTTP API for the browser half (contract: docs/api.md); every request needs the marker header and, with an Origin, same-origin.
  */
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
@@ -10,77 +7,55 @@ import { nowIso } from './util.js'
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024
 
-/**
- * @param {{
- *   service: import('./service.js').RemoteGoService,
- *   getOrigin: () => string | null,
- *   logger?: { warn?: (...a: any[]) => void, error?: (...a: any[]) => void },
- *   diagnostics?: () => Record<string, unknown>,
- * }} options
- */
+/** Rows shared by the `/version` and `/diagnostics/self` responses. */
+const VERSION_ROW = { version: PLUGIN_VERSION, apiVersion: API_VERSION }
+const PLUGIN_ROW = { id: 'dsh-remote-go', version: PLUGIN_VERSION }
+
 export function createApi(options) {
   const { service } = options
   const logger = options.logger ?? console
-  /** @type {Set<import('node:http').ServerResponse>} */
   const sseClients = new Set()
 
-  const broadcastState = () => {
-    const data = JSON.stringify(service.snapshot())
+  /** Write one SSE frame to every subscriber, dropping the ones that already went away. */
+  function writeAll(frame) {
     for (const client of sseClients) {
       try {
-        client.write(`event: state\ndata: ${data}\n\n`)
+        client.write(frame)
       } catch {
         sseClients.delete(client)
       }
     }
   }
+
+  const broadcastState = () => writeAll(`event: state\ndata: ${JSON.stringify(service.snapshot())}\n\n`)
   service.on('state', broadcastState)
 
-  const heartbeat = setInterval(() => {
-    for (const client of sseClients) {
-      try {
-        client.write('event: ping\ndata: {}\n\n')
-      } catch {
-        sseClients.delete(client)
-      }
-    }
-  }, 15_000)
-  if (typeof heartbeat.unref === 'function') heartbeat.unref()
+  const heartbeat = setInterval(() => writeAll('event: ping\ndata: {}\n\n'), 15_000)
+  heartbeat.unref?.()
+
+  const crossSite = () => ({
+    ok: false,
+    status: 403,
+    error: toErrorView(
+      errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
+    ),
+  })
 
   /**
    * Browser trust for same-origin reads (used by SSE, which cannot set custom
    * headers): an absent Origin is a non-browser local caller; a present Origin
    * must be this GUI's origin and the request must not be cross-site.
-   * @param {import('node:http').IncomingMessage} req
    */
   function authorizeOrigin(req) {
     const origin = req.headers.origin
     if (typeof origin === 'string' && origin !== '') {
       const expected = options.getOrigin()
-      if (!expected || origin.replace(/\/$/, '') !== expected.replace(/\/$/, '')) {
-        return {
-          ok: false,
-          status: 403,
-          error: toErrorView(
-            errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
-          ),
-        }
-      }
+      if (!expected || origin.replace(/\/$/, '') !== expected.replace(/\/$/, '')) return crossSite()
     }
-    const secFetchSite = req.headers['sec-fetch-site']
-    if (secFetchSite === 'cross-site') {
-      return {
-        ok: false,
-        status: 403,
-        error: toErrorView(
-          errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
-        ),
-      }
-    }
+    if (req.headers['sec-fetch-site'] === 'cross-site') return crossSite()
     return { ok: true }
   }
 
-  /** @param {import('node:http').IncomingMessage} req */
   function authorize(req) {
     const origin = authorizeOrigin(req)
     if (!origin.ok) return origin
@@ -99,10 +74,8 @@ export function createApi(options) {
     return { ok: true }
   }
 
-  /** @param {import('node:http').IncomingMessage} req */
   function readJson(req) {
     return new Promise((resolve, reject) => {
-      /** @type {Buffer[]} */
       const chunks = []
       let size = 0
       req.on('data', (chunk) => {
@@ -132,7 +105,6 @@ export function createApi(options) {
     })
   }
 
-  /** @param {import('node:http').ServerResponse} res @param {number} status @param {Record<string, unknown>} payload */
   function sendJson(res, status, payload) {
     const body = JSON.stringify(payload)
     res.writeHead(status, {
@@ -143,7 +115,6 @@ export function createApi(options) {
     res.end(body)
   }
 
-  /** @param {import('node:http').IncomingMessage} req @param {import('node:http').ServerResponse} res */
   function handleSse(req, res) {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -158,10 +129,96 @@ export function createApi(options) {
     })
   }
 
-  /**
-   * @param {import('node:http').IncomingMessage} req
-   * @param {import('node:http').ServerResponse} res
-   */
+  // One entry per route: `(req, url) => response body`. The dispatcher owns auth,
+  // init, status codes and the error envelope, so handlers only shape data.
+  const ROUTES = {
+    'GET /health': () => ({ ok: true, version: PLUGIN_VERSION, at: nowIso() }),
+    'GET /state': () => ({ ok: true, state: service.snapshot() }),
+    'GET /version': () => ({ ok: true, ...VERSION_ROW, hostVersion: service.localVersion }),
+    'GET /ssh/aliases': async () => ({ ok: true, ...(await service.discoverSshAliases()) }),
+    'GET /keyfile/list': async (req, url) => ({
+      ok: true,
+      ...(await service.listKeyFiles(url.searchParams.get('path') ?? '')),
+    }),
+    'GET /diagnostics/self': () => ({
+      ok: true,
+      plugin: PLUGIN_ROW,
+      at: nowIso(),
+      ...(typeof options.diagnostics === 'function' ? options.diagnostics() : {}),
+    }),
+    'POST /hosts': async (req) => {
+      const body = await readJson(req)
+      return { ok: true, host: await service.saveHost(body.host ?? body) }
+    },
+    'POST /settings': async (req) => {
+      const body = await readJson(req)
+      return { ok: true, settings: await service.saveSettings(body.patch ?? body) }
+    },
+    'POST /local-version': async (req) => {
+      const { version } = await readJson(req)
+      service.setLocalVersion(String(version ?? ''), 'client')
+      return { ok: true }
+    },
+    'POST /active': async (req) => {
+      const { id } = await readJson(req)
+      service.setActiveHost(typeof id === 'string' ? id : null)
+      return { ok: true }
+    },
+  }
+
+  // `/hosts/:id` and `/hosts/:id/<action>`, keyed the same way.
+  const HOST_ACTIONS = {
+    DELETE: async (id) => {
+      await service.removeHost(id)
+      return { ok: true }
+    },
+    'POST connect': async (id, req) => {
+      const body = await readJson(req)
+      const result = await service.connect(id, {
+        password: typeof body.password === 'string' ? body.password : undefined,
+        rememberPassword: body.rememberPassword === true,
+      })
+      return { ok: true, ...result }
+    },
+    'POST conflict': async (id, req) => {
+      const { action } = await readJson(req)
+      return { ok: true, ...(await service.confirmConflict(id, { action })) }
+    },
+    'POST disconnect': async (id, req) => {
+      const { stopRemote } = await readJson(req)
+      await service.disconnect(id, { stopRemote: stopRemote === true })
+      return { ok: true }
+    },
+    'POST reconnect': async (id) => {
+      await service.reconnect(id)
+      return { ok: true }
+    },
+    'POST fingerprint': async (id, req) => {
+      const body = await readJson(req)
+      await service.confirmFingerprint(id, {
+        accept: body.accept === true,
+        remember: body.remember === true,
+        sha256: typeof body.sha256 === 'string' ? body.sha256 : undefined,
+      })
+      return { ok: true }
+    },
+    'POST diagnose': async (id) => ({ ok: true, report: await service.diagnose(id) }),
+    'GET open': (id) => ({ ok: true, ...service.openInfo(id) }),
+    'POST activate': (id) => {
+      service.setActiveHost(id)
+      return { ok: true }
+    },
+  }
+
+  /** Resolve `/hosts/:id[/action]` to `{ id, run }`, or null for an unknown shape. */
+  function hostHandler(hostPath, method) {
+    const segments = hostPath.split('/').filter(Boolean)
+    if (segments[0] !== 'hosts' || segments.length < 2) return null
+    const key = segments[2] ? `${method} ${segments[2]}` : method
+    if (!Object.hasOwn(HOST_ACTIONS, key)) return null
+    return { id: decodeURIComponent(segments[1]), run: HOST_ACTIONS[key] }
+  }
+
   async function handler(req, res) {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
@@ -176,7 +233,7 @@ export function createApi(options) {
       const method = (req.method ?? 'GET').toUpperCase()
 
       if (path === '/health' && method === 'GET') {
-        sendJson(res, 200, { ok: true, version: PLUGIN_VERSION, at: nowIso() })
+        sendJson(res, 200, ROUTES['GET /health']())
         return
       }
 
@@ -201,145 +258,17 @@ export function createApi(options) {
       }
 
       await service.init()
-      const segments = path.split('/').filter(Boolean)
 
-      if (method === 'GET' && path === '/state') {
-        sendJson(res, 200, { ok: true, state: service.snapshot() })
-        return
-      }
-      if (method === 'GET' && path === '/ssh/aliases') {
-        sendJson(res, 200, { ok: true, ...(await service.discoverSshAliases()) })
-        return
-      }
-      // Read-only directory browsing so the client can pick a private-key file
-      // instead of typing an absolute path (contract: key-file picker).
-      if (method === 'GET' && path === '/keyfile/list') {
-        sendJson(res, 200, { ok: true, ...(await service.listKeyFiles(url.searchParams.get('path') ?? '')) })
-        return
-      }
-      if (method === 'POST' && path === '/hosts') {
-        const body = await readJson(req)
-        const host = await service.saveHost(body.host ?? body)
-        sendJson(res, 200, { ok: true, host })
-        return
-      }
-      if (method === 'POST' && path === '/settings') {
-        const body = await readJson(req)
-        const settings = await service.saveSettings(body.patch ?? body)
-        sendJson(res, 200, { ok: true, settings })
-        return
-      }
-      if (method === 'POST' && path === '/local-version') {
-        const body = await readJson(req)
-        service.setLocalVersion(String(body.version ?? ''), 'client')
-        sendJson(res, 200, { ok: true })
-        return
-      }
-      if (method === 'POST' && path === '/active') {
-        const body = await readJson(req)
-        service.setActiveHost(typeof body.id === 'string' ? body.id : null)
-        sendJson(res, 200, { ok: true })
-        return
-      }
-      if (method === 'GET' && path === '/version') {
-        sendJson(res, 200, {
-          ok: true,
-          version: PLUGIN_VERSION,
-          apiVersion: API_VERSION,
-          hostVersion: service.localVersion,
-        })
-        return
-      }
-      if (method === 'GET' && path === '/diagnostics/self') {
-        const extra = typeof options.diagnostics === 'function' ? options.diagnostics() : {}
-        sendJson(res, 200, {
-          ok: true,
-          plugin: { id: 'dsh-remote-go', version: PLUGIN_VERSION },
-          at: nowIso(),
-          ...extra,
-        })
+      const routeKey = `${method} ${path}`
+      if (Object.hasOwn(ROUTES, routeKey)) {
+        sendJson(res, 200, await ROUTES[routeKey](req, url))
         return
       }
 
-      if (segments[0] === 'hosts' && segments.length >= 2) {
-        const id = decodeURIComponent(segments[1])
-        const action = segments[2] ?? null
-        if (method === 'DELETE' && action === null) {
-          await service.removeHost(id)
-          sendJson(res, 200, { ok: true })
-          return
-        }
-        if (method === 'POST' && action === 'connect') {
-          const body = await readJson(req)
-          const result = await service.connect(id, {
-            password: typeof body.password === 'string' ? body.password : undefined,
-            rememberPassword: body.rememberPassword === true,
-            rememberFingerprint: body.rememberFingerprint !== false,
-          })
-          sendJson(res, 200, { ok: true, ...result })
-          return
-        }
-        if (method === 'POST' && action === 'conflict') {
-          const body = await readJson(req)
-          const result = await service.confirmConflict(id, { action: body.action })
-          sendJson(res, 200, { ok: true, ...result })
-          return
-        }
-        // Remember (or forget) the SSH password in the credential store. The value
-        // never enters hosts.json; `available:false` means nothing can be persisted.
-        if (method === 'POST' && action === 'password') {
-          const body = await readJson(req)
-          const result = await service.saveHostPassword(id, {
-            password: typeof body.password === 'string' ? body.password : undefined,
-            clear: body.clear === true,
-          })
-          sendJson(res, 200, { ok: true, ...result })
-          return
-        }
-        if (method === 'POST' && action === 'disconnect') {
-          const body = await readJson(req)
-          await service.disconnect(id, { stopRemote: body.stopRemote === true })
-          sendJson(res, 200, { ok: true })
-          return
-        }
-        if (method === 'POST' && action === 'reconnect') {
-          await service.reconnect(id)
-          sendJson(res, 200, { ok: true })
-          return
-        }
-        if (method === 'POST' && action === 'fingerprint') {
-          const body = await readJson(req)
-          await service.confirmFingerprint(id, {
-            accept: body.accept === true,
-            remember: body.remember === true,
-            sha256: typeof body.sha256 === 'string' ? body.sha256 : undefined,
-          })
-          sendJson(res, 200, { ok: true })
-          return
-        }
-        if (method === 'POST' && action === 'diagnose') {
-          const report = await service.diagnose(id)
-          sendJson(res, 200, { ok: true, report })
-          return
-        }
-        if (method === 'GET' && action === 'open') {
-          sendJson(res, 200, { ok: true, ...service.openInfo(id) })
-          return
-        }
-        if (method === 'POST' && action === 'keepalive') {
-          const body = await readJson(req)
-          const host = await service.updateHostPolicy(id, {
-            keepAlive: body.keepAlive,
-            idleMinutes: body.idleMinutes,
-          })
-          sendJson(res, 200, { ok: true, host })
-          return
-        }
-        if (method === 'POST' && action === 'activate') {
-          service.setActiveHost(id)
-          sendJson(res, 200, { ok: true })
-          return
-        }
+      const host = hostHandler(path, method)
+      if (host) {
+        sendJson(res, 200, await host.run(host.id, req))
+        return
       }
 
       sendJson(res, 404, {
@@ -368,9 +297,7 @@ export function createApi(options) {
       for (const client of sseClients) {
         try {
           client.end()
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
       sseClients.clear()
     },

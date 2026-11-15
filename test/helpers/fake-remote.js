@@ -1,7 +1,3 @@
-/**
- * Shared fakes for service/API tests: no real SSH, no real remote host.
- * The shapes mirror what ssh.js / probe.js / webapp.js return.
- */
 import { EventEmitter } from 'node:events'
 import { Duplex } from 'node:stream'
 import { mkdtemp } from 'node:fs/promises'
@@ -10,7 +6,6 @@ import path from 'node:path'
 import { HostStore } from '../../src/store.js'
 import { RemoteGoService } from '../../src/service.js'
 
-/** @param {import('../../src/probe.js').ProbeFacts} overrides */
 export function makeFacts(overrides = {}) {
   return {
     os: 'Linux',
@@ -37,9 +32,6 @@ export function makeFacts(overrides = {}) {
 }
 
 export class FakeSsh extends EventEmitter {
-  /**
-   * @param {{ exec?: (command: string, options?: any) => Promise<any>, connect?: () => Promise<any>, onConnectRequest?: (options: any) => void, options?: any }} input
-   */
   constructor(input = {}) {
     super()
     this.connected = false
@@ -50,19 +42,16 @@ export class FakeSsh extends EventEmitter {
     this.connectImpl = input.connect
     this.onConnectRequest = input.onConnectRequest
   }
-
   async connect() {
     this.onConnectRequest?.(this.options)
     if (this.connectImpl) return this.connectImpl()
     this.connected = true
     return { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
   }
-
   async exec(command, options = {}) {
     this.calls.push({ command, options })
     return this.execImpl(command, options)
   }
-
   async forwardOut() {
     return new Duplex({
       read() {},
@@ -71,13 +60,11 @@ export class FakeSsh extends EventEmitter {
       },
     })
   }
-
   async dispose() {
     this.disposed = true
     this.connected = false
     this.emit('close')
   }
-
   simulateClose() {
     this.connected = false
     this.emit('close')
@@ -94,7 +81,6 @@ export class FakeTunnel {
   }
 }
 
-/** The managed Node path the fake provisioner reports. */
 export function managedNodeFixture(version = '24.9.0') {
   const dir = `/home/ubuntu/.dsh/remote-go/node/v${version}`
   return {
@@ -108,26 +94,6 @@ export function managedNodeFixture(version = '24.9.0') {
   }
 }
 
-/**
- * Build a service wired to fakes plus the pieces a test wants to observe.
- * @param {{
- *   facts?: any,
- *   ensureNode?: any,
- *   startWeb?: any,
- *   sshFactory?: any,
- *   tunnelFactory?: any,
- *   waitUi?: any,
- *   exchange?: any,
- *   adopt?: any,
- *   findForeign?: any,
- *   stopForeign?: any,
- *   readRegistry?: any,
- *   localVersion?: string | null,
- *   engineNodeRange?: string | null,
- *   hostKeyConfirmTimeoutMs?: number,
- *   sessionAdapter?: any,
- * }} [overrides]
- */
 export async function makeTestService(overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-'))
   const store = new HostStore({ dir, logger: { warn() {}, info() {}, debug() {}, error() {} } })
@@ -176,12 +142,9 @@ export async function makeTestService(overrides = {}) {
       (async () => ({
         ok: true,
         firstStatus: 302,
-        cookieNames: ['dsh-auth-test'],
         location: './',
         status: 200,
         title: 'DSH',
-        frameBlocked: false,
-        xFrameOptions: null,
         csp: null,
         bodyLength: 1024,
       })),
@@ -200,16 +163,10 @@ export async function makeTestService(overrides = {}) {
   return { service, store, dir, events, facts }
 }
 
-/**
- * Wait for a predicate with a short timeout.
- * @param {() => boolean | Promise<boolean>} predicate
- * @param {{ timeoutMs?: number, intervalMs?: number, label?: string }} [options]
- */
 export async function waitFor(predicate, options = {}) {
   const timeoutMs = options.timeoutMs ?? 4000
   const intervalMs = options.intervalMs ?? 10
   const started = Date.now()
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     if (await predicate()) return true
     if (Date.now() - started > timeoutMs)
@@ -218,7 +175,6 @@ export async function waitFor(predicate, options = {}) {
   }
 }
 
-/** Create a host entry for tests. */
 export async function createHost(service, overrides = {}) {
   return service.saveHost({
     name: 'Tencent VM',

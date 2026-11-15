@@ -11,15 +11,10 @@ test('defaultSettings matches the documented defaults', () => {
   assert.equal(settings.saveTokens, false)
   assert.equal(settings.autoReconnect.enabled, true)
   assert.equal(settings.bootstrap.profile, 'web')
-  // The remote state directory is fixed (`~/.dsh/remote-go`), so it is no longer
-  // a setting at all: a saved value must not survive sanitization.
   assert.equal('remoteDir' in settings.bootstrap, false)
 })
 
 test('the retired presentation mode is gone from settings entirely', () => {
-  // The embedded panel and the separate local-browser-window mode are both
-  // retired: the window takeover is the only presentation, so there is no mode
-  // field left to choose, migrate or validate.
   assert.equal('windowMode' in defaultSettings(), false)
   assert.equal('windowMode' in sanitizeSettings({ windowMode: 'panel' }), false)
   assert.equal('windowMode' in sanitizeSettings({ windowMode: 'overlay' }), false)
@@ -44,7 +39,6 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.equal(settings.bootstrap.profile, 'web')
   assert.equal('remoteDir' in settings.bootstrap, false)
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
-  // A malformed value falls back to the documented default (off since 0.1.0).
 })
 
 test('sanitizeHostEntry validates and normalizes a first host', () => {
@@ -104,7 +98,6 @@ test('sanitizeHostEntry fills defaults from settings and existing values', () =>
   assert.equal(entry.auth.type, 'password')
   assert.equal(entry.keepAlive, 'keep')
   assert.equal(entry.autoReconnect, true)
-  // Runtime configuration is global settings, not per host.
   assert.equal('bootstrap' in entry, false)
 })
 
