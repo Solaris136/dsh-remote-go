@@ -106,6 +106,11 @@
 
 ### 构建 / CI
 
+- **集成套件登记守卫与统一门禁入口**：`check-repo` 枚举 `test/integration/*.test.js` / `*.e2e.js`，凡是既不在
+  `test:integration:local`、也不在 `test:integration:external` 里（且不在 acceptance 白名单 `desktop.e2e.js`）的
+  套件直接失败并提示该加到哪里；CI 的 `Verify` 与 `release` 都真正执行同一个 `pnpm run gate`，以后只往 gate
+  加检查时 CI 不会漏跑。E2E 的就绪等待统一走 `harness-support.js` 的 `waitFor`（定时轮询，避免后台页暂停
+  requestAnimationFrame 造成的假超时）。
 - **PR 上的端到端测试不再静默跳过**：`ci.yml` 把集成测试拆成「无外部依赖」（模拟远端、重启、关闭远端）与
   「需 harness / 浏览器」（同源代理、`dsh web`、浏览器载体、guest 工具、关闭远端的浏览器流程）两组，清单放在
   `package.json` 的 `test:integration:local` / `test:integration:external`，CI 与 release 共用；后者安装按

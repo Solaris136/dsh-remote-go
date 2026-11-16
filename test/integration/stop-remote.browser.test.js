@@ -5,7 +5,7 @@ import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { resolveBrowser, skipOrFail } from './harness-support.js'
+import { resolveBrowser, skipOrFail, waitFor } from './harness-support.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const CLIENT_PATH = path.join(ROOT, 'client.js')
@@ -226,7 +226,7 @@ window.ReactDOM = { createRoot }`,
   page.on('pageerror', (error) => errors.push(String(error?.message ?? error)))
   try {
     await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-    await page.waitForFunction(() => document.querySelector('[data-testid="host-stop-remote"]') !== null, {
+    await waitFor(page, () => document.querySelector('[data-testid="host-stop-remote"]') !== null, {
       timeout: 15_000,
     })
     assert.equal(
@@ -236,14 +236,14 @@ window.ReactDOM = { createRoot }`,
 
     await t.test('the card action asks for confirmation and cancel is non-destructive', async () => {
       await page.click('[data-testid="host-stop-remote"]')
-      await page.waitForFunction(() => document.querySelector('[data-testid="stop-remote-dialog"]') !== null)
+      await waitFor(page, () => document.querySelector('[data-testid="stop-remote-dialog"]') !== null)
       const dialog = await page.$eval('[data-testid="stop-remote-dialog"]', (node) => node.textContent)
       assert.match(dialog, /关闭远端 DSH？/)
       assert.match(dialog, /会停止远端 DSH 进程/)
       assert.match(dialog, /重连/)
       assert.equal(await page.evaluate(() => window.__stopCalls.length), 0, 'opening the dialog must not call the API')
       await page.click('[data-testid="stop-remote-cancel"]')
-      await page.waitForFunction(() => document.querySelector('[data-testid="stop-remote-dialog"]') === null)
+      await waitFor(page, () => document.querySelector('[data-testid="stop-remote-dialog"]') === null)
       assert.equal(await page.evaluate(() => window.__stopCalls.length), 0, 'cancel must not call the API')
       assert.equal(
         await page.$eval('[data-testid="host-stop-remote"]', (node) => node.disabled),
@@ -254,9 +254,9 @@ window.ReactDOM = { createRoot }`,
 
     await t.test('confirming posts the stop action and shows its progress', async () => {
       await page.click('[data-testid="host-stop-remote"]')
-      await page.waitForFunction(() => document.querySelector('[data-testid="stop-remote-confirm"]') !== null)
+      await waitFor(page, () => document.querySelector('[data-testid="stop-remote-confirm"]') !== null)
       await page.click('[data-testid="stop-remote-confirm"]')
-      await page.waitForFunction(() => window.__stopCalls.length === 1, { timeout: 10_000 })
+      await waitFor(page, () => window.__stopCalls.length === 1, { timeout: 10_000 })
       const call = await page.evaluate(() => ({
         url: window.__stopCalls[0].url,
         method: window.__stopCalls[0].init.method,
@@ -264,7 +264,8 @@ window.ReactDOM = { createRoot }`,
       assert.match(call.url, /\/hosts\/h_a\/stop-remote$/)
       assert.equal(call.method, 'POST')
       // While the Host works, the card carries the stopping progress and the action is disabled.
-      await page.waitForFunction(
+      await waitFor(
+        page,
         () =>
           document.querySelector('[data-progress="stopping-remote"]') !== null &&
           document.querySelector('[data-testid="host-stop-remote"]')?.textContent.includes('正在关闭远端 DSH'),
@@ -284,7 +285,7 @@ window.ReactDOM = { createRoot }`,
 
     await t.test('the finished stop leaves a disconnected card that can be reconnected', async () => {
       await page.evaluate(() => window.__resolveStop())
-      await page.waitForFunction(() => document.querySelector('[data-testid="stop-remote-dialog"]') === null, {
+      await waitFor(page, () => document.querySelector('[data-testid="stop-remote-dialog"]') === null, {
         timeout: 10_000,
       })
       // The Host's next state frame after the stop: no remote process, still the same host.
@@ -299,7 +300,8 @@ window.ReactDOM = { createRoot }`,
           })),
         ),
       )
-      await page.waitForFunction(
+      await waitFor(
+        page,
         () =>
           document.querySelector('[data-testid="host-stop-remote"]') === null &&
           document.querySelector('[data-status="disconnected"]') !== null,

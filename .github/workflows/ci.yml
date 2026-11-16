@@ -102,8 +102,12 @@ jobs:
         id: chrome
         uses: browser-actions/setup-chrome@v2
 
-      - name: Unit tests with coverage floors
-        run: pnpm run test:coverage
+      # The single entry point release.yml also uses: repository conventions, formatting,
+      # syntax, workflows, market entry, packaging coverage and the coverage floors. The
+      # granular steps above keep failures readable; this step guarantees a check added to
+      # `gate` can never be absent from CI.
+      - name: Repository gate (same entry point as release)
+        run: pnpm run gate
 
       # Simulated remote, restart and stop-remote: real SSH in-process, no external
       # harness or browser. The explicit lists live in package.json so CI and release
@@ -119,12 +123,6 @@ jobs:
           DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         run: pnpm run test:integration:external
-
-      - name: Validate bundle metadata and market index entry
-        run: pnpm run market:check
-
-      - name: Check file coverage
-        run: pnpm run pack:check
 
       - name: Pack and validate the tarball
         run: |

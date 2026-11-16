@@ -133,6 +133,35 @@ if (pkg === null) {
     )
   }
 
+  // 2b. Integration suite classification. The PR/release gate runs explicit lists because
+  // strict-mode coverage must differ per suite; a suite nobody lists silently stops running.
+  // Every test suite must therefore be in one of the shared group scripts, or explicitly
+  // owned by acceptance.yml.
+  const ACCEPTANCE_ONLY_SUITES = new Set(['test/integration/desktop.e2e.js'])
+  const GROUP_SCRIPTS = ['test:integration:local', 'test:integration:external']
+  const groupCommands = GROUP_SCRIPTS.map((name) => pkg.scripts?.[name])
+  for (const [index, name] of GROUP_SCRIPTS.entries()) {
+    check(
+      typeof groupCommands[index] === 'string' && groupCommands[index].trim() !== '',
+      `package.json: missing "${name}" script (CI and release share these suite lists)`,
+    )
+  }
+  const suiteText = groupCommands.filter((command) => typeof command === 'string').join('\n')
+  const suiteFiles = (await readdir(abs('test/integration'), { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isFile() && /\.(?:test|e2e)\.js$/.test(entry.name))
+    .map((entry) => `test/integration/${entry.name}`)
+    .sort()
+  for (const file of suiteFiles) {
+    if (ACCEPTANCE_ONLY_SUITES.has(file)) {
+      pass()
+      continue
+    }
+    check(
+      suiteText.includes(file),
+      `${file}: no integration group runs this suite; add it to "test:integration:local" (no external harness) or "test:integration:external" (harness/browser) in package.json, or to ACCEPTANCE_ONLY_SUITES when acceptance.yml owns it`,
+    )
+  }
+
   // 3. Version parity with the market entry and the changelog
   if (version !== '') {
     const pluginEntry = await readJson('market/plugin-entry.json')
@@ -171,8 +200,10 @@ if (pkg === null) {
     if (constants === null) fail('src/constants.js: missing or unreadable (PLUGIN_VERSION cannot be verified)')
     else {
       // Anchored to a real top-level declaration: a commented-out or doc mention of
-      // PLUGIN_VERSION must not satisfy (or break) the version-parity check.
-      const declared = /^\s*export\s+const\s+PLUGIN_VERSION\s*=\s*(['"])([^'"]+)\1\s*$/m.exec(constants)?.[2] ?? null
+      // PLUGIN_VERSION must not satisfy (or break) the version-parity check. A trailing
+      // `// comment` on the declaration line is allowed.
+      const declared =
+        /^\s*export\s+const\s+PLUGIN_VERSION\s*=\s*(['"])([^'"]+)\1(?:\s*\/\/.*)?\s*$/m.exec(constants)?.[2] ?? null
       check(
         declared === version,
         `src/constants.js: PLUGIN_VERSION is ${JSON.stringify(declared)}, expected ${JSON.stringify(version)} from package.json; set PLUGIN_VERSION in src/constants.js to ${JSON.stringify(version)}`,

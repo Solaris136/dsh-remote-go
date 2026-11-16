@@ -6,7 +6,7 @@ import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { makeTempRoot, resolveBrowser, resolveDshCli, skipOrFail, stopChild, tail } from './harness-support.js'
+import { makeTempRoot, resolveBrowser, resolveDshCli, skipOrFail, stopChild, tail, waitFor } from './harness-support.js'
 import { createRemoteProxy } from '../../src/remote-proxy.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -472,7 +472,7 @@ window.ReactDOM = { createRoot }`,
       })
       page.on('pageerror', (error) => errors.push(String(error?.message ?? error)))
       await page.goto(`http://127.0.0.1:${localPort}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-      await page.waitForFunction(() => Boolean(window.__harness), { timeout: 15_000, polling: 250 })
+      await waitFor(page, () => Boolean(window.__harness), { timeout: 15_000 })
       assert.equal(
         await page.evaluate(() => window.__harness.plugin.carrier.surface()),
         'web',
@@ -486,7 +486,8 @@ window.ReactDOM = { createRoot }`,
       assert.equal(opened.ok, true)
 
       // The remote UI boots inside the frame and the host row is injected into its sidebar.
-      await page.waitForFunction(
+      await waitFor(
+        page,
         () => {
           try {
             const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
@@ -495,7 +496,7 @@ window.ReactDOM = { createRoot }`,
             return false
           }
         },
-        { timeout: 45_000, polling: 250 },
+        { timeout: 45_000 },
       )
       await page.evaluate(() => {
         window.__harness.plugin.carrier.update({
@@ -503,7 +504,8 @@ window.ReactDOM = { createRoot }`,
           current: 'h_a',
         })
       })
-      await page.waitForFunction(
+      await waitFor(
+        page,
         () => {
           try {
             const row = document
@@ -514,7 +516,7 @@ window.ReactDOM = { createRoot }`,
             return false
           }
         },
-        { timeout: 15_000, polling: 250 },
+        { timeout: 15_000 },
       )
       const frameState = await page.evaluate(() => {
         const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
@@ -650,7 +652,7 @@ window.ReactDOM = { createRoot }`,
         return { x: base.left + rect.left + rect.width / 2, y: base.top + rect.top + rect.height / 2 }
       })
       await page.mouse.click(copyPoint.x, copyPoint.y)
-      await page.waitForFunction(() => window.__frameCopy !== null, { timeout: 10_000, polling: 250 })
+      await waitFor(page, () => window.__frameCopy !== null, { timeout: 10_000 })
       assert.equal(await page.evaluate(() => window.__frameCopy), 'ok', 'the bridge must report a real write')
       assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'drg-e2e-clipboard')
       await page.evaluate(() => {
@@ -692,11 +694,11 @@ window.ReactDOM = { createRoot }`,
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
       })
-      await overlayPage.waitForFunction(
-        () => Boolean(window.__overlay) && window.__overlay.plugin.carrier.shown() === 'h_a',
-        { timeout: 30_000, polling: 250 },
-      )
-      await overlayPage.waitForFunction(
+      await waitFor(overlayPage, () => Boolean(window.__overlay) && window.__overlay.plugin.carrier.shown() === 'h_a', {
+        timeout: 30_000,
+      })
+      await waitFor(
+        overlayPage,
         () => {
           try {
             const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
@@ -710,7 +712,7 @@ window.ReactDOM = { createRoot }`,
             return false
           }
         },
-        { timeout: 45_000, polling: 250 },
+        { timeout: 45_000 },
       )
       const overlayState = await overlayPage.evaluate(() => {
         const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
@@ -735,9 +737,8 @@ window.ReactDOM = { createRoot }`,
         )
         local.click()
       })
-      await overlayPage.waitForFunction(() => window.__overlay.plugin.carrier.shown() === null, {
+      await waitFor(overlayPage, () => window.__overlay.plugin.carrier.shown() === null, {
         timeout: 10_000,
-        polling: 250,
       })
       const overlayErrorsFiltered = overlayErrors.filter((text) => !/Failed to load resource/.test(text))
       assert.deepEqual(overlayErrorsFiltered, [], `overlay page errors: ${overlayErrorsFiltered.join(' | ')}`)
@@ -760,7 +761,7 @@ window.ReactDOM = { createRoot }`,
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
       })
-      await desktopPage.waitForFunction(() => Boolean(window.__harness), { timeout: 15_000, polling: 250 })
+      await waitFor(desktopPage, () => Boolean(window.__harness), { timeout: 15_000 })
       assert.equal(
         await desktopPage.evaluate(() => window.__harness.plugin.carrier.surface()),
         'desktop',
@@ -773,7 +774,8 @@ window.ReactDOM = { createRoot }`,
       // The guest committed the remote document, the plugin taught it the desktop grid, and the
       // remote sidebar rendered (the toggle survives the collapse this test drives).
       try {
-        await desktopPage.waitForFunction(
+        await waitFor(
+          desktopPage,
           () => {
             const seat = document.querySelector('[data-guest-seat]')
             const guest = seat && seat.contentDocument
@@ -783,7 +785,7 @@ window.ReactDOM = { createRoot }`,
               guest.querySelector('[data-sidebar-toggle]'),
             )
           },
-          { timeout: 60_000, polling: 250 },
+          { timeout: 60_000 },
         )
       } catch (error) {
         const state = await desktopPage.evaluate(() => {
@@ -805,7 +807,8 @@ window.ReactDOM = { createRoot }`,
         if (guest.querySelector('[data-sidebar-collapsed]') !== null)
           guest.querySelector('[data-sidebar-toggle]').click()
       })
-      await desktopPage.waitForFunction(
+      await waitFor(
+        desktopPage,
         () => {
           const guest = document.querySelector('[data-guest-seat]').contentDocument
           return (
@@ -813,7 +816,7 @@ window.ReactDOM = { createRoot }`,
             Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left) === 48
           )
         },
-        { timeout: 10_000, polling: 250 },
+        { timeout: 10_000 },
       )
       const expanded = await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
@@ -842,11 +845,12 @@ window.ReactDOM = { createRoot }`,
         const guest = document.querySelector('[data-guest-seat]').contentDocument
         guest.querySelector('[data-sidebar-toggle]').click()
       })
-      await desktopPage.waitForFunction(
+      await waitFor(
+        desktopPage,
         () =>
           document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') !==
           null,
-        { timeout: 10_000, polling: 250 },
+        { timeout: 10_000 },
       )
       // The guest reports through the row's 400ms poll, so the host catches up within one cycle.
       // The overlap during that cycle is the documented transient (docs/design.md §4.2): this
@@ -894,11 +898,12 @@ window.ReactDOM = { createRoot }`,
         const guest = document.querySelector('[data-guest-seat]').contentDocument
         guest.querySelector('[data-sidebar-toggle]').click()
       })
-      await desktopPage.waitForFunction(
+      await waitFor(
+        desktopPage,
         () =>
           document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') ===
           null,
-        { timeout: 10_000, polling: 250 },
+        { timeout: 10_000 },
       )
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const reExpanded = await desktopPage.evaluate(() => ({
