@@ -5780,9 +5780,11 @@ window.__ModuleLoader__.load({
 
       // Fetch `GET /hosts/:id/open` only for a host that is up and not already warm for this
       // attach: the carrier needs the launch-token URL once, and a warm window is shown without it.
+      // A cached URL from an older `viewRev` is stale even for the same host (its token and
+      // tunnel are gone), so it is refetched rather than replayed.
       useEffect(() => {
         if (target === null || carrierHoldsView(target, activeViewRev)) return undefined
-        if (remoteUrl !== null && remoteUrl.hostId === target) return undefined
+        if (remoteUrl !== null && remoteUrl.hostId === target && remoteUrl.viewRev === activeViewRev) return undefined
         if (activeStatus !== 'connected') return undefined
         let cancelled = false
         api.openHost(target).then(
@@ -5818,6 +5820,8 @@ window.__ModuleLoader__.load({
         // The launch URL for *this* host is still being fetched: keep the current carrier up
         // so switching does not flash the local UI behind it.
         if (remoteUrl === null || remoteUrl.hostId !== target) return
+        // Never replay a launch URL issued for an older attach (its token and tunnel are gone).
+        if (activeViewRev !== null && remoteUrl.viewRev !== activeViewRev) return
         const surface = carrierSurface()
         const carrierUrl = surface === 'desktop' ? remoteUrl.url : remoteUrl.webUrl
         if (surface === 'web' && (typeof carrierUrl !== 'string' || carrierUrl === '')) {
