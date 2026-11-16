@@ -4,6 +4,8 @@
 import {
   REMOTE_REATTACH_ATTEMPTS,
   REMOTE_REATTACH_INTERVAL_MS,
+  REMOTE_REPAIR_BACKOFF_MAX_MS,
+  REMOTE_REPAIR_BACKOFF_MS,
   REMOTE_START_TIMEOUT_MS,
   SSH_READY_TIMEOUT_MS,
   TUNNEL_PROBE_TIMEOUT_MS,
@@ -224,6 +226,7 @@ function captureFingerprint(ctx, runtime, info) {
 /**
  * Warn when the remote already runs a DSH this plugin did not start, and let the
  * user decide: stop it, keep it alongside, or cancel.
+ * @returns {Promise<'stop' | 'alongside' | null>} the decision, or null when no prompt was needed.
  */
 async function resolveForeignConflict(ctx, runtime, layout, profile, options = {}) {
   // Processes the user already chose to keep alongside this connection are not asked
@@ -240,27 +243,46 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
   const found = await ctx.deps.findForeign(runtime.ssh, { ignorePids })
   if (found.ok !== true) {
     ctx.progress.log(runtime, 'debug', 'foreign DSH: scan failed:', found.reason ?? found.technical ?? 'unknown')
-    return
+    return null
   }
-  if (found.processes.length === 0) return
-  const pidList = found.processes.map((entry) => `pid ${entry.pid}`).join(', ')
+  const processes = Array.isArray(found.processes) ? [...found.processes] : []
+  // The registry-named instance is normally ignored by the scan (it is this connection's own
+  // process). When the caller cannot stop it - a pid a re-attach discovered - it still must be
+  // put in front of the user: a second instance must never start silently next to it.
+  const known = options.knownProcess
+  const knownPid = Number(known?.pid)
+  // A pid the user already chose to keep alongside is never asked about again; the
+  // registry-named pid, however, must be shown when it could not be stopped.
+  const keptAlongside = (Array.isArray(options.ignoredPids) ? options.ignoredPids : []).map(Number)
+  if (
+    isPid(knownPid) &&
+    !keptAlongside.includes(knownPid) &&
+    !processes.some((entry) => Number(entry?.pid) === knownPid)
+  ) {
+    processes.push({
+      pid: knownPid,
+      command: typeof known.command === 'string' && known.command !== '' ? known.command : `dsh --profile ${profile}`,
+    })
+  }
+  if (processes.length === 0) return null
+  const pidList = processes.map((entry) => `pid ${entry.pid}`).join(', ')
   ctx.progress.log(
     runtime,
     'warn',
-    `foreign DSH on the remote: ${found.processes.length} process(es) sharing this ~/.dsh (${pidList})`,
+    `foreign DSH on the remote: ${processes.length} process(es) sharing this ~/.dsh (${pidList})`,
   )
 
-  const decision = await askConflict(ctx, runtime, found.processes)
+  const decision = await askConflict(ctx, runtime, processes)
   if (decision.action === 'cancel') throw errors.remoteDshRunning()
   if (decision.action === 'alongside') {
-    runtime.alongsidePids = found.processes.map((entry) => entry.pid).filter((pid) => isPid(pid))
+    runtime.alongsidePids = processes.map((entry) => entry.pid).filter((pid) => isPid(pid))
     runtime.warning = {
       zh: '远端已有手工启动的 DSH；已按你的选择并存运行，两者共享 ~/.dsh，请避免同时操作同一会话。',
       en: 'A manually started DSH is already running; it was kept as you chose. Both share ~/.dsh, so avoid editing the same session in both.',
     }
-    return
+    return 'alongside'
   }
-  const stopped = await ctx.deps.stopForeign(runtime.ssh, found.processes)
+  const stopped = await ctx.deps.stopForeign(runtime.ssh, processes)
   if (stopped.ok !== true) {
     throw errors.remoteDshRunning(
       {
@@ -273,7 +295,8 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
     )
   }
   runtime.alongsidePids = []
-  ctx.progress.log(runtime, 'info', `stopped ${found.processes.length} manual remote DSH process(es)`)
+  ctx.progress.log(runtime, 'info', `stopped ${processes.length} manual remote DSH process(es)`)
+  return 'stop'
 }
 
 /** Open the loopback tunnel for one remote port; tunnel-level failures feed the liveness confirmation. */
@@ -350,8 +373,14 @@ async function killAuthorized(ctx, runtime, pid, layout, profile) {
 
 /**
  * Rebuild the local listener for a host whose remote UI answers the SSH probe but whose
- * proxied requests fail: the tunnel, not the remote, is what broke. Single-flight per host.
- * The launch token and the carrier URL stay valid, so no re-navigation is needed.
+ * proxied requests fail: the tunnel, not the remote, is what broke. Single-flight per host and
+ * owned by a link-work token, like restart/reattach: a disconnect, host removal or shutdown
+ * cancels it and the caller waits for `runtime.tunnelRepair` before tearing down.
+ *
+ * The replacement is created before the old listener closes, so there is no window without a
+ * listener. Its local port is a new random one, so `viewRev` is bumped: the carrier refetches
+ * `GET /hosts/:id/open` and navigates again (the desktop guest's URL is the loopback origin).
+ * Existing WebSockets/downloads are dropped by closing the old listener - documented.
  *
  * @param {object} ctx - service context.
  * @param {object} runtime - connected host runtime.
@@ -360,6 +389,7 @@ async function killAuthorized(ctx, runtime, pid, layout, profile) {
 export async function repairTunnel(ctx, runtime) {
   if (
     ctx.state.disposed === true ||
+    runtime.desired !== 'connected' ||
     runtime.status !== 'connected' ||
     runtime.linkBusy !== null ||
     runtime.tunnel === null
@@ -368,24 +398,83 @@ export async function repairTunnel(ctx, runtime) {
   }
   if (runtime.ssh?.connected !== true) return { ok: false, reason: 'no-transport' }
   if (runtime.tunnelRepair) return runtime.tunnelRepair
+  if (Date.now() < (Number(runtime.nextTunnelRepairAt) || 0)) {
+    return { ok: false, reason: 'backoff' }
+  }
   const port = runtime.remote.port
+  const previous = runtime.tunnel
+  const token = beginLinkWork(runtime, 'repair')
+  const stillCurrent = () =>
+    isLinkWorkCurrent(runtime, token) &&
+    ctx.state.disposed !== true &&
+    runtime.desired === 'connected' &&
+    runtime.status === 'connected' &&
+    runtime.ssh?.connected === true
+  let created = null
   let work = null
+  let settled = null
   work = (async () => {
-    await closeTunnel(runtime)
-    await openTunnelFor(ctx, runtime, port)
-    ctx.progress.log(runtime, 'info', `tunnel rebuilt after a failed request (remote port ${port})`)
-    ctx.emitState()
-    return { ok: true }
-  })()
-    .catch((error) => {
+    try {
+      if (runtime.ssh?.connected !== true) throw errors.internal(new Error('the SSH transport is gone'))
+      if (!isPid(port) || port > 65535) throw errors.internal(new Error(`invalid remote port for the tunnel: ${port}`))
+      const next = await ctx.deps.tunnelFactory({
+        ssh: runtime.ssh,
+        remotePort: port,
+        onError: () => ctx.noteRemoteUnreachable?.(runtime, 'tunnel'),
+      })
+      created = next
+      if (!stillCurrent()) return { ok: false, reason: 'cancelled' }
+      // Publish the replacement before closing the old listener: no no-listener window.
+      runtime.tunnel = next
+      runtime.remote.localPort = next.localPort
+      try {
+        await previous.close()
+      } catch {
+        // swallow-ok: the old listener could already be gone; the new one is what matters
+      }
+      if (!stillCurrent()) return { ok: false, reason: 'cancelled' }
+      // The local port changed, so the carrier's view of the host did too.
+      runtime.remote.viewRev = (Number(runtime.remote.viewRev) || 0) + 1
+      ctx.progress.log(
+        runtime,
+        'info',
+        `tunnel rebuilt after a failed request (remote port ${port}, local port ${previous.localPort} -> ${next.localPort})`,
+      )
+      runtime.tunnelRepairFailures = 0
+      runtime.nextTunnelRepairAt = 0
+      ctx.emitState()
+      return { ok: true }
+    } catch (error) {
+      // swallow-ok: a failed rebuild is a typed, retryable reason (with backoff) for the caller;
+      // the old listener is still serving, so this is not a connection failure.
+      runtime.tunnelRepairFailures = (Number(runtime.tunnelRepairFailures) || 0) + 1
+      const backoff = Math.min(
+        REMOTE_REPAIR_BACKOFF_MAX_MS,
+        REMOTE_REPAIR_BACKOFF_MS * 2 ** (runtime.tunnelRepairFailures - 1),
+      )
+      runtime.nextTunnelRepairAt = Date.now() + backoff
       ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
       return { ok: false, reason: 'rebuild-failed' }
-    })
-    .finally(() => {
-      if (runtime.tunnelRepair === work) runtime.tunnelRepair = null
-    })
-  runtime.tunnelRepair = work
-  return work
+    } finally {
+      // A listener this rebuild created must never outlive it: on a cancelled token (or if it
+      // was never published) close it here, and clear the view only when it owned the slot.
+      if (created !== null && (!isLinkWorkCurrent(runtime, token) || runtime.tunnel !== created)) {
+        if (runtime.tunnel === created) {
+          runtime.tunnel = null
+          runtime.remote.localPort = null
+        }
+        try {
+          await created.close()
+        } catch {}
+      }
+      endLinkWork(runtime, token)
+    }
+  })()
+  settled = work.finally(() => {
+    if (runtime.tunnelRepair === settled) runtime.tunnelRepair = null
+  })
+  runtime.tunnelRepair = settled
+  return settled
 }
 
 /** Prove the remote UI answers through the new tunnel and exchange this launch's token. */
@@ -440,6 +529,8 @@ async function connectPipeline(ctx, runtime) {
   runtime.alongsidePids = []
   // Kill rights belong to this connection: a fresh connect starts with no launched pids.
   runtime.launched = new Map()
+  runtime.tunnelRepairFailures = 0
+  runtime.nextTunnelRepairAt = 0
   stopRemoteHeartbeat(runtime)
   ctx.progress.set(runtime, { status: 'connecting', error: null, warning: null })
   let remoteStarted = false
@@ -780,14 +871,37 @@ async function runRestart(ctx, runtime, token) {
         }); leaving the running instance alone`,
       )
     }
+    // A live instance this connection cannot stop and did not launch (typically the pid a
+    // re-attach discovered) still occupies this ~/.dsh + profile. It goes through the conflict
+    // prompt: restarting must never start a second instance silently next to it
+    // (docs/design.md §5.5). Pids this connection launched are its own current instance; the
+    // registry mismatch is the caller's existing "leave it alone" behavior, not a foreign one.
+    let knownProcess = null
+    const launchedHere = runtime.launched instanceof Map && runtime.launched.has(managedPid)
+    if (!killable && !launchedHere && isPid(managedPid) && runtime.ssh?.connected === true) {
+      const identity = await ctx.deps.processIdentity(runtime.ssh, managedPid)
+      if (identity.ok === true) {
+        const sameHome = identity.dshHome === '' || identity.dshHome === layout.dshHome
+        if (sameHome && commandMatchesProfile(identity.command, profile)) {
+          knownProcess = { pid: managedPid, command: identity.command }
+        }
+      } else if (identity.reason === 'unreadable') {
+        // Alive but not provable: asking is safer than starting a second instance.
+        knownProcess = { pid: managedPid, command: `dsh --profile ${profile}` }
+      }
+    }
     if (!isLinkWorkCurrent(runtime, token)) return
 
     // Ask about foreign instances BEFORE anything is stopped: cancelling the prompt must not
     // destroy the instance the user is currently connected to (docs/design.md §5.5).
-    await resolveForeignConflict(ctx, runtime, layout, profile, {
+    const decision = await resolveForeignConflict(ctx, runtime, layout, profile, {
       ignoredPids: Array.isArray(runtime.alongsidePids) ? runtime.alongsidePids : [],
+      knownProcess,
     })
     if (!isLinkWorkCurrent(runtime, token)) return
+    // The prompt stopped the instance this connection was attached to: the old attachment is
+    // gone, so a later failure must not "resume" it.
+    if (decision === 'stop') stoppedOwn = true
 
     if (killable) {
       const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, { pid: managedPid })
@@ -1007,6 +1121,13 @@ async function runReattach(ctx, runtime, info, token) {
         'warn',
         're-attach: the running DSH version could not be proven; keeping it unknown, not assuming the local one',
       )
+    }
+    // The pid that actually listens may differ from the wrapper this connection launched (npx
+    // spawns the DSH). Keep the kill right only for the pid we are now attached to.
+    if (runtime.launched instanceof Map) {
+      for (const pid of [...runtime.launched.keys()]) {
+        if (pid !== resolved.pid) runtime.launched.delete(pid)
+      }
     }
     log(
       'info',

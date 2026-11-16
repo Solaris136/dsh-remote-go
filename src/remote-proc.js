@@ -240,6 +240,8 @@ printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
 /** Decode the `START:` / `CMD:` / `DSH_HOME:` lines of {@link remoteProcessIdentity}. */
 export function parseProcessIdentity(stdout) {
   const text = String(stdout ?? '')
+  // The markers below are matched anywhere in the output, deliberately: a command line that
+  // happens to contain MISSING/NO-STAT must not be mistaken for a readable identity (fail closed).
   if (text.includes('MISSING')) return { ok: false, reason: 'missing' }
   if (text.includes('NO-STAT')) return { ok: false, reason: 'unreadable' }
   const start = /^START:(\d+)$/m.exec(text)

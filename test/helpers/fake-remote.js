@@ -126,6 +126,9 @@ export async function makeTestService(overrides = {}) {
       return ssh
     })
   const tunnelFactory = overrides.tunnelFactory ?? (async () => new FakeTunnel(45123))
+  // The fake tunnel is not a real listener: tests that want "the listener still answers"
+  // override this. Default false keeps the rebuild path exercised.
+  const tunnelProbe = overrides.tunnelProbe ?? (async () => false)
   const service = new RemoteGoService({
     store,
     home: path.join(dir, 'home'),
@@ -134,6 +137,7 @@ export async function makeTestService(overrides = {}) {
     engineNodeRange: overrides.engineNodeRange,
     sshFactory,
     tunnelFactory,
+    tunnelProbe,
     probe: overrides.probe ?? (async () => facts),
     plan: (await import('../../src/bootstrap.js')).planNpx,
     ensureNode: overrides.ensureNode ?? (async () => managedNodeFixture()),

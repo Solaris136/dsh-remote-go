@@ -109,8 +109,18 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
   重挂失败报 `remote-unreachable`，保留 SSH 与主机配置。
 - 两个动作都持有一个**令牌**（`beginLinkWork` / `isLinkWorkCurrent` / `endLinkWork`）：disconnect、SSH `close`
   或新的连接会 `cancelLinkWork`，迟到的旧动作只会打一行 debug 日志，不能写状态。`markConnected` 每次
-  `remote.viewRev + 1` 并重启心跳。心跳的代理/隧道疑似事件有 15s 冷却；远端健康而代理失败时
-  `repairTunnel` 重建本地监听器（单飞、同一远端端口、token 不变）。
+  `remote.viewRev + 1` 并重启心跳。
+- 心跳的代理/隧道疑似事件有 15s 冷却。恢复阶段先 `tunnelProbe`（`tunnel.js#probeLoopback`，直接请求
+  `127.0.0.1:<localPort>`，任何 HTTP 状态都算通）；本地 listener 仍应答就不重建，否则 `repairTunnel`
+  重建（同一远端端口、token 不变）：持 link-work 令牌、**先建新 listener 再关旧**、`finally` 在令牌失效时关闭
+  自己创建的 listener 并清 `tunnel`/`localPort`；成功后 `viewRev + 1`（桌面载体据此重新取 `open` 并导航，旧
+  listener 的 WS/下载会短暂断开），失败保留旧 listener 并按 30s→120s 退避。`teardownRuntime` /
+  `shutdownAll` 先 `cancelLinkWork` 再 **await** `runtime.tunnelRepair`，所以 disconnect / removeHost /
+  shutdown 不会在 teardown 之后才发布 listener。
+- 重挂后点重启：监听者是启动脚本包装进程 spawn 的 DSH 子进程，`launched` 里通常没有它；`runRestart` 会把这个
+  「已知、存活、非 alongside」的 pid 合并进 `resolveForeignConflict`（即使 registry pid 原本在扫描 ignore 列表），
+  用户选 `stop` / `alongside` 后才 `[start]`，`cancel` 保留原连接；选择 `stop` 记 `stoppedOwn=true`，失败不会
+  “恢复”已停掉的实例（N3）。
 
 ## 4. SSH、指纹与运行时
 `ssh.js` 封装 ssh2：`hostVerifier` 计算 `SHA256:<base64>`，按 `pinnedFingerprint` → `knownHostFingerprints` → `hostKeyPolicy` 决策；认证回退只有私钥文件 →（密码认证时）密码，不支持 Agent；`exec(command,{timeoutMs,stdin})` 统一返回 `{ code, stdout, stderr }`，`forwardOut` 供隧道与跳板机。`onHostKey` 由 service 提供：`strict` 直接抛 `host-key-unknown`，否则把指纹挂到 runtime 并返回 promise，`confirmFingerprint()` 或 120s 超时后 resolve。
@@ -187,10 +197,10 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | 准入栅栏 | `request-trust`（经 `api` / `remote-proxy` 用例覆盖） | `Host` 同源（loopback 互换、默认端口折算）、`Origin` 同源、`cross-site` 拒绝 |
 | 运行时 | `node-runtime/bootstrap/remote-web/remote-proc/tunnel/ssh` | 托管 Node、npx 判定与命令模板、启动/收养、URL/token 握手、隧道、认证与指纹 |
 | 同源代理 | `remote-proxy` | 视图路径解析、cookie jar / 路径与过期 / 按 remote authority 重置、Host/Origin 栅栏、准入拒绝（HTTP 与升级）、头部与 Location 改写、HTTP 转发、升级转发 |
-| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、kill 授权与 `/proc` 身份校验、心跳确认、端口重解析与重挂、诊断、DSH 准入 / Host 自检 / SSE 鉴权、原子写、下载任务 |
+| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权、原子写、下载任务 |
 | 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、两种载体、关键组件、重启按钮与 viewRev 重导航、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
-| 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表 |
+| 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表；监听器重建与重挂后重启冲突在单测覆盖（含三种 keepAlive 的 disconnect 窗口与 removeHost/shutdown） |
 | 代理端到端 | `test/integration/remote-proxy.test.js` | 隔离 `dsh web` 实例 → 同源代理 → 真实首页 / 插件资源 / WebSocket 升级 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` / `browser-carrier.test.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 主题；浏览器载体 → 真实远端页面 + 注入主机条 + 本地意图 + 能力桥（真实点击链接触发顶层新标签、frame 内复制写入真实剪贴板并回执、按 hostId 分区的 localStorage） |
 

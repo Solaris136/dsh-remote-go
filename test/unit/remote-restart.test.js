@@ -748,6 +748,7 @@ test('a restart during a connect and a connect during a restart are refused, not
 test('a re-attach to a pid this connection did not launch grants no kill rights', async () => {
   const registry = registryStore(null)
   const stopped = []
+  const foreignStopped = []
   let starts = 0
   const { service } = await makeTestService({
     readRegistry: registry.read,
@@ -755,6 +756,10 @@ test('a re-attach to a pid this connection did not launch grants no kill rights'
     stopWeb: async (_ssh, _layout, options) => {
       stopped.push(options?.pid)
       return { ok: true, output: 'STOPPED' }
+    },
+    stopForeign: async (_ssh, processes) => {
+      foreignStopped.push(...processes.map((process) => process.pid))
+      return { ok: true, alive: [], output: 'STOPPED' }
     },
     startWeb: async () => {
       starts += 1
@@ -789,10 +794,21 @@ test('a re-attach to a pid this connection did not launch grants no kill rights'
   assert.equal(runtime.launched.has(777), false)
 
   await service.restart(host.id)
+  // The re-attached pid is alive and this connection may not stop it silently: the restart
+  // must ask first, exactly like a connect conflict.
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending', { label: 'restart conflict' })
+  assert.equal(starts, 1, 'no new instance may start before the user decides')
+  assert.deepEqual(
+    service.snapshot().hosts[0].conflict.processes.map((process) => process.pid),
+    [777],
+  )
+  assert.deepEqual(stopped, [])
+  await service.confirmConflict(host.id, { action: 'stop' })
   await waitFor(
     () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38210,
   )
-  assert.deepEqual(stopped, [], 'a pid discovered by a re-attach must never be killed')
+  assert.deepEqual(stopped, [], 'the explicit conflict stop is not a stopWeb of the managed pid')
+  assert.deepEqual(foreignStopped, [777])
   assert.match(messagesOf(service, host.id).join('\n'), /not stopping pid 777 \(not-launched-by-this-connection\)/)
   await service.shutdown()
 })
@@ -1125,5 +1141,283 @@ test('an unproven remote version stays unknown and is never written as the local
   assert.equal(registry.get().version, '', 'an unproven version is not laundered into the registry')
   assert.equal(service.snapshot().hosts[0].remote.version, null)
   assert.match(messagesOf(service, host.id).join('\n'), /version could not be proven/)
+  await service.shutdown()
+})
+
+for (const policy of ['keep', 'stop', 'idle']) {
+  test(`a disconnect during a tunnel rebuild leaves no listener (keepAlive=${policy})`, async () => {
+    const tunnels = []
+    let release = () => {}
+    const gate = new Promise((resolve) => {
+      release = resolve
+    })
+    let calls = 0
+    const { service } = await makeTestService({
+      readRegistry: async () => REGISTRY,
+      tunnelProbe: async () => false,
+      remoteStatus: async () => 200,
+      startWeb: async () => webInfo(38123, 'tok_first', 4242),
+      tunnelFactory: async (options) => {
+        calls += 1
+        const tunnel = new FakeTunnel(47000 + tunnels.length + 1)
+        tunnels.push({ tunnel, remotePort: options.remotePort })
+        if (calls === 2) await gate
+        return tunnel
+      },
+    })
+    const host = await createHost(service, { keepAlive: policy })
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    const runtime = service.runtimes.get(host.id)
+    service.ctx.noteRemoteUnreachable(runtime, 'proxy')
+    await waitFor(() => calls === 2, { label: 'rebuild listener creating' })
+    // Disconnect while the replacement listener is being created: teardown cancels the
+    // rebuild and waits for it, so the listener can never be published afterwards.
+    setTimeout(release, 20)
+    await service.disconnect(host.id)
+    assert.equal(service.snapshot().hosts[0].status, 'disconnected')
+    assert.equal(runtime.tunnel, null)
+    assert.equal(runtime.remote.localPort, null)
+    assert.equal(tunnels.length, 2)
+    assert.equal(tunnels[1].tunnel.closed, true, 'the listener created after the drop must be closed')
+    await service.shutdown()
+  })
+}
+
+test('removing a host during a tunnel rebuild cannot leak the new listener', async () => {
+  const tunnels = []
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  let calls = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => REGISTRY,
+    tunnelProbe: async () => false,
+    remoteStatus: async () => 200,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    tunnelFactory: async (options) => {
+      calls += 1
+      const tunnel = new FakeTunnel(48000 + tunnels.length + 1)
+      tunnels.push({ tunnel, remotePort: options.remotePort })
+      if (calls === 2) await gate
+      return tunnel
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  service.ctx.noteRemoteUnreachable(runtime, 'proxy')
+  await waitFor(() => calls === 2, { label: 'rebuild listener creating' })
+  setTimeout(release, 20)
+  await service.removeHost(host.id)
+  assert.equal(service.snapshot().hosts.length, 0)
+  assert.equal(tunnels.length, 2)
+  assert.equal(tunnels[1].tunnel.closed, true, 'a removed host must not leave the rebuilt listener behind')
+  assert.equal(runtime.tunnel, null)
+  await service.shutdown()
+})
+
+test('shutting down during a tunnel rebuild closes the new listener', async () => {
+  const tunnels = []
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  let calls = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => REGISTRY,
+    tunnelProbe: async () => false,
+    remoteStatus: async () => 200,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    tunnelFactory: async (options) => {
+      calls += 1
+      const tunnel = new FakeTunnel(49000 + tunnels.length + 1)
+      tunnels.push({ tunnel, remotePort: options.remotePort })
+      if (calls === 2) await gate
+      return tunnel
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  service.ctx.noteRemoteUnreachable(service.runtimes.get(host.id), 'proxy')
+  await waitFor(() => calls === 2, { label: 'rebuild listener creating' })
+  setTimeout(release, 20)
+  await service.shutdown()
+  assert.equal(tunnels[1].tunnel.closed, true)
+})
+
+test('a tunnel rebuild bumps the view revision and replaces the listener', async () => {
+  const { tunnels, factory } = tunnelRecorder()
+  const { service } = await makeTestService({
+    readRegistry: async () => REGISTRY,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    tunnelFactory: factory,
+    tunnelProbe: async () => false,
+    remoteStatus: async () => 200,
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  const before = service.snapshot().hosts[0].remote
+  const phases = []
+  service.on('remote-unreachable', (event) => phases.push(event.phase))
+  service.ctx.noteRemoteUnreachable(runtime, 'proxy')
+  await waitFor(() => phases.includes('recovered'), { label: 'tunnel repaired' })
+  const after = service.snapshot().hosts[0].remote
+  assert.equal(after.viewRev, before.viewRev + 1, 'the carrier must refetch open and re-navigate')
+  assert.notEqual(after.localPort, before.localPort)
+  assert.equal(after.localPort, runtime.tunnel.localPort)
+  assert.equal(tunnels.length, 2)
+  assert.equal(tunnels[0].tunnel.closed, true)
+  assert.equal(tunnels[1].tunnel.closed, false)
+  await service.shutdown()
+})
+
+test('a healthy local listener is not rebuilt for one failed request', async () => {
+  const { tunnels, factory } = tunnelRecorder()
+  let probes = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => REGISTRY,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    tunnelFactory: factory,
+    tunnelProbe: async () => true,
+    remoteStatus: async () => {
+      probes += 1
+      return 200
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  const before = service.snapshot().hosts[0].remote.viewRev
+  const phases = []
+  service.on('remote-unreachable', (event) => phases.push(event.phase))
+  service.ctx.noteRemoteUnreachable(runtime, 'proxy')
+  await waitFor(() => phases.includes('recovered'))
+  assert.equal(probes, 1)
+  assert.equal(tunnels.length, 1, 'a listener that still answers is not rebuilt')
+  assert.equal(service.snapshot().hosts[0].remote.viewRev, before)
+  await service.shutdown()
+})
+
+test('a failed tunnel rebuild backs off instead of rebuilding in a storm', async () => {
+  let calls = 0
+  const { service } = await makeTestService({
+    readRegistry: async () => REGISTRY,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    tunnelProbe: async () => false,
+    tunnelFactory: async () => {
+      calls += 1
+      if (calls === 2) throw new Error('cannot listen on a loopback port')
+      return new FakeTunnel(45000 + calls)
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  const first = await service.ctx.repairTunnel(runtime)
+  assert.equal(first.ok, false)
+  assert.equal(first.reason, 'rebuild-failed')
+  assert.ok(runtime.nextTunnelRepairAt > Date.now())
+  const second = await service.ctx.repairTunnel(runtime)
+  assert.equal(second.reason, 'backoff')
+  assert.equal(calls, 2, 'no second listener attempt inside the backoff window')
+  // The old listener was never closed: a failed rebuild leaves the connection usable.
+  assert.notEqual(runtime.tunnel, null)
+  runtime.nextTunnelRepairAt = 0
+  const third = await service.ctx.repairTunnel(runtime)
+  assert.equal(third.ok, true)
+  assert.equal(calls, 3)
+  await service.shutdown()
+})
+
+/** Bring the test service to "re-attached to an external pid 777" (the npx wrapper/listener shape). */
+async function reattachedService() {
+  const registry = registryStore(null)
+  const stopped = []
+  const foreignStopped = []
+  let starts = 0
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    writeRegistry: registry.write,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+    stopForeign: async (_ssh, processes) => {
+      foreignStopped.push(...processes.map((process) => process.pid))
+      return { ok: true, alive: [], output: 'STOPPED' }
+    },
+    startWeb: async () => {
+      starts += 1
+      return starts === 1 ? webInfo(38123, 'tok_first', 4242) : webInfo(38210, 'tok_second', 4343)
+    },
+    remoteStatus: async () => null,
+    resolveRemote: async () => ({
+      ok: true,
+      pid: 777,
+      port: 38010,
+      token: 'tok_external',
+      url: 'http://127.0.0.1:38010/?token=tok_external',
+      version: '0.2.2-rc.1',
+      profile: 'web',
+      dshHome: '/home/ubuntu/.dsh',
+      source: 'log',
+    }),
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  const runtime = service.runtimes.get(host.id)
+  const phases = []
+  service.on('remote-unreachable', (event) => phases.push(event.phase))
+  await remoteHeartbeatTick(service.ctx, runtime)
+  await waitFor(() => phases.includes('confirmed'), { label: 'reattach confirmed' })
+  await waitFor(
+    () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38010,
+  )
+  return { service, host, runtime, registry, stopped, foreignStopped, starts: () => starts }
+}
+
+test('restart after a re-attach asks before starting a second instance (cancel keeps the old one)', async () => {
+  const { service, host, runtime, stopped, foreignStopped, starts } = await reattachedService()
+  const before = service.snapshot().hosts[0].remote
+  await service.restart(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending', { label: 'restart conflict' })
+  assert.equal(starts(), 1)
+  assert.deepEqual(
+    service.snapshot().hosts[0].conflict.processes.map((process) => process.pid),
+    [777],
+  )
+  await service.confirmConflict(host.id, { action: 'cancel' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.equal(starts(), 1)
+  assert.deepEqual(stopped, [])
+  assert.deepEqual(foreignStopped, [])
+  assert.equal(service.snapshot().hosts[0].remote.port, 38010)
+  assert.equal(service.snapshot().hosts[0].remote.viewRev, before.viewRev)
+  assert.notEqual(runtime.tunnel, null)
+  await service.shutdown()
+})
+
+test('restart after a re-attach can keep the old instance alongside, deliberately', async () => {
+  const { service, host, runtime, stopped, foreignStopped, starts } = await reattachedService()
+  await service.restart(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'conflict-pending')
+  await service.confirmConflict(host.id, { action: 'alongside' })
+  await waitFor(
+    () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38210,
+  )
+  assert.equal(starts(), 2)
+  assert.deepEqual(stopped, [])
+  assert.deepEqual(foreignStopped, [])
+  assert.deepEqual(service.snapshot().hosts[0].conflict, null)
+  assert.deepEqual(runtime.alongsidePids, [777])
   await service.shutdown()
 })

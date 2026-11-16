@@ -31,11 +31,11 @@ export function cancelIdleStop(runtime) {
 }
 
 /**
- * One-shot link actions (a local restart, a remote re-attach) share a token so a
- * disconnect, a dropped transport or a newer action can invalidate an older one:
+ * One-shot link actions (a local restart, a remote re-attach, a tunnel rebuild) share a
+ * token so a disconnect, a dropped transport or a newer action can invalidate an older one:
  * an action must never write state on top of whatever replaced it.
  * @param {object} runtime - host runtime.
- * @param {string} kind - `restart` or `reattach`.
+ * @param {string} kind - `restart`, `reattach` or `repair`.
  * @returns {number} the token that owns the action.
  */
 export function beginLinkWork(runtime, kind) {
@@ -150,14 +150,27 @@ async function clearRemoteEpisode(ctx, runtime, source) {
   runtime.episodeSource = null
   if (transient) {
     runtime.episodeCooldownUntil = Date.now() + REMOTE_EPISODE_COOLDOWN_MS
+    // The SSH probe only proves the remote side answers. Ask the local listener first: if it
+    // still serves, a single failed upstream connection is not a broken tunnel and rebuilding
+    // would drop live WebSockets for nothing.
+    let healthy = false
     try {
-      const repaired = await ctx.repairTunnel?.(runtime)
-      if (repaired && repaired.ok !== true) {
-        ctx.progress.log(runtime, 'warn', `tunnel rebuild failed (${repaired.reason ?? 'unknown'})`)
+      healthy = (await ctx.deps.tunnelProbe?.(runtime.tunnel?.localPort ?? null)) === true
+    } catch {
+      // swallow-ok: a probe error means "not healthy"; the rebuild path reports its own failure
+    }
+    if (healthy) {
+      ctx.progress.log(runtime, 'debug', 'the local tunnel still answers; keeping the listener')
+    } else {
+      try {
+        const repaired = await ctx.repairTunnel?.(runtime)
+        if (repaired && repaired.ok !== true) {
+          ctx.progress.log(runtime, 'debug', `tunnel rebuild skipped (${repaired.reason ?? 'unknown'})`)
+        }
+      } catch (error) {
+        // swallow-ok: a failed repair is reported by the helper; the episode still recovers
+        ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
       }
-    } catch (error) {
-      // swallow-ok: a failed repair is reported by the helper; the episode still recovers
-      ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
     }
   }
   ctx.progress.log(runtime, 'info', `remote heartbeat: the remote UI answers again (${source})`)
@@ -339,12 +352,31 @@ export async function disposeSsh(runtime) {
  * `keepRemote` preserves the remote facts so the card still describes what is
  * running on the other side.
  */
+/**
+ * Wait for an in-flight tunnel rebuild (if any) after the caller cancelled link work.
+ * The rebuild closes its own replacement in `finally` when its token is gone, so awaiting
+ * here is what makes disconnect / removeHost / shutdown leak-free.
+ * @param {object} runtime - host runtime.
+ */
+async function settleTunnelRepair(runtime) {
+  const repair = runtime.tunnelRepair
+  if (!repair) return
+  try {
+    await repair
+  } catch {
+    // swallow-ok: the rebuild reports its own failure; teardown must still proceed
+  }
+}
+
 export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelConflict(runtime)
   cancelLinkWork(runtime)
   stopRemoteHeartbeat(runtime)
   runtime.closing = true
   cancelIdleStop(runtime)
+  // A tunnel rebuild owns a listener it may be creating right now. Cancel it (above), then
+  // wait for it to clean up: otherwise the listener would be assigned after this teardown.
+  await settleTunnelRepair(runtime)
   if (options.stopRemote && runtime.ssh?.connected) {
     try {
       await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
@@ -398,6 +430,7 @@ export async function shutdownAll(ctx) {
     cancelIdleStop(runtime)
     cancelLinkWork(runtime)
     stopRemoteHeartbeat(runtime)
+    await settleTunnelRepair(runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
         await stopRemoteQuietly(ctx, runtime)

@@ -65,6 +65,8 @@ export function createHostRuntime(host) {
     launched: new Map(),
     /** Current tunnel repair (a broken local listener under a healthy remote). */
     tunnelRepair: null,
+    tunnelRepairFailures: 0,
+    nextTunnelRepairAt: 0,
     /** Liveness probes: a confirmed episode is two consecutive failed probes. */
     heartbeatTimer: null,
     remoteCheckTimer: null,

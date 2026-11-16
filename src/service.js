@@ -33,7 +33,7 @@ import { ensureRemoteNode } from './node-runtime.js'
 import { confirmConflict, confirmHostKey } from './prompts.js'
 import { probeRemote } from './probe.js'
 import { SshConnection } from './ssh.js'
-import { createTunnel } from './tunnel.js'
+import { createTunnel, probeLoopback } from './tunnel.js'
 import { normalizeVersion } from './version.js'
 import { nowIso } from './util.js'
 import {
@@ -74,6 +74,8 @@ export class RemoteGoService extends EventEmitter {
     const deps = {
       sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
       tunnelFactory: options.tunnelFactory ?? createTunnel,
+      /** Local listener health: decides whether a transient proxy failure needs a rebuild. */
+      tunnelProbe: options.tunnelProbe ?? probeLoopback,
       probe: options.probe ?? probeRemote,
       plan: options.plan ?? planNpx,
       ensureNode: options.ensureNode ?? ensureRemoteNode,

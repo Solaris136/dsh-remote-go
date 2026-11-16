@@ -63,6 +63,13 @@ export const REMOTE_UNREACHABLE_RECHECK_DELAY_MS = 1200
 export const REMOTE_EPISODE_COOLDOWN_MS = 15_000
 
 /**
+ * A failed listener rebuild waits before the next attempt (doubling up to the max). The
+ * episode cooldown alone would still let a broken rebuild retry every 15s forever.
+ */
+export const REMOTE_REPAIR_BACKOFF_MS = 30_000
+export const REMOTE_REPAIR_BACKOFF_MAX_MS = 120_000
+
+/**
  * A remote restart needs a little time to print its new readiness line. The
  * re-attach retries the read-back a few times before it declares the remote gone.
  */

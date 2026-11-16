@@ -266,7 +266,7 @@ data: {}
 ```
 
 `download` 只在下载任务启动、进度变化、完成或失败时推送；客户端仍应在收到 `POST /downloads` 后轮询 `/status` 一次，避免 EventSource 尚未订阅时漏帧。
-`remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续两次探活失败，开始重挂）、`recovered`（探活恢复；若故障来源是代理/隧道，同一个 recovered 之前会重建一次本地监听器）。同一类疑似上报在 recovered 后 15s 内不重复开新事件。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。拿不到新 launch token 的远端（例如日志被 supervisor 重定向）不会被接管，而是以 `remote-unreachable` 结束并保留主机、配置与 SSH。
+`remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续两次探活失败，开始重挂）、`recovered`（探活恢复）。若故障来源是代理/隧道，同一个 recovered 之前会先问本地监听器：能应答就不动；不应答才重建 listener（先建新、再关旧，失败按 30s→120s 退避）。重建会把 `RemoteView.viewRev` 自增（本地回环端口变了），承载方据此重新 `GET /hosts/:id/open` 并导航；关闭旧 listener 会短暂断开现有 WebSocket 与下载，属预期。同一类疑似上报在 recovered 后 15s 内不重复开新事件。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。拿不到新 launch token 的远端（例如日志被 supervisor 重定向）不会被接管，而是以 `remote-unreachable` 结束并保留主机、配置与 SSH。
 
 ### `GET /version`
 ```json
@@ -331,7 +331,7 @@ data: {}
 
 - 异步执行：立即返回 `{ "ok": true, "accepted": true }`，进度经 `/events` 推送（`status: "connecting"` + 进度码 `restarting-remote`）。已有连接 / 重启在进行时返回 `{ "ok": true, "accepted": false, "reason": "busy" }`。
 - 状态机：`connected` ✅；`error` + `error.code === "remote-unreachable"` ✅（该状态有意保留 SSH 会话）；其余状态（`unconfigured` / `disconnected` / `connecting` / `fingerprint-pending` / `conflict-pending` / 其它 `error` / `limited`）一律拒绝，HTTP **409** + `restart-unavailable`，`ErrorView.detail` 说明原因。
-- 只杀自己启动的实例：同时满足「run registry 命名该 pid」「本连接实际启动过它（start 脚本返回的 pid，或 adopt 自 `origin: "launch"` 记录）」「`/proc/<pid>` 的 starttime 与记录一致且 cmdline/env 仍是同一 DSH home/profile」才会 kill；pid 复用、重挂发现的 pid、`alongside` 保留的 pid 一律不 kill，仍在运行的手工实例走 `POST /hosts/:id/conflict` 的既有提示（`stop` / `alongside` / `cancel`）。冲突提示在 kill 之前；取消时保留当前连接与隧道。
+- 只杀自己启动的实例：同时满足「run registry 命名该 pid」「本连接实际启动过它（start 脚本返回的 pid，或 adopt 自 `origin: "launch"` 记录）」「`/proc/<pid>` 的 starttime 与记录一致且 cmdline/env 仍是同一 DSH home/profile」才会 kill；pid 复用、重挂发现的 pid、`alongside` 保留的 pid 一律不 kill。本连接无法 kill、但仍存活且不是 alongside 的实例（典型是重挂发现的监听进程）会并入 `POST /hosts/:id/conflict` 的冲突提示（`stop` / `alongside` / `cancel`），在用户选择前**不会启动第二个实例**；冲突提示在 kill 之前，取消时保留当前连接与隧道。
 - 未连接（或 SSH 已释放）时返回 409 `restart-unavailable`。
 - 成功后 `RemoteView.viewRev` 自增，旧 `url` / `webUrl` 与 token 失效；承载方应重新 `GET /hosts/:id/open` 并导航。
 

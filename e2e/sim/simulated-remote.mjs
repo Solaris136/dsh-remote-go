@@ -581,6 +581,9 @@ async function respond(command, sim) {
 
   // 2d. Process identity read before a kill decision (src/remote-proc.js remoteProcessIdentity):
   //     a stable start time per pid, the npx launch line, and the DSH home it was started with.
+  //     Note: the simulator uses one pid for both the npx wrapper and the listener. The real
+  //     `$!` != listener shape (after a re-attach the kill right no longer covers the listener)
+  //     is covered by test/unit/remote-restart.test.js's re-attach tests.
   if (cmd.startsWith('set -u\nPID=') && cmd.includes('/proc/$PID/stat')) {
     const pid = Number(/^PID=(\d+)$/m.exec(cmd)?.[1] ?? 0)
     if (pid !== sim.pid) return ok('MISSING\n')

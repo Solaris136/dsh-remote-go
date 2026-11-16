@@ -208,7 +208,8 @@ restart(id)（同一条 SSH 会话）
   ├─ 只有同时满足三条才允许 kill：
   │   1) run registry 命名它；2) 本连接实际启动过它（start 脚本的 pid，或 adopt 自 launch 记录）；
   │   3) /proc/<pid> 的 starttime 与记录的启动时刻一致（排除 pid 复用），cmdline/env 仍是同一 DSH home/profile
-  │   不满足就只「接管显示」，不 kill，转冲突流程
+  │   不满足就不 kill；只要这个 pid 仍存活且不是用户选过的 alongside，就把「本连接无法停止的实例」
+  │   一并交给冲突流程（stop / alongside / cancel），**绝不静默起第二个实例**
   ├─ [start]  用已记录的 facts/plan 重新 npx 启动（`--port 0` → 新端口、新 token），记录新 pid 身份
   ├─ 刷新 run/web.json（新 pid/port/version/profile/dshHome/launch；origin 标为 launch）
   ├─ 关旧隧道 → [tunnel] 按新端口重建 → [verifying] 重新 token → cookie 种入
@@ -217,11 +218,16 @@ restart(id)（同一条 SSH 会话）
 
 重启是一次性动作：结束后仍按原 `keepAlive` 策略走，不写远端 `~/.dsh` 的插件、配置与凭据。动作内创建的隧道在 `finally` 里收尾：disconnect / 删主机 / 退出让令牌失效时，监听器一律关闭并清空 `remote.localPort`，绝不留下持有已释放 SSH 的隧道。失败按连接失败同样收尾（分类错误 + teardown），主机与配置保留。
 
+**重挂后重启（N3）**：真实形态里启动脚本的 `$!` 是 npx 包装进程，而监听者是它 spawn 的 DSH 子进程；重挂记录的是后者（端口 owner），本连接的 `launched` 里没有它。因此重挂后点重启时，这个实例不是「可 kill」，但仍是**已知、存活、非 alongside** 的实例：它会被合并进冲突提示（即便 registry pid 本来在扫描的 ignore 列表里），用户选 `stop`（显式停止）或 `alongside`（显式并存）后才继续 `[start]`；`cancel` 保留当前连接。选择 `stop` 后 `stoppedOwn=true`，后续失败不会“恢复”一个已经停掉的实例。这条也覆盖「registry 与 pid 不匹配 / pid 复用但仍是同 home+profile 的 DSH」。
+关于身份校验的边界：`killAuthorized` 在 `/proc/<pid>/environ` 不可读（`DSH_HOME` 为空）时允许继续，只依赖 starttime（exec 不变、pid 复用必变）+ cmdline 的 `--profile`；这已足以排除误杀，且方向是 fail-closed（读不到 identity 直接不杀）。与之相对，`resolveRemoteWeb` 的接管路径要求 `DSH_HOME` 必须可读并等于真实 home，因为那里是在「选择接管一个陌生进程」，标准更严。
+
 ### 5.6 远端自重启：心跳、确认与重挂
 远端 DSH 可能自己重启（插件市场更新、supervisor、远端重启），而启动命令固定 `--port 0`，所以**重启后端口一定变化**，且市场发起的重启不会写插件的 `run/web.json`。处理分三层：
 
 1. **故障上报**：同源代理或隧道的 `ECONNREFUSED` / `ECONNRESET` 只上报一次 `remote-unreachable` 疑似事件（SSE 同名事件带 `phase: suspected`），由探活确认，不把一次请求失败当成进程重启。同一类上报在 recovered 后有 15s 冷却窗口，避免「隧道坏、远端健康」时反复抖动。
-2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭并即时生效）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。若远端健康但页面请求失败（典型是隧道坏了），恢复时会**重建本地监听器**（同一远端端口、token 不变），而不是把远端判成重启。
+2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭并即时生效）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。若远端健康但页面请求失败（典型是隧道坏了），恢复阶段先**问本地监听器**：能应答（任何 HTTP 状态都算）就保持不动；本地不应答才重建监听器（同一远端端口、token 不变），而不是把远端判成重启。重建是**先建新 listener、再关旧的**（避免无监听窗口），失败时保留旧 listener 并按 30s→120s 退避，不会因单个 `forwardOut` 失败或坏 listener 反复重建。
+   - 新 listener 的本地端口是新的随机端口，因此重建成功后 `remote.viewRev` +1：承载方重新 `GET /hosts/:id/open` 并导航（桌面 guest 的地址就是回环 `localPort`，不 bump 会停在已关闭端口）。重建关闭旧 listener 会**短暂断开现有 WebSocket 与下载**，这是预期行为（文档与 CHANGELOG 已写明）；浏览器 iframe 会随 `viewRev` 重新加载同一路径。
+   - 重建本身也是一次一次性动作：持 link-work 令牌，`finally` 在令牌失效时关闭自己创建的 listener 并清 `remote.localPort`/`tunnel`；`disconnect` / `removeHost` / `shutdown` 会先取消再 **await** `runtime.tunnelRepair`，因此不会在 teardown 之后才发布 listener。
 3. **重挂而不是全量重连**（`reattachRemote`，状态 `connecting` + 进度码 `restarting-remote`）：
    ```text
    重读远端真实状态（resolveRemoteWeb，最多重试数秒），一个候选必须同时满足：
@@ -236,7 +242,7 @@ restart(id)（同一条 SSH 会话）
    没有可重挂实例 / 拿不到 token → 报可解释的 `remote-unreachable`，保留主机、配置与 SSH；
             用户可点「重启远端 DSH」或「重连」（进程扫描只用于解释 `no-token`，不产生接管）
    ```
-   运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**；重挂发现的 pid 只有显示/承载权，**没有 kill 权**（`run/web.json` 记 `origin: "reattach"`，下一次连接 adoption 也只接管不授权）。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
+   运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**；重挂发现的 pid 只有显示/承载权，**没有 kill 权**（`run/web.json` 记 `origin: "reattach"`，下一次连接 adoption 也只接管不授权）。重挂成功后 `launched` 只保留与当前监听 pid 相同的条目（包装进程的旧 pid 被清理），所以真实 npx 形态下重启会走 §5.5 的冲突提示而不是静默双实例。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
 
 ## 6. 远端运行时
 ### 6.1 托管 Node + npx
