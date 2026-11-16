@@ -451,7 +451,14 @@ window.ReactDOM = { createRoot }`,
       browser = await puppeteer.launch({
         executablePath: browserPath,
         headless: 'new',
-        args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
+        args: [
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-gpu',
+          // Hosted Ubuntu runners restrict unprivileged user namespaces, so Chromium
+          // aborts with "No usable sandbox!" without this (web.e2e does the same).
+          ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
+        ],
       })
       // The carrier test reads the clipboard back to prove the write landed; headless Chromium
       // grants that only through an explicit permission override.
