@@ -4,14 +4,43 @@
  */
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
-import { sameServerHost } from './request-trust.js'
+import { redactObject } from './redact.js'
+import { sameServerHost, sameServerOrigin } from './request-trust.js'
 import { nowIso } from './util.js'
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024
 
+/** HTTP status for one `invalid-input` refusal: an oversized body is not a business conflict. */
+const PAYLOAD_TOO_LARGE = 413
+
+/**
+ * At most this many live `/events` streams are served; a new one evicts the oldest, so a page
+ * that leaks EventSources cannot grow this set without bound.
+ */
+const MAX_SSE_CLIENTS = 8
+
+/** One SSE frame may not exceed this many bytes (a runaway snapshot is dropped, not buffered). */
+const MAX_SSE_FRAME_BYTES = 1 * 1024 * 1024
+
+/** A subscriber whose unsent backlog passes this is gone: drop it instead of buffering forever. */
+const MAX_SSE_BUFFERED_BYTES = 1 * 1024 * 1024
+
 /** Rows shared by the `/version` and `/diagnostics/self` responses. */
 const VERSION_ROW = { version: PLUGIN_VERSION, apiVersion: API_VERSION }
 const PLUGIN_ROW = { id: 'dsh-remote-go', version: PLUGIN_VERSION }
+
+/**
+ * The HTTP status one ErrorView maps to (docs/api.md). `internal` used to fall through to 409,
+ * which made a plugin bug look like a state conflict; only the two explicit codes are special,
+ * everything else is a business refusal of the current state.
+ * @param {string} code
+ * @returns {number}
+ */
+export function statusForErrorCode(code) {
+  if (code === 'invalid-input') return 400
+  if (code === 'internal') return 500
+  return 409
+}
 
 export function createApi(options) {
   const { service } = options
@@ -19,9 +48,33 @@ export function createApi(options) {
   const sseClients = new Set()
   const kernelAdmit = typeof options.admit === 'function' ? options.admit : null
 
-  /** Write one SSE frame to every subscriber, dropping the ones that already went away. */
+  /**
+   * Write one SSE frame to every subscriber, dropping the ones that already went away, are
+   * too far behind, or are gone from the set by the time their turn comes.
+   * @param {string} frame
+   */
   function writeAll(frame) {
+    const bytes = Buffer.byteLength(frame)
+    if (bytes > MAX_SSE_FRAME_BYTES) {
+      // One frame that no browser could render is not worth unbounded memory: the next state
+      // change (or the client's own `/state` read) carries the same data at a smaller size.
+      logger.warn?.(`[dsh-remote-go] dropped an ${bytes}-byte SSE frame`)
+      return
+    }
     for (const client of sseClients) {
+      if (client.writableEnded === true || client.destroyed === true) {
+        sseClients.delete(client)
+        continue
+      }
+      // A slow consumer must not grow the process heap: once its queue is too deep it is
+      // treated as gone, and the browser reconnects to a fresh stream.
+      if (client.writableLength > MAX_SSE_BUFFERED_BYTES) {
+        sseClients.delete(client)
+        try {
+          client.end()
+        } catch {}
+        continue
+      }
       try {
         client.write(frame)
       } catch {
@@ -100,17 +153,22 @@ export function createApi(options) {
    * fence is checked for both kinds of caller, because a DNS-rebinding page
    * reaches the socket under its own hostname: it sends no Origin, its
    * Fetch-Metadata says same-origin, and `Host` is the one header it cannot forge.
+   *
+   * The Origin comparison is the shared `sameServerOrigin`, not a string compare: the kernel
+   * names its listener as `127.0.0.1:<port>`, while a user may open the GUI on
+   * `http://localhost:<port>`, and `localhost` / `127.0.0.1` / `[::1]` are the same server.
+   * The old equality check locked those users out of every write while `/state` still worked
+   * without an Origin.
    */
   function authorizeOrigin(req) {
-    const expected = options.getOrigin()
+    const local = parseOrigin(options.getOrigin())
     const origin = req.headers.origin
     if (typeof origin === 'string' && origin !== '') {
-      if (!expected || origin.replace(/\/$/, '') !== expected.replace(/\/$/, '')) return crossSite()
+      if (local === null || !sameServerOrigin(origin, local)) return crossSite()
     }
     if (req.headers['sec-fetch-site'] === 'cross-site') return crossSite()
     // An origin the kernel cannot name yet is no reason to reject local traffic; the kernel's own
     // admission (when present) has already judged Host, and this fence is the fallback.
-    const local = parseOrigin(expected)
     if (local !== null && !sameServerHost(req.headers.host, local)) return crossSite()
     return { ok: true }
   }
@@ -133,20 +191,38 @@ export function createApi(options) {
     return { ok: true }
   }
 
+  /** The 413 the API answers once a body crosses `MAX_BODY_BYTES`. */
+  function payloadTooLarge() {
+    const error = errors.invalidInput('body', {
+      zh: `请求体超过上限（${MAX_BODY_BYTES} 字节）。`,
+      en: `The request body exceeds the limit (${MAX_BODY_BYTES} bytes).`,
+    })
+    error.httpStatus = PAYLOAD_TOO_LARGE
+    return error
+  }
+
   function readJson(req) {
     return new Promise((resolve, reject) => {
       const chunks = []
       let size = 0
+      let refused = false
       req.on('data', (chunk) => {
+        if (refused) return
         size += chunk.length
         if (size > MAX_BODY_BYTES) {
-          reject(errors.invalidInput('body', { zh: '请求体过大。', en: 'The request body is too large.' }))
-          req.destroy()
+          // Answer 413 with a JSON body *before* the socket goes away. Destroying the request
+          // here (the old behavior) made the client see ECONNRESET instead of the refusal, and
+          // the rest of the body is drained rather than buffered so the response can flush.
+          refused = true
+          chunks.length = 0
+          reject(payloadTooLarge())
+          req.resume()
           return
         }
         chunks.push(Buffer.from(chunk))
       })
       req.on('end', () => {
+        if (refused) return
         if (chunks.length === 0) {
           resolve({})
           return
@@ -175,6 +251,16 @@ export function createApi(options) {
   }
 
   function handleSse(req, res) {
+    // A page that leaks EventSource connections must not pin the process: the oldest stream is
+    // closed when the cap is reached, and the page reconnects to one fresh stream.
+    while (sseClients.size >= MAX_SSE_CLIENTS) {
+      const oldest = sseClients.values().next().value
+      if (oldest === undefined) break
+      sseClients.delete(oldest)
+      try {
+        oldest.end()
+      } catch {}
+    }
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
@@ -191,7 +277,8 @@ export function createApi(options) {
   // One entry per route: `(req, url) => response body`. The dispatcher owns auth,
   // init, status codes and the error envelope, so handlers only shape data.
   const ROUTES = {
-    'GET /health': () => ({ ok: true, version: PLUGIN_VERSION, at: nowIso() }),
+    // A liveness probe only: no state, no version, nothing worth reading without a session.
+    'GET /health': () => ({ ok: true }),
     'GET /state': () => ({ ok: true, state: service.snapshot() }),
     'GET /version': () => ({ ok: true, ...VERSION_ROW, hostVersion: service.localVersion }),
     'GET /ssh/aliases': async () => ({ ok: true, ...(await service.discoverSshAliases()) }),
@@ -199,12 +286,15 @@ export function createApi(options) {
       ok: true,
       ...(await service.listKeyFiles(url.searchParams.get('path') ?? '')),
     }),
-    'GET /diagnostics/self': () => ({
-      ok: true,
-      plugin: PLUGIN_ROW,
-      at: nowIso(),
-      ...(typeof options.diagnostics === 'function' ? options.diagnostics() : {}),
-    }),
+    // Machine paths (`home`, `stateDir`) and the client-module row are troubleshooting data,
+    // not the user's business: redact them like any other diagnostic export.
+    'GET /diagnostics/self': () =>
+      redactObject({
+        ok: true,
+        plugin: PLUGIN_ROW,
+        at: nowIso(),
+        ...(typeof options.diagnostics === 'function' ? options.diagnostics() : {}),
+      }),
     'POST /hosts': async (req) => {
       const body = await readJson(req)
       return { ok: true, host: await service.saveHost(body.host ?? body) }
@@ -215,8 +305,9 @@ export function createApi(options) {
     },
     'POST /local-version': async (req) => {
       const { version } = await readJson(req)
-      service.setLocalVersion(String(version ?? ''), 'client')
-      return { ok: true }
+      // The client only backfills a *missing* probe result; the service decides whether this
+      // one may be adopted (unknown locally, and not below DSH's `engines.dsh` floor).
+      return { ok: true, accepted: service.setLocalVersion(String(version ?? ''), 'client') }
     },
     'POST /active': async (req) => {
       const { id } = await readJson(req)
@@ -277,7 +368,18 @@ export function createApi(options) {
     if (segments[0] !== 'hosts' || segments.length < 2) return null
     const key = segments[2] ? `${method} ${segments[2]}` : method
     if (!Object.hasOwn(HOST_ACTIONS, key)) return null
-    return { id: decodeURIComponent(segments[1]), run: HOST_ACTIONS[key] }
+    let id
+    try {
+      id = decodeURIComponent(segments[1])
+    } catch {
+      // A malformed escape (`/hosts/%E0%A4%A/activate`) is a client mistake, not an internal
+      // failure: answer 400 with a readable field error instead of leaking URIError as 500.
+      throw errors.invalidInput('id', {
+        zh: '主机 id 不是合法的 URL 编码。',
+        en: 'The host id is not valid URL encoding.',
+      })
+    }
+    return { id, run: HOST_ACTIONS[key] }
   }
 
   async function handler(req, res) {
@@ -389,7 +491,11 @@ export function createApi(options) {
       })
     } catch (error) {
       const view = toErrorView(error)
-      const status = isRemoteGoError(error) ? (view.code === 'invalid-input' ? 400 : 409) : 500
+      const status = Number.isInteger(error?.httpStatus)
+        ? error.httpStatus
+        : isRemoteGoError(error)
+          ? statusForErrorCode(view.code)
+          : 500
       logger.error?.('[dsh-remote-go] API error:', error)
       try {
         sendJson(res, status, { ok: false, error: view })

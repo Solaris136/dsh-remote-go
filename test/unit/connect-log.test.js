@@ -82,6 +82,29 @@ test('a runtime without a log yields an empty tail instead of throwing', () => {
   assert.deepEqual(connectLogTail(null), [])
 })
 
+test('the ring redacts the remote launch line and clamps it, because HostView.logs reads it', () => {
+  const runtime = { id: 'h_test' }
+  const line = [
+    'LINE:dsh web: http://127.0.0.1:38123/?token=SUPERSECRET-TOKEN',
+    'Authorization: Bearer local-value-77',
+    '/home/alice/.dsh/remote-go/logs/web.log',
+  ].join('\n')
+  const entry = appendConnectLog(runtime, { at: '2026-11-16T00:00:00.000Z', level: 'debug', message: line })
+  for (const secret of ['SUPERSECRET-TOKEN', 'local-value-77', 'alice']) {
+    assert.equal(entry.message.includes(secret), false, `${secret} survived the ring`)
+    assert.equal(entry.line.includes(secret), false, `${secret} survived the log line`)
+  }
+  assert.match(entry.message, /token=<redacted>/)
+  assert.match(entry.message, /<user>/)
+  // `/state` and `/events` serialize `connectLogTail`, not the ring itself.
+  const tail = connectLogTail(runtime)
+  assert.equal(JSON.stringify(tail).includes('SUPERSECRET-TOKEN'), false)
+  // A chatty single line is clamped to the same budget as any other technical detail.
+  const huge = appendConnectLog(runtime, { at: '', level: 'info', message: 'x'.repeat(LOG_TECHNICAL_LIMIT * 3) })
+  assert.ok(huge.message.length <= LOG_TECHNICAL_LIMIT + 8, `message was ${huge.message.length} characters`)
+  assert.ok(huge.message.includes('…'), 'the elided middle keeps its marker')
+})
+
 test('every connection starts a clean ring with one boundary line that names the attempt', () => {
   const runtime = { id: 'h_test' }
   appendConnectLog(runtime, { at: '2026-11-16T00:00:00.000Z', level: 'info', message: 'old line' })

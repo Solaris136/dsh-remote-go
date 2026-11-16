@@ -1,6 +1,8 @@
 /**
  * Coded, bilingual errors; `toErrorView` is the only shape the Client ever sees.
  */
+import { redactObject, redactText } from './redact.js'
+import { headTail } from './util.js'
 
 const ErrorCode = Object.freeze({
   NETWORK: 'network',
@@ -372,6 +374,23 @@ export const errors = {
     ),
 }
 
+/**
+ * How much of one `ErrorView.technical` string the API will carry. The producers hand over
+ * captured process output (a remote `web.log` tail, an SFTP failure); the API response is the
+ * one place that must never carry the whole of it.
+ */
+export const TECHNICAL_LIMIT = 1200
+
+/**
+ * The only ErrorView a caller may send: redaction is part of the contract, not an opt-in.
+ * `technical` is the risky field — producers put remote process output there, and the first
+ * line of a remote `web.log` is the launch URL with its session token. It is redacted and
+ * length-capped, then the whole view goes through `redactObject` so a detail/next-step that
+ * quotes one of those lines is covered too (docs/api.md: "已脱敏").
+ * @param {unknown} error
+ * @returns {{ code: string, title: { zh: string, en: string }, detail: { zh: string, en: string },
+ *   nextSteps: { zh: string, en: string }[], retryable: boolean, technical?: string }}
+ */
 export function toErrorView(error) {
   if (error instanceof RemoteGoError) {
     const table = CODE_TABLE[error.code] ?? { retryable: true, title: { zh: '未知错误', en: 'Unknown error' } }
@@ -382,8 +401,8 @@ export function toErrorView(error) {
       nextSteps: error.nextSteps,
       retryable: error.retryable,
     }
-    if (error.technical) view.technical = error.technical
-    return view
+    if (error.technical) view.technical = headTail(redactText(error.technical), TECHNICAL_LIMIT)
+    return redactObject(view)
   }
   return toErrorView(errors.internal(error))
 }

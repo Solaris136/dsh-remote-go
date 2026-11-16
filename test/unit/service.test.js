@@ -685,12 +685,38 @@ test('saving and removing hosts updates the snapshot', async () => {
   assert.equal(service.snapshot().firstRun, true)
 })
 
-test('setLocalVersion enables local-version parity resolution', async () => {
+test('setLocalVersion adopts a detected version and only backfills a missing one', async () => {
   const { service } = await makeTestService({ localVersion: null })
   assert.equal(service.snapshot().hostVersion, null)
-  service.setLocalVersion('v0.2.2-rc.1', 'client')
-  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
-  assert.equal(service.snapshot().targetVersion, '0.2.2-rc.1')
+  // The client may fill in a version the Host could not detect…
+  assert.equal(service.setLocalVersion('v0.2.2-rc.3', 'client'), true)
+  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.3')
+  assert.equal(service.snapshot().targetVersion, '0.2.2-rc.3')
+  // …but a version that is already known is never overwritten by the page.
+  assert.equal(service.setLocalVersion('0.9.9', 'client'), false)
+  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.3')
+  // A locally detected version replaces the backfill: it is the Host's own reading.
+  assert.equal(service.setLocalVersion('0.3.0', 'package.json:/x'), true)
+  assert.equal(service.snapshot().hostVersion, '0.3.0')
+})
+
+test('the client backfill refuses a version below the supported floor or one that is not a version', async () => {
+  const { service } = await makeTestService({ localVersion: null })
+  assert.throws(
+    () => service.setLocalVersion('0.2.2-rc.1', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.equal(service.snapshot().hostVersion, null)
+  // A malformed value is a client mistake, not a silent `accepted:false` (docs/api.md says 400).
+  assert.throws(
+    () => service.setLocalVersion('not-a-version', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.throws(
+    () => service.setLocalVersion('', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.equal(service.snapshot().hostVersion, null)
 })
 
 test('a re-attached instance with another version is never stopped by the next connect', async () => {

@@ -40,6 +40,12 @@ export function hostView(runtime, ctx) {
     updatedAt: entry.updatedAt,
     targetVersion: ctx.targetVersion,
     versionParity: versionParity(ctx.targetVersion, runtime.remote.version ?? null),
+    /**
+     * True when `hosts.json` was unreadable on load: this list is the recovered fallback, and a
+     * copy of the damaged file is kept next to it (`hosts.json.corrupt-<timestamp>`). Contract
+     * field only — the Client renders it as a warning (docs/api.md HostView).
+     */
+    storeCorrupt: ctx.storeCorrupt === true,
   }
 }
 

@@ -57,6 +57,7 @@ export function apply(ctx, config = {}) {
         stateDir,
         localVersion: service.localVersion,
         engineNodeRange: service.engineNodeRange,
+        storeCorrupt: store.hostsCorrupt,
       }),
   })
   // The browser half's remote window lives on the local origin (the desktop half uses a guest
@@ -138,6 +139,8 @@ function describeSelf(ctx, info) {
     stateDir: info.stateDir,
     hostVersion: info.localVersion,
     engineNodeRange: info.engineNodeRange ?? null,
+    // True when hosts.json was unreadable and the list beside it is the recovered fallback.
+    storeCorrupt: info.storeCorrupt === true,
     entry: null,
     client: null,
   }

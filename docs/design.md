@@ -359,6 +359,60 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
   必须自带确认门——DSH 的审批在 `policy='never'` 时会确定性拒绝，不能把「问用户」寄托在审批上。返回值里的远端
   主机名、版本与错误文本属于不可信数据。
 
+### 7.1 同源 iframe 的威胁模型（产品级）
+
+浏览器半端把远端界面放进**同源** iframe（`/dsh-remote-go/remote/<hostId>/`），因此必须先说清一个前提：
+
+- **远端被入侵 = 本机 API 被可信调用。** 被攻陷（或本身就是恶意）的远端 DSH 在那个 frame 里拥有本机 origin 的
+  脚本能力：它可以直接 `fetch('/dsh-remote-go/api/…', { credentials: 'same-origin' })`，带上 `x-dsh-remote-go`
+  与任何同源请求头，浏览器不会给这类请求任何额外信号。标识头 `x-dsh-remote-go: 1` 是**常量**，写在本仓库与打包
+  产物里，**不是鉴权**：它只挡随手 curl 与旧的跨站路径，挡不住已经在本机同源文档里的脚本。真正的准入是 DSH 自己的
+  浏览器会话（`ctx.connection.requestRejection`）加 Host/Origin 栅栏，而 frame 天然满足它们。
+- 这是**产品决策**，不是可以就地修掉的实现缺陷：只要保留「整窗使用远端界面」，frame 里的页面就必然与本机同源。
+  收窄它只能把敏感动作搬到需要用户手势的通道（桌面 guest、本地确认弹窗），那是另一种产品形态。本版本**不宣称**
+  对「被入侵的远端」提供隔离，只做两件事：把最重两条链路的破坏面压到最小，并让用户知道自己信任了什么。
+
+两条最重的链路与已加的缓解：
+
+1. `POST /downloads`：远端决定**写什么内容**（文件字节），也决定**写到哪里**（`destination` 下新建的文件/目录名
+   就来自远端文件树）。
+   - `destination` 必须是本机用户主目录之下，且不是系统目录、自启动目录（`Startup` / `autostart` / `systemd` /
+     `Start Menu\Programs`）、凭据目录（`.ssh` / `.gnupg`）、登录脚本与用户配置目录（`.bashrc` / `.profile` /
+     `.zshrc` / `.config` / `.local` 等）；`shell:startup` 一类未解析的 shell 路径直接拒绝。目标是把「远端不能把
+     可执行内容放进下次登录会执行的位置」这件事挡住，不是「任意内容都可以安全下载」。
+   - **远端命名的最终路径同样过关**：`destination` 合法不代表 `destination/<远端名字>` 合法。远端文件夹名
+     `autostart` / `Startup` / `.ssh`、远端文件名 `.bash_login`，以及会在其下生成受保护路径的上级目录
+     （如 `AppData/Roaming/Microsoft`，其下就是 `Windows\Start Menu\Programs\Startup`）都在创建前被拒绝，
+     拒绝时零写入。
+   - 仍然可以写入 `~/Downloads` 这类正常位置：「用户自己选目录」是产品语义，栅栏只限制根集合与危险子目录，
+     越界时给可读原因（`invalid-input` + `destination`）。
+   - 注意 `HostView.authKeyPath` 与 `GET /keyfile/list` 仍会把本机 home 下的绝对路径交给同源 frame（既有契约，
+     也是目录选择器的信息来源）。它们不是秘密，但在本条修好之前，那正是远端定位 `destination` 的线索；本条的
+     栅栏不依赖「远端不知道 home」。
+2. `POST /hosts` + `POST /hosts/:id/connect`：远端可以新增/覆盖主机条目并触发连接，把本机 SSH 客户端指向它控制的
+   地址。
+   - 主机 `id` 只由 Host 签发：客户端传来的未知或畸形 id 一律替换成新的 `h_*`，不能伪造或占用别人的条目（`id` 同时
+     是 secrets 键与代理路由的一部分）。
+   - 连接仍要真实 SSH 认证与主机指纹确认；密码不经 `POST /hosts` 传输，`hosts.json` 不含密码。
+   - `POST /local-version` 只在探测失败时接受回填，且不得低于 `engines.dsh` 下限，避免远端把 npx 运行时钉到任意版本。
+
+同源代理本身的方向性边界（不是隔离，是「不要让远端在同源上做它本来没资格做的事」）：
+
+- 请求头是**白名单**：本机会话的 `authorization` / `cookie` / `x-dsh-*`、`forwarded` / `x-forwarded-*`、
+  `sec-fetch-*` 一律不发给远端；只有 `accept*` / `content-*` / `range` / `if-*` / `cache-control` /
+  `user-agent` / `x-requested-with` 与 WebSocket 握手头能过去。
+- 响应头按名丢弃 `clear-site-data`、`access-control-*`、`refresh`、`content-location`、`report-to`、`nel`、
+  `permissions-policy`、`alt-svc`；**WebSocket 的 101 响应头也走同一套策略**；`Location` 只允许折回远端自己的
+  listener，其它绝对地址（含 `//host`、带反斜杠的“相对”引用、其它 loopback 端口）一律丢弃，避免这条 frame 被
+  导航去钓鱼页。
+- 远端 cookie 只存在 Host 侧的 per-host jar（≤64 条、值 ≤4 KiB，`Secure` cookie 不入明文 jar）；上游 30s
+  无响应即 502，不把本机请求无限挂住。
+
+错误与诊断文本同样在这个前提之下：`ErrorView.technical` 会带远端进程输出（第一行就是带 token 的 launch URL），
+所以它在序列化前统一脱敏（token / 密码 / 私钥 / 家目录）并限长；连接日志在写入 ring 时脱敏（`HostView.logs`、
+SSE 状态帧与诊断导出读的都是它，所以 `/state` 与 `/events` 不再含 token）；`GET /diagnostics/self` 的
+`home` / `stateDir` 同样脱敏。这些是数据卫生，不是隔离边界。
+
 ## 8. 失败与恢复
 | 场景 | 表现 |
 |---|---|

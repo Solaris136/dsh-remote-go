@@ -13,7 +13,7 @@ export { normalizeRemoteFilePath, remoteFileName } from './remote-path.js'
  * Save one file or one folder for a download job.
  * @param {object} runtime - the connected host runtime.
  * @param {unknown} rawPath - the requested absolute remote path.
- * @param {{ destination?: string, onProgress?: Function, onInventory?: Function,
+ * @param {{ destination?: string, home?: string, onProgress?: Function, onInventory?: Function,
  *   isCancelled?: () => boolean }} [options]
  * @returns {Promise<{ path: string, kind: 'file'|'folder', name: string,
  *   destination: string, totalBytes: number, files: number, cancelled?: boolean }>}
@@ -33,7 +33,7 @@ export async function readHostDownload(runtime, rawPath, options = {}) {
   let destination
   try {
     const info = await ssh.inspectRemotePath(remotePath)
-    destination = await requireDestination(options.destination)
+    destination = await requireDestination(options.destination, { home: options.home })
     if (info.isFile) return await saveHostFile(runtime, remotePath, destination, options)
     if (info.isDirectory) return await saveHostFolder(runtime, remotePath, destination, options)
     throw errors.remoteFileUnavailable({

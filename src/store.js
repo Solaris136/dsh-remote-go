@@ -1,10 +1,10 @@
 /**
- * Durable local state under `$DSH_HOME/remote-go/`: hosts.json, settings.json and secrets.json; writes are atomic, a corrupt file falls back to defaults.
+ * Durable local state under `$DSH_HOME/remote-go/`: hosts.json, settings.json and secrets.json; writes are atomic, a corrupt file is kept aside before the next write replaces it.
  */
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { readJsonFile, withProcessLock, writeJsonAtomic } from './atomic-json.js'
-import { nowIso, randomId } from './util.js'
+import { deepMerge, nowIso, randomId } from './util.js'
 import { defaultSettings, sanitizeHostEntry, sanitizeSettings } from './settings.js'
 
 export class HostStore {
@@ -17,7 +17,14 @@ export class HostStore {
     this.secretsFile = path.join(this.dir, 'secrets.json')
     this.data = { hosts: [], settings: defaultSettings() }
     this.secrets = {}
+    /** Basenames of state files that were unreadable and moved aside on this load. */
+    this.corrupt = new Set()
     this.loaded = false
+  }
+
+  /** Whether `hosts.json` had to be quarantined, i.e. the host list is the empty fallback. */
+  get hostsCorrupt() {
+    return this.corrupt.has('hosts.json')
   }
 
   async load() {
@@ -40,7 +47,34 @@ export class HostStore {
 
   async #readJson(file, fallback) {
     const result = await readJsonFile(file, { fs: this.fs, logger: this.logger })
-    return result.status === 'ok' ? result.value : fallback
+    if (result.status === 'ok') return result.value
+    // Only bytes that are not JSON are quarantined. A file that merely could not be read right
+    // now (EACCES, a transient IO error) falls back for this run and is left in place: renaming
+    // it would turn a permission problem into a silently emptied host list.
+    // A corrupt file used to fall back to `[]` / defaults silently, and the next write then
+    // replaced it for good — losing every host, including the pinned fingerprints that make a
+    // host-key change detectable. Keep the bytes aside first, then recover.
+    if (result.status === 'corrupt') await this.#quarantine(file)
+    return fallback
+  }
+
+  /**
+   * Rename one unreadable state file to `<name>.corrupt-<iso>` so it survives the recovery
+   * write. A failure here is logged and swallowed: recovery must not be blocked by it.
+   * @param {string} file - absolute path of the corrupt state file.
+   */
+  async #quarantine(file) {
+    const name = path.basename(file)
+    // The flag means "this file was unreadable", whether or not a copy could be made.
+    this.corrupt.add(name)
+    // Colons and dots are invalid (Windows) or noisy in a file name, so the ISO stamp is flattened.
+    const target = `${file}.corrupt-${nowIso().replace(/[:.]/g, '-')}`
+    try {
+      await this.fs.rename(file, target)
+      this.logger.warn?.(`[dsh-remote-go] ${name} was unreadable; kept a copy as ${path.basename(target)}`)
+    } catch (error) {
+      this.logger.warn?.(`[dsh-remote-go] cannot keep a copy of the unreadable ${name}:`, error)
+    }
   }
 
   #writeJson(file, value, mode = 0o600) {
@@ -51,7 +85,12 @@ export class HostStore {
         logger: this.logger,
         fileMode: mode,
       }),
-    )
+    ).then((result) => {
+      // The recovered file is the authority again: the next successful write clears the flag,
+      // so a user who rebuilds the list is not warned forever about a file that is now valid.
+      this.corrupt.delete(path.basename(file))
+      return result
+    })
   }
 
   async #persistHosts() {
@@ -77,10 +116,14 @@ export class HostStore {
 
   async upsertHost(rawEntry, options = {}) {
     await this.load()
-    const existing =
-      rawEntry && typeof rawEntry === 'object' && typeof rawEntry.id === 'string' ? this.getHost(rawEntry.id) : null
+    // A caller may name an id only if this store already issued it: the id keys the secrets
+    // file, the proxy's per-host routes and the client's host links, so a client-chosen id
+    // (malformed, too long, or a duplicate of another host) is not something to adopt. A new
+    // host always gets a fresh `h_…` and learns it from the returned HostView.
+    const rawId = rawEntry && typeof rawEntry === 'object' && typeof rawEntry.id === 'string' ? rawEntry.id : ''
+    const existing = rawId === '' ? null : this.getHost(rawId)
     const entry = sanitizeHostEntry(rawEntry, { settings: options.settings ?? this.data.settings, existing })
-    if (!entry.id) entry.id = randomId('h')
+    entry.id = existing ? existing.id : randomId('h')
     const index = this.data.hosts.findIndex((item) => item.id === entry.id)
     if (index >= 0) this.data.hosts[index] = { ...this.data.hosts[index], ...entry }
     else this.data.hosts.push(entry)
@@ -115,7 +158,11 @@ export class HostStore {
 
   async saveSettings(raw) {
     await this.load()
-    this.data.settings = sanitizeSettings({ ...this.data.settings, ...(raw && typeof raw === 'object' ? raw : {}) })
+    const patch = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+    // Merge the patch onto the *current* settings. Spreading it over the defaults reset every
+    // field the patch did not name — a patch of `autoReconnect.maxAttempts` also rewound
+    // `baseDelayMs` from a configured 5000 back to 800 — which silently undid sibling settings.
+    this.data.settings = sanitizeSettings(deepMerge(this.data.settings, patch))
     await this.#persistSettings()
     if (!this.data.settings.saveTokens) {
       this.secrets = {}
@@ -125,6 +172,9 @@ export class HostStore {
   }
 
   async saveToken(hostId, token) {
+    // Without this the first token save on a fresh process wrote `{}` over a secrets file that
+    // still held other hosts' tokens.
+    await this.load()
     if (!this.data.settings.saveTokens) return
     this.secrets[hostId] = token
     await this.#persistSecrets()

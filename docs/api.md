@@ -6,7 +6,7 @@
 > **准入**：每条请求（`/health` 除外）在进入路由前先过本机 DSH 自己的准入——`Host`/`Origin` 栅栏 + 浏览器会话认证
 > （`ctx.connection.requestRejection`），与 DSH 自带路由同一套检查；`/health` 不要求会话，但仍过 Host/Origin 栅栏。
 > 内核没有该服务时（旧内核）退回本插件自己的标识头 + 同源栅栏。
-> HTTP 状态：成功 200；DSH 准入拒绝 401（会话未认证/失效）或 403（Host/Origin 不通过）；缺头或跨站 403；未知路径 404；`invalid-input` 400；其余业务错误 409；未知异常 500。
+> HTTP 状态：成功 200；DSH 准入拒绝 401（会话未认证/失效）或 403（Host/Origin 不通过）；缺头或跨站 403；未知路径 404；`invalid-input` 400；请求体超过 1 MiB 413；`internal` 500；其余业务错误 409。
 >
 > **v2.0 变更**：移除镜像/工作区相关端点（`GET /local/workspaces`、`GET /hosts/:id/workspaces`、`GET /hosts/:id/mirrors`、`POST /hosts/:id/mirrors/sync`）。主机、连接、诊断与设置端点保持不变。
 >
@@ -60,6 +60,15 @@
 > `stop-unavailable`。它与既有的 `POST /hosts/:id/disconnect` 的区别见端点小节：`disconnect` 按存活策略收尾、
 > 不做 kill 归属校验；`stop-remote` 是显式破坏性动作，只有本连接启动或接管的那个 pid 能停，且会清掉远端
 > `run/web.json`。语义变化只在新增路由与新增 code，`HostView` / `RemoteView` 字段不变。
+>
+> **v2.9 安全修正**（独立安全审计结论，端点集合不变，与 stop-remote 同一版发布）：`ErrorView` 统一脱敏并
+> 限长（§0）；HTTP 状态改为 `invalid-input` 400、请求体过大 413、`internal` 500、其余业务错误 409；
+> `Origin` 比较改为回环等价（`127.0.0.1` / `localhost` / `[::1]`），用 `localhost` 打开 GUI 不再「能读不能写」；
+> `/health` 收敛为 `{ "ok": true }`；`/diagnostics/self` 与 `/keyfile/list` 不再回显机器路径（越界为 400）；
+> 主机 `id` 只由 Host 签发；`/settings` 与当前值深合并；`/local-version` 只回填缺失版本且不低于 `engines.dsh`
+> 下限；`POST /downloads` 的 `destination` 限用户主目录且拒绝系统/自启动/凭据目录；同源代理改为请求头白名单 +
+> 响应头阻止列表、`Location` 只允许折回远端自身、上游 30s 超时、cookie jar 有上限（`Secure` 不入 jar）；
+> `StateView` / `HostView` 增加 `storeCorrupt`（`hosts.json` **内容**不可解析时备份为 `.corrupt-<stamp>`；读取错误不改名，成功写回后标记清除）。
 
 ## 0. 通用类型
 
@@ -72,7 +81,7 @@ interface ErrorView {
   detail: I18nText
   nextSteps: I18nText[]
   retryable: boolean          // UI 是否显示「重试」
-  technical?: string          // 已脱敏的技术细节，仅放诊断里
+  technical?: string          // 已脱敏并限长（≤1200 个字符）；见下方 ErrorView 说明
 }
 
 type HostStatus =
@@ -174,6 +183,11 @@ interface HostView {
   lastOpenedAt: string | null
   createdAt: string
   updatedAt: string
+  /**
+   * `hosts.json` 的内容在加载时不可解析（已备份为 `hosts.json.corrupt-<stamp>`，并回落到空列表）。
+   * 与 `StateView.storeCorrupt` 同值：主机列表为空时只有状态里能看到，所以两个位置都下发；成功写回后清零。
+   */
+  storeCorrupt: boolean
 }
 
 interface DownloadJobView {
@@ -216,8 +230,16 @@ interface StateView {
   targetVersion: string | null  // = 本机 DSH 版本
   hosts: HostView[]; settings: SettingsView
   activeHostId: string | null; firstRun: boolean  // hosts.length === 0
+  storeCorrupt: boolean         // hosts.json 内容不可解析、已备份为 .corrupt-<stamp>，主机列表为恢复后的空列表；成功写回后清除
 }
 ```
+
+### ErrorView 脱敏（v2.9 修正）
+
+`ErrorView` 在序列化前**统一**过 `redactObject`：`technical`（常是远端进程输出，第一行就是带 token 的
+launch URL）、`detail`、`nextSteps` 里的 token / 密码 / 私钥 / `Authorization` / cookie / home 目录都会被脱敏；
+`technical` 还会截断到 1200 个字符（UTF-16 码元，CJK 时 UTF-8 字节更多；保留首尾）。因此它可以安全地进 UI 与日志，但**不是**「原始技术细节」：
+排障要看完整输出请取诊断包（`POST /hosts/:id/diagnose`）。
 
 ### ErrorView.code
 
@@ -247,9 +269,7 @@ interface StateView {
 
 ### `GET /health`（无需浏览器会话，仍过 Host/Origin 栅栏）
 存活探针，不返回任何状态数据，因此不要求 DSH 浏览器会话；`Host` 仍必须是本机 origin，`Origin`（若有）必须同源。
-```json
-{ "ok": true, "version": "0.1.0", "at": "2026-11-14T00:00:00.000Z" }
-```
+响应只有 `{ "ok": true }`：这条路由不需要会话，也就不下发版本、时间或任何可被无会话调用方读到的字段。
 
 ### `GET /state`
 ```json
@@ -282,10 +302,12 @@ data: {}
 ```
 
 ### `GET /diagnostics/self`
-返回插件入口与 client-module 图行，用于验收/排障：
+返回插件入口与 client-module 图行，用于验收/排障（`home` / `stateDir` 等机器路径与用户名同样过脱敏，
+`storeCorrupt` 表示 `hosts.json` 被隔离过）：
 ```json
 { "ok": true, "plugin": { "id": "dsh-remote-go", "version": "0.1.0" }, "at": "…",
-  "home": "…", "stateDir": "…", "hostVersion": "0.2.2-rc.1", "engineNodeRange": ">=24.9.0",
+  "home": "C:\\Users\\<user>", "stateDir": "C:\\Users\\<user>\\.dsh\\remote-go", "storeCorrupt": false,
+  "hostVersion": "0.2.2-rc.3", "engineNodeRange": ">=24.9.0",
   "entry": { "id": "dsh-remote-go", "name": "dsh-remote-go" },
   "client": { "graph": { "rev": "…", "release": { }, "entries": 1 }, "row": { }, "clientPath": "…", "bundle": { } } }
 ```
@@ -298,7 +320,8 @@ data: {}
 ```
 
 ### `GET /keyfile/list?path=<dir>`
-只读目录浏览，供客户端选择私钥文件；范围限用户主目录内，拒绝 `..` 与符号链接逃逸：
+只读目录浏览，供客户端选择私钥文件；范围限用户主目录内，拒绝 `..` 与符号链接逃逸。越界或不可读的目录是
+调用方的输入问题：返回 **400** `invalid-input`（字段 `path`），响应里**不回显**请求的路径。
 ```json
 { "ok": true, "path": "C:\\Users\\me\\.ssh", "parent": "C:\\Users\\me",
   "entries": [{ "name": "id_rsa", "path": "C:\\Users\\me\\.ssh\\id_rsa", "isDirectory": false }],
@@ -306,13 +329,18 @@ data: {}
 ```
 
 ### `POST /hosts`
-新增或更新主机（带 `id` 为更新）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用 `SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
+新增或更新主机（带**已存在的** `id` 为更新）。`id` 由 Host 签发（`h_*`）：客户端传来的未知 id 或格式
+不合法的 id 会被替换成一个新的 id，不会被采纳（`id` 同时是 secrets 键与代理路由的一部分，不能让调用方
+伪造或占用别人的条目）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用
+`SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` /
+`hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
 ```json
 { "host": { "id": "h_xxx", "name": "构建服务器", "address": "my-server", "port": 22, "username": "ubuntu",
   "auth": { "type": "key", "keyPath": "~/.ssh/id_rsa" }, "jumpHost": null, "keepAlive": "keep",
   "idleMinutes": 15, "autoReconnect": true, "hostKeyPolicy": "first-use" } }
 ```
-`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 编辑时省略表示保留原值。响应 `{ "ok": true, "host": HostView }`；校验失败返回 `invalid-input`。
+`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 编辑时省略表示保留原值。响应
+`{ "ok": true, "host": HostView }`；校验失败返回 `invalid-input`（400）。
 
 ### `DELETE /hosts/:id`
 断开（按存活策略决定是否停远端）并删除记录，同时取消该主机所有计时器。响应 `{ "ok": true }`。
@@ -408,15 +436,32 @@ data: {}
   浏览器信任栅栏：`Host` 必须是本机 origin（回环写法等价）、`Origin`（若有）必须同源、`sec-fetch-site`
   不能是 `cross-site`，否则 403。
 - 远端 `Set-Cookie` 由 Host 侧的 per-host cookie jar 保存，并从响应里移除；后续请求与 WebSocket 升级由 jar
-  注入。因此本地 DSH 的 cookie 与远端 DSH 的 cookie 虽然同在 `127.0.0.1` 上，也永不混用。
+  注入。因此本地 DSH 的 cookie 与远端 DSH 的 cookie 虽然同在 `127.0.0.1` 上，也永不混用。jar 有上限
+  （每主机 ≤64 条、cookie 值 ≤4 KiB），`Secure` cookie 不进这个明文 jar（隧道就是 loopback 明文 HTTP）。
+- 请求头是**白名单**：只转发 `accept`、`accept-encoding`、`accept-language`、`content-type`、
+  `content-length`、`range`、`if-*`、`cache-control`、`user-agent`、`x-requested-with`，WebSocket 升级另加握手头。
+  本机会话的 `authorization` / `cookie` / `x-dsh-*`、一跳字段 `forwarded` / `x-forwarded-*` 与 `sec-fetch-*`
+  **一律丢弃**，不会到达远端（`x-dsh-remote-go` 是常量标识头，不是凭据，但同样不转发）。
 - 转发时 `Host` / `Origin` 改写为该远端自己的回环 authority（`127.0.0.1:<远端 web 端口>`），远端的
-  authority 绑定 cookie 与同源校验继续成立；`Location` 指回远端自身 listener 时折回 `/dsh-remote-go/remote/<hostId>/`。
+  authority 绑定 cookie 与同源校验继续成立；`Location` 指回远端自身 listener 时折回
+  `/dsh-remote-go/remote/<hostId>/`，**其它绝对地址（外部域、`//host`、其它 loopback 端口、`javascript:`）
+  直接丢弃**；一个“相对”引用里只要还带反斜杠也丢弃（http(s) 下 `/\evil`、`\/evil` 都会被浏览器解析成外站
+  origin），`#` / `/` / `.` 开头且不含反斜杠的相对引用原样透传。
   响应去掉 `X-Frame-Options`，并从 CSP 中只移除 `frame-ancestors` 指令（其余指令原样保留），因为这条代理的存在意义
   就是把这一页嵌进同源 frame。
+- 响应头按名丢弃 `clear-site-data`、`access-control-*`、`refresh`、`content-location`、`report-to`、
+  `nel`、`permissions-policy`、`alt-svc`：远端不得通过本机 origin 清本地 cookie / 存储或改写浏览器策略。
+  **WebSocket 的 101 响应头同样过这套策略**（只解析响应头，帧原样流转；`Connection` / `Upgrade` /
+  `Sec-WebSocket-*` 保留），因此远端也不能借握手把 `Set-Cookie` 或策略头塞给浏览器。
+- 上游 30s 内没有响应头（连接已建立但对端不回答）即 **502**，并同时销毁两侧连接；升级握手同样有 30s 超时。
+  已建立的响应流不受该超时影响（SSE / 大文件可以合法地长时间空闲）。
 - 远端 DSH 唯一的 WebSocket 路由 `/api/remote.mux` 以**每主机一条精确升级路由**的形式注册
   （`/dsh-remote-go/remote/<hostId>/api/remote.mux`），Host 卸载或主机被删除时注销。
 - 上游不可达时返回 502 文本；代理只读、不写远端文件，也不缓存响应。上游连接失败会向 Host 上报一次
   `remote-unreachable` 疑似事件（不把单次 502 当成远端重启；Host 用探活确认后再重挂）。
+
+> 同源 iframe 的威胁模型（「远端被入侵 = 本机 API 被可信调用」）见
+> [docs/design.md](design.md) §7.1：这条代理只降低「远端在同源上多做一步」的面，不构成对恶意远端的隔离。
 
 ### `POST /downloads`
 启动一个后台下载任务（文件或文件夹），立即返回初始 `DownloadJobView`（`phase: "preparing"`）。Host 把远端内容**流式写入用户选择的本机目录**，不在内存里缓存文件字节；进度通过 SSE `download` 事件推送，也可用 `/status` 兜底轮询。
@@ -435,7 +480,15 @@ content-type: application/json
 
 - `path` 必须是绝对 POSIX 路径；Host 会 `stat` 判断文件或文件夹。
 - **不设置文件或文件夹大小上限，也不限制文件个数。**
-- `destination` 必填（DSH 目录选择器 `uiWorkspace.pickDirectory` 返回的绝对本机目录）。
+- `destination` 必填（DSH 目录选择器 `uiWorkspace.pickDirectory` 返回的绝对本机目录），并且：
+  - 必须在**本机用户主目录之下**；`Startup` / `autostart` / `systemd`、`Start Menu\Programs` 等自启动位置、
+    `.ssh` / `.gnupg` 等凭据目录、`.bashrc` / `.profile` / `.config` / `.local` 等登录脚本与配置目录、系统目录与
+    `shell:` 形式的路径一律拒绝（`invalid-input` + 字段 `destination`）。原因见
+    [docs/design.md](design.md) §7.1：这个字段是「远端决定写什么、写到哪里」的写入口。
+  - **远端命名的最终路径也受同一策略约束**：`destination` 合法不代表 `destination/<远端名字>` 合法。远端文件夹名
+    `autostart`、`Startup`、`.ssh`，远端文件名 `.bash_login`，或会在其下生成受保护路径的上级目录（例如
+    `AppData/Roaming/Microsoft`）同样返回 `invalid-input`，且**不发生任何写入**。
+  - 校验是**同步**的：坏 `destination` 直接 400，不会先创建 `preparing` 任务再异步报错。
   - 文件：写入 `<destination>/<远端文件名>`；同名文件已存在时改用 `<名字> (2).<扩展名>`、`<名字> (3).<扩展名>`……
   - 文件夹：在 `destination` 下新建 `<远端文件夹名>`；同名文件夹或文件已存在时改用 `<名字> (2)`、`<名字> (3)`……
 - 文件夹不打包 ZIP：Host 递归枚举后逐个文件写到新建目录，保留子目录与空目录，跳过符号链接。
@@ -468,9 +521,15 @@ content-type: application/json
 
 ### `POST /settings`
 局部更新设置：`{ "patch": Partial<SettingsView> }` → `{ "ok": true, "settings": SettingsView }`。
+patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ "autoReconnect": { "maxAttempts": 12 } }` 只改这一个
+字段，不会把 `baseDelayMs` 之类的兄弟字段重置回默认值。
 
 ### `POST /local-version`
-客户端把页面里读到的本机 DSH 版本回填给 Host（Host 探测失败时的兜底）：`{ "version": "0.2.2-rc.1" }` → `{ "ok": true }`。
+客户端把页面里读到的本机 DSH 版本回填给 Host（只在 Host 探测失败时的兜底）：
+`{ "version": "0.2.2-rc.3" }` → `{ "ok": true, "accepted": true }`。
+- Host 已经探测到版本时**不覆盖**，返回 `{ "ok": true, "accepted": false }`。
+- 低于 `package.json` `engines.dsh` 下限（当前 `0.2.2-rc.3`）或不是合法 semver 时，返回 **400**
+  `invalid-input`（字段 `version`），不改变现有版本。远端 npx 运行时被钉在这个版本上，不能让页面随意指定。
 
 ### `POST /active`
 `{ "id": "h_x" }` 设置活动主机，`id: null` 清除；返回 `{ "ok": true }`。

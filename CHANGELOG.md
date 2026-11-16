@@ -11,6 +11,47 @@
 
 ### 安全
 
+- **`ErrorView` 统一脱敏并限长**（独立安全审计 A）。失败连接会把远端进程输出塞进 `ErrorView.technical`，
+  而远端 `web.log` 的第一行就是带会话 token 的 launch URL。错误视图此前没有脱敏；连接日志此前也没有——
+  `remote-web.js` 的 `onLine` 把同一行写进连接 ring，`HostView.logs`、SSE 状态帧与诊断导出都读它，所以
+  **成功连接进行中**的 `/state` / `/events` 就带 token。现在两处都封住：`toErrorView` 在返回前跑
+  `redactObject`（`technical` / `detail` / `nextSteps` 里的 token、`Authorization`、cookie、私钥与家目录
+  全部替换，`technical` 与单条日志都截断到 1200 个字符），`appendConnectLog` 在写入 ring 时先 `redactText`。
+  `redactText` 同时补上裸 `token=`/`#token=`、`x-*-token` 头与
+  `/Users/` 路径，并且不再把 `ssh -p 2222` 的端口当成密码脱掉。
+- **同源栅栏按回环等价比较 `Origin`**（审计 B）。本地 API 用字符串比较 `Origin` 与内核给的
+  `127.0.0.1:<port>`，用 `localhost` 打开 GUI 时 `/state`、`/health`、`/events` 全 403，表现为「能读不能写」。
+  改用 `request-trust.js` 的 `sameServerOrigin`：`127.0.0.1` / `localhost` / `[::1]` 与默认端口折算视为同一
+  origin，外部域、其它端口、其它协议仍然拒绝；`Origin` 的 authority 按原样（大小写不敏感）比较，
+  `user@host`、尾点、补零端口这类被解析器改写的值不会被当成回环。
+- **同源代理收紧为双向白名单**（审计 C）。请求头从黑名单改成白名单，本机会话的 `authorization`、`cookie`、
+  `x-dsh-*`、`forwarded` / `x-forwarded-*`、`sec-fetch-*` 不再发给远端（只有 `accept*` / `content-*` /
+  `range` / `if-*` / `cache-control` / `user-agent` / `x-requested-with` 与 WebSocket 握手头通过）；响应头按名
+  丢弃 `clear-site-data`、`access-control-*`、`refresh`、`content-location`、`report-to`、`nel`、
+  `permissions-policy`、`alt-svc`，远端不能再借此清本机 cookie 或改写浏览器策略；`Location` 只折回远端自身
+  listener，其它绝对地址（外部域、`//host`、含反斜杠的「相对」引用如 `/\evil`、其它 loopback 端口）直接
+  丢弃；上游 30s 无响应即 502 并销毁两侧；**WebSocket 的 101 响应头也过同一套策略**（此前原样透传，
+  `Set-Cookie` / 策略头可借握手绕过）；`accept-encoding` 作为内容协商头转发；per-host cookie jar 限 64 条 /
+  值 4 KiB，`Secure` cookie 不进明文 jar。
+- **数据层不再静默丢配置**（审计 D）。`hosts.json` / `settings.json` / `secrets.json` **内容不可解析**时
+  先改名为 `<name>.corrupt-<stamp>` 再回落到默认值，避免下一次写入把全部主机（含 pinned 指纹）永久覆盖；只是
+  读不了（EACCES/IO）的文件只回落、不改名，避免把权限问题变成空主机列表。损坏标记通过
+  `StateView.storeCorrupt` / `HostView.storeCorrupt` 与 `/diagnostics/self` 暴露，并在下一次成功写回后清除
+  （不会永远提示）。`POST /settings` 改为与
+  **当前值**深合并（嵌套 patch 不再把 `autoReconnect.baseDelayMs` 从 5000 重置成 800）；`saveToken` 先
+  `load()`，不会再以 `{}` 覆盖已有 secrets。
+- **下载目标加固**（审计 F）。`POST /downloads` 的 `destination` 只允许本机用户主目录之下，并拒绝
+  `Startup` / `autostart` / `systemd` / `Start Menu\Programs` 等自启动位置、`.ssh` / `.gnupg` 等凭据
+  目录、`.bashrc` / `.profile` / `.config` / `.local` 等登录脚本与配置目录、系统目录与 `shell:startup`
+  一类路径；校验是同步的（坏路径直接 400，不再先建 `preparing` 任务再异步报错）。**远端命名的最终路径同样
+  过关**：`destination=~/.config` + 远端文件夹名 `autostart`、`~` + 远端文件名 `.bash_login`，以及会在其下
+  生成受保护路径的上级目录都在创建前被拒绝（零写入）。主机 `id` 只由 Host 签发（客户端传来的未知/畸形 id
+  一律替换成新的 `h_*`）；`POST /local-version` 只在探测失败时接受回填、不得低于 `engines.dsh` 下限，格式
+  不合法返回 400。
+- **错误与契约修正**（审计 E）。`internal` 由 409 改为 500；畸形主机 id 与越界的 `keyfile/list` 由 500 改为
+  400 `invalid-input`（且不回显路径）；>1 MiB 请求体先回 413 JSON 再结束，不再让客户端看到 `ECONNRESET`；
+  SSE 限 8 个客户端、慢消费者与超大帧有上限；`/health` 收敛为 `{ "ok": true }`；`/diagnostics/self` 的
+  `home` / `stateDir` 脱敏。
 - **本地 HTTP API 与同源代理补上 DSH 的 Host/Origin 准入**（#65）。每条请求在进入路由前先过本机 DSH 自己的
   `ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话认证，与 DSH 自带路由同一套检查；服务不存在
   的旧内核退回本插件原本的标识头 / 同源栅栏，升级后仍可用。此前 API 只看 `Origin` 与 `sec-fetch-site`，

@@ -21,6 +21,14 @@ export const API_HEADER = 'x-dsh-remote-go'
 export const PLUGIN_ID = 'dsh-remote-go'
 export const PLUGIN_VERSION = '0.1.0'
 
+/**
+ * DSH's own lower bound, mirrored from this package's `engines.dsh`. The client may only
+ * backfill a locally-detected DSH version; a value below this floor names a build the plugin
+ * does not support, so `/local-version` refuses it (it would otherwise pin the remote npx
+ * runtime to an arbitrary, possibly unusable version).
+ */
+export const MIN_DSH_VERSION = '0.2.2-rc.3'
+
 /** Host↔Client contract version served by `GET /version` (docs/api.md v2.9). */
 export const API_VERSION = '2.9'
 
