@@ -175,6 +175,15 @@ window.__ModuleLoader__.load({
         '远端链路正在重建隧道，请稍后再试。',
         'The remote link is rebuilding its tunnel; try again shortly.',
       ],
+      cardStopRemote: ['关闭远端 DSH', 'Stop remote DSH'],
+      cardStopping: ['正在关闭远端 DSH…', 'Stopping the remote DSH…'],
+      stopRemoteTitle: ['关闭远端 DSH？', 'Stop the remote DSH?'],
+      stopRemoteBody: [
+        '会停止远端 DSH 进程（本连接管理的那个），然后断开本机连接：隧道关闭、SSH 会话释放，此主机变为「断线」，连接配置与凭据保留，之后可以点「重连」重新启动一个新的远端实例。',
+        'This stops the remote DSH process managed by this connection, then releases the link: the tunnel closes, the SSH session is released and the host becomes disconnected. Its settings and credentials are kept, and Reconnect starts a fresh remote instance later.',
+      ],
+      stopRemoteConfirm: ['关闭远端 DSH', 'Stop remote DSH'],
+      stopRemoteBusy: ['正在关闭…', 'Stopping…'],
       cardDiagnose: ['诊断', 'Diagnose'],
       cardEdit: ['编辑', 'Edit'],
       cardDelete: ['删除', 'Delete'],
@@ -263,6 +272,10 @@ window.__ModuleLoader__.load({
       'progress.restarting-remote': [
         '远端 DSH 正在重启，正在重新挂载界面…',
         'The remote DSH is restarting; re-attaching the remote UI…',
+      ],
+      'progress.stopping-remote': [
+        '正在关闭远端 DSH（停止本连接管理的远端进程）…',
+        'Stopping the remote DSH process managed by this connection…',
       ],
       'progress.default': ['正在连接…', 'Connecting…'],
       'phase.ssh': ['SSH', 'SSH'],
@@ -877,6 +890,14 @@ window.__ModuleLoader__.load({
        */
       async restart(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/restart', { method: 'POST', body: {} })
+      },
+      /**
+       * Stop the remote DSH this connection manages and release the link. The Host refuses
+       * with 409 `stop-unavailable` when the host is not stoppable or the bound pid cannot be
+       * proven to be this connection's own; `/state` carries `stopping-remote` while it works.
+       */
+      async stopRemote(hostId) {
+        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/stop-remote', { method: 'POST', body: {} })
       },
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
@@ -1574,17 +1595,47 @@ window.__ModuleLoader__.load({
           title: props.title,
           onClose: props.onCancel,
           closeLabel: props.cancelLabel,
+          testId: props.testId,
           footer: footerRow(
             h(
               Button,
-              { variant: 'secondary', onClick: props.onCancel, disabled: props.busy === true },
+              {
+                variant: 'secondary',
+                testId: props.cancelTestId,
+                onClick: props.onCancel,
+                disabled: props.busy === true,
+              },
               props.cancelLabel,
             ),
-            h(Button, { variant: 'danger', onClick: props.onConfirm, busy: props.busy === true }, props.confirmLabel),
+            h(
+              Button,
+              { variant: 'danger', testId: props.confirmTestId, onClick: props.onConfirm, busy: props.busy === true },
+              props.confirmLabel,
+            ),
           ),
         },
         box('p', 'drg-paragraph', props.body),
       )
+    }
+
+    /**
+     * The confirmation for the destructive "Stop remote DSH" action: it names the process
+     * that will be stopped and what survives (the host, its settings and credentials).
+     */
+    function StopRemoteDialog(props) {
+      const t = translatorOf(props)
+      return h(ConfirmDialog, {
+        title: t('stopRemoteTitle'),
+        body: t('stopRemoteBody'),
+        confirmLabel: props.busy === true ? t('stopRemoteBusy') : t('stopRemoteConfirm'),
+        cancelLabel: t('cancel'),
+        busy: props.busy === true,
+        testId: 'stop-remote-dialog',
+        confirmTestId: 'stop-remote-confirm',
+        cancelTestId: 'stop-remote-cancel',
+        onConfirm: props.onConfirm,
+        onCancel: props.onCancel,
+      })
     }
 
     //#region 8. host list view
@@ -1632,10 +1683,14 @@ window.__ModuleLoader__.load({
       // `connecting` (not `disconnected`) while it runs, so no "connection lost" shows up.
       const restarting =
         host.status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
+      // The explicit stop is the same kind of one-shot link action, under its own progress code.
+      const stopping =
+        host.status === 'connecting' && host.progress !== null && host.progress.code === 'stopping-remote'
       // `remote-unreachable` keeps the SSH session on purpose, so a restart is the other way
       // back besides reconnecting (docs/design.md §5.6).
       const recoverable = host.status === 'error' && host.error !== null && host.error.code === 'remote-unreachable'
       const restartAvailable = host.status === 'connected' || restarting || recoverable
+      const stopAvailable = host.status === 'connected' || restarting || stopping || recoverable
 
       return h(
         'li',
@@ -1719,9 +1774,21 @@ window.__ModuleLoader__.load({
                   variant: 'ghost',
                   testId: 'host-restart',
                   onClick: () => props.onRestart && props.onRestart(host),
-                  disabled: busy || restarting,
+                  disabled: busy || restarting || stopping,
                 },
                 restarting ? t('cardRestarting') : t('cardRestart'),
+              )
+            : null,
+          stopAvailable
+            ? h(
+                Button,
+                {
+                  variant: 'ghost',
+                  testId: 'host-stop-remote',
+                  onClick: () => props.onStopRemote && props.onStopRemote(host),
+                  disabled: busy || restarting || stopping,
+                },
+                stopping ? t('cardStopping') : t('cardStopRemote'),
               )
             : null,
           meta.retry === true
@@ -1775,6 +1842,30 @@ window.__ModuleLoader__.load({
       const connected = hosts.filter((host) => host && host.status === 'connected').length
       const total = hosts.length
       const busyHostId = props.busyHostId || null
+      // Stopping a remote DSH is destructive, so the card action only opens a confirmation;
+      // the dialog owns the busy state until the Host answers.
+      const [pendingStop, setPendingStop] = useState(null)
+      const [stopBusy, setStopBusy] = useState(false)
+
+      const requestStop = (host) => {
+        if (host) setPendingStop(host)
+      }
+      const confirmStop = () => {
+        if (pendingStop === null || stopBusy) return
+        const host = pendingStop
+        setStopBusy(true)
+        const work = typeof props.onStopRemote === 'function' ? props.onStopRemote(host) : null
+        Promise.resolve(work).then(
+          () => {
+            setStopBusy(false)
+            setPendingStop(null)
+          },
+          () => {
+            setStopBusy(false)
+            setPendingStop(null)
+          },
+        )
+      }
 
       let content
       if (state === null && error !== null) {
@@ -1812,12 +1903,25 @@ window.__ModuleLoader__.load({
                 onDisconnect: props.onDisconnectHost,
                 onReconnect: props.onReconnectHost,
                 onRestart: props.onRestartHost,
+                onStopRemote: requestStop,
                 onEdit: props.onEditHost,
                 onDelete: props.onDeleteHost,
                 onDiagnose: props.onDiagnoseHost,
               }),
             ),
           ),
+          pendingStop !== null
+            ? h(StopRemoteDialog, {
+                key: 'stop-remote:' + pendingStop.id,
+                t,
+                busy: stopBusy,
+                onConfirm: confirmStop,
+                onCancel: () => {
+                  if (stopBusy) return
+                  setPendingStop(null)
+                },
+              })
+            : null,
         )
       }
 
@@ -5478,6 +5582,7 @@ window.__ModuleLoader__.load({
                 onDisconnectHost: props.onDisconnectHost,
                 onReconnectHost: props.onReconnectHost,
                 onRestartHost: props.onRestartHost,
+                onStopRemote: props.onStopRemoteHost,
                 onEditHost: props.onEditHost,
                 onDeleteHost: props.onDeleteHost,
                 onDiagnoseHost: props.onDiagnoseHost,
@@ -5734,9 +5839,9 @@ window.__ModuleLoader__.load({
        * the state, a failure reaches the toast, and the flag clears either way.
        */
       const runAction = (host, work, done) => {
-        if (!host || !host.id) return
+        if (!host || !host.id) return undefined
         setBusyHostId(host.id)
-        work()
+        return work()
           .then(
             (result) => {
               if (done) done(result)
@@ -6086,7 +6191,7 @@ window.__ModuleLoader__.load({
        */
       const restartHost = (host) => {
         if (!host) return
-        runAction(
+        return runAction(
           host,
           () => api.restart(host.id),
           (result) => {
@@ -6094,6 +6199,24 @@ window.__ModuleLoader__.load({
             if (result && result.accepted === false && result.reason === 'busy') {
               notify(t('remoteRestartBusy'), 'info')
             }
+          },
+        )
+      }
+
+      /**
+       * Stop the remote DSH this connection manages (the "Stop remote DSH" card action). The
+       * Host stops only the process it launched or took over, then releases the tunnel and the
+       * SSH session; the host lands on `disconnected` with its settings kept. The remote UI
+       * goes away with the link, so its carrier is released here as well.
+       */
+      const stopRemoteHost = (host) => {
+        if (!host) return undefined
+        return runAction(
+          host,
+          () => api.stopRemote(host.id),
+          () => {
+            setTarget((current) => (current === host.id ? null : current))
+            closeCarrier(host.id).catch(() => {})
           },
         )
       }
@@ -6207,6 +6330,7 @@ window.__ModuleLoader__.load({
           onDisconnectHost: disconnectHost,
           onReconnectHost: reconnectHost,
           onRestartHost: restartHost,
+          onStopRemoteHost: stopRemoteHost,
           onEditHost: (host) => openWizard({ mode: 'edit', host }),
           onDeleteHost: (host) => setPendingDelete(host),
           onDiagnoseHost: runDiagnose,
@@ -7007,6 +7131,7 @@ window.__ModuleLoader__.load({
       FingerprintCard,
       PasswordPrompt,
       RemoteConflictPrompt,
+      StopRemoteDialog,
       KeyFilePicker,
       WizardDialog,
       DiagnoseDrawer,

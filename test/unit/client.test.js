@@ -993,6 +993,133 @@ test('a connected host card offers a remote restart and a restarting one shows i
   assert.match(unreachable, /data-testid="host-reconnect"/)
 })
 
+test('a connected host card offers stopping the remote DSH and a stopping one shows its progress', () => {
+  const noop = () => {}
+  const listOf = (host) =>
+    render(
+      React.createElement(plugin.components.HostListView, {
+        t,
+        state: stateWith({ hosts: [host] }),
+        loading: false,
+        error: null,
+        onAdd: noop,
+        onRefresh: noop,
+        onOpenHost: noop,
+        onDisconnectHost: noop,
+        onReconnectHost: noop,
+        onRestartHost: noop,
+        onStopRemote: noop,
+        onEditHost: noop,
+        onDeleteHost: noop,
+        onDiagnoseHost: noop,
+      }),
+    )
+  const connected = listOf(hostView())
+  assert.match(connected, /data-testid="host-stop-remote"/)
+  assert.match(connected, /关闭远端 DSH/)
+  assert.doesNotMatch(connected, /data-progress="stopping-remote"/)
+  const stopButton = /<button[^>]*data-testid="host-stop-remote"[^>]*>/.exec(connected)
+  assert.ok(stopButton, 'the connected card must offer the stop action')
+  assert.doesNotMatch(stopButton[0], /disabled=""/)
+
+  // A stopped host has no remote process left: no stop action until it is reconnected.
+  const disconnected = listOf(
+    hostView({ status: 'disconnected', remote: { ...hostView().remote, uiReady: false, localPort: null } }),
+  )
+  assert.doesNotMatch(disconnected, /data-testid="host-stop-remote"/)
+
+  const stopping = listOf(
+    hostView({
+      status: 'connecting',
+      phase: 'start',
+      progress: { code: 'stopping-remote', params: { pid: 1234 } },
+      remote: { ...hostView().remote, uiReady: false },
+    }),
+  )
+  assert.match(stopping, /data-progress="stopping-remote"/)
+  assert.match(stopping, /正在关闭远端 DSH…/)
+  assert.match(stopping, /正在关闭远端 DSH（停止本连接管理的远端进程）…/)
+  const busyStop = /<button[^>]*data-testid="host-stop-remote"[^>]*>/.exec(stopping)
+  assert.ok(busyStop, 'the stop button stays on the card while it runs')
+  assert.match(busyStop[0], /disabled=""/)
+  // A restart in flight also disables the stop action (one link action at a time).
+  const restarting = listOf(hostView({ status: 'connecting', phase: 'start', progress: { code: 'restarting-remote' } }))
+  const restartingStop = /<button[^>]*data-testid="host-stop-remote"[^>]*>/.exec(restarting)
+  assert.ok(restartingStop)
+  assert.match(restartingStop[0], /disabled=""/)
+
+  // The retained remote-unreachable error state can be closed as well as restarted/reconnected.
+  const unreachable = listOf(
+    hostView({
+      status: 'error',
+      error: {
+        code: 'remote-unreachable',
+        title: { zh: '远端 DSH 已不在运行', en: 'The remote DSH is no longer running' },
+        detail: { zh: '没有可重挂实例。', en: 'No instance to re-attach.' },
+        nextSteps: [],
+        retryable: true,
+      },
+    }),
+  )
+  assert.match(unreachable, /data-testid="host-stop-remote"/)
+  assert.match(unreachable, /data-testid="host-restart"/)
+  assert.match(unreachable, /data-testid="host-reconnect"/)
+})
+
+test('the stop confirmation names the destructive action and its consequences in both languages', () => {
+  const noop = () => {}
+  const zh = render(React.createElement(plugin.components.StopRemoteDialog, { t, onConfirm: noop, onCancel: noop }))
+  assert.match(zh, /data-testid="stop-remote-dialog"/)
+  assert.match(zh, /关闭远端 DSH？/)
+  assert.match(zh, /会停止远端 DSH 进程/)
+  assert.match(zh, /重连/)
+  assert.match(zh, /data-testid="stop-remote-confirm"/)
+  assert.match(zh, /data-testid="stop-remote-cancel"/)
+  const zhConfirm = /<button[^>]*data-testid="stop-remote-confirm"[^>]*>/.exec(zh)
+  assert.ok(zhConfirm, 'the confirmation needs its own confirm button')
+  assert.match(zhConfirm[0], /drg-btn-danger|danger/, 'stopping the remote process is a destructive action')
+  assert.doesNotMatch(zhConfirm[0], /disabled=""/)
+
+  const busy = render(
+    React.createElement(plugin.components.StopRemoteDialog, {
+      t,
+      busy: true,
+      onConfirm: noop,
+      onCancel: noop,
+    }),
+  )
+  assert.match(busy, /正在关闭…/)
+  const busyConfirm = /<button[^>]*data-testid="stop-remote-confirm"[^>]*>/.exec(busy)
+  assert.match(busyConfirm[0], /disabled=""/)
+  const busyCancel = /<button[^>]*data-testid="stop-remote-cancel"[^>]*>/.exec(busy)
+  assert.match(busyCancel[0], /disabled=""/)
+
+  const en = render(
+    React.createElement(plugin.components.StopRemoteDialog, {
+      t: enT,
+      getLocaleId: () => 'en',
+      onConfirm: noop,
+      onCancel: noop,
+    }),
+  )
+  assert.match(en, /Stop the remote DSH\?/)
+  assert.match(en, /This stops the remote DSH process/)
+  assert.match(en, /Reconnect/)
+})
+
+test('api.stopRemote posts the stop-remote route and returns the Host answer', async () => {
+  const calls = []
+  const fetch = async (url, init) => {
+    calls.push({ url, init })
+    return { ok: true, status: 200, json: async () => ({ ok: true, pid: 4242 }) }
+  }
+  const withFetch = loadClientPlugin({ fetch })
+  assert.deepEqual(await withFetch.api.stopRemote('h_1'), { ok: true, pid: 4242 })
+  assert.match(calls[0].url, /\/hosts\/h_1\/stop-remote$/)
+  assert.equal(calls[0].init.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[0].init.body), {})
+})
+
 test('api.restart posts the restart route and returns the Host answer', async () => {
   const calls = []
   const fetch = async (url, init) => {
@@ -2956,10 +3083,10 @@ test('every automation data-testid required by acceptance is rendered', () => {
     ),
   ]
   const required =
-    'dsh-remote-go-overlay-host host-list host-list-empty host-add host-card host-open host-diagnose host-edit host-delete host-wizard wizard-form wizard-save wizard-connect wizard-name wizard-address wizard-auth wizard-password connect-log connect-log-line manage-live diagnostics diagnose-rerun diagnose-copy settings settings-save settings-default-key-path settings-default-key-path-pick wizard-key-path-pick host-settings error-card error-retry fingerprint-card fingerprint-accept password-prompt'.split(
+    'dsh-remote-go-overlay-host host-list host-list-empty host-add host-card host-open host-diagnose host-edit host-delete host-stop-remote host-wizard wizard-form wizard-save wizard-connect wizard-name wizard-address wizard-auth wizard-password connect-log connect-log-line manage-live diagnostics diagnose-rerun diagnose-copy settings settings-save settings-default-key-path settings-default-key-path-pick wizard-key-path-pick host-settings error-card error-retry fingerprint-card fingerprint-accept password-prompt'.split(
       ' ',
     )
-  assert.equal(required.length, 34)
+  assert.equal(required.length, 35)
   const ids = new Set(markup.flatMap(testIdsOf))
   for (const id of required) assert.ok(ids.has(id), `missing data-testid="${id}"`)
   assert.match(markup[2], /data-host-id="h_test"/)
