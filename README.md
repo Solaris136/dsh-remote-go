@@ -8,8 +8,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](#远端运行时与兼容)
 [![DSH](https://img.shields.io/badge/dsh-%3E%3D0.2.2--rc.3-blueviolet.svg)](#远端运行时与兼容)
 
-**English** — `dsh-remote-go` opens a **remote** DSH from your local DSH over SSH: the desktop shell renders the remote web UI as a full-window browser guest,
-and one host switcher ("Local" + every host) sits at the top of the sidebar on both sides; no iframe, no second window. Current version **0.1.0** (unpublished).
+**English** — `dsh-remote-go` opens a **remote** DSH from your local DSH over SSH: the desktop shell renders the remote web UI as a full-window browser guest, the browser build carries the same UI in a same-origin frame fed by a local reverse proxy, and one host switcher ("Local" + every host) sits at the top of the sidebar on both sides; no iframe on desktop, no second window. Current version **0.1.0** (unpublished).
 
 ## 文档
 
@@ -18,7 +17,7 @@ and one host switcher ("Local" + every host) sits at the top of the sidebar on b
 ## 它是什么
 
 - 一个 DSH 插件，**主机入口**只有侧边栏顶部的**主机条**（设置面板不注册入口）：状态点 + 当前目标名，点开是「本地」+ 每台远端主机的列表。它用页面自己的主题变量绘制，跟随字体、hover 与弹层遮罩；侧边栏收起成窄条时自动隐藏。
-- 接管后看到的是**远端 DSH 自己的完整 Web 界面**：桌面端用 Chromium guest 铺满整个窗口，远端页面自己让出标题栏那一条（与本地同一套栅格，行高、留白与浮层位置一致）。本地侧边栏在接管期间隐藏，窗口里只有远端那一条侧边栏；没有 iframe、不开第二个浏览器窗口、没有浮层胶囊或「在新窗口打开」。
+- 接管后看到的是**远端 DSH 自己的完整 Web 界面**，桌面端与浏览器端都能用：桌面端用 Chromium guest 铺满整个窗口（远端页面自己让出桌面标题栏那一条，与本地同一套栅格，行高、留白与浮层位置一致）；浏览器端（`dsh web`）用一个**同源 iframe**，由本机 DSH 上一条只服务已连接主机的反向代理喂页面。本地侧边栏在接管期间隐藏，窗口里只有远端那一条侧边栏；没有第二个浏览器窗口、没有浮层胶囊或「在新窗口打开」。
 - 已连接的远端前面是**绿色发光的点**；没连接的点一下浮出**连接窗口**：上半是分阶段进度（指纹确认、密码也在这里），下半是这台连接的**日志**（SSH / npx / 远端启动逐行打印，自动跟随，可往上翻）；连上就自动接管整窗，失败时错误和日志留在窗口里。已连接的主机行悬停时右侧出现「断开」，只断那一台。
 - 切回已打开过的远端**不重新加载**：每台主机的远端窗口保持热态（不设数量上限），切走只是隐藏；断开或删除主机才真正释放。本地只做连接与承载：**主机清单、SSH 连接与隧道、整窗接管、连接状态与诊断**，以及用户手势触发的远端文件 SFTP 转发。
 - **远端文件与文件夹下载**：在远端 Files 面板右键文件选「下载」；文件夹右键菜单会多出「下载到本地」。点击后先选一个本机保存目录，Host 用同一条 SSH/SFTP 连接**流式写入**：文件写入 `<目录>/<文件名>`，文件夹新建同名目录后逐个文件写入；同名文件或文件夹自动加 ` (2)`。不打包 ZIP、不限文件大小或数量；右下角显示可拖动的进度卡（标题栏拖动、可取消）。
@@ -76,9 +75,11 @@ env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
 ## 安全
 
 - 远端界面只绑 `127.0.0.1`，经 SSH 隧道访问；本地也不监听公网。
+- 浏览器端的同源代理只服务 `connected` 主机的回环隧道，只接受同源请求；远端的 session cookie 只存在 Host 的
+  per-host cookie jar 里，不交给浏览器，本地 DSH 的 cookie 也不会转发给远端。
 - SSH 密码默认只用于本次连接（内存）；勾选保存后写入 DSH 凭据存储（插件自有记录空间，不进 `hosts.json`），其保护强度由 DSH 的凭据实现决定，插件不额外加密。
 - 主机指纹首次确认、变化强提示；诊断导出默认脱敏（token / 密码 / 私钥 / 家目录）。
-- 本地 HTTP API 要求同源 + 自定义请求头（`x-dsh-remote-go`）；跨站请求被拒绝。
+- 本地 HTTP API 要求同源 + 自定义请求头（`x-dsh-remote-go`）；同源代理使用同一 Origin / `sec-fetch-site` 栅栏。跨站请求被拒绝。
 - 操作都在远端执行；首次进入提示「你正在操作远端服务器」，关闭时提示「远端任务会继续运行」。
 
 发现安全问题请**不要**公开提交 issue，通过 [GitHub Security Advisory](https://github.com/Solaris136/dsh-remote-go/security/advisories/new) 私密报告。
@@ -94,8 +95,8 @@ pnpm run verify                                   # 仓库规范 + 格式 + 语�
 
 | 命令 | 作用 |
 |---|---|
-| `pnpm run test:unit` | 单元测试（Host + Client），不需要网络 / SSH |
-| `pnpm run test:integration` | 模拟远端集成；浏览器 / 桌面套件缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败 |
+| `pnpm run test:unit` | 单元测试（Host + Client + 同源远端代理），不需要网络 / SSH |
+| `pnpm run test:integration` | 模拟远端 + 隔离 `dsh web` 的同源代理端到端 + 真实浏览器载体；缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败 |
 | `pnpm run test:coverage` | 覆盖率门禁（阈值 85 / 70 / 80，不含 `vendor/` 与 `test/`） |
 | `pnpm run test:web` / `test:desktop` | 打包产物验收：隔离 `dsh web` / 真实桌面端安装 tarball、打开管理浮窗、浅/深色对比度与第三方主题 |
 | `pnpm run sim:remote` | 模拟远端主机自检（探针 → 隧道 → HTTP 200） |
@@ -126,7 +127,10 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 - 远端仅支持 Linux，首次连接需要能访问 nodejs.org（或 npmmirror.com）与 npm registry，**没有离线包**；官方 Node 构建要求 glibc ≥ 2.28，musl（如 Alpine）会明确失败。
 - 托管 Node 是唯一运行时：系统 Node 永远不参与，装不上时连接明确失败、不会降级；远端 DSH 版本恒等于本机版本（本机版本必须已发布到 npm）。
 - 不迁移旧版的独立状态目录（`~/.dsh-remote-go`）：升级后插件文件固定在 `~/.dsh/remote-go`。插件只收养自己启动的远端实例；远端已有手工启动的 DSH 时连接会暂停并列出这些进程，由你选择「停止它并启动受管实例」「保留它，另起一个」或「取消连接」。
-- 远端界面只能**整窗接管**：非桌面端（例如浏览器里的 `dsh web`）没有 guest 能力，此时没有可用的远端呈现方式；多台远端在同一时刻只能呈现一台。
+- 远端界面只能**整窗接管**：桌面端用 Chromium guest，浏览器端（`dsh web`）用同源 iframe + 本地反向代理；
+  页面经 `file://` 加载且没有桌面桥时没有远端呈现方式。多台远端在同一时刻只能呈现一台。
+- 浏览器端的远端文件夹下载需要页面能拿到本机目录（DSH 的目录选择器）；拿不到时在下载入口提示，不静默改写到别处。
+- 浏览器端依赖远端页面使用相对路径；远端第三方插件若硬编码根路径资源，可能只在桌面端完整可用。
 - 刷新本地页面后主机条会重新出现，点那台主机即可再次接管（远端任务不受影响）；修改 Host 插件代码需重启本地 DSH 生效（Client 半端随页面刷新加载）。
 
 ## License

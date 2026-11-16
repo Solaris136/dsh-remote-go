@@ -30,7 +30,11 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   assert.ok(codes.includes('verifying'))
   const open = service.openInfo(host.id)
   assert.match(open.url, /^http:\/\/127\.0\.0\.1:45123\/\?token=tok_test_123$/)
+  assert.equal(open.webUrl, `/dsh-remote-go/remote/${host.id}/?token=tok_test_123`)
   assert.equal(open.localPort, 45123)
+  // The same-origin proxy reads the live tunnel (and the remote's own port for Host rewriting).
+  assert.deepEqual(service.webViewTarget(host.id), { localPort: 45123, remotePort: 38123 })
+  assert.equal(service.webViewTarget('h_missing'), null)
   const persisted = store.getHost(host.id)
   assert.ok(persisted.lastOpenedAt, 'lastOpenedAt must be persisted')
   assert.equal(service.snapshot().activeHostId, host.id)

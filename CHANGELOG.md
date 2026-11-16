@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
+  本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
+  HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端
+  自己的回环 authority；远端的 session cookie 保存在 Host 侧 per-host jar，浏览器既拿不到远端 cookie，
+  本地 cookie 也不会被转发出去。主机条与远端文件桥用同一份 `mountHostRow` / `mountGuestTools` 注入
+  iframe（同源直接调用，不依赖 `unsafe-eval`），点「本地」仍走同一条意图通道。
+- 客户端载体拆成 `desktop`（Chromium guest）与 `web`（同源 frame）两个后端，共用同一个窗口池、热窗口、
+  切换、抢占与释放语义；`carrierSurface()` 是唯一的载体选择点。
+- `GET /hosts/:id/open` 增加同源 `webUrl`；API 契约升到 **2.7**。桌面端继续只用回环 `url`，旧 Host 响应
+  不会阻塞桌面路径。
+- 测试：`remote-proxy` 单测（路径 / cookie jar / 同一源栅栏 / 头部与 Location 改写 / HTTP 与升级转发）；
+  隔离 `dsh web` 的同源代理端到端（真实首页、插件资源、WebSocket 101）；真实浏览器的载体验收
+  （iframe 里跑起真实远端页面、注入主机条、点「本地」回到本地）。
+
 ## [0.1.0] - 2026-11-16
 
 首个版本：在本地 DSH 里通过 SSH 使用远端 DSH，整窗呈现远端界面，本地只负责连接与状态。

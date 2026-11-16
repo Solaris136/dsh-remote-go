@@ -14,7 +14,7 @@ const INDEX_URL = process.env.DSH_REMOTE_GO_INDEX_URL || 'https://cdn.jsdelivr.n
 const REQUIRED_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json']
 const RUNTIME_SRC = `index api service ssh ssh-config known-hosts bootstrap node-runtime webapp probe tunnel
 store settings errors version util redact atomic-json layout constants local-version local-ssh host-runtime
-host-view diagnostics`
+host-view diagnostics remote-proxy`
   .split(/\s+/)
   .map((name) => `src/${name}.js`)
 

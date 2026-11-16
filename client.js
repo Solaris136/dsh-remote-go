@@ -31,8 +31,13 @@ window.__ModuleLoader__.load({
     const CAPTION_MARKER = 'data-windows-titlebar'
     const CAPTION_LIVE_CLASS = 'drg-caption-live'
     const CAPTION_GRIP_LEFT = 84
-    /** Only loopback URLs may ever be handed to the guest (docs/api.md 安全约束). */
+    /** Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
+    /**
+     * Same-origin seat of the remote UI used by the browser carrier. It is a path, not an origin:
+     * the local DSH proxies it to the connected host's tunnel (docs/api.md `GET /hosts/:id/open`).
+     */
+    const REMOTE_VIEW_PREFIX = '/dsh-remote-go/remote/'
     /** Ordered connect phases (contract ConnectPhase). */
     const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready']
     /** Known diagnostic check ids, in the contract's fixed order. */
@@ -149,17 +154,17 @@ window.__ModuleLoader__.load({
       cardDelete: ['删除', 'Delete'],
       errorReason: ['原因：{detail}', 'Reason: {detail}'],
       loopbackNote: [
-        '远端界面只经 SSH 隧道映射为 127.0.0.1 后嵌入；不会直接使用该地址，也不会暴露到公网。',
-        'The remote UI is embedded only through an SSH tunnel mapped to 127.0.0.1; this address is never used directly and is never exposed publicly.',
+        '远端界面只经 SSH 隧道映射为 127.0.0.1，再由本地同源代理承载；不会直接使用该地址，也不会暴露到公网。',
+        'The remote UI is only reached through an SSH tunnel mapped to 127.0.0.1, then carried by the local same-origin proxy; the address itself is never used directly or exposed publicly.',
       ],
       viewportConnecting: ['正在连接「{name}」…', 'Connecting to "{name}"…'],
       viewportOverlayLoadFailed: [
         '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
         'The remote UI failed to load. Pick “Local” in the sidebar switcher and open the host again.',
       ],
-      desktopRequired: [
-        '当前环境没有可用的桌面端窗口，远端界面只能在 DeepSeek Harness 桌面端打开。',
-        'This window has no desktop guest seat; the remote UI only opens in the DSH desktop app.',
+      carrierUnavailable: [
+        '当前窗口没有可用的远端承载方式，无法打开远端界面。',
+        'This window has no seat for the remote UI, so it cannot be opened here.',
       ],
       connectLogTitle: ['连接日志', 'Connect log'],
       connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
@@ -464,6 +469,21 @@ window.__ModuleLoader__.load({
 
     function isValidLoopbackUrl(url) {
       return typeof url === 'string' && url.startsWith(LOOPBACK_PREFIX)
+    }
+
+    /**
+     * A browser carrier URL is a path on this page's own origin, so it must be exactly the view
+     * prefix plus one host id plus a slash (the one-shot token rides in the query string).
+     * Anything absolute, encoded or traversing is refused before it can reach an iframe.
+     */
+    function isValidViewPath(value) {
+      if (typeof value !== 'string' || !value.startsWith(REMOTE_VIEW_PREFIX)) return false
+      if (value.includes('://') || value.includes('\\')) return false
+      // The browser would collapse these before sending; refusing them keeps the check honest.
+      if (/(^|\/)\.{1,2}(\/|$)/.test(value) || /%2e/i.test(value)) return false
+      const rest = value.slice(REMOTE_VIEW_PREFIX.length)
+      const match = /^([A-Za-z0-9_-]{1,64})\//.exec(rest)
+      return match !== null
     }
 
     function formatTime(iso, locale) {
@@ -794,8 +814,13 @@ window.__ModuleLoader__.load({
       },
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
+        // The desktop carrier takes the loopback origin; the browser carrier takes the same-origin
+        // view path. Both are checked here, so neither backend can be handed anything else.
         if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
-        return payload.url
+        const webUrl = typeof payload.webUrl === 'string' ? payload.webUrl : ''
+        // A Host from before the web carrier has no webUrl; that must not block the desktop path.
+        if (webUrl !== '' && !isValidViewPath(webUrl)) throw apiError(localErrorView('blocked-url'))
+        return { url: payload.url, webUrl }
       },
       async acceptFingerprint(hostId, accept, remember, sha256) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/fingerprint', {
@@ -2009,7 +2034,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#region 9b. host switcher row + full-window remote carrier (DSH desktop only)
+    //#region 9b. host switcher row + remote carrier backends
 
     const SWITCHER_TICK_MS = 1500
 
@@ -2097,13 +2122,11 @@ window.__ModuleLoader__.load({
 
     function pushGuestHostRow(payload) {
       const entry = shownCarrier()
-      if (entry === null || entry.rowInstalled !== true || entry.view === null) return
+      if (entry === null || entry.rowInstalled !== true) return
       try {
-        entry.view.executeJavaScript(
-          'window.__drgHostRow && window.__drgHostRow.update(' + JSON.stringify(payload) + ')',
-        )
+        entry.backend.pushRow(entry, payload)
       } catch (_error) {
-        // the guest may still be navigating
+        // the framed page or guest may still be navigating
       }
     }
 
@@ -2749,6 +2772,26 @@ window.__ModuleLoader__.load({
       return browser
     }
 
+    /**
+     * Where this page can put a remote window: the desktop shell's Chromium guest when its bridge
+     * is present, otherwise a same-origin frame (the browser build's carrier). Both paths keep the
+     * same pool, switching and teardown behaviour — only how a page is embedded differs.
+     */
+    function carrierSurface() {
+      if (desktopBrowserBridge() !== null) return 'desktop'
+      if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null
+      // A page loaded from file:// (an Electron build without the guest bridge) cannot host the
+      // same-origin view seat: there is no local HTTP origin to proxy through.
+      const location = typeof window === 'undefined' ? null : window.location
+      if (location && typeof location.protocol === 'string' && !/^https?:$/.test(location.protocol)) return null
+      return 'web'
+    }
+
+    /** Each surface accepts a different kind of seat: a loopback origin, or a path on this origin. */
+    function acceptsCarrierUrl(surface, value) {
+      return surface === 'desktop' ? isValidLoopbackUrl(value) : surface === 'web' ? isValidViewPath(value) : false
+    }
+
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:var(--dsw-alias-bg-base);pointer-events:auto}
       .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
@@ -2938,7 +2981,7 @@ window.__ModuleLoader__.load({
       else document.documentElement.classList.remove(CAPTION_LIVE_CLASS)
     }
 
-    async function createCarrier(hostId, url, message) {
+    async function createDesktopCarrier(hostId, url, message) {
       const bridge = desktopBrowserBridge()
       if (bridge === null) return null
       let reservation = null
@@ -3008,6 +3051,8 @@ window.__ModuleLoader__.load({
       // Built before any listener is attached: the handlers below read it, and a guest that fired an event while the
       // element was being appended would otherwise read a binding that is still in its temporal dead zone.
       const entry = {
+        kind: 'desktop',
+        backend: DESKTOP_CARRIER,
         hostId,
         lease: String(reservation.lease),
         root,
@@ -3093,6 +3138,197 @@ window.__ModuleLoader__.load({
       return entry
     }
 
+    // --- web backend: same-origin frame, used whenever the desktop guest bridge is absent -------
+
+    /**
+     * The browser build has no guest seat, so the remote page is framed on this origin and the
+     * local proxy forwards it to the host's tunnel. Same origin is what lets the row and the file
+     * bridge be injected below; it is also why the frame must never navigate off the view prefix.
+     */
+    function createWebCarrier(hostId, url, message) {
+      const root = document.createElement('div')
+      root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
+      root.setAttribute('data-testid', 'remote-overlay')
+      root.setAttribute('data-host-id', hostId)
+      root.style.cssText = [
+        'position:fixed;left:0;right:0;top:0;bottom:0;z-index:2147483000',
+        'overflow:hidden;background:var(--dsw-alias-bg-base)',
+      ].join(';')
+      const style = document.createElement('style')
+      style.textContent = CARRIER_CSS
+      // A frame that never loads would otherwise be a blank window; say why instead.
+      const errorLayer = document.createElement('div')
+      errorLayer.className = 'drg-carrier-error'
+      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
+      errorLayer.textContent = typeof message === 'string' ? message : ''
+      const frame = document.createElement('iframe')
+      frame.className = 'drg-carrier-view drg-carrier-frame'
+      frame.setAttribute('data-testid', 'remote-frame')
+      frame.setAttribute('title', 'Remote DSH')
+      // No sandbox: it would sever the same-origin access this backend depends on. The URL is
+      // re-checked against the view prefix before it is assigned (see acceptsCarrierUrl).
+      frame.setAttribute('allow', 'clipboard-read; clipboard-write')
+      frame.setAttribute('referrerpolicy', 'no-referrer')
+      const entry = {
+        kind: 'web',
+        backend: WEB_CARRIER,
+        hostId,
+        root,
+        frame,
+        url,
+        rowInstalled: false,
+        ready: false,
+        readyWaiters: [],
+        revealToken: 0,
+        timer: null,
+      }
+      frame.addEventListener('load', () => onWebFrameLoad(entry))
+      root.append(style, frame, errorLayer)
+      document.body.appendChild(root)
+      // Assign after the listener and the element are in place, so the first load is observed.
+      frame.src = url
+      return entry
+    }
+
+    function webWindow(entry) {
+      try {
+        const win = entry.frame && entry.frame.contentWindow
+        if (!win) return null
+        // Reading a cross-origin frame's document throws; this carrier only accepts same-origin.
+        void win.document
+        return win
+      } catch (_error) {
+        return null
+      }
+    }
+
+    function onWebFrameLoad(entry) {
+      if (entry === null || entry.kind !== 'web') return
+      const win = webWindow(entry)
+      if (win === null) {
+        // The framed page left this origin (an external link, an OAuth hop): a cross-origin
+        // frame would hide the host switcher and trap the window there, so bring it back.
+        try {
+          entry.frame.src = entry.url
+        } catch (_error) {
+          // a detached frame reports through the next load
+        }
+        return
+      }
+      markCarrierReady(entry)
+      installWebCarrier(entry, win)
+      if (carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+    }
+
+    /**
+     * Inject the host row and the file bridge into the framed page. Both are ordinary functions
+     * taking its window, so nothing is evaluated as a string (a CSP without 'unsafe-eval' cannot
+     * break them) and the intent sink is a direct call back into this module.
+     */
+    function installWebCarrier(entry, existingWindow) {
+      const win = existingWindow ?? webWindow(entry)
+      if (!win) {
+        entry.rowInstalled = false
+        return false
+      }
+      try {
+        win.__drgBridgeSink = dispatchSwitcherIntent
+      } catch (_error) {
+        return false
+      }
+      let row = 'error'
+      try {
+        row = mountHostRow(win)
+      } catch (_error) {
+        row = 'error'
+      }
+      const live = typeof row === 'string' && row !== 'error' && row !== 'no-document'
+      entry.rowInstalled = live
+      if (live) pushWebCarrierRow(entry, switcherPayload())
+      try {
+        mountGuestTools(win)
+      } catch (_error) {
+        // the download bridge is optional; the remote window itself still works
+      }
+      return live
+    }
+
+    function pushWebCarrierRow(entry, payload) {
+      try {
+        const win = entry.frame && entry.frame.contentWindow
+        if (win && win.__drgHostRow && typeof win.__drgHostRow.update === 'function') {
+          win.__drgHostRow.update(payload)
+        }
+      } catch (_error) {
+        // the frame may still be navigating
+      }
+    }
+
+    /** Desktop guest backend: the shell hands out a Chromium guest lease per host. */
+    const DESKTOP_CARRIER = {
+      kind: 'desktop',
+      create: (hostId, url, message) => createDesktopCarrier(hostId, url, message),
+      load: async (entry, url) => {
+        entry.url = url
+        try {
+          await entry.view.loadURL(url)
+        } catch (_error) {
+          // the guest reports navigation failures through did-fail-load
+        }
+      },
+      pushRow: (entry, payload) => {
+        try {
+          entry.view.executeJavaScript(
+            'window.__drgHostRow && window.__drgHostRow.update(' + JSON.stringify(payload) + ')',
+          )
+        } catch (_error) {
+          // the guest may still be navigating
+        }
+      },
+      waitReady: async (entry) => {
+        if (entry.ready !== true) await waitForCarrierReady(entry, CARRIER_READY_TIMEOUT_MS)
+        await waitForGuestPaint(entry, CARRIER_PAINT_TIMEOUT_MS)
+      },
+      dispose: (entry) => disposeDesktopCarrier(entry),
+      poll: (entry) => startHostRowPoll(entry),
+    }
+
+    /** Web frame backend: a same-origin iframe, warmed and hidden exactly like the guest. */
+    const WEB_CARRIER = {
+      kind: 'web',
+      create: (hostId, url, message) => createWebCarrier(hostId, url, message),
+      load: (entry, url) => {
+        entry.url = url
+        entry.rowInstalled = false
+        entry.ready = false
+        try {
+          entry.frame.src = url
+        } catch (_error) {
+          // a frame that refuses a navigation reports it through the load event
+        }
+      },
+      pushRow: (entry, payload) => pushWebCarrierRow(entry, payload),
+      waitReady: async () => true,
+      dispose: (entry) => disposeWebCarrier(entry),
+      poll: null,
+    }
+
+    /** Build the carrier that fits this window: guest when the shell offers one, frame otherwise. */
+    function createCarrier(hostId, url, message) {
+      const surface = carrierSurface()
+      if (surface === null) return null
+      return surface === 'desktop' ? createDesktopCarrier(hostId, url, message) : createWebCarrier(hostId, url, message)
+    }
+
+    function disposeWebCarrier(entry) {
+      try {
+        entry.frame.src = 'about:blank'
+      } catch (_error) {
+        // the frame may already be detached
+      }
+      if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
+    }
+
     /**
      * Show one host's window, warming it on first visit. Creation is async (the bridge hands out a
      * lease), so `carrierPool.wanted` makes the last request win: a superseded creation is dropped.
@@ -3158,12 +3394,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Make a carrier visible without painting its empty frame first. A hidden `<webview>` has no
-     * guest surface, so revealing it as-is paints the carrier's own background: for one frame on a
-     * warm window, and for the whole page load on a cold one. That blank is the flash seen when the
-     * window switches from local to a host. The carrier goes up transparent instead, the guest gets
-     * a document and a frame to paint, and only then does the carrier become opaque. A reveal that
-     * lost its turn (local, or another host) leaves the carrier hidden.
+     * Make a carrier visible without painting its empty frame first. The desktop guest has no
+     * surface while hidden, so revealing it as-is paints the carrier's own background; the browser
+     * frame keeps its last frame, so it only needs the same one-frame opacity handoff. The carrier
+     * goes up transparent, waits for its content (guest paint, or the frame's own compositor), and
+     * only then becomes opaque. A reveal that lost its turn leaves the carrier hidden.
      */
     async function revealCarrier(entry) {
       const token = (entry.revealToken ?? 0) + 1
@@ -3173,8 +3408,7 @@ window.__ModuleLoader__.load({
       // Still transparent: the local page underneath stays the one receiving clicks.
       entry.root.style.pointerEvents = 'none'
       await nextLocalFrame()
-      if (entry.ready !== true) await waitForCarrierReady(entry, CARRIER_READY_TIMEOUT_MS)
-      await waitForGuestPaint(entry, CARRIER_PAINT_TIMEOUT_MS)
+      await entry.backend.waitReady(entry)
       await nextLocalFrame()
       if (entry.revealToken !== token || carrierPool.current !== entry.hostId) return
       entry.root.style.pointerEvents = ''
@@ -3185,8 +3419,10 @@ window.__ModuleLoader__.load({
       const url = typeof options.url === 'string' ? options.url : ''
       let entry = carrierOf(hostId)
       const reused = entry !== null
+      const surface = entry === null ? carrierSurface() : entry.kind
       if (entry === null) {
-        if (!isValidLoopbackUrl(url)) return { ok: false, reason: 'bad-url' }
+        if (surface === null) return { ok: false, reason: 'acquire-failed' }
+        if (!acceptsCarrierUrl(surface, url)) return { ok: false, reason: 'bad-url' }
         entry = await createCarrier(hostId, url, options.message)
         if (entry === null) return { ok: false, reason: 'acquire-failed' }
         // The user moved on (another host, or back to local) while this one was being
@@ -3195,17 +3431,12 @@ window.__ModuleLoader__.load({
           await disposeCarrier(entry)
           return { ok: false, reason: 'superseded' }
         }
-      } else if (url !== '' && entry.url !== url && isValidLoopbackUrl(url)) {
+      } else if (url !== '' && entry.url !== url && acceptsCarrierUrl(entry.kind, url)) {
         // A reconnect hands out a new one-shot URL: the warm page is stale, reload it.
-        entry.url = url
-        try {
-          await entry.view.loadURL(url)
-        } catch (_error) {
-          // the guest reports navigation failures through did-fail-load
-        }
+        await entry.backend.load(entry, url)
       }
-      // A window whose page failed to load is not worth showing as-is: retry it once.
-      if (reused && entry.failed === true) {
+      // A desktop guest whose page failed is not worth showing as-is: retry it once.
+      if (reused && entry.kind === 'desktop' && entry.failed === true) {
         entry.failed = false
         try {
           entry.view.reload()
@@ -3224,7 +3455,7 @@ window.__ModuleLoader__.load({
         entry.root.style.pointerEvents = ''
         entry.root.style.opacity = ''
       } else {
-        // Rendered over the next frames, once the guest has something to show (see `revealCarrier`).
+        // Rendered over the next frames, once the carrier has something to show.
         revealCarrier(entry).catch(() => {})
       }
       // The band belongs to this guest now: keep the shell's caption menus above it, but
@@ -3233,7 +3464,7 @@ window.__ModuleLoader__.load({
       updateSwitcher({ current: hostId })
       if (entry.rowInstalled === true) {
         pushGuestHostRow(switcherPayload())
-        startHostRowPoll(entry)
+        if (typeof entry.backend.poll === 'function') entry.backend.poll(entry)
       }
       return { ok: true, reused }
     }
@@ -3248,12 +3479,12 @@ window.__ModuleLoader__.load({
       setCaptionLive(false)
     }
 
-    /** Tear one guest down: row, DOM, renderer, lease. Safe for one that never entered the pool. */
+    /** Tear one carrier down. Safe for one that never entered the pool. */
     async function disposeCarrier(entry) {
       if (entry === null || entry === undefined) return
       if (carrierPool.poll === entry) stopHostRowPoll()
       carrierPool.entries = carrierPool.entries.filter((item) => item !== entry)
-      // The guest that filled the window is going away, so the local page is next: the row has to follow here as well.
+      // The window that filled the page is going away, so the local page is next: the row has to follow here as well.
       // The React state that asked for the teardown is not enough - a disconnect arrives through a subscription created
       // at mount, whose closure holds the target from that render, so it cannot clear it.
       const wasShown = carrierPool.current === entry.hostId
@@ -3261,6 +3492,12 @@ window.__ModuleLoader__.load({
         carrierPool.current = null
         setCaptionLive(false)
       }
+      await entry.backend.dispose(entry)
+      if (wasShown) updateSwitcher({ current: 'local' })
+    }
+
+    /** Hand one desktop guest back to the shell: injected row, DOM, then the lease itself. */
+    async function disposeDesktopCarrier(entry) {
       if (entry.view !== null && entry.rowInstalled === true) {
         try {
           entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
@@ -3269,7 +3506,6 @@ window.__ModuleLoader__.load({
         }
       }
       if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
-      if (wasShown) updateSwitcher({ current: 'local' })
       const bridge = desktopBrowserBridge()
       if (bridge !== null && entry.lease !== null) {
         try {
@@ -4807,8 +5043,8 @@ window.__ModuleLoader__.load({
         if (activeStatus !== 'connected') return undefined
         let cancelled = false
         api.openHost(target).then(
-          (url) => {
-            if (!cancelled) setRemoteUrl({ hostId: target, url })
+          (opened) => {
+            if (!cancelled) setRemoteUrl({ hostId: target, url: opened.url, webUrl: opened.webUrl })
           },
           (error) => {
             if (cancelled) return
@@ -4835,17 +5071,26 @@ window.__ModuleLoader__.load({
           showOverlay({ hostId: target, message: t('viewportOverlayLoadFailed') })
           return
         }
-        // The launch URL for *this* host is still being fetched: keep the current guest up
+        // The launch URL for *this* host is still being fetched: keep the current carrier up
         // so switching does not flash the local UI behind it.
         if (remoteUrl === null || remoteUrl.hostId !== target) return
-        const shown = showOverlay({ hostId: target, url: remoteUrl.url, message: t('viewportOverlayLoadFailed') })
+        const surface = carrierSurface()
+        const carrierUrl = surface === 'desktop' ? remoteUrl.url : remoteUrl.webUrl
+        if (surface === 'web' && (typeof carrierUrl !== 'string' || carrierUrl === '')) {
+          if (noWindowNotified.current !== target) {
+            noWindowNotified.current = target
+            notify(t('carrierUnavailable'), 'error')
+          }
+          return
+        }
+        const shown = showOverlay({ hostId: target, url: carrierUrl, message: t('viewportOverlayLoadFailed') })
         if (shown && typeof shown.then === 'function') {
           shown.then(
             (outcome) => {
               if (!outcome || outcome.ok !== false || outcome.reason !== 'acquire-failed') return
               if (noWindowNotified.current === target) return
               noWindowNotified.current = target
-              notify(t('desktopRequired'), 'error')
+              notify(t('carrierUnavailable'), 'error')
             },
             () => {},
           )
@@ -5963,6 +6208,7 @@ window.__ModuleLoader__.load({
         hide: hideOverlays,
         warm: carrierWarm,
         shown: () => carrierPool.current,
+        surface: () => carrierSurface(),
         update: updateSwitcher,
         script: () => HOST_ROW_SCRIPT,
         guestTools: () => GUEST_TOOLS_SCRIPT,

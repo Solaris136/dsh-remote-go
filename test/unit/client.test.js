@@ -142,6 +142,72 @@ function fire(node, type, event) {
   for (const handler of node.listeners[type] || []) handler(event)
 }
 
+/** The framed page's own document: enough shape for the injected row and file bridge. */
+function fakeFrameDocument() {
+  const create = (tag) => {
+    const node = {
+      tagName: String(tag).toUpperCase(),
+      attributes: {},
+      children: [],
+      style: {},
+      className: '',
+      textContent: '',
+      parentNode: null,
+      setAttribute(name, value) {
+        this.attributes[name] = String(value)
+      },
+      getAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null
+      },
+      hasAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      },
+      appendChild(child) {
+        child.parentNode = this
+        this.children.push(child)
+        return child
+      },
+      append(...items) {
+        for (const item of items) this.appendChild(item)
+      },
+      insertBefore(child, reference) {
+        child.parentNode = this
+        const at = reference === null ? this.children.length : this.children.indexOf(reference)
+        if (at < 0) this.children.push(child)
+        else this.children.splice(at, 0, child)
+        return child
+      },
+      removeChild(child) {
+        const at = this.children.indexOf(child)
+        if (at >= 0) this.children.splice(at, 1)
+        child.parentNode = null
+        return child
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      classList: { add() {}, remove() {}, contains: () => false },
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 280, height: 800, right: 280, bottom: 800 }),
+      querySelector: () => null,
+      get firstChild() {
+        return this.children.length > 0 ? this.children[0] : null
+      },
+    }
+    return node
+  }
+  const head = create('head')
+  const body = create('body')
+  return {
+    head,
+    body,
+    documentElement: create('html'),
+    createElement: create,
+    createElementNS: (_namespace, tag) => create(tag),
+    querySelectorAll: () => [],
+    addEventListener() {},
+    removeEventListener() {},
+  }
+}
+
 function fakeDom(options = {}) {
   const columnWidth = options.sidebarWidth === undefined ? 280 : options.sidebarWidth
   const create = (tag) => {
@@ -639,18 +705,26 @@ test('client code never logs and never persists remote URLs / tokens', () => {
   assert.match(SOURCE, /url\.startsWith\(LOOPBACK_PREFIX\)/)
 })
 
-test('the client embeds no remote page and opens no extra window', () => {
-  assert.doesNotMatch(SOURCE, /h\(\s*'iframe'/, 'no iframe element may be rendered')
-  assert.doesNotMatch(SOURCE, /IFRAME_SANDBOX/, 'no iframe sandbox may be configured')
+test('the client embeds the remote page only in the browser carrier and opens no extra window', () => {
+  // The desktop path still hands the remote page to the shell guest: no React iframe, no sandbox.
+  assert.doesNotMatch(SOURCE, /h\(\s*'iframe'/, 'no iframe element may be rendered by React')
+  assert.doesNotMatch(SOURCE, /IFRAME_SANDBOX/)
   assert.doesNotMatch(SOURCE, /window\.open\s*\(/, 'the client must not open an external window')
   assert.doesNotMatch(SOURCE, /sandbox:?\s*['"]allow-scripts/, 'no iframe sandbox attribute may remain')
   assert.doesNotMatch(SOURCE, /RemoteViewport/, 'the embedded viewport component must be gone')
+  // The browser carrier is the only frame seat, and it is fed a checked same-origin view path.
+  assert.match(SOURCE, /function createWebCarrier\(/)
+  assert.match(SOURCE, /function isValidViewPath\(value\)/)
+  assert.match(SOURCE, /frame\.src = url/)
   assert.match(SOURCE, /function isValidLoopbackUrl\(url\)/)
 })
 
-test('openHost rejects a non-loopback remote URL (API-layer guard)', async () => {
+test('openHost validates both carrier URLs (API-layer guard)', async () => {
   const requests = []
-  let answer = 'http://127.0.0.1:54321/?token=abc123'
+  let answer = {
+    url: 'http://127.0.0.1:54321/?token=abc123',
+    webUrl: '/dsh-remote-go/remote/h_test/?token=abc123',
+  }
   const client = loadClientPlugin({
     fetch: async (endpoint) => {
       requests.push(String(endpoint))
@@ -658,14 +732,15 @@ test('openHost rejects a non-loopback remote URL (API-layer guard)', async () =>
         ok: true,
         status: 200,
         async json() {
-          return { ok: true, url: answer, localPort: 54321, address: '127.0.0.1:54321' }
+          return { ok: true, localPort: 54321, address: '127.0.0.1:54321', ...answer }
         },
       }
     },
   })
   assert.equal(typeof client.api?.openHost, 'function', 'client.js must expose the Host-API client for this test')
   const allowed = await client.api.openHost('h_test')
-  assert.equal(allowed, 'http://127.0.0.1:54321/?token=abc123')
+  assert.equal(allowed.url, 'http://127.0.0.1:54321/?token=abc123')
+  assert.equal(allowed.webUrl, '/dsh-remote-go/remote/h_test/?token=abc123')
   assert.equal(requests.at(-1), '/dsh-remote-go/api/hosts/h_test/open')
   for (const refusedUrl of [
     'https://evil.example.com/?token=secret',
@@ -673,10 +748,26 @@ test('openHost rejects a non-loopback remote URL (API-layer guard)', async () =>
     'http://localhost:54321/?token=secret',
     'http://127.0.0.1.evil.example.com/?token=secret',
   ]) {
-    answer = refusedUrl
+    answer = { url: refusedUrl, webUrl: '/dsh-remote-go/remote/h_test/?token=secret' }
     await assert.rejects(client.api.openHost('h_test'), (error) => {
       assert.equal(error?.view?.code, 'blocked-url', `unexpected error view for ${refusedUrl}`)
       assert.equal(error?.message, '远端地址不是本地回环地址，出于安全考虑已阻止。')
+      return true
+    })
+  }
+  // The browser carrier seat is a path on this origin, never an absolute or traversing URL.
+  for (const refusedView of [
+    'https://evil.example.com/dsh-remote-go/remote/h_test/',
+    '//evil.example.com/dsh-remote-go/remote/h_test/',
+    '/dsh-remote-go/remote/h_test',
+    '/dsh-remote-go/remote/../h_test/',
+    '/dsh-remote-go/remote/h_test/../../state',
+    '/dsh-remote-go/remote/h%5Ftest/',
+    '/dsh-remote-go/api/h_test/',
+  ]) {
+    answer = { url: 'http://127.0.0.1:54321/?token=abc123', webUrl: refusedView }
+    await assert.rejects(client.api.openHost('h_test'), (error) => {
+      assert.equal(error?.view?.code, 'blocked-url', `unexpected error view for ${refusedView}`)
       return true
     })
   }
@@ -1032,10 +1123,11 @@ test('the overlay host takes no page of its own until a window is asked for', ()
   assert.doesNotMatch(html, /<iframe/)
 })
 
-test('the plugin never selects a main panel or renders the remote page itself', () => {
+test('the plugin never selects a main panel; the browser carrier frames the proxied view only', () => {
   assert.doesNotMatch(SOURCE, /selectPanel/, 'the plugin must not select a layout panel')
   assert.doesNotMatch(SOURCE, /'main'/, 'the plugin must not register the main slot')
-  assert.doesNotMatch(SOURCE, /<iframe|h\(\s*'iframe'/, 'no iframe may be rendered')
+  assert.doesNotMatch(SOURCE, /<iframe|h\(\s*'iframe'/, 'no React iframe may be rendered')
+  assert.match(SOURCE, /acceptsCarrierUrl\(entry\.kind, url\)/, 'the frame URL must be re-checked on reload')
   assert.match(SOURCE, /const openHost = \(host(?:, options)?\) => \{[\s\S]*?setTarget\(host\.id\)/)
 })
 
@@ -1560,6 +1652,50 @@ test('dropping the window that fills the screen hands the row back to the local 
   assert.equal(local.carrier.warm('h_a'), false)
   assert.equal(rowName(rowOf(dom)), '本地', 'the row must not name a host whose window is gone')
   assert.deepEqual(released, ['lease-2', 'lease-1'])
+})
+
+test('the browser carrier frames the proxied view and injects the switcher there', async () => {
+  const doc = fakeDocument()
+  const local = loadClientPlugin({ document: doc })
+  try {
+    assert.equal(local.carrier.surface(), 'web', 'without a desktop bridge the page carrier is the seat')
+    // The loopback origin belongs to the desktop guest; in a browser it is not a valid seat.
+    const bad = await local.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    assert.deepEqual({ ok: bad.ok, reason: bad.reason }, { ok: false, reason: 'bad-url' })
+    const view = '/dsh-remote-go/remote/h_a/?token=abc'
+    const opened = await local.carrier.open({ hostId: 'h_a', url: view })
+    assert.equal(opened.ok, true)
+    assert.equal(opened.reused, false)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    assert.ok(root, 'the frame carrier must mount on document.body')
+    assert.match(root.style.cssText, /position:fixed/)
+    const frame = root.children.find((node) => node.tagName === 'IFRAME')
+    assert.ok(frame, 'the browser carrier uses one same-origin frame')
+    assert.equal(frame.src, view)
+    assert.equal(frame.attributes.sandbox, undefined, 'the same-origin seat must not be sandboxed')
+    // The frame committed its document: the row and the file bridge live inside it.
+    const frameWindow = { document: fakeFrameDocument(), innerHeight: 800, innerWidth: 1200 }
+    frame.contentWindow = frameWindow
+    fire(frame, 'load', {})
+    assert.equal(typeof frameWindow.__drgBridgeSink, 'function', 'clicks must reach this module directly')
+    assert.ok(frameWindow.__drgHostRow, 'the switcher row must be injected into the framed page')
+    assert.equal(frameWindow.__drgGuestTools, true, 'the file bridge must be injected too')
+    await local.carrier.update({
+      hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })],
+      current: 'h_a',
+    })
+    assert.equal(local.carrier.shown(), 'h_a')
+    local.carrier.hide()
+    assert.equal(root.style.display, 'none')
+    assert.equal(local.carrier.warm('h_a'), true, 'a hidden frame stays warm')
+    const again = await local.carrier.open({ hostId: 'h_a' })
+    assert.equal(again.reused, true)
+    assert.notEqual(root.style.display, 'none')
+    await local.carrier.close()
+    assert.equal(doc.body.children.filter((node) => String(node.id).indexOf('dsh-remote-go-overlay-') === 0).length, 0)
+  } finally {
+    await local.carrier.close()
+  }
 })
 
 test('the disconnect handover reads the live window target, not the mount-time one', () => {

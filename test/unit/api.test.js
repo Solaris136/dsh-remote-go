@@ -111,6 +111,7 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     assert.equal(open.status, 200)
     assert.match(open.json.url, /^http:\/\/127\.0\.0\.1:45123\/\?token=/)
     assert.equal(open.json.localPort, 45123)
+    assert.match(open.json.webUrl, new RegExp(`^/dsh-remote-go/remote/${hostId}/\\?token=`))
     const disconnected = await call(api.base, `/hosts/${hostId}/disconnect`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -405,7 +406,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.6')
+    assert.equal(result.json.apiVersion, '2.7')
   } finally {
     await api.close()
     await service.shutdown()

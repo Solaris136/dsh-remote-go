@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import { mkdirSync } from 'node:fs'
 import { readFile, rm } from 'node:fs/promises'
 import path from 'node:path'
@@ -27,6 +28,14 @@ import { dismissOpenDialog, openManageWindow } from './ui-steps.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
+
+/** One plain GET against the isolated server, without the browser's cookie/console side effects. */
+function httpRequest(origin, requestPath, onResponse, onError) {
+  const url = new URL(requestPath, origin)
+  return http
+    .request({ host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'GET' }, onResponse)
+    .on('error', onError)
+}
 
 const DIALOG_DISMISS_LABELS = [
   '继续',
@@ -187,6 +196,37 @@ test('dsh web renders the host-management window with legible buttons', { timeou
         () => document.querySelector('[aria-label="账号菜单"], [aria-label="Account menu"]') !== null,
         { timeout: 60_000 },
       )
+    })
+    await t.test('the host API and the same-origin remote view seat are mounted', async () => {
+      const origin = new URL(server.url).origin
+      const probe = (requestPath) =>
+        new Promise((resolve, reject) => {
+          const request = httpRequest(
+            origin,
+            requestPath,
+            (response) => {
+              const chunks = []
+              response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+              response.on('end', () =>
+                resolve({
+                  status: response.statusCode,
+                  type: response.headers['content-type'] ?? '',
+                  body: Buffer.concat(chunks).toString('utf8').slice(0, 160),
+                }),
+              )
+            },
+            reject,
+          )
+          request.end()
+        })
+      const health = await probe('/dsh-remote-go/api/health')
+      assert.equal(health.status, 200)
+      assert.match(health.type, /application\/json/)
+      const view = await probe('/dsh-remote-go/remote/h_missing/')
+      // The SPA fallback would answer its own page; the proxy owns the prefix and 404s unknown hosts.
+      assert.equal(view.status, 404, `remote view seat: ${JSON.stringify(view)}\n${tail(server.logs)}`)
+      assert.match(view.type, /text\/plain/)
+      assert.doesNotMatch(view.body, /DeepSeek Harness/)
     })
     await t.test('the host-management window mounts from the switcher row', async () => {
       await dismissFirstRunDialogs(page)
