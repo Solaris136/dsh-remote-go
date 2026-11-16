@@ -152,6 +152,9 @@ export async function diagnoseHost(runtime, ctx) {
     checks,
     redacted: true,
     generatedAt: nowIso(),
+    // One entry per restart / re-attach, so an exported report can tell a local restart
+    // apart from a remote one without re-reading the whole connect log.
+    restarts: (Array.isArray(runtime.restarts) ? runtime.restarts : []).slice(-10),
     logs: runtime.logs.slice(-40).map((entry) => entry.line),
   })
 }

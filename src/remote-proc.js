@@ -121,6 +121,86 @@ echo "STOPPED"
   }
 }
 
+/**
+ * TCP ports a pid is listening on, read from its own `/proc` network tables and
+ * matched against the socket inodes it holds. Used after a remote restart: the
+ * process may be the same pid with a new random port, or a new pid entirely.
+ * @param {object} ssh - SSH transport.
+ * @param {number} pid - remote process id.
+ * @returns {Promise<number[]>} listening ports, ascending and unique.
+ */
+export async function remoteListenPorts(ssh, pid) {
+  if (!isPid(pid)) return []
+  const script = `set -u
+PID=${pid}
+[ -d "/proc/$PID" ] || exit 0
+ls -l "/proc/$PID/fd" 2>/dev/null | sed -n 's/.*socket:\\[\\([0-9][0-9]*\\)\\].*/INODE:\\1/p' | sort -u
+for NET in "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6"; do
+  [ -r "$NET" ] || continue
+  awk 'NR > 1 && $4 == "0A" { print "LISTEN:" $2 ":" $10 }' "$NET" 2>/dev/null
+done
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 15_000 })
+    return parseListenPorts(result.stdout)
+  } catch {
+    // swallow-ok: an unreadable /proc directory yields no candidate ports
+    return []
+  }
+}
+
+/** Decode the `INODE:` / `LISTEN:<addr-hex>:<port-hex>:<inode>` lines of {@link remoteListenPorts}. */
+export function parseListenPorts(stdout) {
+  const inodes = new Set()
+  const ports = []
+  for (const line of String(stdout ?? '').split(/\r?\n/)) {
+    const inode = /^INODE:(\d+)$/.exec(line)
+    if (inode) {
+      inodes.add(inode[1])
+      continue
+    }
+    const listen = /^LISTEN:[0-9A-Fa-f]+:([0-9A-Fa-f]{1,4}):(\d+)$/.exec(line)
+    if (!listen) continue
+    const port = Number.parseInt(listen[1], 16)
+    if (isPid(port) && port <= 65535) ports.push({ port, inode: listen[2] })
+  }
+  return [...new Set(ports.filter((entry) => inodes.has(entry.inode)).map((entry) => entry.port))].sort(
+    (left, right) => left - right,
+  )
+}
+
+/**
+ * The pid behind one listening loopback port, found by matching the port's socket
+ * inode against every `/proc/<pid>/fd`. Needed when the remote restarted into a new
+ * pid that the run registry does not know yet.
+ * @param {object} ssh - SSH transport.
+ * @param {number} port - TCP port on the remote's loopback.
+ * @returns {Promise<number | null>} the owning pid, or null when it cannot be read.
+ */
+export async function remotePortOwnerPid(ssh, port) {
+  if (!isPid(port) || port > 65535) return null
+  const script = `set -u
+PORT_HEX=$(printf '%04X' ${port})
+INODE=$(awk -v p=":$PORT_HEX" '$2 ~ p"$" && $4 == "0A" { print $10; exit }' /proc/net/tcp 2>/dev/null)
+[ -n "\${INODE:-}" ] || exit 0
+for D in /proc/[0-9]*; do
+  if ls -l "$D/fd" 2>/dev/null | grep -q "socket:\\[\${INODE}\\]"; then
+    echo "PID:\${D#/proc/}"
+    exit 0
+  fi
+done
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 20_000 })
+    const match = /^PID:(\d+)$/m.exec(String(result.stdout ?? ''))
+    const pid = match ? Number(match[1]) : 0
+    return isPid(pid) ? pid : null
+  } catch {
+    // swallow-ok: an unreadable /proc scan means the pid is unknown, the caller falls back
+    return null
+  }
+}
+
 export async function remoteHttpStatus(ssh, port) {
   if (!isPid(port)) return null
   const script = `URL="http://127.0.0.1:${port}/"

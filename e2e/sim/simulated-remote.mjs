@@ -15,6 +15,11 @@
 //                                                             VALIDATES publishes, which makes the channel enforced
 //   --state-file <file> (SIM_STATE_FILE)                        where ports/pid are published
 //
+// A restart of the remote DSH itself is modelled too, because the plugin has to survive one:
+//   ssh ... "sim-internal restart-web"     in-place restart: same pid, new random port, stale
+//                                          run/web.json until the plugin rewrites it
+// Every later `[start]` (a plugin restart) also picks a new random port, exactly like `--port 0`.
+//
 // Not a permissive fake: commands are matched by leading tokens, anything else exits 127.
 import { createServer as createHttpServer } from 'node:http'
 import { connect as netConnect } from 'node:net'
@@ -393,8 +398,9 @@ function webLine(sim) {
   return `dsh web: http://127.0.0.1:${sim.remotePort}/?token=${sim.token}`
 }
 
-function runRegistry(sim) {
-  return JSON.stringify({
+/** The registry a real launch writes; the plugin may rewrite it after a re-attach. */
+function runRegistryRecord(sim) {
+  return {
     pid: sim.pid,
     port: sim.remotePort,
     startedAt: '2026-11-11T00:00:00Z',
@@ -403,22 +409,66 @@ function runRegistry(sim) {
     dshHome: SIM.dshHome,
     // The simulator emulates a current launch, so adoption is allowed.
     launch: 'browser-carrier-v1',
-  })
+  }
+}
+
+function runRegistry(sim) {
+  // A written registry wins (that is what a re-attach does); a stale one models the market
+  // restart that re-execs the process without going through the plugin's launch script.
+  const record = sim.registryOverride ?? sim.staleRegistry ?? runRegistryRecord(sim)
+  return JSON.stringify(record)
+}
+
+/**
+ * Replace the simulated remote web with a fresh listener on a random port, the way
+ * `--port 0` does on a real relaunch. Returns the new port.
+ */
+async function replaceRemoteWeb(sim) {
+  const previous = sim.remoteServer
+  const next = await startRemoteWeb(0)
+  previous?.closeAllConnections?.()
+  await closeServer(previous)
+  sim.remoteServer = next.server
+  sim.remotePort = next.port
+  sim.token = `sim-token-${String(sim.generation).padStart(2, '0')}`
+  sim.registryOverride = null
+  return next.port
 }
 
 /** Report the already-listening stub the way a real start script does (pid, line, DONE). */
-function startScriptAnswer(sim) {
+async function startScriptAnswer(sim) {
+  sim.launches = (sim.launches ?? 0) + 1
+  if (sim.launches > 1) {
+    // A relaunch (plugin restart) binds a new random port again.
+    await replaceRemoteWeb(sim)
+    sim.staleRegistry = null
+  }
   if (sim.pid === 0) sim.pid = 40_000 + (sim.remotePort % 1_000)
   sim.started = true
+  publishState(sim)
   return `PID:${sim.pid}\nLINE:${webLine(sim)}\nDONE:${sim.pid}:${sim.remotePort}\n`
 }
 
 /**
- * Recognise one command by its leading tokens.
+ * Recognise one command by its leading tokens. Async because a simulated relaunch really
+ * binds a new listener before it answers.
  */
-function respond(command, sim) {
+async function respond(command, sim) {
   const cmd = command.trim()
   const ok = (stdout) => ({ code: 0, stdout, stderr: '' })
+
+  // Test control: model the remote DSH restarting itself (plugin-market update, supervisor).
+  // The process stays the same pid, picks a new random port, and the plugin's run registry
+  // is left stale until the plugin rewrites it.
+  if (cmd === 'sim-internal restart-web') {
+    sim.generation = (sim.generation ?? 1) + 1
+    sim.staleRegistry = runRegistryRecord(sim)
+    sim.registryOverride = null
+    const port = await replaceRemoteWeb(sim)
+    sim.started = true
+    publishState(sim)
+    return ok(`RESTARTED:${port}\n`)
+  }
 
   // 4c. The polled follower (src/mirror-stream.js). The install command is accepted and
   // discarded: the simulated remote has no filesystem to install into, and only exit 0 counts.
@@ -505,9 +555,38 @@ function respond(command, sim) {
     return ok('CLEAR\n')
   }
 
-  // 2. Detached remote web start (src/webapp.js buildStartScript).
+  // 2. Detached remote web start (src/webapp.js buildStartScript): every relaunch binds a
+  //    new random port, like the real `--port 0`.
   if (cmd.startsWith('set -eu\n') && cmd.includes('dsh web:') && cmd.includes('DONE:')) {
-    return ok(startScriptAnswer(sim))
+    return ok(await startScriptAnswer(sim))
+  }
+
+  // 2c. Run registry rewrite after a restart / re-attach (src/webapp.js writeRunRegistry).
+  if (cmd.startsWith('set -eu\nmkdir -p ') && cmd.includes('REGISTRY-WRITTEN')) {
+    const payload = /printf '%s\\n' '(\{[^\n]*\})' >/.exec(cmd)
+    if (!payload) return { code: 1, stdout: '', stderr: 'simulated-remote: unreadable registry payload' }
+    try {
+      const record = JSON.parse(payload[1])
+      sim.registryOverride = record
+      sim.staleRegistry = null
+      sim.remotePort = Number(record.port) || sim.remotePort
+      sim.pid = Number(record.pid) || sim.pid
+    } catch {
+      return { code: 1, stdout: '', stderr: 'simulated-remote: registry payload is not JSON' }
+    }
+    return ok('REGISTRY-WRITTEN\n')
+  }
+
+  // 2d. Listening ports of a pid (src/remote-proc.js remoteListenPorts): report the stub.
+  if (cmd.startsWith('set -u\nPID=') && cmd.includes('/net/tcp')) {
+    const portHex = sim.remotePort.toString(16).toUpperCase().padStart(4, '0')
+    return ok(`INODE:77\nLISTEN:0100007F:${portHex}:77\n`)
+  }
+
+  // 2e. The pid behind a listening port (remotePortOwnerPid): this simulator's single pid.
+  if (cmd.startsWith('set -u\nPORT_HEX=')) {
+    const port = Number(/printf '%04X' (\d+)/.exec(cmd)?.[1] ?? 0)
+    return ok(port === sim.remotePort ? `PID:${sim.pid}\n` : '')
   }
 
   // 3. Remote web stop (src/webapp.js stopRemoteWeb).
@@ -614,6 +693,15 @@ function respond(command, sim) {
     return ok(alive ? 'alive\n' : '')
   }
 
+  // 9b. Foreign / managed DSH process scans. The simulator owns exactly one DSH, so the
+  //     "other processes" scan is empty; the command line of its own pid names the pins.
+  if (cmd.startsWith('set -u\nIGNORE=" ')) return ok('')
+  const argsOf = /^ps -p (\d+) -o args=/.exec(cmd)
+  if (argsOf) {
+    const pinned = `${SIM.managedNodeDir}/bin/node /home/sim/.npm/_npx/x/node_modules/@deepseek-ai/dsh/lib/bin.js`
+    return ok(Number(argsOf[1]) === sim.pid ? `${pinned} --profile web --no-open --port 0\n` : '')
+  }
+
   // 10. Single-command convenience answers (not used by the current plugin).
   if (/^uname -a$/.test(cmd)) {
     return ok('Linux simulated-remote 6.1.0 #1 SMP x86_64 GNU/Linux\n')
@@ -667,8 +755,29 @@ function removeOwnStateFile() {
   }
 }
 
+/**
+ * Publish what the tests need to find this simulated host. Re-published after a restart so
+ * a test can watch the remote port change without racing the plugin.
+ */
+function publishState(sim) {
+  const published = {
+    simulated: true,
+    sshHost: '127.0.0.1',
+    sshPort: sim.sshPort,
+    remotePort: sim.remotePort,
+    fingerprint: sim.fingerprint ?? null,
+    pid: process.pid,
+    workspaceFixture: WORKSPACE.fixturePath,
+    dshVersion: SIM.dshVersion,
+    generation: sim.generation ?? 1,
+    launch: sim.launches ?? 0,
+  }
+  mkdirSync(path.dirname(STATE_FILE), { recursive: true })
+  writeFileSync(STATE_FILE, `${JSON.stringify(published, null, 2)}\n`, 'utf8')
+}
+
 /** Stand-in for the remote DSH web UI: only what the smoke path touches. */
-function startRemoteWeb() {
+function startRemoteWeb(portOption = undefined) {
   const server = createHttpServer((req, res) => {
     if (req.url === '/api/health') {
       res.writeHead(200, { 'content-type': 'application/json' })
@@ -681,7 +790,9 @@ function startRemoteWeb() {
   // A port clash must not print a stack trace or leave a stale .state.json.
   server.once('error', (error) => fatal('remote-web listener', error))
   return new Promise((resolve) => {
-    server.listen(Number(args['remote-port'] ?? 0), '127.0.0.1', () => resolve({ server, port: server.address().port }))
+    server.listen(Number(portOption ?? args['remote-port'] ?? 0), '127.0.0.1', () =>
+      resolve({ server, port: server.address().port }),
+    )
   })
 }
 
@@ -706,7 +817,15 @@ async function startSimulatedRemote() {
     process.exit(2)
   }
 
-  const sim = { remotePort: remote.port, pid: 0, started: false, token: SIM.token }
+  const sim = {
+    remotePort: remote.port,
+    remoteServer: remote.server,
+    pid: 0,
+    started: false,
+    token: SIM.token,
+    generation: 1,
+    launches: 0,
+  }
   // ssh2's `Server` emits `connection` with its own ServerConnection wrapper (it has `end()`,
   // and a private `_sock` for the raw socket), so track those and tear them down explicitly;
   // otherwise `close()` can wait forever.
@@ -731,17 +850,27 @@ async function startSimulatedRemote() {
           const session = accept()
           session.on('exec', (acceptExec, _reject, info) => {
             const stream = acceptExec()
-            const result = respond(info.command, sim)
-            if (result === null) {
-              stream.stderr.write(`simulated-remote: command not simulated: ${describeCommand(info.command)}\n`)
-              stream.exit(127)
+            void (async () => {
+              let result = null
+              try {
+                result = await respond(info.command, sim)
+              } catch (error) {
+                stream.stderr.write(`simulated-remote: handler failed: ${error?.message ?? error}\n`)
+                stream.exit(1)
+                stream.end()
+                return
+              }
+              if (result === null) {
+                stream.stderr.write(`simulated-remote: command not simulated: ${describeCommand(info.command)}\n`)
+                stream.exit(127)
+                stream.end()
+                return
+              }
+              if (result.stdout) stream.write(result.stdout)
+              if (result.stderr) stream.stderr.write(result.stderr)
+              stream.exit(result.code)
               stream.end()
-              return
-            }
-            if (result.stdout) stream.write(result.stdout)
-            if (result.stderr) stream.stderr.write(result.stderr)
-            stream.exit(result.code)
-            stream.end()
+            })()
           })
         })
         // The tunnel: a client forwardOut() arrives here as a `tcpip` request. Only the
@@ -785,6 +914,8 @@ async function startSimulatedRemote() {
   server.once('error', (error) => fatal('ssh listener', error))
   await new Promise((resolve) => server.listen(Number(args.port ?? 0), '127.0.0.1', resolve))
   const sshPort = server.address().port
+  sim.sshPort = sshPort
+  sim.fingerprint = hostKey.fingerprint
 
   /** Close both listeners, destroying live connections so nothing can hang. */
   const close = async () => {
@@ -803,11 +934,11 @@ async function startSimulatedRemote() {
       }
     }
     connections.clear()
-    remote.server.closeAllConnections?.()
+    sim.remoteServer?.closeAllConnections?.()
     await withTimeout(
       Promise.all([
         new Promise((resolve) => server.close(() => resolve(undefined))),
-        new Promise((resolve) => remote.server.close(() => resolve(undefined))),
+        new Promise((resolve) => sim.remoteServer?.close(() => resolve(undefined))),
       ]),
       10_000,
       'shutdown',
@@ -944,18 +1075,7 @@ async function runSelfTest(host) {
 
 if (serve || selfTest) {
   const host = await startSimulatedRemote()
-  mkdirSync(path.dirname(STATE_FILE), { recursive: true })
-  const published = {
-    simulated: true,
-    sshHost: '127.0.0.1',
-    sshPort: host.sshPort,
-    remotePort: host.remotePort,
-    fingerprint: host.fingerprint,
-    pid: process.pid,
-    workspaceFixture: WORKSPACE.fixturePath,
-    dshVersion: SIM.dshVersion,
-  }
-  writeFileSync(STATE_FILE, `${JSON.stringify(published, null, 2)}\n`, 'utf8')
+  publishState(host.sim)
   console.log('[sim] SIMULATED remote host — not a real machine; touches only its state file and the workspace fixture')
   console.log(`[sim] ssh 127.0.0.1:${host.sshPort}  remote-web 127.0.0.1:${host.remotePort}  ${host.fingerprint}`)
   console.log(

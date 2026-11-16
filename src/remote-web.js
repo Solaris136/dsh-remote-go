@@ -4,9 +4,15 @@
 import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS } from './constants.js'
 import { errors } from './errors.js'
 import { remoteLayout } from './layout.js'
-import { headTail, isLoopbackHost, isPid, messageOf, shellQuote } from './util.js'
+import { headTail, isLoopbackHost, isPid, messageOf, nowIso, shellQuote } from './util.js'
 import { normalizeVersion } from './version.js'
-import { isUiUp, remoteHttpStatus } from './remote-proc.js'
+import {
+  findForeignDshProcesses,
+  isUiUp,
+  remoteHttpStatus,
+  remoteListenPorts,
+  remotePortOwnerPid,
+} from './remote-proc.js'
 
 const WEB_LINE_RE = /dsh web:\s*(https?:\/\/[^\s]+)/
 
@@ -297,4 +303,167 @@ export async function adoptRemoteWeb(ssh, layout, options = {}) {
     dshHome: layout.dshHome,
     adopted: true,
   }
+}
+
+/**
+ * The pid/port record the plugin writes to `run/web.json` (the same shape the
+ * launch script writes). Kept pure so a re-attach can be tested without SSH.
+ * @param {object} input - pid, port, profile, dshHome, version, startedAt.
+ * @returns {object} the registry record.
+ */
+export function buildRunRegistryRecord(input = {}) {
+  const pid = Number(input.pid ?? 0)
+  const port = Number(input.port ?? 0)
+  if (!isPid(pid)) throw errors.invalidInput('pid', { zh: 'pid 不合法。', en: 'The pid is invalid.' })
+  if (!isPid(port) || port > 65535)
+    throw errors.invalidInput('port', { zh: '端口不合法。', en: 'The port is invalid.' })
+  const dshHome = String(input.dshHome ?? '').trim()
+  if (dshHome === '') {
+    throw errors.invalidInput('dshHome', { zh: '远端 DSH_HOME 未知。', en: 'The remote DSH_HOME is unknown.' })
+  }
+  return {
+    pid,
+    port,
+    startedAt: typeof input.startedAt === 'string' && input.startedAt !== '' ? input.startedAt : nowIso(),
+    profile: typeof input.profile === 'string' && input.profile !== '' ? input.profile : DEFAULT_REMOTE_PROFILE,
+    version: normalizeVersion(input.version ?? ''),
+    dshHome,
+    launch: LAUNCH_MARKER,
+  }
+}
+
+/**
+ * Rewrite `run/web.json` after a re-attach: the remote restarted on a new port
+ * (and possibly a new pid) without going through the launch script, so the stale
+ * record would mislead the next connect's adopt step.
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout.
+ * @param {object} record - validated record from {@link buildRunRegistryRecord}.
+ * @returns {Promise<{ ok: boolean, output: string }>} whether the write was acknowledged.
+ */
+export async function writeRunRegistry(ssh, layout, record) {
+  const payload = JSON.stringify(record)
+  const script = `set -eu
+mkdir -p ${shellQuote(layout.runDir)}
+printf '%s\\n' ${shellQuote(payload)} > ${shellQuote(layout.runFile)}
+echo "REGISTRY-WRITTEN"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 15_000, maxBytes: 8_000 })
+    return { ok: result.code === 0 && result.stdout.includes('REGISTRY-WRITTEN'), output: result.stdout.trim() }
+  } catch (error) {
+    // A registry write failure is reported to the caller, which logs it and carries on:
+    // the live tunnel is what matters, the next connect re-adopts from the log line.
+    return { ok: false, output: messageOf(error) }
+  }
+}
+
+/** Whether a `ps` command line is the DSH process for this profile. */
+export function commandMatchesProfile(command, profile) {
+  const wanted = String(profile ?? '')
+  if (wanted === '') return false
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`--profile[=\\s]+${escaped}(?:\\s|$)`).test(String(command ?? ''))
+}
+
+/** The pinned `@deepseek-ai/dsh@<version>` an npx command line names, if any. */
+export function versionFromCommand(command) {
+  const match = /@deepseek-ai\/dsh@([^\s'"]+)/.exec(String(command ?? ''))
+  return match ? normalizeVersion(match[1]) : null
+}
+
+async function readProcessArgs(ssh, pid) {
+  if (!isPid(pid)) return ''
+  try {
+    const result = await ssh.exec(
+      `ps -p ${pid} -o args= 2>/dev/null || tr '\\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true`,
+      { timeoutMs: 10_000 },
+    )
+    return String(result.stdout ?? '').trim()
+  } catch {
+    // swallow-ok: the command line is only used for the version check, never for a decision to kill
+    return ''
+  }
+}
+
+/**
+ * Re-read the remote's real web state after it restarted: the same pid on a new
+ * random port (in-place exec), a new pid from a supervisor, or the market's own
+ * restart that never writes the plugin's registry. The run registry is only a
+ * starting point; the truth is "a live DSH on this ~/.dsh + profile with a
+ * listening loopback port that answers HTTP".
+ *
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout (`~/.dsh/remote-go`).
+ * @param {{ profile?: string }} [options]
+ * @returns {Promise<{ ok: true, pid: number, port: number, token: string, url: string,
+ *   version: string | null, profile: string, dshHome: string, source: string } |
+ *   { ok: false, reason: string }>}
+ */
+export async function resolveRemoteWeb(ssh, layout, options = {}) {
+  const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
+  const registry = await readRunRegistry(ssh, layout)
+  const line = await readWebLineFromLog(ssh, layout)
+  const registryMatches =
+    registry !== null &&
+    registry.dshHome === layout.dshHome &&
+    registry.profile === profile &&
+    registry.launch === LAUNCH_MARKER
+  const registryPid = Number(registry?.pid ?? 0)
+  const registryVersion =
+    typeof registry?.version === 'string' && registry.version !== '' ? normalizeVersion(registry.version) : null
+  const alive = registryMatches && isPid(registryPid) && (await remotePidAlive(ssh, registryPid))
+  const web = async (pid, port, source) => ({
+    ok: true,
+    pid,
+    port,
+    token: line !== null && line.port === port ? line.token : '',
+    url: line !== null && line.port === port ? line.url : `http://127.0.0.1:${port}/`,
+    // The registry names the version of the instance this plugin launched; a process the
+    // remote restarted itself is asked for the npx pins in its own command line.
+    version:
+      pid === registryPid && registryVersion !== null
+        ? registryVersion
+        : versionFromCommand(await readProcessArgs(ssh, pid)),
+    profile,
+    dshHome: layout.dshHome,
+    source,
+  })
+
+  // 1. The instance this plugin started: the registry still names a live pid, and the
+  //    port is whatever the newest readiness line (or the pid's own socket) says.
+  if (alive) {
+    const candidates = []
+    if (line !== null) candidates.push(line.port)
+    candidates.push(Number(registry?.port ?? 0))
+    candidates.push(...(await remoteListenPorts(ssh, registryPid)))
+    for (const port of [...new Set(candidates.filter((value) => isPid(value) && value <= 65535))]) {
+      if (isUiUp(await remoteHttpStatus(ssh, port))) return web(registryPid, port, 'registry')
+    }
+  }
+
+  // 2. A readiness line newer than the registry: the market restart re-execs in place
+  //    (same pid, new port) or is re-launched by a supervisor. Recover the pid from the port.
+  if (line !== null && isPid(line.port) && isUiUp(await remoteHttpStatus(ssh, line.port))) {
+    let pid = alive ? registryPid : 0
+    if (!isPid(pid)) pid = await remotePortOwnerPid(ssh, line.port)
+    if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
+    return web(pid, line.port, 'log')
+  }
+
+  // 3. No usable readiness line (a supervisor may redirect stdout): find the DSH process
+  //    for this profile and read its listening port from /proc.
+  const scanned = await findForeignDshProcesses(ssh, {
+    ignorePids: alive ? [registryPid] : [],
+    timeoutMs: options.timeoutMs ?? 20_000,
+  })
+  if (scanned.ok === true) {
+    for (const process of scanned.processes) {
+      if (!commandMatchesProfile(process.command, profile)) continue
+      for (const port of await remoteListenPorts(ssh, process.pid)) {
+        if (isUiUp(await remoteHttpStatus(ssh, port))) return web(process.pid, port, 'process')
+      }
+    }
+  }
+  return { ok: false, reason: alive ? 'no-listener' : 'no-running-web' }
 }

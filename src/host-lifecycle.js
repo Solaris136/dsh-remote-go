@@ -1,11 +1,20 @@
 /**
  * Per-host lifecycle: the reconnect backoff, the idle-stop timer and the single teardown path; the reconnect timer gets a callback, so this never imports the pipeline.
  */
-import { DEFAULT_IDLE_MINUTES } from './constants.js'
+import {
+  DEFAULT_IDLE_MINUTES,
+  REMOTE_HEARTBEAT_DEFAULT_SEC,
+  REMOTE_HEARTBEAT_MAX_SEC,
+  REMOTE_HEARTBEAT_MIN_SEC,
+  REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
+  REMOTE_UNREACHABLE_FAILURES,
+  REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
+} from './constants.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'
 import { remoteLayout } from './layout.js'
 import { cancelConflict } from './prompts.js'
+import { isUiUp } from './remote-proc.js'
 import { messageOf, randomDelay } from './util.js'
 
 export function cancelReconnect(runtime) {
@@ -20,6 +29,179 @@ export function cancelIdleStop(runtime) {
     clearTimeout(runtime.idleTimer)
     runtime.idleTimer = null
   }
+}
+
+/**
+ * One-shot link actions (a local restart, a remote re-attach) share a token so a
+ * disconnect, a dropped transport or a newer action can invalidate an older one:
+ * an action must never write state on top of whatever replaced it.
+ * @param {object} runtime - host runtime.
+ * @param {string} kind - `restart` or `reattach`.
+ * @returns {number} the token that owns the action.
+ */
+export function beginLinkWork(runtime, kind) {
+  runtime.linkToken = (Number(runtime.linkToken) || 0) + 1
+  runtime.linkBusy = kind
+  return runtime.linkToken
+}
+
+export function isLinkWorkCurrent(runtime, token) {
+  return runtime.linkToken === token
+}
+
+export function endLinkWork(runtime, token) {
+  if (!isLinkWorkCurrent(runtime, token)) return
+  runtime.linkBusy = null
+}
+
+/** Invalidate whatever one-shot action was running; safe when there is none. */
+export function cancelLinkWork(runtime) {
+  runtime.linkToken = (Number(runtime.linkToken) || 0) + 1
+  runtime.linkBusy = null
+}
+
+/** Milliseconds between liveness probes, from settings (default 30s, disabled allowed). */
+export function remoteHeartbeatIntervalSec(ctx) {
+  const raw = ctx.settings()?.remoteHeartbeat
+  const seconds = Number(raw?.intervalSec)
+  if (!Number.isFinite(seconds)) return REMOTE_HEARTBEAT_DEFAULT_SEC
+  return Math.min(REMOTE_HEARTBEAT_MAX_SEC, Math.max(REMOTE_HEARTBEAT_MIN_SEC, Math.round(seconds)))
+}
+
+function cancelRemoteCheck(runtime) {
+  if (runtime.remoteCheckTimer) {
+    clearTimeout(runtime.remoteCheckTimer)
+    runtime.remoteCheckTimer = null
+  }
+}
+
+/** Stop probing: called on connect, disconnect, re-attach and shutdown. */
+export function stopRemoteHeartbeat(runtime) {
+  if (runtime.heartbeatTimer) {
+    clearInterval(runtime.heartbeatTimer)
+    runtime.heartbeatTimer = null
+  }
+  cancelRemoteCheck(runtime)
+  runtime.remoteFailures = 0
+  runtime.remoteEpisode = false
+}
+
+/** Start the light liveness probe for a host that just became connected. */
+export function startRemoteHeartbeat(ctx, runtime) {
+  stopRemoteHeartbeat(runtime)
+  const enabled = ctx.settings()?.remoteHeartbeat?.enabled !== false
+  if (!enabled) {
+    ctx.progress.log(runtime, 'debug', 'remote heartbeat: disabled by settings')
+    return
+  }
+  const intervalSec = remoteHeartbeatIntervalSec(ctx)
+  runtime.heartbeatTimer = setInterval(() => {
+    void remoteHeartbeatTick(ctx, runtime)
+  }, intervalSec * 1000)
+  runtime.heartbeatTimer.unref?.()
+  ctx.progress.log(runtime, 'debug', `remote heartbeat: probing every ${intervalSec}s`)
+}
+
+/** A host is watchable only while it is really up and no one-shot action owns the link. */
+function watchable(ctx, runtime) {
+  return (
+    ctx.state.disposed !== true &&
+    runtime.desired === 'connected' &&
+    runtime.status === 'connected' &&
+    runtime.linkBusy === null &&
+    runtime.ssh?.connected === true &&
+    runtime.tunnel !== null
+  )
+}
+
+function beginRemoteEpisode(ctx, runtime, source) {
+  if (runtime.remoteEpisode === true) return
+  runtime.remoteEpisode = true
+  ctx.progress.log(runtime, 'debug', `remote-unreachable suspected (${source}); confirming with probes`)
+  ctx.onRemoteUnreachable?.(runtime, { phase: 'suspected', source })
+}
+
+/** Reset the failure streak; report the recovery once when an episode was open. */
+function clearRemoteEpisode(ctx, runtime, source) {
+  const wasOpen = runtime.remoteEpisode === true
+  runtime.remoteEpisode = false
+  runtime.remoteFailures = 0
+  if (!wasOpen) return
+  ctx.progress.log(runtime, 'info', `remote heartbeat: the remote UI answers again (${source})`)
+  ctx.onRemoteUnreachable?.(runtime, { phase: 'recovered', source })
+}
+
+function scheduleRemoteCheck(ctx, runtime, source, delayMs) {
+  if (runtime.remoteCheckTimer) return
+  runtime.remoteCheckTimer = setTimeout(() => {
+    runtime.remoteCheckTimer = null
+    void checkRemoteNow(ctx, runtime, source)
+  }, delayMs)
+  runtime.remoteCheckTimer.unref?.()
+}
+
+/**
+ * Probe the connected host once and feed the consecutive-failure counter. One
+ * failed request is not a restart: the counter has to reach
+ * {@link REMOTE_UNREACHABLE_FAILURES} before a re-attach is requested.
+ */
+async function checkRemoteNow(ctx, runtime, source) {
+  if (!watchable(ctx, runtime) || typeof ctx.deps.remoteStatus !== 'function') return
+  const ssh = runtime.ssh
+  const port = runtime.remote.port
+  let status = null
+  try {
+    status = await ctx.deps.remoteStatus(ssh, port)
+  } catch {
+    // swallow-ok: an unreachable probe is a failed probe, handled by the same counter
+    status = null
+  }
+  // The transport may have gone away while the probe was in flight; the close handler owns that.
+  if (!watchable(ctx, runtime) || runtime.ssh !== ssh) return
+  if (isUiUp(status)) {
+    clearRemoteEpisode(ctx, runtime, source)
+    return
+  }
+  runtime.remoteFailures = (Number(runtime.remoteFailures) || 0) + 1
+  ctx.progress.log(
+    runtime,
+    'debug',
+    `remote heartbeat: probe failed (HTTP ${status ?? 'none'}), ${runtime.remoteFailures}/${REMOTE_UNREACHABLE_FAILURES} (${source})`,
+  )
+  beginRemoteEpisode(ctx, runtime, source)
+  if (runtime.remoteFailures < REMOTE_UNREACHABLE_FAILURES) {
+    scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteRecheckMs)
+    return
+  }
+  ctx.progress.log(
+    runtime,
+    'warn',
+    `remote-unreachable: ${runtime.remoteFailures} consecutive probes failed (${source}); re-attaching`,
+  )
+  ctx.onRemoteUnreachable?.(runtime, {
+    phase: 'confirmed',
+    source,
+    failures: runtime.remoteFailures,
+  })
+  cancelRemoteCheck(runtime)
+  ctx.requestReattach?.(runtime, { reason: `probe-failed-${runtime.remoteFailures}`, source })
+}
+
+/** One scheduled heartbeat tick. */
+export async function remoteHeartbeatTick(ctx, runtime) {
+  if (!watchable(ctx, runtime)) return
+  if (runtime.remoteCheckTimer) return
+  await checkRemoteNow(ctx, runtime, 'heartbeat')
+}
+
+/**
+ * A proxy or tunnel failure was observed: report the episode once and confirm it
+ * with probes instead of treating one failed request as a remote restart.
+ */
+export function noteRemoteUnreachable(ctx, runtime, source) {
+  if (!watchable(ctx, runtime)) return
+  beginRemoteEpisode(ctx, runtime, source)
+  scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteConfirmDelayMs)
 }
 
 /**
@@ -122,6 +304,8 @@ export async function disposeSsh(runtime) {
  */
 export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelConflict(runtime)
+  cancelLinkWork(runtime)
+  stopRemoteHeartbeat(runtime)
   runtime.closing = true
   cancelIdleStop(runtime)
   if (options.stopRemote && runtime.ssh?.connected) {
@@ -151,6 +335,8 @@ export async function disconnectHost(ctx, runtime, options = {}) {
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
   runtime.desired = 'idle'
   cancelReconnect(runtime)
+  cancelLinkWork(runtime)
+  stopRemoteHeartbeat(runtime)
   const policy = runtime.entry.keepAlive
   const stopRemote = options.stopRemote === true || policy === 'stop'
   await teardownRuntime(ctx, runtime, { stopRemote, keepSshForIdle: policy === 'idle' && !stopRemote })
@@ -173,6 +359,8 @@ export async function shutdownAll(ctx) {
   for (const runtime of ctx.state.runtimes.values()) {
     cancelReconnect(runtime)
     cancelIdleStop(runtime)
+    cancelLinkWork(runtime)
+    stopRemoteHeartbeat(runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
         await stopRemoteQuietly(ctx, runtime)

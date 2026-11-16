@@ -134,7 +134,7 @@ export async function makeTestService(overrides = {}) {
     engineNodeRange: overrides.engineNodeRange,
     sshFactory,
     tunnelFactory,
-    probe: async () => facts,
+    probe: overrides.probe ?? (async () => facts),
     plan: (await import('../../src/bootstrap.js')).planNpx,
     ensureNode: overrides.ensureNode ?? (async () => managedNodeFixture()),
     preflight: overrides.preflight ?? (async (_ssh, plan) => plan.targetVersion),
@@ -168,6 +168,9 @@ export async function makeTestService(overrides = {}) {
         bodyLength: 1024,
       })),
     adopt: overrides.adopt ?? (async () => null),
+    resolveRemote: overrides.resolveRemote ?? (async () => ({ ok: false, reason: 'no-running-web' })),
+    writeRegistry: overrides.writeRegistry ?? (async () => ({ ok: true, output: 'REGISTRY-WRITTEN' })),
+    remoteStatus: overrides.remoteStatus ?? (async () => 200),
     loadSshMaterial: async () => ({
       sshDir: '/home/test/.ssh',
       configText: 'Host test-host\n  HostName 2001:db8::1\n  User ubuntu\n',
@@ -177,6 +180,11 @@ export async function makeTestService(overrides = {}) {
     }),
     hostKeyConfirmTimeoutMs: overrides.hostKeyConfirmTimeoutMs ?? 2000,
     sessionAdapter: overrides.sessionAdapter ?? null,
+    // Liveness confirmation and the re-attach retry loop run on short timers in tests.
+    remoteConfirmDelayMs: overrides.remoteConfirmDelayMs ?? 5,
+    remoteRecheckMs: overrides.remoteRecheckMs ?? 5,
+    reattachAttempts: overrides.reattachAttempts ?? 2,
+    reattachIntervalMs: overrides.reattachIntervalMs ?? 0,
   })
   await service.init()
   return { service, store, dir, events, facts }

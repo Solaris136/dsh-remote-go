@@ -35,3 +35,31 @@ export const SSH_READY_TIMEOUT_MS = 20_000
 export const DEFAULT_IDLE_MINUTES = 15
 
 export const TUNNEL_PROBE_TIMEOUT_MS = 10_000
+
+/**
+ * Remote liveness: a connected host's remote UI is probed on this interval
+ * (`settings.remoteHeartbeat`). Two consecutive failed probes - not one failed
+ * request - are what confirm that the remote web really went away.
+ */
+export const REMOTE_HEARTBEAT_DEFAULT_SEC = 30
+
+export const REMOTE_HEARTBEAT_MIN_SEC = 5
+
+export const REMOTE_HEARTBEAT_MAX_SEC = 600
+
+/** Consecutive failed probes that turn a suspicion into a confirmed restart. */
+export const REMOTE_UNREACHABLE_FAILURES = 2
+
+/** Delay before the confirming probe after a proxy/tunnel error (never trust one failure). */
+export const REMOTE_UNREACHABLE_CONFIRM_DELAY_MS = 750
+
+/** Delay between the two confirming probes, so they are consecutive but not one slow request. */
+export const REMOTE_UNREACHABLE_RECHECK_DELAY_MS = 1200
+
+/**
+ * A remote restart needs a little time to print its new readiness line. The
+ * re-attach retries the read-back a few times before it declares the remote gone.
+ */
+export const REMOTE_REATTACH_ATTEMPTS = 6
+
+export const REMOTE_REATTACH_INTERVAL_MS = 2_000

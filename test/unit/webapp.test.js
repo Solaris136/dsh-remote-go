@@ -7,18 +7,26 @@ import {
   adoptRemoteWeb,
   buildBrowserCarrierProbe,
   buildForeignDshCommand,
+  buildRunRegistryRecord,
   buildStartCommand,
   buildStartScript,
+  commandMatchesProfile,
   ensureBrowserCarrier,
   exchangeTokenOverTunnel,
   findForeignDshProcesses,
   parseForeignDshOutput,
+  parseListenPorts,
   parseWebLine,
   readWebLineFromLog,
+  remoteListenPorts,
+  remotePortOwnerPid,
+  resolveRemoteWeb,
   startRemoteWeb,
   stopForeignDshProcesses,
   stopRemoteWeb,
   remoteHttpStatus,
+  versionFromCommand,
+  writeRunRegistry,
 } from '../../src/webapp.js'
 import { remoteLayout } from '../../src/layout.js'
 
@@ -308,6 +316,189 @@ test('readWebLineFromLog reads the last readiness line', async () => {
   }
   const parsed = await readWebLineFromLog(ssh, LAYOUT)
   assert.equal(parsed.port, 5000)
+})
+
+const ok = (stdout) => ({ code: 0, stdout, stderr: '' })
+
+/** A fake transport that answers by the shape of the command it receives. */
+function routedSsh(routes) {
+  const calls = []
+  return {
+    calls,
+    async exec(command) {
+      calls.push(command)
+      for (const [pattern, reply] of routes) {
+        if (pattern.test(command)) return typeof reply === 'function' ? reply(command) : reply
+      }
+      return { code: 1, stdout: '', stderr: '' }
+    },
+  }
+}
+
+const REGISTRY_JSON = JSON.stringify({
+  pid: 4242,
+  port: 38123,
+  startedAt: '2026-11-16T00:00:00.000Z',
+  profile: 'web',
+  version: '0.2.2-rc.1',
+  dshHome: '/home/ubuntu/.dsh',
+  launch: LAUNCH_MARKER,
+})
+
+const HTTP_PROBE = /curl -s -o \/dev\/null -w|--server-response/
+const LISTEN_SCAN = /\/proc\/\$PID\/fd/
+const PROCESS_PS = /ps -eww -o pid=,comm=,args=/
+
+test('resolveRemoteWeb re-reads the random port after an in-place restart', async () => {
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok(`${REGISTRY_JSON}\n`)],
+    [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=newtok\n')],
+    [/^kill -0 4242/, ok('alive\n')],
+    [LISTEN_SCAN, ok('INODE:700\nLISTEN:0100007F:9A32:700\n')],
+    [HTTP_PROBE, (command) => ok(/38123/.test(command) ? '000' : '200')],
+  ])
+  const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
+  assert.equal(found.ok, true)
+  assert.equal(found.pid, 4242)
+  assert.equal(found.port, 41234)
+  assert.equal(found.token, 'newtok')
+  assert.equal(found.url, 'http://127.0.0.1:41234/?token=newtok')
+  assert.equal(found.version, '0.2.2-rc.1')
+  assert.equal(found.source, 'registry')
+  assert.equal(found.dshHome, '/home/ubuntu/.dsh')
+  assert.equal(found.profile, 'web')
+})
+
+test('resolveRemoteWeb recovers a new pid from a fresh readiness line', async () => {
+  const deadRegistry = JSON.stringify({ ...JSON.parse(REGISTRY_JSON), pid: 4242 })
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok(`${deadRegistry}\n`)],
+    [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=newtok\n')],
+    [/^kill -0 4242/, ok('')],
+    [/\/proc\/net\/tcp/, ok('PID:5150\n')],
+    [/(ps -p 5150 -o args=|tr '\\0' ' ' < "\/proc\/5150\/cmdline")/, ok('node /x/bin.js --profile web --no-open\n')],
+    [HTTP_PROBE, ok('200')],
+  ])
+  const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
+  assert.equal(found.ok, true)
+  assert.equal(found.pid, 5150)
+  assert.equal(found.port, 41234)
+  assert.equal(found.token, 'newtok')
+  assert.equal(found.source, 'log')
+})
+
+test('resolveRemoteWeb falls back to the DSH process for this profile when the log is stale', async () => {
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok('')],
+    [/grep 'dsh web:'/, ok('')],
+    [PROCESS_PS, ok('5150\t/bin/node /x/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open\n')],
+    [/\/proc\/\$PID\/fd/, ok('INODE:900\nLISTEN:0100007F:B6E2:900\n')],
+    [/ps -p 5150 -o args=/, ok('node bin.js @deepseek-ai/dsh@0.2.2-rc.1 --profile web\n')],
+    [HTTP_PROBE, ok('200')],
+  ])
+  const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
+  assert.equal(found.ok, true)
+  assert.equal(found.pid, 5150)
+  assert.equal(found.port, 0xb6e2)
+  assert.equal(found.token, '')
+  assert.equal(found.url, `http://127.0.0.1:${0xb6e2}/`)
+  assert.equal(found.version, '0.2.2-rc.1')
+  assert.equal(found.source, 'process')
+})
+
+test('resolveRemoteWeb reports a typed reason when nothing can be re-attached', async () => {
+  const empty = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok('')],
+    [/grep 'dsh web:'/, ok('')],
+    [PROCESS_PS, ok('')],
+  ])
+  assert.deepEqual(await resolveRemoteWeb(empty, LAYOUT, { profile: 'web' }), {
+    ok: false,
+    reason: 'no-running-web',
+  })
+  const aliveButSilent = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok(`${REGISTRY_JSON}\n`)],
+    [/grep 'dsh web:'/, ok('')],
+    [/^kill -0 4242/, ok('alive\n')],
+    [LISTEN_SCAN, ok('')],
+    [HTTP_PROBE, ok('000')],
+    [PROCESS_PS, ok('')],
+  ])
+  assert.deepEqual(await resolveRemoteWeb(aliveButSilent, LAYOUT, { profile: 'web' }), {
+    ok: false,
+    reason: 'no-listener',
+  })
+})
+
+test('writeRunRegistry writes a shell-quoted record and reports the acknowledgement', async () => {
+  const record = buildRunRegistryRecord({
+    pid: 4242,
+    port: 41234,
+    version: 'v0.2.2-rc.1',
+    profile: 'web',
+    dshHome: "/home/o'neil/.dsh",
+    startedAt: '2026-11-16T00:00:00.000Z',
+  })
+  assert.equal(record.launch, LAUNCH_MARKER)
+  assert.equal(record.version, '0.2.2-rc.1')
+  const ssh = routedSsh([[/printf '%s\\n'/, ok('REGISTRY-WRITTEN\n')]])
+  const written = await writeRunRegistry(ssh, LAYOUT, record)
+  assert.deepEqual(written, { ok: true, output: 'REGISTRY-WRITTEN' })
+  const command = ssh.calls[0]
+  assert.match(command, /mkdir -p '\/home\/ubuntu\/\.dsh\/remote-go\/run'/)
+  assert.match(command, /printf '%s\\n' '/)
+  // A quote in the home directory must not break out of the single-quoted payload.
+  assert.ok(command.includes("/home/o'\\''neil/.dsh"), command)
+  const failing = routedSsh([[/printf '%s\\n'/, { code: 1, stdout: '', stderr: 'read-only fs' }]])
+  assert.deepEqual(await writeRunRegistry(failing, LAYOUT, record), { ok: false, output: '' })
+  const throwing = {
+    async exec() {
+      throw new Error('no shell')
+    },
+  }
+  assert.equal((await writeRunRegistry(throwing, LAYOUT, record)).ok, false)
+})
+
+test('buildRunRegistryRecord refuses invalid pids, ports and homes', () => {
+  assert.throws(() => buildRunRegistryRecord({ pid: 0, port: 1, dshHome: '/x' }), /pid/)
+  assert.throws(() => buildRunRegistryRecord({ pid: 1, port: 0, dshHome: '/x' }), /port/)
+  assert.throws(() => buildRunRegistryRecord({ pid: 1, port: 70000, dshHome: '/x' }), /port/)
+  assert.throws(() => buildRunRegistryRecord({ pid: 1, port: 2, dshHome: '  ' }), /DSH_HOME/)
+})
+
+test('profile and version helpers only match the exact launch shape', () => {
+  assert.equal(commandMatchesProfile('node bin.js --profile web --no-open --port 0', 'web'), true)
+  assert.equal(commandMatchesProfile('node bin.js --profile=web', 'web'), true)
+  assert.equal(commandMatchesProfile('node bin.js --profile webtest', 'web'), false)
+  assert.equal(commandMatchesProfile('node bin.js', ''), false)
+  assert.equal(versionFromCommand('npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web'), '0.2.2-rc.1')
+  assert.equal(versionFromCommand('node /opt/dsh/bin.js web'), null)
+})
+
+test('listen-port parsing only keeps sockets owned by the pid', async () => {
+  const stdout = [
+    'INODE:700',
+    'LISTEN:0100007F:1F90:700',
+    'LISTEN:00000000000000000000000000000000:01BB:701',
+    'LISTEN:0100007F:1F90:700',
+  ].join('\n')
+  assert.deepEqual(parseListenPorts(stdout), [8080])
+  const ssh = routedSsh([[/\/proc\/\$PID\/fd/, ok(`${stdout}\n`)]])
+  assert.deepEqual(await remoteListenPorts(ssh, 4242), [8080])
+  assert.deepEqual(await remoteListenPorts(ssh, 0), [])
+  const broken = {
+    async exec() {
+      throw new Error('no /proc')
+    },
+  }
+  assert.deepEqual(await remoteListenPorts(broken, 1), [])
+  const owner = routedSsh([[/\/proc\/net\/tcp/, ok('PID:99\n')]])
+  assert.equal(await remotePortOwnerPid(owner, 8080), 99)
+  assert.match(owner.calls[0], /PORT_HEX=\$\(printf '%04X' 8080\)/)
+  assert.equal(await remotePortOwnerPid(owner, 0), null)
+  assert.equal(await remotePortOwnerPid(owner, 70000), null)
+  const noOwner = routedSsh([[/\/proc\/net\/tcp/, ok('')]])
+  assert.equal(await remotePortOwnerPid(noOwner, 8080), null)
 })
 
 async function startFakeDsh() {

@@ -271,6 +271,8 @@ function plain(res, status, text) {
  * @param {(req: object) => (number | undefined)} [options.admit] - DSH admission
  *   (`ctx.connection.requestRejection`): the rejection status for a request, or undefined when it may
  *   proceed. Absent on kernels without the Connection service, where the fence below is the gate.
+ * @param {(hostId: string) => void} [options.onUpstreamError] - called once per failed upstream
+ *   connection so the Host can confirm a suspected remote restart (the browser still gets a 502).
  * @param {{ warn?: Function, debug?: Function, error?: Function }} [options.logger]
  */
 export function createRemoteProxy(options) {
@@ -279,10 +281,20 @@ export function createRemoteProxy(options) {
   const getOrigin = options.getOrigin
   const resolveHost = options.resolveHost
   const admit = typeof options.admit === 'function' ? options.admit : () => undefined
+  const onUpstreamError = options.onUpstreamError
   const jars = new Map()
   const upgrades = new Map()
   const sockets = new Set()
   let disposed = false
+
+  /** Report one failed upstream without letting the reporter break the proxy. */
+  function reportUpstreamFailure(hostId) {
+    try {
+      onUpstreamError?.(hostId)
+    } catch {
+      // swallow-ok: reporting only feeds the liveness confirmation, it must never fail a request
+    }
+  }
 
   function jarOf(hostId) {
     let jar = jars.get(hostId)
@@ -393,6 +405,7 @@ export function createRemoteProxy(options) {
       // operator, and the browser only ever sees the 502 below.
       logger.debug?.(`[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed`)
       plain(res, 502, 'remote UI is unreachable')
+      reportUpstreamFailure(parsed.hostId)
     })
     req.once('aborted', () => upstream.destroy())
     req.pipe(upstream)
@@ -456,7 +469,10 @@ export function createRemoteProxy(options) {
       upstream.destroy()
     })
     socket.on('error', () => upstream.destroy())
-    upstream.on('error', () => socket.destroy())
+    upstream.on('error', () => {
+      socket.destroy()
+      reportUpstreamFailure(hostId)
+    })
     upstream.once('connect', () => {
       upstream.write(raw)
       if (head && head.length > 0) upstream.write(head)

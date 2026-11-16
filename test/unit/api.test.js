@@ -230,6 +230,110 @@ test('POST /downloads starts a job; status and cancel are separate', async () =>
   }
 })
 
+test('POST /hosts/:id/restart requires a restartable state', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const refused = await call(api.base, `/hosts/${host.id}/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(refused.status, 409)
+    assert.equal(refused.json.ok, false)
+    assert.equal(refused.json.error.code, 'restart-unavailable')
+    assert.ok(refused.json.error.detail.zh.length > 0)
+    assert.equal(service.snapshot().hosts[0].status, 'unconfigured')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /hosts/:id/restart accepts on a connected host and relaunches on the new port', async () => {
+  const started = []
+  const web = (port, token, pid) => ({
+    pid,
+    port,
+    token,
+    url: `http://127.0.0.1:${port}/?token=${token}`,
+    logPath: '/tmp/web.log',
+    startedAt: new Date().toISOString(),
+    rawLine: '',
+    profile: 'web',
+    dshHome: '/home/ubuntu/.dsh',
+  })
+  const { service } = await makeTestService({
+    readRegistry: async () => ({ pid: 4242, port: 38123, profile: 'web', dshHome: '/home/ubuntu/.dsh' }),
+    startWeb: async () => {
+      started.push(true)
+      return started.length === 1 ? web(38123, 'tok_first', 4242) : web(38200, 'tok_second', 4243)
+    },
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await call(api.base, `/hosts/${host.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    const restart = await call(api.base, `/hosts/${host.id}/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(restart.status, 200)
+    assert.equal(restart.json.ok, true)
+    assert.equal(restart.json.accepted, true)
+    await waitFor(
+      () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38200,
+      { label: 'restarted on the new port' },
+    )
+    const open = await call(api.base, `/hosts/${host.id}/open`)
+    assert.match(open.json.url, /:45123\/\?token=tok_second$/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('SSE /events also broadcasts remote-unreachable episode frames', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const controller = new AbortController()
+    const response = await fetch(`${api.base}/events`, { signal: controller.signal })
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    const readUntil = async (needle) => {
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline && !text.includes(needle)) {
+        const { value, done } = await reader.read()
+        if (done) break
+        text += decoder.decode(value, { stream: true })
+      }
+    }
+    await readUntil('event: state')
+    service.emit('remote-unreachable', {
+      hostId: 'h_1',
+      phase: 'confirmed',
+      source: 'heartbeat',
+      at: '2026-11-16T00:00:00.000Z',
+    })
+    await readUntil('event: remote-unreachable')
+    controller.abort()
+    assert.match(text, /event: remote-unreachable/)
+    assert.match(text, /"phase":"confirmed"/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('diagnose returns a redacted report', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)

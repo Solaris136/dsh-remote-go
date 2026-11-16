@@ -8,7 +8,13 @@ import { createHostRuntime } from './host-runtime.js'
 import { hostView } from './host-view.js'
 import { listKeyFiles as listKeyFilesInHome } from './key-files.js'
 import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
-import { cancelIdleStop, cancelReconnect, teardownRuntime } from './host-lifecycle.js'
+import {
+  cancelIdleStop,
+  cancelReconnect,
+  startRemoteHeartbeat,
+  stopRemoteHeartbeat,
+  teardownRuntime,
+} from './host-lifecycle.js'
 import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from './ssh-config.js'
 
 function ensureRuntime(ctx, host) {
@@ -109,6 +115,12 @@ export function setActiveHost(ctx, id) {
 export async function saveSettings(ctx, patch) {
   await ctx.init()
   const settings = await ctx.store.saveSettings(patch)
+  // The liveness switch applies to hosts that are already connected, not just the next one.
+  for (const runtime of ctx.state.runtimes.values()) {
+    if (runtime.status !== 'connected') continue
+    if (settings.remoteHeartbeat.enabled) startRemoteHeartbeat(ctx, runtime)
+    else stopRemoteHeartbeat(runtime)
+  }
   ctx.emitState()
   return settings
 }
