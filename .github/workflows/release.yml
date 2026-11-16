@@ -48,23 +48,16 @@ jobs:
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Lint repository conventions
-        run: pnpm run lint
+      - name: Rebuild vendored ssh2 bundle and require a clean tree
+        run: |
+          pnpm run build:vendor
+          git diff --exit-code -- vendor/
 
-      - name: Syntax check
-        run: pnpm run check:syntax
-
-      - name: Validate workflow YAML
-        run: pnpm run check:workflows
-
-      - name: Validate bundle metadata and market index entry
-        run: pnpm run market:check
-
-      - name: Check file coverage
-        run: pnpm run pack:check
-
-      - name: Unit tests (Host + Client)
-        run: pnpm run test:unit
+      # Same gate as the PR (lint + format + syntax + workflows + market + pack +
+      # coverage floors + unit + integration). The previous release path ran only the
+      # unit tests, so a release could ship code that the PR gate would have rejected.
+      - name: Verify (same gate as CI)
+        run: pnpm run verify
 
       - name: Read the version to release
         id: version

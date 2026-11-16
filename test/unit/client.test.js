@@ -42,7 +42,9 @@ function loadClientPlugin(options = {}) {
   }
   sandbox.globalThis = sandbox
   vm.createContext(sandbox)
-  vm.runInContext(SOURCE, sandbox, { filename: 'client.js' })
+  // The absolute path makes V8 attribute the script to the real file, so `client.js`
+  // shows up in `--experimental-test-coverage` instead of being invisible.
+  vm.runInContext(SOURCE, sandbox, { filename: CLIENT_PATH })
   const declaration = sandbox.__declaration
   assert.ok(declaration, 'client.js must call window.__ModuleLoader__.load')
   assert.equal(declaration.id, 'dsh-remote-go')

@@ -5,8 +5,11 @@ import { existsSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
+// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const cliArgs = process.argv.slice(2)
 const findIndex = cliArgs.indexOf('--find')
 let tarball = cliArgs.find((arg, index) => !arg.startsWith('--') && index !== findIndex + 1) ?? null
@@ -40,8 +43,11 @@ function fail(message) {
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
 const problems = []
 
+// The vendored ssh2 bundle is imported at runtime by src/ssh.js, so a missing vendor/
+// entry is an install-time crash, not a cosmetic packaging bug.
 const mustShip = `index.js client.js cordis.patch.yml locale/en.json locale/zh.json src/index.js
-src/api.js src/service.js package.json`.split(/\s+/)
+src/api.js src/service.js vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md README.md LICENSE
+package.json`.split(/\s+/)
 
 for (const file of mustShip) {
   if (!existsSync(path.join(root, file))) problems.push(`missing file: ${file}`)
@@ -49,6 +55,10 @@ for (const file of mustShip) {
 const files = pkg.files ?? []
 if (!files.includes('src') && !files.some((entry) => entry.startsWith('src/'))) problems.push('files[] must ship src/')
 if (!files.includes('client.js')) problems.push('files[] must ship client.js')
+if (!files.includes('vendor') && !files.some((entry) => entry.startsWith('vendor/')))
+  problems.push('files[] must ship vendor/ (the runtime ssh2 bundle)')
+if (!files.includes('README.md')) problems.push('files[] must ship README.md')
+if (!files.includes('LICENSE')) problems.push('files[] must ship LICENSE')
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
 
 if (tarball) {
@@ -76,6 +86,10 @@ if (tarball) {
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
   if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
     problems.push('tarball does not contain src/*.js')
+  // Assert the vendor/ tree explicitly: `mustShip` covers the two files, this catches a
+  // `files[]` regression that drops the whole directory from the published tarball.
+  if (!entries.some((file) => file.startsWith('vendor/')))
+    problems.push('tarball does not contain vendor/ (the runtime ssh2 bundle)')
   console.log(`[pack-check] tarball entries: ${entries.length}`)
 }
 

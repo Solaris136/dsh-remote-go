@@ -6,9 +6,13 @@ import { readdir } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const includeDirs = ['src', 'scripts', 'test']
+// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
+// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+// `e2e/` holds the simulated remote and its fixtures; they run in CI, so parse them too.
+const includeDirs = ['src', 'scripts', 'test', 'e2e']
 const includeFiles = ['index.js', 'client.js']
 const skipDirs = new Set('node_modules _research _tools artifacts home home-published logs vendor'.split(' '))
 

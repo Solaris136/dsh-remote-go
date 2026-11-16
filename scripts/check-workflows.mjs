@@ -2,14 +2,27 @@
 // devDependency, then DSH_JS_YAML, then python3 + PyYAML. Exit 1 on a bad workflow and 2
 // when no YAML parser is available.
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
-const files = ['ci', 'codeql', 'release', 'acceptance'].map((name) => `.github/workflows/${name}.yml`)
+// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
+// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+const workflowDir = path.join(root, '.github', 'workflows')
+// Discover the workflows instead of listing them: a new workflow file must be validated
+// by CI on the day it is added, not after someone remembers to extend this list.
+const files = (await readdir(workflowDir).catch(() => []))
+  .filter((name) => /\.ya?ml$/.test(name))
+  .sort()
+  .map((name) => `.github/workflows/${name}`)
+if (files.length === 0) {
+  console.error(`[check-workflows] no workflow YAML found under ${path.relative(root, workflowDir)}`)
+  process.exit(1)
+}
 
 let parse = null
 try {

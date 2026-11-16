@@ -17,6 +17,12 @@ jobs:
   verify:
     name: Verify (ubuntu-latest)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # A missing harness or browser must fail this job, never turn the E2E suites into
+      # silent skips. The suite split below keeps the desktop E2E in acceptance.yml,
+      # which is the only workflow with a real Electron app installed.
+      DSH_E2E_STRICT: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -53,16 +59,68 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: node scripts/check-pr-title.mjs
 
-      - name: Rebuild vendored ssh2 bundle
-        run: pnpm run build:vendor
+      - name: Rebuild vendored ssh2 bundle and require a clean tree
+        # vendor/ is runtime code imported by src/ssh.js, so the committed bundle must be
+        # exactly what `build-vendor.mjs` reproduces from the pinned ssh2 devDependency.
+        run: |
+          pnpm run build:vendor
+          git diff --exit-code -- vendor/
 
-      - name: Unit tests with coverage thresholds
+      - name: Resolve the DSH harness version
+        id: harness-version
+        # The acceptance floor is engines.dsh; deriving it keeps CI and acceptance from
+        # drifting to an older harness (0.2.2-rc.1 vs the declared >=0.2.2-rc.3).
+        run: |
+          version="$(node scripts/harness-version.mjs)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the DSH harness cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/harness
+          # Bump the v1 prefix when the cached native addon must be rebuilt. Node is
+          # pinned to the 24 line, so the key names that major on purpose.
+          key: dsh-harness-v1-${{ runner.os }}-node24-${{ steps.harness-version.outputs.version }}
+
+      - name: Install the DSH harness
+        env:
+          DSH_HARNESS_VERSION: ${{ steps.harness-version.outputs.version }}
+        # npm, not pnpm: the harness needs its native addon, and npm runs the install
+        # scripts that pnpm 11's build-approval gate would skip. The cache above keeps
+        # the built addon between runs.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/harness"
+          cd "$RUNNER_TEMP/harness"
+          if [ ! -f node_modules/@deepseek-ai/dsh/lib/bin.js ]; then
+            npm init -y >/dev/null
+            npm install --no-fund --no-audit --loglevel=error "@deepseek-ai/dsh@$DSH_HARNESS_VERSION"
+          fi
+          node node_modules/@deepseek-ai/dsh/lib/bin.js --version
+
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+
+      - name: Unit tests with coverage floors
         run: pnpm run test:coverage
 
-      # Simulated-remote integration/E2E: no external host or browser is needed,
-      # so it runs here instead of on its own runner.
-      - name: Integration tests (simulated remote)
-        run: node --test --test-concurrency=1 "test/integration/*.test.js" "test/integration/*.e2e.js"
+      # The simulated remote and the restart E2E need no external harness or browser.
+      - name: Integration tests (no external harness)
+        run: node --test --test-concurrency=1 test/integration/sim.test.js test/integration/remote-restart.test.js
+
+      # Same-origin proxy, real `dsh web`, real Chromium and the browser/desktop carriers:
+      # strict mode turns a missing prerequisite into a failure, so this leg cannot no-op.
+      - name: Browser and harness E2E (strict)
+        env:
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          node --test --test-concurrency=1 \
+            test/integration/remote-proxy.test.js \
+            test/integration/web.e2e.js \
+            test/integration/browser-carrier.test.js \
+            test/integration/guest-tools.e2e.js
 
       - name: Validate bundle metadata and market index entry
         run: pnpm run market:check
@@ -86,6 +144,11 @@ jobs:
   windows:
     name: Tests (windows-latest, Node 24)
     runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # Same rule as the Linux leg: a missing prerequisite fails instead of skipping.
+      # Desktop E2E runs in acceptance.yml, which installs the real Electron app.
+      DSH_E2E_STRICT: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -102,11 +165,25 @@ jobs:
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Rebuild vendored ssh2 bundle
-        run: pnpm run build:vendor
+      - name: Lint repository conventions
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format:check
+
+      - name: Syntax check
+        run: pnpm run check:syntax
+
+      - name: Validate workflow YAML
+        run: pnpm run check:workflows
+
+      - name: Rebuild vendored ssh2 bundle and require a clean tree
+        run: |
+          pnpm run build:vendor
+          git diff --exit-code -- vendor/
 
       - name: Unit tests
         run: pnpm run test:unit
 
-      - name: Integration tests (simulated remote)
-        run: node --test --test-concurrency=1 "test/integration/*.test.js" "test/integration/*.e2e.js"
+      - name: Integration tests (no external harness)
+        run: node --test --test-concurrency=1 test/integration/sim.test.js test/integration/remote-restart.test.js
