@@ -338,8 +338,17 @@ export async function stopRemoteForIdle(ctx, runtime, options = {}) {
     ctx.progress.log(runtime, 'debug', 'idle stop skipped: the host is connected again')
     return { ok: false, reason: 'still-wanted' }
   }
+  // The transport this call owns: the identity proof below awaits, and the user may connect
+  // in that window. Only this session may be released afterwards, never the new one.
+  const capturedSsh = runtime.ssh
+  let released = false
+  const stillWanted = () =>
+    runtime.ssh !== capturedSsh ||
+    runtime.desired === 'connected' ||
+    runtime.status === 'connected' ||
+    runtime.tunnel !== null
   try {
-    if (runtime.ssh?.connected !== true) return { ok: false, reason: 'no-transport' }
+    if (capturedSsh?.connected !== true) return { ok: false, reason: 'no-transport' }
     const home = runtime.facts?.home ?? runtime.remoteHome ?? null
     if (typeof home !== 'string' || home.trim() === '') {
       ctx.progress.log(runtime, 'warn', 'idle stop skipped: the remote home directory is unknown')
@@ -347,18 +356,22 @@ export async function stopRemoteForIdle(ctx, runtime, options = {}) {
     }
     const layout = layoutForRuntime(runtime)
     const pid = Number(runtime.remote.pid ?? runtime.remotePid ?? 0)
-    if (isPid(pid)) {
-      // Same `/proc` identity proof the explicit stop uses: a reused pid, another DSH home or
-      // another profile is not this connection's process and must not be signalled.
-      const proof = await proveIdleStopTarget(ctx, runtime, pid, layout)
-      if (proof.ok !== true) {
-        ctx.progress.log(runtime, 'warn', `idle stop skipped: ${proof.reason}`)
-        return { ok: false, reason: proof.reason }
-      }
+    // Without a pid there is nothing this policy may signal: `stopRemoteWeb` would fall back
+    // to the run registry and could stop an instance this connection did not launch.
+    if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
+    // Same `/proc` identity proof the explicit stop uses: a reused pid, another DSH home or
+    // another profile is not this connection's process and must not be signalled.
+    const proof = await proveIdleStopTarget(ctx, runtime, pid, layout)
+    if (proof.ok !== true) {
+      ctx.progress.log(runtime, 'warn', `idle stop skipped: ${proof.reason}`)
+      return { ok: false, reason: proof.reason }
     }
-    const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, {
-      pid: isPid(pid) ? pid : undefined,
-    })
+    // The user may have connected while the identity was read: the link wins again.
+    if (options.shutdown !== true && stillWanted()) {
+      ctx.progress.log(runtime, 'debug', 'idle stop skipped: the host is connected again')
+      return { ok: false, reason: 'still-wanted' }
+    }
+    const stopped = await ctx.deps.stopWeb(capturedSsh, layout, { pid })
     if (stopped?.ok !== true) {
       ctx.progress.log(
         runtime,
@@ -375,9 +388,12 @@ export async function stopRemoteForIdle(ctx, runtime, options = {}) {
     ctx.progress.log(runtime, 'warn', 'idle stop failed:', messageOf(error))
     return { ok: false, reason: 'error' }
   } finally {
-    // The idle host keeps no transport. This runs last so a skipped stop (a reused pid, an
-    // unknown home) still releases the SSH session.
-    await disposeSsh(runtime)
+    // Release only the transport this call captured: when a new connection owns the link by
+    // now, its session is not ours to dispose.
+    if (!released && runtime.ssh === capturedSsh) {
+      released = true
+      await disposeSsh(runtime)
+    }
   }
 }
 

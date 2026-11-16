@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { EventEmitter } from 'node:events'
 import assert from 'node:assert/strict'
 import {
   FakeSsh,
@@ -10,6 +11,7 @@ import {
   waitFor,
 } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
+import { SshConnection } from '../../src/ssh.js'
 
 function webInfo() {
   return {
@@ -336,3 +338,34 @@ for (const action of ['disconnect', 'removeHost']) {
     }
   })
 }
+
+test('a first connect that fails with error+close synchronously is not retried', async () => {
+  class SyncFailureClient extends EventEmitter {
+    connect() {
+      const error = new Error('getaddrinfo ENOTFOUND test-host')
+      error.code = 'ENOTFOUND'
+      this.emit('error', error)
+      this.emit('close')
+    }
+    end() {}
+  }
+  let attempts = 0
+  const { service } = await makeTestService({
+    sshFactory: (options) => {
+      attempts += 1
+      return new SshConnection({ ...options, clientFactory: () => new SyncFailureClient() })
+    },
+  })
+  await service.saveSettings({ autoReconnect: { enabled: true, maxAttempts: 3, baseDelayMs: 10 } })
+  const host = await createHost(service, { auth: { type: 'password' } })
+  const frames = framesOf(service)
+  await service.connect(host.id, { password: 'x' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { timeoutMs: 5_000, label: 'first failure' })
+  const runtime = service.runtimes.get(host.id)
+  assert.equal(attempts, 1, 'a connection that never came up must not be retried')
+  assert.equal(runtime.reconnectAttempts, 0)
+  assert.equal(runtime.reconnectTimer, null)
+  assert.equal(service.snapshot().hosts[0].error.code, 'network')
+  assert.doesNotMatch(JSON.stringify(frames), /"code":"reconnecting"/)
+  await service.shutdown()
+})

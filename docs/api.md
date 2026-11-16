@@ -205,6 +205,7 @@ interface DownloadJobView {
   doneBytes: number
   totalFiles: number           // 文件夹的文件数；单文件为 1（读完前可为 0）
   doneFiles: number
+  ignoredNames?: string[]      // 文件夹下载里被跳过的名字（Windows 元数据 / 快捷方式；其他平台为空）
   destination: string | null   // 实际写入的本机文件/目录绝对路径
   startedAt: string
   error: ErrorView | null
@@ -543,7 +544,8 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 
 - `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`；跳板机的确认额外带
   `role: "jump"` 与跳板机地址 `host`，这是「等待确认的是哪台机器」的唯一信号——目标机的帧形状不变）
-- `auth-checking`、`probing`- `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
+- `auth-checking`、`probing`
+- `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
 - `restarting-remote`（`reason`，可选 `pid` / `port` / `level`）：本地重启远端或远端自重启后的重挂；状态保持

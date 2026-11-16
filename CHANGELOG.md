@@ -146,7 +146,8 @@
   - **连接期间断线被报成 `internal` 且不重连**：断线监听只在 `connected` 之后才装，`exec`/`openSftp`/
     `forwardOut` 在关闭的连接上抛裸 `Error`。现在 SSH 会话一建立就装上监听（握手期也监听，握手期断开会让
     挂起的指纹提示立即结算并按网络错误拒绝，而不是干等到超时），关闭的连接返回
-    `network`（`reason=ssh-closed`），bootstrap 期间断线按网络失败处理并进入重连。
+    `network`（`reason=ssh-closed`），bootstrap 期间断线按网络失败处理并进入重连。DNS 解析失败这类
+    **同步 error+close** 只算一次失败，不会被当成断线去重试一条从未建立的连接。
   - **用户操作与管线无互斥**：每个 `await` 之后都复查「用户还要这条连接吗」（`desired`/`closing`/`disposed`/
     主机仍在），隧道端口改用局部变量并校验，disconnect / 删除主机不会再收到假的 `connected` 帧，
     也不会再在 `runtime.tunnel.localPort` 上空指针崩溃；`removeHost` 先置 `desired: "idle"` 并清 `activeHostId`。
@@ -157,10 +158,12 @@
   - **`run/web.json` 非原子写 / 停止失败也删 registry**：改为临时文件 + `mv`，停止未确认时保留记录，
     registry 读不出来时仍能从中恢复 pid（不再误判为「没有记录」），且 pid 必须由 `,`/`}` 结束才算数。
   - **`known_hosts` 的明文条目对任意端口作保**：非 22 端口现在只认 `[host]:port`（与 OpenSSH 一致）。
-    已知限制：`!host` 否定行与 `|1|` 哈希行不支持（后者只统计数量），失败方向是更严格。
+    已知限制：`!host` 否定行与 `|1|` 哈希行不支持；否定行被当成普通模式，因此带否定的条目比 OpenSSH
+    **更宽松**（不是更严格），详见 [docs/design.md](docs/design.md) §5.3。
   - **文件夹下载在大小写不敏感的文件系统静默覆盖**：同名（仅大小写不同）的远端文件按 `name (2).ext`
     改名，两者都落盘（大小写不敏感判定在 Windows/macOS 默认开启）；`desktop.ini` / `thumbs.db` / `*.lnk` /
-    `*.url` 等 Windows 元数据与快捷方式只在 **Windows 本地**被跳过，跳过的名字在结果里可见，其他平台照常下载。
+    `*.url` 等 Windows 元数据与快捷方式只在 **Windows 本地**被跳过，被跳过的名字通过下载任务的
+    `ignoredNames` 透出，其他平台照常下载。
   - 另有若干低危加固：`shutdownAll` 先置关闭标志再收尾、重连计时器 `unref()`、`exec` 的进度回调抛错不再
     中断命令、探测/预检超时按网络条件分类、关闭隧道时销毁已建立的 SSH 通道、读取私钥前限制大小。
 - **连接日志每次连接都从干净的一页开始**：手动重连与断线自动重连会清空上一次连接的日志与序号，并先写一条

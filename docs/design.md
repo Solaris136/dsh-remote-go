@@ -214,9 +214,11 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
   - 改了主机的 `jumpHost`（或端口）后，旧跳板 pin 因 `host`/`port` 不匹配被丢弃并重新询问，不会把新跳板报成 `host-key-changed`。
   - **已知限制**：Client 的指纹对话框不区分跳板 / 目标，也复用「确认后会记住」的固定文案；Host 侧保证对话框里显示的**密钥**是当前被确认的那一把
     （跳板确认期间 `HostView.fingerprint` 是跳板密钥，拨号目标前清空），但文案无法按角色改写（`client.js` 不在本改动的范围内）。
-- **known_hosts 的已知限制**：只按主机字段（`host` / `*` / `?`，非 22 端口只认 `[host]:port`）匹配；`!host` 否定行与 `|1|` 哈希行不支持
-  （哈希行只统计数量，不猜测明文），因此这类条目不会放行指纹——失败方向是「更严格」，不是误信。同一 `known_hosts` 里多条同主机条目时，
-  任一指纹匹配即放行（与 OpenSSH 一致）。
+- **known_hosts 的已知限制**：只按主机字段（`host` / `*` / `?`，非 22 端口只认 `[host]:port`）匹配，不支持 `|1|` 哈希行
+  （只统计数量，不猜测明文）与 `!host` 否定行。注意否定行**不是**「更严格」而是**更宽松**：本实现忽略 `!`
+  前缀，把 `!bad.example` 当成普通模式，因此 `*.corp.example,!bad.corp.example` 里只要有一行非否定模式匹配
+  就放行——OpenSSH 会排除 `bad.corp.example`，本实现会信任它。同一 `known_hosts` 里多条同主机条目时，任一
+  非否定指纹匹配即放行（与 OpenSSH 的「任一匹配即放行」一致，但少了否定排除）。
 
 ### 5.4 断线、重连与退出
 - SSH 连接 `close` 且用户期望保持连接时：状态转 `disconnected`，按设置做指数退避重连（`autoReconnect.maxAttempts`）。

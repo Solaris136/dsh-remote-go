@@ -121,11 +121,18 @@ export class SshConnection extends EventEmitter {
       // `connected === false` and every later `exec`/`forwardOut` would throw
       // "SSH connection is not open" on a transport that is actually up.
       this.closed = false
+      // An attempt that has already failed is torn down by its own error/close pair (a DNS
+      // resolution failure emits both synchronously), and that close is the teardown of a
+      // connection that never existed - not a lost link. Without this flag the wrapper would
+      // emit `close`, the pipeline would read a transport drop and retry a first connection
+      // that never got off the ground (review: close-after-error).
+      let attemptFailed = false
       // Attach the close handling *before* dialling: a transport that dies during the
       // handshake (for example while a host-key prompt is open) must be observable and must
       // reject the connect promise instead of hanging until the ready timeout. `this.client
       // !== client` filters a superseded auth attempt, whose teardown is not a lost link.
       client.once('close', () => {
+        if (attemptFailed) return
         if (this.client !== client) return
         this.closed = true
         this.emit('close')
@@ -139,6 +146,7 @@ export class SshConnection extends EventEmitter {
       // Permanent listener: settle the promise on the first error, swallow any
       // later teardown errors (they are already reflected in the rejection).
       client.on('error', (error) => {
+        attemptFailed = true
         settle(toSshError(error, this.options.host, this.options.port))
       })
       const config = {
@@ -160,6 +168,7 @@ export class SshConnection extends EventEmitter {
       try {
         client.connect(config)
       } catch (error) {
+        attemptFailed = true
         settle(toSshError(error, this.options.host, this.options.port))
       }
     })
@@ -402,10 +411,12 @@ export class SshConnection extends EventEmitter {
    * @param {string} targetRoot - absolute local directory that receives the tree.
    * @param {{ onInventory?: (info: { totalBytes: number, totalFiles: number }) => void,
    *   onProgress?: (info: { doneBytes: number, totalBytes: number, doneFiles: number,
-   *     totalFiles: number }) => void, isCancelled?: () => boolean,
+   *     totalFiles: number }) => void, onIgnored?: (names: string[]) => void,
+   *   isCancelled?: () => boolean,
    *   caseInsensitive?: boolean, ignoreWindowsNames?: boolean }} [options]
    *   `caseInsensitive` defaults to the local platform (Windows/macOS); `ignoreWindowsNames`
-   *   defaults to Windows and is the only platform where the Windows-only names are skipped.
+   *   defaults to Windows and is the only platform where the Windows-only names are skipped;
+   *   `onIgnored` receives the skipped names so a download job can show them.
    * @returns {Promise<{ destination: string, totalBytes: number, totalFiles: number,
    *   renamedFiles?: number, ignoredNames?: string[], cancelled?: boolean }>}
    */
@@ -485,6 +496,13 @@ export class SshConnection extends EventEmitter {
       if (typeof options.onInventory === 'function') {
         try {
           options.onInventory({ totalBytes, totalFiles })
+        } catch {
+          /* progress listeners must not break the download */
+        }
+      }
+      if (ignoredNames.length > 0 && typeof options.onIgnored === 'function') {
+        try {
+          options.onIgnored(ignoredNames.slice())
         } catch {
           /* progress listeners must not break the download */
         }

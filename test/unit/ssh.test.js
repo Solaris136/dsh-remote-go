@@ -494,10 +494,17 @@ test('saveRemoteTree leaves Windows metadata and shell shortcut files out', asyn
     },
   )
   const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-junk-')), 'mixed')
-  const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target, { ignoreWindowsNames: true })
+  const reported = []
+  const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target, {
+    ignoreWindowsNames: true,
+    onIgnored: (names) => reported.push(names),
+  })
   assert.equal(result.totalFiles, 1)
   assert.deepEqual((await readdir(target)).sort(), ['notes', 'readme.txt'])
   assert.deepEqual(result.ignoredNames.sort(), ['Thumbs.db', 'desktop.ini', 'docs.url', 'setup.lnk'])
+  // The download job surfaces what was skipped instead of dropping it silently.
+  assert.equal(reported.length, 1)
+  assert.deepEqual(reported[0].sort(), ['Thumbs.db', 'desktop.ini', 'docs.url', 'setup.lnk'])
 })
 
 test('saveRemoteFile surfaces a missing SFTP session and a missing file', async () => {
@@ -567,5 +574,32 @@ test('a handshake-time close is observable and rejects the connect instead of ha
     (error) => error.code === 'network' && /closed during the SSH handshake/.test(error.detail.en),
   )
   assert.deepEqual(closes, ['close'], 'the pipeline needs the close to cancel its parked prompt')
+  assert.equal(ssh.connected, false)
+})
+
+test('a synchronous error+close during the handshake is one failure, not a dropped link', async () => {
+  class SyncFailureClient extends EventEmitter {
+    connect() {
+      // ssh2's DNS resolution failure: error then close in the same tick.
+      const error = new Error('getaddrinfo ENOTFOUND example.com')
+      error.code = 'ENOTFOUND'
+      this.emit('error', error)
+      this.emit('close')
+    }
+    end() {}
+  }
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new SyncFailureClient(),
+  })
+  const closes = []
+  ssh.on('close', () => closes.push('close'))
+  await assert.rejects(
+    () => ssh.connect(),
+    (error) => error.code === 'network',
+  )
+  assert.deepEqual(closes, [], 'the teardown of a failed attempt must not read as a lost link')
   assert.equal(ssh.connected, false)
 })

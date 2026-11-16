@@ -189,3 +189,73 @@ test('an idle stop refuses a pid whose /proc identity no longer matches the laun
   assert.equal(stopped.length, 0)
   await service.shutdown()
 })
+
+test('an idle stop with no pid refuses instead of letting the registry pick one', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service, { keepAlive: 'idle' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  await service.disconnect(host.id)
+  runtime.remotePid = null
+  runtime.bound = null
+  runtime.launched = new Map()
+  const verdict = await stopRemoteForIdle(service.ctx, runtime)
+  assert.deepEqual(verdict, { ok: false, reason: 'pid-unknown' })
+  assert.deepEqual(stopped, [], 'no pid means no stop call at all')
+})
+
+test('a connect that lands during the identity proof keeps its new transport', async () => {
+  const stopped = []
+  const state = { gateEnabled: false, identityStarted: false, release: null }
+  const gate = new Promise((resolve) => {
+    state.release = resolve
+  })
+  const { service } = await makeTestService({
+    processIdentity: async () => {
+      // Only the idle stop's proof is parked; the initial connect and its identity read run
+      // normally. The reconnect's own identity read shares the gate, which is already open.
+      if (state.gateEnabled) {
+        state.identityStarted = true
+        await gate
+      }
+      return {
+        ok: true,
+        startTime: 'start-4242',
+        command: 'node /home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web',
+        dshHome: '/home/ubuntu/.dsh',
+      }
+    },
+    stopWeb: async () => {
+      stopped.push(true)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service, { keepAlive: 'idle' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  await service.disconnect(host.id)
+  const idleSsh = runtime.ssh
+
+  state.gateEnabled = true
+  const idleStop = stopRemoteForIdle(service.ctx, runtime)
+  await waitFor(() => state.identityStarted, { label: 'identity in flight' })
+  await service.connect(host.id)
+  state.release()
+  const verdict = await idleStop
+  assert.deepEqual(verdict, { ok: false, reason: 'still-wanted' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected again' })
+  assert.equal(stopped.length, 0, 'the idle stop must not run once the link is live')
+  assert.notEqual(runtime.ssh, idleSsh)
+  assert.equal(idleSsh.disposed, true, 'the idle transport is released by the new connect')
+  assert.equal(runtime.ssh.connected, true)
+  assert.equal(runtime.ssh.disposed, false, 'the new transport is never disposed by the idle policy')
+  await service.shutdown()
+})

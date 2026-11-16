@@ -46,6 +46,11 @@ export function createDownloadJobs(options) {
     doneBytes: job.doneBytes,
     totalFiles: job.totalFiles,
     doneFiles: job.doneFiles,
+    /**
+     * Names a folder download deliberately skipped (Windows metadata / shell shortcuts on a
+     * Windows host). Surfaced so nothing disappears without the user seeing it.
+     */
+    ignoredNames: Array.isArray(job.ignoredNames) ? job.ignoredNames : [],
     destination: job.destination ?? null,
     startedAt: job.startedAt,
     error: job.error,
@@ -107,6 +112,13 @@ export function createDownloadJobs(options) {
           if (Number.isFinite(info?.totalBytes)) job.totalBytes = Math.max(0, Number(info.totalBytes))
           if (Number.isFinite(info?.doneFiles)) job.doneFiles = Math.max(0, Number(info.doneFiles))
           if (Number.isFinite(info?.totalFiles)) job.totalFiles = Math.max(0, Number(info.totalFiles))
+          publish(job)
+        },
+        // Folder downloads report the names they skipped (Windows-only metadata/shortcuts);
+        // `saveHostFolder` forwards this options object to the SSH layer unchanged.
+        onIgnored: (names) => {
+          if (job.cancelled || !Array.isArray(names)) return
+          job.ignoredNames = names.slice(0, 200).map((name) => String(name))
           publish(job)
         },
       })
@@ -173,6 +185,7 @@ export function createDownloadJobs(options) {
         home: typeof options.home === 'string' && options.home !== '' ? options.home : undefined,
         startedAt: new Date(now()).toISOString(),
         error: null,
+        ignoredNames: [],
         timer: null,
         lastEmit: 0,
         cancelled: false,
