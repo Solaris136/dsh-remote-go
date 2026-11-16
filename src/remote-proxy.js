@@ -423,15 +423,11 @@ export function createRemoteProxy(options) {
         response.pipe(res)
       },
     )
-    upstream.on('error', (error) => {
-      // The host id in this message came from the request path; a raw path fragment in a log line
-      // is a log-injection sink, so the line names the loopback upstream instead (that port is what
-      // identifies the host to an operator).
-      logger.debug?.(
-        `[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      )
+    upstream.on('error', () => {
+      // Nothing from this failure reaches the log line: the emitter is request-driven, so CodeQL
+      // treats its error as user-controlled (log injection). The loopback port names the host to an
+      // operator, and the browser only ever sees the 502 below.
+      logger.debug?.(`[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed`)
       plain(res, 502, 'remote UI is unreachable')
     })
     req.once('aborted', () => upstream.destroy())
