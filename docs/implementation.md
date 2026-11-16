@@ -11,7 +11,7 @@ dsh-remote-go
 ├─ package.json             dsh.bundle.patch + dsh.client（web / immediately / inject）
 ├─ src/
 │  ├─ index.js              Host 插件入口：挂 API 与同源远端代理、注册模型工具、初始化 service、探测本机版本
-│  ├─ tools.js              模型工具：remote_hosts_list / remote_hosts_manage（白名单投影 + confirm 门 + jobs）
+│  ├─ tools.js              模型工具：只读的 remote_hosts_list（白名单投影，无写操作面）
 │  ├─ admission.js          DSH 准入装配：把 `ctx.get('connection').requestRejection` 变成每请求闸门
 │  ├─ api.js                本地 HTTP + SSE 路由（契约实现）
 │  ├─ request-trust.js      本地 API 与同源代理共用的 Host/Origin 栅栏（单一实现）
@@ -74,7 +74,7 @@ dsh-remote-go
 
 `/health` 是唯一豁免：它是契约里的存活探针、不返回状态数据，因此不要求浏览器会话，但仍过 Host/Origin 栅栏（见 [api.md](api.md)）。`optional = ['connection','credentials']` 只声明可选依赖，不是访问凭据；其余依赖都是 node 内置模块或本仓库模块，发布包 `dependencies: {}`。
 
-模型工具在同一条 `ctx.effect` 里装配：`registerHostTools(ctx, { service, store, logger, getJobs })`（`tools.js`）→ `ctx.effect(() => ctx.tools.register(def)…)` 注册 `remote_hosts_list`（只读）与 `remote_hosts_manage`（变更），effect 的清理函数逐个调用 `register` 返回的 disposer，所以卸载后两个工具真的消失。`inject` 因此是 `['webServer','tools']`（`tools` 是 DSH 必有的内核服务）；`getJobs` 每次调用时读 `ctx.get('jobs')`——`jobs` 是 optional，缺失就退回前台执行。工具只注册在 Host 半端，`package.json` 的 `dsh.client` 与远端都没变。
+模型工具在同一条 `ctx.effect` 里装配：`registerHostTools(ctx, { service, logger })`（`tools.js`）→ `ctx.tools.register(listTool(...))` 注册只读的 `remote_hosts_list`，effect 的清理函数调用 `register` 返回的 disposer，所以卸载后工具真的消失。`inject` 因此是 `['webServer','tools']`（`tools` 是 DSH 必有的内核服务）；注册失败只记一条 warn，不连坐插件（主机条必须还能用）。工具**没有写操作面**：没有 add / update / remove / connect，也就没有 confirm 门、没有 jobs、没有 `exec.agent.session.id`，维护主机仍走管理界面。它只注册在 Host 半端，`package.json` 的 `dsh.client` 与远端都没变。
 
 ## 3. 连接管线
 入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），交给 `connect-pipeline.js#startConnect`，把 `runtime.connectPromise` 设为 `connectPipeline(ctx, runtime)` 后立即返回；进度全走 `state` 事件。顺序：
@@ -224,7 +224,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表；监听器重建与重挂后重启冲突在单测覆盖（含三种 keepAlive 的 disconnect 窗口与 removeHost/shutdown） |
 | 关闭/重连端到端 | `test/integration/stop-remote.test.js` | 真实 SSH + 真实隧道：关闭停掉绑定的 pid、远端不再应答、`run/web.json` 清空，重连起新端口/新 token 且不弹冲突 |
 | 按钮真实浏览器 | `test/integration/stop-remote.browser.test.js` | 真实 Chromium：卡片按钮 → 确认框（取消不请求）→ POST → `stopping-remote` 禁用态与进度文案 → 断线卡片可重连 |
-| 模型工具 | `tools` | 注册/注销与输出契约、白名单投影（塞入带 password/token/fingerprint 的假 host 断言不外泄）、`CONFIRMATION_REQUIRED` 不写任何东西、确认后的 add/update/remove 参数、`SECRET_NOT_ACCEPTED`、jobs 与前台两条 connect 路径、`CONNECT_FAILED` / `INTERNAL` 等结构化错误 |
+| 模型工具 | `tools` | 注册/注销与输出契约、白名单投影（塞入带 password/token/fingerprint/`~/.ssh` 路径的假 host 断言不外泄）、`includeDisconnected` 过滤与计数、投影多一个字段即失败（planted regression）、服务异常转结构化错误、内核拒装不影响插件激活 |
 | 代理端到端 | `test/integration/remote-proxy.test.js` | 隔离 `dsh web` 实例 → 同源代理 → 真实首页 / 插件资源 / WebSocket 升级 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` / `browser-carrier.test.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 主题；浏览器载体 → 真实远端页面 + 注入主机条 + 本地意图 + 能力桥（真实点击链接触发顶层新标签、frame 内复制写入真实剪贴板并回执、按 hostId 分区的 localStorage） |
 
@@ -244,4 +244,4 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 - 新增设置项同时更新 `settings.js` 的默认值/清洗、`docs/api.md` 的 SettingsView 与 `docs/design.md` 的界面说明；日志 `#log(runtime, level, …)` 的 `level` 是真实级别，信息性 trace 用 `debug`，不要用 `info` 刷屏。
 - 重启 / 重挂必须复用已建立的 SSH 会话（不重跑 `[ssh]` / `[probe]` / `[bootstrap]`），只能停止 run registry 指向的本连接 pid；任何拿不准归属的进程都交给 `resolveForeignConflict`，不要用命令行模式匹配去 kill。远端端口是随机的，任何「换端口」路径都必须一起换隧道与 token，并把 `run/web.json` 刷新成真实值。
 - 远端 `~/.dsh` 是远端用户自己的数据：本插件的任何代码都不应读写它（版本探测、启动/停止、日志与 run registry 除外），新增功能先确认不越过这条线。
-- 新增模型工具或新增一个 `action`：先改 `tools.js` 的字段白名单与 `output.schema`（`additionalProperties: false`，多一个字段就必须声明），再补 `test/unit/tools.test.js`；变更类动作一律先走 `confirm` 门，不要在 `tools/pre-execute` 上挂 ask（`approval.policy='never'` 的会话会确定性拒绝），也不要把密码 / 私钥内容 / token 放进 `parameters`。
+- 新增模型工具或改它的返回字段：先改 `tools.js` 的字段白名单与 `output.schema`（`additionalProperties: false`，多一个字段就必须声明），再补 `test/unit/tools.test.js`。工具保持**只读**；确实要加写动作时，必须同时补上工具自带的确认门（不要挂在 `tools/pre-execute` 的 ask 上：`approval.policy='never'` 的会话会确定性拒绝），也不要让 `parameters` 出现密码 / 私钥内容 / token。

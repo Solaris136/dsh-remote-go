@@ -84,21 +84,9 @@ export function apply(ctx, config = {}) {
       path: proxy.routePath,
       handler: (/** @type {any} */ req, /** @type {any} */ res) => proxy.handle(req, res),
     })
-    // Model-facing tools live on the Host half only: a local LLM session can list and maintain the
-    // hosts through the same service the HTTP API drives, and the remote DSH never loads this package.
-    const disposeTools = registerHostTools(ctx, {
-      service,
-      store,
-      logger,
-      getJobs: () => {
-        try {
-          return typeof ctx.get === 'function' ? (ctx.get('jobs') ?? null) : null
-        } catch (error) {
-          logger.warn?.('[dsh-remote-go] jobs service lookup failed:', error)
-          return null
-        }
-      },
-    })
+    // The model-facing host list lives on the Host half only: a local LLM session reads the same
+    // snapshot the switcher renders, and the remote DSH never loads this package.
+    const disposeTools = registerHostTools(ctx, { service, logger })
     const syncViewRoutes = () => proxy.sync(service.hostIds())
     service.on('state', syncViewRoutes)
     logger.info(`API mounted at ${API_PREFIX} (state dir ${stateDir})`)

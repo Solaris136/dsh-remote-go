@@ -24,7 +24,7 @@
 | SSH 认证、主机指纹、跳板机 | ✅ | — |
 | 启动 / 收养 / 停止远端 `dsh web`；本地回环隧道 | ✅ | — |
 | 远端文件/文件夹下载（用户从文件树右键选择） | ✅ 经 SSH/SFTP 读取；文件流式、文件夹逐个文件写入用户选择的本地目录；保存位置由用户选择 | 文件树与右键菜单、右下角进度卡 |
-| AI 会话维护主机（§4.9） | ✅ 两个 DSH 工具（只读清单 / 变更），白名单投影 + `confirm` 门 | — |
+| AI 会话查看主机列表与连接状态（§4.9） | ✅ 一个只读工具（白名单投影） | — |
 | 界面呈现 | 提供承载与主机条：桌面端 Chromium guest / 浏览器端同源 iframe + 代理 | 渲染完整 DSH Web UI |
 | 数据（会话、工作区、凭据） | 只读版本/诊断信息 | ✅ 用户自己的 `~/.dsh` |
 
@@ -157,15 +157,14 @@
 - **桌面载体**：guest 有自己的分区，但 `<webview>` 的 `window-open` 处理在 DSH 桌面主进程里（`shell.openExternal` 也只有那边能调），插件客户端半端装不上 `setWindowOpenHandler`。桌面路径因此复用同一条桥：guest 里的链接/`window.open` 经队列回到本地页面，由该页面打开。**边界**：桌面壳若不让渲染进程开新窗口，链接就只是被丢掉（`noopener` 让返回值无法区分「打开了」和「被拦了」，桥不猜）；这一路的需求侧修复是 DSH 桌面桥暴露一个 `openExternal(url)`，属于后续工作，本 PR 没有假装覆盖。
 - **不在本仓库**：前端 bundle 里的 `writeClipboard`（reject 后不回退、失败不提示）与 `openExternalLink`（在 frame 内自开侧栏/`window.open`）无法在插件里改。桥在**调用点**上等效修好了它们：`writeText` 现在总是成功或可见失败，外链总是在顶层打开；但前端自己仍可能选择「侧栏 browser」分支（那是 DSH 的设置），那个嵌套页面不是本插件能改的。
 
-### 4.9 AI 工具（本地 LLM 会话维护主机）
+### 4.9 AI 工具（本地 LLM 会话查看主机）
 
-本地会话里的模型不需要用户先点主机条：Host 半端向 DSH 的 `tools` 服务注册两个工具，模型可以直接读主机清单并维护它。工具只注册在**本地 Host**（浏览器半端是 UI bundle，远端 DSH 也不加载本插件），所以远端会话看不到它们，也不新增 HTTP 路由。
+本地会话里的模型不需要用户先点主机条就能知道「有哪些主机、哪台连着、那台为什么失败」：Host 半端向 DSH 的 `tools` 服务注册**一个只读工具**。它只注册在**本地 Host**（浏览器半端是 UI bundle，远端 DSH 也不加载本插件），所以远端会话看不到它，也不新增 HTTP 路由。
 
-- `remote_hosts_list`（只读）：每台主机的 `id` / 名字 / 连接状态 / 地址 / 用户 / 端口 / 远端 DSH 版本 / 当前进度码 / 最近一次失败，外加 `includeDisconnected`（默认 true）与 `includeDetails`（默认 false）两个开关。只读，声明 `isConcurrencySafe` 与 8s `timeoutMs`。
-- `remote_hosts_manage`（变更）：`add` / `update` / `remove` / `connect` / `disconnect` / `reconnect`，全部调用现有的 `service.saveHost` / `removeHost` / `connect` / `disconnect` / `reconnect`，不复制业务逻辑；`host` 只接受主机元数据（名字、地址、端口、用户、认证方式、私钥**路径**、跳板机、存活策略），不接受密码、私钥内容或 token。`restart_host` / `stop_host` 留待主机生命周期 API 合入后补，枚举先固定为这六个动作。
-- **`confirm` 门**：所有变更默认 `confirm:false`（`dryRun` 等价），此时不写任何东西，只返回 `planned`（动作、目标主机、将写入的字段、一句可直接读给用户的话）与 `CONFIRMATION_REQUIRED`；模型必须先把 `planned.summary` 告诉用户，得到明确同意后再带 `confirm:true` 调用一次。**这道门不能交给 DSH 的审批**：唯一的原生人工确认是 `tools/pre-execute` 返回 `{kind:'ask'}`，而 `approval.policy='never'` 的会话会确定性拒绝它，请求永远到不了用户手里。
-- **长任务**：`connect` / `reconnect` 在 `jobs` 服务可用时起后台作业并立即返回 `jobId`，进度与取消交给 DSH 自带的 `job_output` / `job_list` / `job_kill`（不再自己写轮询工具）；`jobs` 缺失时前台等待（120s `timeoutMs`），被 `exec.signal` 中止就返回 `CANCELLED`——服务本身没有 AbortSignal 入参，前台只负责停止等待，不额外中断。
-- **不做的事**：不返回配置原文（字段白名单投影 + `redactText` + 按字段限长）；不接受密码 / 私钥内容 / token；不碰远端 `~/.dsh`；不改已有 API 语义。
+- `remote_hosts_list`（只读）：参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected }`，每行 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。声明 `isConcurrencySafe`（只读可并发）与 8s `timeoutMs`。
+- **没有写操作面**：增删改、连接 / 断开 / 重连、重启或关闭远端 DSH 一律留在主机条的「添加主机 / 管理界面」里。因此工具既不需要审批门，也不需要 `confirm` / `dryRun` 参数——它不改变任何状态。
+- **白名单投影**：字段按名字挑（不 spread 配置或 HostView），再过 `redactText` 并按字段限长；密码、token、cookie、指纹原文与私钥路径都不进结果，`output.schema` 是 `additionalProperties: false`，投影里多一个未声明字段会让调用失败而不是漏出去。返回值里的远端主机名、版本与错误文本是不可信数据。
+- **不做的事**：不碰远端 `~/.dsh`；不改已有 API 语义；不提供任何写动作（将来若要加，必须同时补上「不依赖 DSH 审批」的确认门——`approval.policy='never'` 的会话会确定性拒绝 `tools/pre-execute` 的 ask）。
 
 ## 5. 连接生命周期
 ### 5.1 状态、阶段与进度
@@ -353,11 +352,11 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
   聚焦时静默覆写剪贴板。两者都建立在「frame 里的页面 = 用户自己连的那台远端 DSH」这一信任前提上：它本来就能渲染整窗、
   也能通过同一通道切换/断开主机，桥只是把它需要的浏览器能力搬到有权限的文档里执行，不宣称把它关进沙箱。
   `localStorage` 分区是数据卫生（防止偏好互相覆盖），不是同源隔离的安全边界。
-- **模型工具的返回值同样是「对外输出」**：`remote_hosts_list` / `remote_hosts_manage` 只做字段白名单投影
-  （再过 `redactText`、按字段限长），密码、token、cookie、指纹原文与私钥路径都不进结果；`parameters` 里没有
-  密码 / 私钥 / token 字段，收到即回 `SECRET_NOT_ACCEPTED`。变更默认不执行（`confirm:false` 只回计划），
-  因为 DSH 的审批在 `policy='never'` 时会确定性拒绝，不能把「问用户」寄托在审批上；`planned` 里也不回显
-  私钥路径本身。返回值里的远端主机名、版本与错误文本属于不可信数据。
+- **模型工具的返回值同样是「对外输出」**：`remote_hosts_list` 只做字段白名单投影（再过 `redactText`、按字段
+  限长），密码、token、cookie、指纹原文与私钥路径都不进结果；`output.schema` 的 `additionalProperties: false`
+  让多出来的字段变成失败而不是泄漏。工具**没有写操作面**（维护仍在管理界面），所以不需要审批门；若将来加写动作，
+  必须自带确认门——DSH 的审批在 `policy='never'` 时会确定性拒绝，不能把「问用户」寄托在审批上。返回值里的远端
+  主机名、版本与错误文本属于不可信数据。
 
 ## 8. 失败与恢复
 | 场景 | 表现 |
@@ -379,8 +378,8 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
 4. 断线后按设置自动重连；手动断开 / 关闭本地不误杀远端任务（按策略）；诊断导出包含 10 项检查且已脱敏；中英文界面均可完整操作。
 5. 浏览器端在远端界面里：代码块/工具输出的「复制」真的写入剪贴板（失败有提示），点消息里的 `https://` 链接在顶层标签页打开
    （页面不会被导航走、也不出现空白嵌套页），远端与本地改偏好互不影响；麦克风与登录弹窗所需的 `allow` 已声明。
-6. 本地会话里问「我有哪些主机」能直接答出清单；让它删一台时先返回计划与 `CONFIRMATION_REQUIRED`，用户同意后
-   带 `confirm:true` 才真的删除；返回值里没有任何凭证或 `~/.ssh` 路径；远端 DSH 的会话看不到这两个工具。
+6. 本地会话里问「我有哪些主机 / 哪台连着」能直接答出清单与状态；返回值里没有任何凭证、指纹或 `~/.ssh` 路径；
+   增删改与连接仍然只能在主机条的管理界面里做，远端 DSH 的会话看不到这个工具。
 
 ## 10. 关键决策
 - **桌面端整窗 guest，浏览器端同源 frame + 受控代理**：桌面 guest 行为最接近真实浏览器且不需要代理字节；

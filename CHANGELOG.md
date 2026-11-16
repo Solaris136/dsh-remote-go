@@ -50,20 +50,14 @@
   会短暂断开现有 WebSocket/下载，属预期），而不是误判进程重启。重挂发现的监听进程没有 kill 权，点「重启远端
   DSH」会先弹 stop/alongside/cancel 提示，用户选择前不会静默启动第二个实例。重挂期间显示 `restarting-remote`
   进度码而不是「连接断开」；诊断报告新增最近 10 次重启 / 重挂记录。
-- **本地 LLM 会话能直接看到并维护远端主机**：Host 半端向 DSH 的 `tools` 服务注册两个工具，本地会话不必再让
-  用户先去点主机条。`remote_hosts_list` 只读列出每台主机的 `id`、名字、连接状态、地址、用户 / 端口、远端 DSH
-  版本、当前进度码与最近一次失败；`remote_hosts_manage` 用 `action: add / update / remove / connect /
-  disconnect / reconnect` 增删改与连接，调用现有 `saveHost` / `removeHost` / `connect` / `disconnect` /
-  `reconnect`，没有复制业务逻辑。返回值是**字段白名单投影**（再用 `redactText` 脱敏、按字段限长）：不含密码、
-  token、cookie、指纹原文或 `~/.ssh` 路径；`parameters` 也不接受密码 / 私钥内容 / token，收到即返回
-  `SECRET_NOT_ACCEPTED` 并让用户去「添加主机 / 管理界面」输入密码。所有变更**默认 `confirm:false`**，只返回
-  `planned`（动作、目标、将写入的字段、一句可读给用户的话）与 `CONFIRMATION_REQUIRED`，模型必须先把这一步告诉
-  用户、得到明确同意后再带 `confirm:true` 重调（`dryRun` 等价于不确认）。这道门必须放在工具里：DSH 唯一的人工
-  确认通道是 `tools/pre-execute` 的 `{kind:'ask'}`，而 `approval.policy='never'` 的会话会**确定性地拒绝**它。
-  `connect` / `reconnect` 在 `jobs` 服务可用时起后台任务并立即返回 `jobId`（用 DSH 自带的 `job_output` /
-  `job_kill` 查看与取消），`jobs` 缺失时前台等待，被 `exec.signal` 中止或超时则返回 `CANCELLED`。工具只注册在
-  本地 Host 半端，远端 DSH 不加载本插件，所以远端会话看不到它们；`restart_host` / `stop_host` 不在这次范围内，
-  等主机生命周期 API 合入后补。
+- **本地 LLM 会话能看到主机列表与连接状态**：Host 半端向 DSH 的 `tools` 服务注册一个**只读**工具
+  `remote_hosts_list`，本地会话不必再让用户先去点主机条就能回答「我有几台主机 / 哪台连着 / 那台为什么失败」。
+  参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected }`，每行是
+  `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。返回值是**字段白名单投影**
+  （再用 `redactText` 脱敏、按字段限长）：不含密码、token、cookie、指纹原文或 `~/.ssh` 路径，`output.schema` 也
+  声明为 `additionalProperties: false`，投影里多一个字段会让调用失败而不是漏出去。**维护主机仍然在主机条的
+  「添加主机 / 管理界面」里**——工具没有写操作面（没有 add / update / remove / connect / disconnect），因此也不需要
+  审批或确认门；它只注册在本地 Host 半端，远端 DSH 不加载本插件，远端会话看不到它。
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
   本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
   HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端
