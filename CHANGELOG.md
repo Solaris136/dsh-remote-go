@@ -9,6 +9,20 @@
 
 ## [Unreleased]
 
+### 安全
+
+- **本地 HTTP API 与同源代理补上 DSH 的 Host/Origin 准入**（#65）。每条请求在进入路由前先过本机 DSH 自己的
+  `ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话认证，与 DSH 自带路由同一套检查；服务不存在
+  的旧内核退回本插件原本的标识头 / 同源栅栏，升级后仍可用。此前 API 只看 `Origin` 与 `sec-fetch-site`，
+  不看 `Host`——DNS rebinding 下攻击页与被 rebind 的主机名同源，请求没有 `Origin`、`Sec-Fetch-Site` 是
+  `same-origin`、`Host` 是攻击者域名，`GET /dsh-remote-go/api/events` 这条只走 Origin 栅栏的 SSE 状态流
+  （主机清单、状态、诊断字段）可被读走。现在：
+  - API 与代理共用 `request-trust.js` 的同一份 Host/Origin 栅栏；`Host` 必须是本机 origin，`/events` 同样受检。
+  - 没有浏览器会话的调用方（包括只带 `x-dsh-remote-go` 标识头的直连）在 `/events` 与普通 JSON 路由上一律
+    401/403，拒绝发生在 SSE 开流之前与代理建立上游连接之前。
+  - `GET /health` 仍无需浏览器会话（存活探针，不返回状态数据），但同样过 Host/Origin 栅栏；API 契约见
+    [docs/api.md](docs/api.md)。
+
 ### 新增
 
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。

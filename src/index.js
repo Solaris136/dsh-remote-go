@@ -40,9 +40,32 @@ export function apply(ctx, config = {}) {
       return null
     }
   }
+  // DSH's own admission for every route this plugin serves: the kernel's Host/Origin fence plus
+  // browser-session authentication (`ctx.connection.requestRejection`). `connection` is optional —
+  // Cordis throws when a plugin reads a service its fiber did not inject, so it is read through
+  // `ctx.get`, exactly like the credential store. On a kernel without the Connection service the
+  // plugin keeps its own marker-header / same-origin fence instead of going dark, and a service
+  // that throws rejects the request rather than admitting it.
+  const admit = (/** @type {any} */ req) => {
+    let connection = null
+    try {
+      connection = typeof ctx.get === 'function' ? ctx.get('connection') : null
+    } catch (error) {
+      logger.warn('DSH connection lookup failed; the local fence stays the only gate:', error)
+      return undefined
+    }
+    if (!connection || typeof connection.requestRejection !== 'function') return undefined
+    try {
+      return connection.requestRejection(req)
+    } catch (error) {
+      logger.warn('DSH connection admission failed; rejecting the request:', error)
+      return 500
+    }
+  }
   const api = createApi({
     service,
     getOrigin,
+    admit,
     logger,
     diagnostics: () =>
       describeSelf(ctx, {
@@ -57,6 +80,7 @@ export function apply(ctx, config = {}) {
   const proxy = createRemoteProxy({
     webServer: ctx.webServer,
     getOrigin,
+    admit,
     resolveHost: (id) => service.webViewTarget(id),
     logger,
   })

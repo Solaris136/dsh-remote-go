@@ -9,9 +9,9 @@ import {
   parseViewPath,
   responseHeaders,
   storeCookies,
-  trustedRequest,
   upgradePath,
 } from '../../src/remote-proxy.js'
+import { trustedRequest } from '../../src/request-trust.js'
 
 const LOCAL_ORIGIN = 'http://127.0.0.1:57442'
 const LOCAL_AUTHORITY = '127.0.0.1:57442'
@@ -79,11 +79,12 @@ function fakeWebServer() {
   }
 }
 
-async function startProxy(resolveHost, webServer = fakeWebServer()) {
+async function startProxy(resolveHost, webServer = fakeWebServer(), options = {}) {
   const proxy = createRemoteProxy({
     webServer,
     getOrigin: () => LOCAL_ORIGIN,
     resolveHost,
+    admit: options.admit,
     logger: { debug() {}, warn() {}, error() {} },
   })
   webServer.register({ kind: 'prefix', path: proxy.routePath, handler: (req, res) => proxy.handle(req, res) })
@@ -259,6 +260,57 @@ test('the proxy refuses cross-site requests, unknown hosts and disconnected host
     const connected = await request(local.port, '/dsh-remote-go/remote/h_a/')
     assert.equal(connected.status, 200)
     assert.equal(connected.body, 'should not be reached')
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
+    await close(upstream)
+  }
+})
+
+test('the proxy refuses callers DSH does not admit, over HTTP and the stream upgrade', async () => {
+  const reached = []
+  const upstream = http.createServer((_req, res) => {
+    reached.push('http')
+    res.writeHead(200)
+    res.end('upstream')
+  })
+  upstream.on('upgrade', (_req, socket) => {
+    reached.push('upgrade')
+    socket.destroy()
+  })
+  const upstreamPort = await listen(upstream)
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), undefined, {
+    admit: (req) => (req.headers['x-test-session'] === 'ok' ? undefined : 401),
+  })
+  try {
+    local.proxy.sync(['h_a'])
+    const denied = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(denied.status, 401)
+    assert.doesNotMatch(denied.body, /upstream/)
+
+    const deniedUpgrade = await new Promise((resolve, reject) => {
+      const socket = net.connect(local.port, '127.0.0.1', () => {
+        socket.write(
+          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
+            `Host: ${LOCAL_AUTHORITY}\r\n` +
+            'Connection: Upgrade\r\nUpgrade: websocket\r\n' +
+            'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+        )
+      })
+      const chunks = []
+      socket.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      socket.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')))
+      socket.on('error', reject)
+    })
+    assert.match(deniedUpgrade, /HTTP\/1\.1 401/)
+    assert.deepEqual(reached, [], 'a rejected request must never open an upstream connection')
+
+    const allowed = await request(local.port, '/dsh-remote-go/remote/h_a/', {
+      headers: { 'x-test-session': 'ok' },
+    })
+    assert.equal(allowed.status, 200)
+    assert.equal(allowed.body, 'upstream')
+    assert.deepEqual(reached, ['http'])
   } finally {
     local.proxy.dispose()
     await close(local.server)

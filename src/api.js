@@ -1,8 +1,10 @@
 /**
- * Local HTTP API for the browser half (contract: docs/api.md); every request needs the marker header and, with an Origin, same-origin.
+ * Local HTTP API for the browser half (contract: docs/api.md); every request passes DSH's own
+ * admission when the kernel provides it, then the marker header and, with an Origin, same-origin.
  */
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
+import { sameServerHost } from './request-trust.js'
 import { nowIso } from './util.js'
 
 const MAX_BODY_BYTES = 1 * 1024 * 1024
@@ -15,6 +17,7 @@ export function createApi(options) {
   const { service } = options
   const logger = options.logger ?? console
   const sseClients = new Set()
+  const kernelAdmit = typeof options.admit === 'function' ? options.admit : null
 
   /** Write one SSE frame to every subscriber, dropping the ones that already went away. */
   function writeAll(frame) {
@@ -43,18 +46,63 @@ export function createApi(options) {
     ),
   })
 
+  /** The listener origin as a URL, or null while the kernel cannot name it yet. */
+  function parseOrigin(value) {
+    if (typeof value !== 'string' || value === '') return null
+    try {
+      return new URL(value)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The kernel's own admission (`ctx.connection.requestRejection`): its Host/Origin fence plus
+   * browser authentication against a live Peer — the gate every DSH route passes. Absent on a
+   * kernel without the Connection service, where the marker-header fence below stays the fallback.
+   * @param {{ headers: object }} req
+   * @returns {number | undefined} rejection status, or undefined when the route may proceed.
+   */
+  function admission(req) {
+    if (kernelAdmit === null) return undefined
+    const rejection = kernelAdmit(req)
+    return typeof rejection === 'number' ? rejection : undefined
+  }
+
+  /** Response body for an admission rejection: the kernel decided, and this route never ran. */
+  function admissionView(status) {
+    const detail =
+      status === 401
+        ? {
+            zh: '这次请求没有通过 DSH 的浏览器会话认证（会话失效或未登录）。',
+            en: 'The request did not pass DSH browser-session authentication (no session, or it expired).',
+          }
+        : {
+            zh: '请求没有通过 DSH 的 Host / Origin 准入检查。',
+            en: 'The request did not pass DSH Host / Origin admission.',
+          }
+    return { ok: false, error: toErrorView(errors.invalidInput('request', detail)) }
+  }
+
   /**
    * Browser trust for same-origin reads (used by SSE, which cannot set custom
    * headers): an absent Origin is a non-browser local caller; a present Origin
-   * must be this GUI's origin and the request must not be cross-site.
+   * must be this GUI's origin and the request must not be cross-site. The Host
+   * fence is checked for both kinds of caller, because a DNS-rebinding page
+   * reaches the socket under its own hostname: it sends no Origin, its
+   * Fetch-Metadata says same-origin, and `Host` is the one header it cannot forge.
    */
   function authorizeOrigin(req) {
+    const expected = options.getOrigin()
     const origin = req.headers.origin
     if (typeof origin === 'string' && origin !== '') {
-      const expected = options.getOrigin()
       if (!expected || origin.replace(/\/$/, '') !== expected.replace(/\/$/, '')) return crossSite()
     }
     if (req.headers['sec-fetch-site'] === 'cross-site') return crossSite()
+    // An origin the kernel cannot name yet is no reason to reject local traffic; the kernel's own
+    // admission (when present) has already judged Host, and this fence is the fallback.
+    const local = parseOrigin(expected)
+    if (local !== null && !sameServerHost(req.headers.host, local)) return crossSite()
     return { ok: true }
   }
 
@@ -234,14 +282,31 @@ export function createApi(options) {
       const path = url.pathname.slice(API_PREFIX.length) || '/'
       const method = (req.method ?? 'GET').toUpperCase()
 
-      if (path === '/health' && method === 'GET') {
+      // `/health` stays the documented unauthenticated liveness probe (it carries no state), and
+      // still passes the Host/Origin fence below. Everything else passes DSH's own admission
+      // first, so a rebound page or an unauthenticated local caller cannot read state or change it.
+      const probe = path === '/health' && method === 'GET'
+      if (!probe) {
+        const rejection = admission(req)
+        if (rejection !== undefined) {
+          sendJson(res, rejection, admissionView(rejection))
+          return
+        }
+      }
+
+      if (probe) {
+        const trust = authorizeOrigin(req)
+        if (!trust.ok) {
+          sendJson(res, trust.status, { ok: false, error: trust.error })
+          return
+        }
         sendJson(res, 200, ROUTES['GET /health']())
         return
       }
 
-      // SSE cannot carry the custom header; trusting only the same-origin fence
-      // is enough for a read-only state stream (browsers block cross-origin
-      // EventSource without CORS headers, which this route never sends).
+      // SSE cannot carry the custom header. It already passed DSH's admission above; the fence
+      // here covers kernels without the Connection service, and browsers block a cross-origin
+      // EventSource anyway because this route never sends CORS headers.
       if (path === '/events' && method === 'GET') {
         const originOnly = authorizeOrigin(req)
         if (!originOnly.ok) {
