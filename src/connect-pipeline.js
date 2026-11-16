@@ -1260,7 +1260,17 @@ export async function stopRemoteHost(ctx, runtime) {
     const view = toErrorView(error)
     const phase = typeof runtime.phase === 'string' ? runtime.phase : previous.phase
     if (isLinkWorkCurrent(runtime, token)) {
-      restoreStopState(ctx, runtime, previous)
+      if (!restoreStopState(ctx, runtime, previous) && runtime.status === 'connecting') {
+        // The transport went away (or the link was replaced) while the stop was failing:
+        // never publish a fake "connected" state, publish the coded failure instead.
+        runtime.error = view
+        runtime.status = 'error'
+        runtime.phase = null
+        runtime.progress = null
+        runtime.remote.uiReady = false
+        runtime.remote.localPort = null
+        ctx.emitState()
+      }
       // The failure explains itself in the log too (phase, code, reason, hints, details).
       ctx.progress.logFailure(runtime, view, { phase, label: STOP_FAILED_LABEL })
     }
@@ -1286,9 +1296,11 @@ function restoreStopState(ctx, runtime, previous) {
     runtime.remote.uiReady = previous.uiReady === true
     runtime.remote.localPort = previous.localPort ?? null
     ctx.emitState()
-    return
+    return true
   }
-  resumeConnected(ctx, runtime)
+  // `resumeConnected` refuses to stage a connected state on a link that went away (or was
+  // replaced) while the stop was failing; the caller reports the coded failure instead.
+  return resumeConnected(ctx, runtime)
 }
 
 async function runStopRemote(ctx, runtime, token) {
