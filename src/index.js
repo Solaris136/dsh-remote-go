@@ -1,11 +1,13 @@
 /**
- * dsh-remote-go — Host half: registers the local HTTP API the browser panel uses and owns the SSH / bootstrap / tunnel lifecycle; it never proxies UI bytes.
+ * dsh-remote-go — Host half: registers the local HTTP API and the browser half's same-origin remote proxy,
+ * and owns the SSH / bootstrap / tunnel lifecycle; it never copies remote data.
  */
-import { API_PREFIX, PLUGIN_ID } from './constants.js'
+import { API_PREFIX, PLUGIN_ID, REMOTE_VIEW_PREFIX } from './constants.js'
 import { statSync } from 'node:fs'
 import path from 'node:path'
 import { createApi } from './api.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
+import { createRemoteProxy } from './remote-proxy.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
@@ -50,6 +52,14 @@ export function apply(ctx, config = {}) {
         engineNodeRange: service.engineNodeRange,
       }),
   })
+  // The browser half's remote window lives on the local origin (the desktop half uses a guest
+  // instead), so the same-origin proxy is the only thing that needs to know how to reach a tunnel.
+  const proxy = createRemoteProxy({
+    webServer: ctx.webServer,
+    getOrigin,
+    resolveHost: (id) => service.webViewTarget(id),
+    logger,
+  })
 
   ctx.effect(() => {
     const disposeRoute = ctx.webServer.register({
@@ -59,11 +69,20 @@ export function apply(ctx, config = {}) {
         void api.handler(req, res)
       },
     })
+    const disposeView = ctx.webServer.register({
+      kind: 'prefix',
+      path: proxy.routePath,
+      handler: (/** @type {any} */ req, /** @type {any} */ res) => proxy.handle(req, res),
+    })
+    const syncViewRoutes = () => proxy.sync(service.hostIds())
+    service.on('state', syncViewRoutes)
     logger.info(`API mounted at ${API_PREFIX} (state dir ${stateDir})`)
+    logger.info(`remote view mounted at ${REMOTE_VIEW_PREFIX}<host> (browser carrier)`)
 
     void (async () => {
       try {
         await service.init()
+        syncViewRoutes()
         const detected = await detectLocalVersion({ ctx })
         if (detected.version) service.setLocalVersion(detected.version, detected.source)
         // The managed Node version is the lower bound of DSH's own `engines.node`;
@@ -80,9 +99,12 @@ export function apply(ctx, config = {}) {
     })()
 
     return () => {
+      service.removeListener('state', syncViewRoutes)
+      proxy.dispose()
       api.dispose()
       void service.shutdown()
       disposeRoute()
+      disposeView()
       logger.info('unloaded')
     }
   }, 'dsh-remote-go: http api + service')

@@ -3,7 +3,7 @@
  */
 import { EventEmitter } from 'node:events'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
-import { REMOTE_CONFLICT_TIMEOUT_MS } from './constants.js'
+import { REMOTE_CONFLICT_TIMEOUT_MS, REMOTE_VIEW_PREFIX } from './constants.js'
 import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
 import { createDownloadJobs } from './download-jobs.js'
 import { reconnectHost, startConnect } from './connect-pipeline.js'
@@ -205,11 +205,31 @@ export class RemoteGoService extends EventEmitter {
         en: 'The host is not connected yet, so the remote UI cannot be opened.',
       })
     }
+    const token = encodeURIComponent(runtime.token)
     return {
-      url: `http://127.0.0.1:${runtime.tunnel.localPort}/?token=${encodeURIComponent(runtime.token)}`,
+      url: `http://127.0.0.1:${runtime.tunnel.localPort}/?token=${token}`,
+      // The browser half's carrier: same-origin seat of the same UI, proxied to this tunnel.
+      webUrl: `${REMOTE_VIEW_PREFIX}${encodeURIComponent(id)}/?token=${token}`,
       localPort: runtime.tunnel.localPort,
       address: `127.0.0.1:${runtime.tunnel.localPort}`,
     }
+  }
+
+  /** Configured host ids (the proxy keeps one stream upgrade route per id). */
+  hostIds() {
+    return [...this.ctx.state.runtimes.keys()]
+  }
+
+  /**
+   * Loopback target of one host's remote web UI, for the same-origin proxy.
+   * Reads the live runtime, so a reconnect hands the proxy the new tunnel on the next request.
+   * @param {string} id - host id.
+   * @returns {{ localPort: number, remotePort: number | null } | null}
+   */
+  webViewTarget(id) {
+    const runtime = this.ctx.state.runtimes.get(id)
+    if (!runtime || runtime.status !== 'connected' || !runtime.tunnel) return null
+    return { localPort: runtime.tunnel.localPort, remotePort: runtime.remote.port }
   }
 
   async diagnose(id) {

@@ -414,9 +414,9 @@ async function connectPipeline(ctx, runtime) {
         en: `The tunnel exchanged the token but the remote UI answered HTTP ${exchange.status} (first ${exchange.firstStatus}).`,
       })
     }
-    // X-Frame-Options / CSP no longer matter: the remote UI is rendered by the
-    // desktop guest, not embedded in a frame, so a page that refuses framing is
-    // still a perfectly usable remote host.
+    // The remote UI is reachable both ways: the desktop half hands the loopback origin to a
+    // Chromium guest, and the browser half frames it through the same-origin proxy (which strips
+    // any X-Frame-Options). Either way this exchange proves the launch token works.
     runtime.remote.uiReady = true
     await ctx.store.patchHost(runtime.id, { lastOpenedAt: nowIso() })
     runtime.entry = ctx.store.getHost(runtime.id) ?? runtime.entry

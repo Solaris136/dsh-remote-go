@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.6）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.7）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -25,6 +25,10 @@
 > **v2.5 变更**：新增下载任务 `POST /downloads`、`GET /downloads/:id/status`、
 > `DELETE /downloads/:id`；SSE 增加 `download` 事件。`GET /hosts/:id/file` 与
 > `GET /downloads/:id` 只存在于 v2.5，已在 v2.6 移除。
+>
+> **v2.7 变更**：`GET /hosts/:id/open` 增加同源 `webUrl`，供浏览器半端在
+> `/dsh-remote-go/remote/<hostId>/` 承载远端界面；新增该前缀下的同源反向代理（含
+> WebSocket 升级）。桌面 half 继续使用 `url` 的回环地址，接口向后兼容。
 
 ## 0. 通用类型
 
@@ -215,7 +219,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.6", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.7", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
@@ -284,9 +288,34 @@ data: {}
 ### `GET /hosts/:id/open`
 仅 `status === 'connected'` 时可用：
 ```json
-{ "ok": true, "url": "http://127.0.0.1:54321/?token=...", "localPort": 54321, "address": "127.0.0.1:54321" }
+{ "ok": true,
+  "url": "http://127.0.0.1:54321/?token=...",
+  "webUrl": "/dsh-remote-go/remote/h_xxx/?token=...",
+  "localPort": 54321,
+  "address": "127.0.0.1:54321" }
 ```
-URL 直接交给桌面端 guest；`?token=` 只用一次完成 cookie 种入，之后由远端重定向到干净地址。
+- `url` 是远端界面的回环地址，交给桌面端的 Chromium guest；`token` 只用一次完成 cookie 种入，之后由远端重定向到干净地址。
+- `webUrl` 是同一界面的**同源**地址，交给浏览器半端的 iframe：`/dsh-remote-go/remote/<hostId>/` 由本机 DSH 的
+  反向代理转发到该主机的回环隧道（见下文「远端界面同源代理」）。`token` 同样只在首次导航里出现一次；代理随后把远端的
+  session cookie 收进 Host 侧，不交给浏览器。
+- 两个地址都绑定这一次连接；断开或重连后旧 URL 失效。
+
+### 远端界面同源代理（`/dsh-remote-go/remote/<hostId>/`）
+浏览器半端没有 guest 能力，故远端界面以同源 iframe 承载。该前缀**不是** JSON API，也不属于 `API_PREFIX`：
+- 前缀路由把 `/<hostId>/<rest>` 去掉前缀后转发到**该主机当前隧道**的 `/<rest>`（含 query）；
+  `<hostId>` 必须是已知且 `connected` 的主机，否则 404；未连接 / 未知 id 不产生上游连接。
+- 浏览器不给代理带任何插件请求头（iframe 导航、子资源与 WebSocket 都不可加）；代理改用与本地 API 相同的
+  浏览器信任栅栏：`Host` 必须是本机 origin（回环写法等价）、`Origin`（若有）必须同源、`sec-fetch-site`
+  不能是 `cross-site`，否则 403。
+- 远端 `Set-Cookie` 由 Host 侧的 per-host cookie jar 保存，并从响应里移除；后续请求与 WebSocket 升级由 jar
+  注入。因此本地 DSH 的 cookie 与远端 DSH 的 cookie 虽然同在 `127.0.0.1` 上，也永不混用。
+- 转发时 `Host` / `Origin` 改写为该远端自己的回环 authority（`127.0.0.1:<远端 web 端口>`），远端的
+  authority 绑定 cookie 与同源校验继续成立；`Location` 指回远端自身 listener 时折回 `/dsh-remote-go/remote/<hostId>/`。
+  响应去掉 `X-Frame-Options`，并从 CSP 中只移除 `frame-ancestors` 指令（其余指令原样保留），因为这条代理的存在意义
+  就是把这一页嵌进同源 frame。
+- 远端 DSH 唯一的 WebSocket 路由 `/api/remote.mux` 以**每主机一条精确升级路由**的形式注册
+  （`/dsh-remote-go/remote/<hostId>/api/remote.mux`），Host 卸载或主机被删除时注销。
+- 上游不可达时返回 502 文本；代理只读、不写远端文件，也不缓存响应。
 
 ### `POST /downloads`
 启动一个后台下载任务（文件或文件夹），立即返回初始 `DownloadJobView`（`phase: "preparing"`）。Host 把远端内容**流式写入用户选择的本机目录**，不在内存里缓存文件字节；进度通过 SSE `download` 事件推送，也可用 `/status` 兜底轮询。
@@ -351,8 +380,11 @@ content-type: application/json
 ## 3. 安全约束（客户端必须遵守）
 
 1. 密码只在 `connect` 请求体里出现，不写入客户端存储，不放到 URL。
-2. `token` / 带 token 的 URL 只在内存中传递；`GET /open` 的 URL 只交给桌面端 guest。
+2. `token` / 带 token 的 URL 只在内存中传递；`GET /open` 的 `url` 只交给桌面端 guest，`webUrl` 只交给同源 iframe。
+   两者都只用于首次导航，客户端不得持久化、不得拼进其它请求。
 3. `saveTokens` 默认 false；为 true 时由 Host 在 `$DSH_HOME` 下以 0600 保存，客户端不接触。
 4. 所有 `fetch` 使用 `credentials: 'same-origin'` 并带 `x-dsh-remote-go: 1`。
-5. guest 只允许 `http://127.0.0.1:<port>`；客户端必须再次校验前缀后才交给桌面端。
-6. 跨站请求（Origin 不同或 `sec-fetch-site: cross-site`）必须被拒绝。
+5. guest 只允许 `http://127.0.0.1:<port>`；浏览器 iframe 只允许 `/dsh-remote-go/remote/<hostId>/` 形状的
+   同源路径（拒绝绝对 URL、`//`、转义与路径穿越），两端都在交给承载器前再校验一次。
+6. 跨站请求（Origin 不同或 `sec-fetch-site: cross-site`）必须被拒绝；同源代理使用同一栅栏。
+7. 代理只服务 `connected` 主机：断开后同一 URL 立即不再有上游；远端的 cookie 只存在 Host 内存里。
