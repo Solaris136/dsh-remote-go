@@ -66,10 +66,13 @@ interface FingerprintView {
 }
 
 interface ConnectLogEntry {
-  seq: number                 // 每台主机内单调递增，用于稳定渲染与去重
+  seq: number                 // 本次连接内从 1 单调递增（每次连接重置），用于稳定渲染与去重
   at: string                  // ISO 时间戳
   level: 'debug' | 'info' | 'warn' | 'error'
-  message: string             // 原始一行（SSH / npx / 远端 stdout / 连接步骤）
+  phase: ConnectPhase | null  // 写下这一行时所在的连接阶段；边界行与首个阶段前的输出为 null
+  message: string             // 原始一行（英文兜底：SSH / npx / 远端 stdout / 连接步骤 / 失败行）
+  text?: I18nText             // 双语行（连接边界行、失败原因与建议），Client 按 locale 渲染，缺省回退 message
+  boundary?: true             // 本次连接的第一行：第 N 次连接 + 时刻
 }
 
 interface RemoteView {
@@ -107,9 +110,11 @@ interface HostView {
     processes: { pid: number; command: string }[]
   } | null
   /**
-   * 连接窗口的日志尾（Client 原样打印）。仅当 status 是 `connecting` / `fingerprint-pending` /
+   * 连接窗口的日志尾（Client 按 locale 渲染）。仅当 status 是 `connecting` / `fingerprint-pending` /
    * `error` 时非空——也就是屏幕上确实有连接窗口的时候；其余状态为 `[]`，避免每帧携带历史日志。
-   * 最多 120 条，旧的先掉；每条是 Host 写下的原始一行（本机内容，不加前缀、不改写、不脱敏）。
+   * **每次连接开始时重置**（手动连接 / 重连 / 自动重连都会），因此这里只有本次连接的行，第一行是带
+   * 次数与时间的边界行；最多 120 条，旧的先掉。失败会被写成多行：阶段与错误码、双语原因、每条建议、
+   * 脱敏并 `headTail` 截断的技术细节（`remote-dsh-start-failed` 为远端日志尾部逐行）。
    */
   logs: ConnectLogEntry[]
   remote: RemoteView

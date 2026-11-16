@@ -1013,6 +1013,76 @@ test('the connect console prints raw lines, staged progress and says so when the
   assert.doesNotMatch(html, /dsh-remote-go:/)
 })
 
+test('the connect log shows the phase of every line and the Host’s bilingual failure block', () => {
+  const logs = [
+    {
+      seq: 1,
+      at: '2026-11-16T02:30:12.000Z',
+      level: 'info',
+      phase: null,
+      boundary: true,
+      message: '— Connection 2 · 2026-11-16 10:30:12 —',
+      text: { zh: '— 第 2 次连接 · 2026-11-16 10:30:12 —', en: '— Connection 2 · 2026-11-16 10:30:12 —' },
+    },
+    { seq: 2, at: '2026-11-16T02:30:13.000Z', level: 'info', phase: 'ssh', message: 'SSH connected to 10.0.0.5' },
+    {
+      seq: 3,
+      at: '2026-11-16T02:30:14.000Z',
+      level: 'error',
+      phase: 'start',
+      message: 'Connect failed in phase start: remote-dsh-start-failed',
+      text: {
+        zh: '连接失败于 start 阶段：remote-dsh-start-failed',
+        en: 'Connect failed in phase start: remote-dsh-start-failed',
+      },
+    },
+    {
+      seq: 4,
+      at: '2026-11-16T02:30:15.000Z',
+      level: 'error',
+      phase: 'start',
+      message: 'Reason: startup failed',
+      text: { zh: '原因：启动失败。', en: 'Reason: startup failed.' },
+    },
+    { seq: 5, at: '2026-11-16T02:30:16.000Z', level: 'error', phase: 'custom', message: 'unknown phase line' },
+  ]
+  const zhHtml = render(
+    React.createElement(plugin.components.ConnectLog, { t, host: hostView({ status: 'error', logs }) }),
+  )
+  assert.match(zhHtml, /data-boundary="true"/, 'the boundary line is marked for styling')
+  assert.match(zhHtml, /第 2 次连接 · 2026-11-16 10:30:12/)
+  assert.match(zhHtml, /data-phase="ssh"/)
+  assert.match(zhHtml, /data-phase="start"/)
+  assert.match(zhHtml, />SSH</, 'the ssh phase has its localized chip')
+  assert.match(zhHtml, />启动远端</, 'the start phase chip is localized')
+  assert.match(zhHtml, />custom</, 'an unknown phase prints as its own id')
+  assert.match(zhHtml, /连接失败于 start 阶段：remote-dsh-start-failed/)
+  assert.match(zhHtml, /原因：启动失败。/)
+  assert.equal((zhHtml.match(/data-level="error"/g) ?? []).length, 3, 'failure lines render at error level')
+  assert.doesNotMatch(zhHtml, /— Connection 2 · 2026-11-16 10:30:12 —/, 'the zh UI shows the zh line')
+  const order = ['第 2 次连接', 'SSH connected', '连接失败于 start 阶段', '原因：启动失败。', 'unknown phase line'].map(
+    (needle) => zhHtml.indexOf(needle),
+  )
+  assert.deepEqual(
+    order,
+    [...order].sort((left, right) => left - right),
+    'the log must keep the order the Host wrote',
+  )
+
+  const enHtml = render(
+    React.createElement(plugin.components.ConnectLog, {
+      t: enT,
+      getLocaleId: () => 'en',
+      host: hostView({ status: 'error', logs }),
+    }),
+  )
+  assert.match(enHtml, /— Connection 2 · 2026-11-16 10:30:12 —/)
+  assert.match(enHtml, />Start</)
+  assert.match(enHtml, /Connect failed in phase start: remote-dsh-start-failed/)
+  assert.match(enHtml, /Reason: startup failed\./)
+  assert.doesNotMatch(enHtml, /第 2 次连接/, 'the en UI resolves the same line in English')
+})
+
 test('the connect window resolves host-provided text in English', () => {
   const host = hostView({
     status: 'error',

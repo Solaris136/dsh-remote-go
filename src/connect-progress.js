@@ -1,7 +1,7 @@
 /**
  * Connect progress: the coalesced `/state` frame that carries log lines, the staged progress line and the npm / managed-Node reporters; it never sets a status.
  */
-import { appendConnectLog, connectLogVisible } from './connect-log.js'
+import { appendConnectLog, connectFailureLines, connectLogVisible } from './connect-log.js'
 import { logVisible, nowIso } from './util.js'
 
 /**
@@ -39,15 +39,34 @@ export function describePreflightEvent(line, version) {
 export function createConnectProgress(options) {
   let flushTimer = null
 
-  function log(runtime, level, ...args) {
-    const message = args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')
-    const entry = appendConnectLog(runtime, { at: nowIso(), level, message })
-    scheduleFlush(runtime)
+  /** Append one line and echo it to the Host logger at the same level. */
+  function write(runtime, input) {
+    const entry = appendConnectLog(runtime, { at: nowIso(), ...input })
     // Verbosity is a runtime decision: `options.logLevel` (tests, diagnostics) or settings.
     const threshold = options.logLevel ?? options.getSettings()?.logLevel ?? 'info'
-    if (!logVisible(level, threshold)) return
-    const method = options.logger[level] ?? options.logger.info
+    if (!logVisible(entry.level, threshold)) return entry
+    const method = options.logger[entry.level] ?? options.logger.info
     method?.(entry.line)
+    return entry
+  }
+
+  function log(runtime, level, ...args) {
+    const message = args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')
+    const entry = write(runtime, { level, message, phase: runtime.phase })
+    scheduleFlush(runtime)
+    return entry
+  }
+
+  /**
+   * Print a failed connection as the lines that explain it (phase, code, localized reason,
+   * hints, redacted details), instead of one line of code plus a raw message.
+   */
+  function logFailure(runtime, view, context = {}) {
+    const phase = typeof context.phase === 'string' && context.phase !== '' ? context.phase : null
+    for (const line of connectFailureLines(view, { phase })) {
+      write(runtime, { level: line.level, message: line.message, text: line.text, phase: line.phase })
+    }
+    scheduleFlush(runtime)
   }
 
   /** Ship the log tail to the Client's console without one `/state` frame per line. */
@@ -131,5 +150,5 @@ export function createConnectProgress(options) {
     }
   }
 
-  return { log, set, phase, nodeProgress, bootstrapReporter, dispose }
+  return { log, logFailure, set, phase, nodeProgress, bootstrapReporter, dispose }
 }

@@ -49,5 +49,7 @@ export function createHostRuntime(host) {
     closing: false,
     logs: [],
     logSeq: 0,
+    // Which connection this runtime is on; the connect log starts at 1 and resets its ring.
+    connectCount: 0,
   }
 }

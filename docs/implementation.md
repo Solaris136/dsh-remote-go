@@ -21,7 +21,7 @@ dsh-remote-go
 │  ├─ prompts.js            指纹确认与远端冲突的用户决定 rendezvous
 │  ├─ host-runtime.js       每主机 runtime 对象的唯一形状（建/用分开）
 │  ├─ host-view.js          每主机对客户端的只读视图（HostView 投影）
-│  ├─ connect-log.js        连接日志：环形缓冲下限、对外日志尾与可见状态
+│  ├─ connect-log.js        连接日志：每次连接的重置与边界行、失败分解、环形缓冲下限、日志尾与可见状态
 │  ├─ diagnostics.js        10 项诊断检查表（只读投影，不新建连接）
 │  ├─ ssh.js                ssh2 封装：指纹策略、认证回退、exec、forwardOut
 │  ├─ ssh-config.js         ~/.ssh/config 解析与别名发现

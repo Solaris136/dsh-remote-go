@@ -2,6 +2,7 @@
  * The connect pipeline: SSH -> probe -> managed Node -> plan -> adopt/conflict -> preflight -> start -> tunnel -> verify; the step order is the behavior and every step is injected.
  */
 import { REMOTE_START_TIMEOUT_MS, SSH_READY_TIMEOUT_MS, TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
+import { beginConnectLog } from './connect-log.js'
 import { errors, toErrorView } from './errors.js'
 import { runtimeOf } from './host-registry.js'
 import {
@@ -44,6 +45,9 @@ export async function startConnect(ctx, id, options = {}) {
   }
   runtime.desired = 'connected'
   cancelReconnect(runtime)
+  // This connection starts its own log: the previous attempt's lines are gone before the
+  // first line of this one, so the panel and a copied log only ever show the live attempt.
+  beginConnectLog(runtime)
   ctx.progress.log(
     runtime,
     'info',
@@ -72,6 +76,8 @@ export async function reconnectHost(ctx, runtime) {
 async function reconnectNow(ctx, runtime) {
   if (ctx.state.disposed || runtime.desired !== 'connected') return
   await disposeSsh(runtime)
+  // A dropped link's retry is a new connection too: start from a clean log.
+  beginConnectLog(runtime)
   runtime.connectPromise = connectPipeline(ctx, runtime).finally(() => {
     runtime.connectPromise = null
   })
@@ -435,6 +441,8 @@ async function connectPipeline(ctx, runtime) {
     log('info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${runtime.tunnel.localPort}`)
   } catch (error) {
     const view = toErrorView(error)
+    // Phase is cleared with the status; capture it first so the log says where it stopped.
+    const failedPhase = runtime.phase
     if (runtime.desired !== 'connected') {
       // A user-initiated disconnect/teardown resolved a pending prompt (or closed
       // the window) while the pipeline was in flight: this is not a failure.
@@ -448,7 +456,9 @@ async function connectPipeline(ctx, runtime) {
       runtime.status = 'error'
       runtime.phase = null
       runtime.progress = null
-      log('warn', `connect failed: ${view.code}`, messageOf(error))
+      // The log has to explain the failure on its own: every line the card shows, plus the
+      // redacted technical detail (and the remote log tail for a failed remote start).
+      ctx.progress.logFailure(runtime, view, { phase: failedPhase })
     }
     runtime.remote.uiReady = false
     runtime.remote.localPort = null
