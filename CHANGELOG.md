@@ -25,6 +25,17 @@
 
 ### 新增
 
+- **远端 DSH 重启**：主机清单里已连接的卡片新增「重启远端 DSH」。Host 用同一条 SSH 会话停掉自己拉起的
+  远端进程（只认 run registry 里的 pid，SIGTERM → 等待 → SIGKILL），重新 `npx` 启动、刷新 `run/web.json`、
+  按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，不会再次索要密码或主机指纹。手工实例仍走
+  既有冲突提示，不会被静默杀掉；结束后仍按原存活策略。
+- **远端自重启（插件市场更新等）自动恢复**：新增 `POST /hosts/:id/restart`、`remote-unreachable` SSE 事件
+  （疑似 / 确认 / 恢复）、`RemoteView.viewRev`（承载方据此重新导航）与 `remoteHeartbeat` 设置（默认 30s 可关）。
+  同源代理与隧道不再把一次 `ECONNREFUSED` 当成进程重启；连续两次探活失败后才重读远端真实状态（新的
+  `dsh web:` 行，或 `/proc` 里的监听端口）、校验 pid/版本/dshHome/profile、刷新 `run/web.json`、关旧隧道并按
+  新端口重建，再静默重载界面。重挂期间显示 `restarting-remote` 进度码而不是「连接断开」；没有可重挂实例时
+  报可解释的 `remote-unreachable` 并保留主机与配置（该状态保留 SSH 会话，因此「重启远端 DSH」无需重新认证）。
+  诊断报告新增最近 10 次重启 / 重挂记录。
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
   本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
   HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端

@@ -48,6 +48,12 @@
 > 只豁免会话、仍过 Host/Origin 栅栏；其余 JSON 路由与 `/dsh-remote-go/remote/<hostId>/` 代理路径
 > （含每主机一条的 `remote.mux` 升级）走同一套准入。内核没有 Connection 服务时退回本插件原来的
 > 标识头 / 同源栅栏，行为与 v2.7 一致。
+>
+> **v2.8 重启与重挂**：新增 `POST /hosts/:id/restart`（本地主动重启受管远端 DSH）；SSE 增加
+> `remote-unreachable` 事件（远端自重启的「疑似 / 确认 / 恢复」）；`RemoteView` 增加 `viewRev`，
+> 承载方据此重新导航；`SettingsView` 增加 `remoteHeartbeat`；诊断报告增加 `restarts`；新增错误码
+> `remote-unreachable` 与 `restart-unavailable`。`POST /hosts/:id/connect` 在一次性动作进行中返回
+> `reason: "already-restarting"`。上述新路由与代理路径同样通过本机 DSH 的准入（v2.8 鉴权注记）。
 
 ## 0. 通用类型
 
@@ -74,6 +80,9 @@ type HostStatus =
   | 'limited'             // 保留：能连但远端无法提供界面
 
 type ConnectPhase = 'ssh' | 'probe' | 'bootstrap' | 'start' | 'tunnel' | 'verifying' | 'ready'
+
+// `connecting` 同时覆盖首次连接、本地重启远端与远端自重启后的重挂：后两者的进度码固定是
+// `restarting-remote`，阶段只走 start → tunnel → verifying，且不重跑 ssh / probe / bootstrap。
 
 interface Progress { code: string; params?: Record<string, string | number> }  // 客户端按 code 查本地文案，params 只用于插值
 
@@ -106,6 +115,12 @@ interface RemoteView {
   nodeVersion: string | null    // 插件托管 Node 的版本
   nodeSource: 'managed' | null  // 当前恒为 'managed'
   startedAt: string | null      // ISO
+  /**
+   * 每次成功挂载（首次连接 / 本地重启 / 远端重挂）自增。承载方缓存着上一次的 launch URL 与
+   * 会话 cookie，发现 viewRev 变化后必须重新 `GET /hosts/:id/open` 并重新导航。
+   * 旧 Host 没有该字段：客户端把它当作 null，只在 URL 变化时重载。
+   */
+  viewRev: number
 }
 
 interface HostView {
@@ -176,6 +191,10 @@ interface SettingsView {
   defaultKeyPath: string        // 默认 ~/.ssh/id_rsa
   connectTimeoutSec: number
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
+  /**
+   * 已连接主机的轻量探活。连续两次失败才会触发远端重挂（§5.6）；默认开启、30s。
+   */
+  remoteHeartbeat: { enabled: boolean; intervalSec: number }  // intervalSec 5–600
   hostKeyPolicy: 'first-use' | 'strict'
   saveTokens: boolean           // 默认 false（token 仅内存）
   language: 'auto' | 'zh' | 'en'
@@ -206,6 +225,8 @@ interface StateView {
 | `remote-dsh-start-failed` | 远端 DSH 启动失败 | ✅ |
 | `remote-dsh-running` | 手工 DSH 冲突且用户取消/停止失败 | ✅ |
 | `remote-ui-unreachable` | 隧道或远端界面校验失败 | ✅ |
+| `remote-unreachable` | 远端自己重启后找不到可重挂实例（主机与配置保留） | ✅ |
+| `restart-unavailable` | 非可重启状态（未连接 / SSH 已释放 / 动作进行中）请求重启 | ✅ |
 | `remote-file-unavailable` | 远端文件/文件夹不存在、不可读或超过下载上限 | ✅ |
 | `download-not-ready` | 下载任务尚在准备、已失败或已过期 | ✅ |
 | `download-busy` | 同时准备/保留的下载任务过多 | ✅ |
@@ -236,11 +257,16 @@ data: { ...StateView }
 event: download
 data: { ...DownloadJobView }
 
+event: remote-unreachable
+data: { "hostId": "h_x", "phase": "suspected" | "confirmed" | "recovered",
+       "source": "proxy" | "tunnel" | "heartbeat", "failures": 2, "at": "…" }
+
 event: ping
 data: {}
 ```
 
 `download` 只在下载任务启动、进度变化、完成或失败时推送；客户端仍应在收到 `POST /downloads` 后轮询 `/status` 一次，避免 EventSource 尚未订阅时漏帧。
+`remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续两次探活失败，开始重挂）、`recovered`（探活恢复且没有重挂）。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。
 
 ### `GET /version`
 ```json
@@ -284,7 +310,7 @@ data: {}
 断开（按存活策略决定是否停远端）并删除记录，同时取消该主机所有计时器。响应 `{ "ok": true }`。
 
 ### `POST /hosts/:id/connect`
-异步发起连接：立即返回 `{ "ok": true, "accepted": true }`；已在连接 / 已连接时返回 `{ "ok": true, "accepted": false, "reason": "already-connecting" | "already-connected" }`。进度经 `/events` 推送。`rememberPassword: true` 时密码在连接成功后写入 DSH 凭据存储（`passwordSaved` 只表示是否已保存，永不返回值）。
+异步发起连接：立即返回 `{ "ok": true, "accepted": true }`；已在连接 / 已连接 / 正在重启远端时返回 `{ "ok": true, "accepted": false, "reason": "already-connecting" | "already-connected" | "already-restarting" }`。进度经 `/events` 推送。`rememberPassword: true` 时密码在连接成功后写入 DSH 凭据存储（`passwordSaved` 只表示是否已保存，永不返回值）。
 ```json
 { "password": "仅本次连接使用", "rememberPassword": false }
 ```
@@ -294,6 +320,20 @@ data: {}
 
 ### `POST /hosts/:id/reconnect`
 等价于 disconnect（不停远端）+ connect。响应 `{ "ok": true }`。
+
+### `POST /hosts/:id/restart`
+本地主动重启受管远端 DSH，仅 `status === "connected"` 时可用；另有一个恢复入口：远端重挂失败后的
+`error` + `error.code === "remote-unreachable"` 状态（该状态按 §5.6 保留 SSH 会话）也可以用同一个端点重启。
+语义：在同一条 SSH 会话上停掉本连接启动的进程（run registry 里的 pid，SIGTERM → 等待 → SIGKILL）→ 重新
+`[start]`（`--port 0`，端口与 token 必变）→ 刷新远端 `run/web.json` → 关旧隧道并按新端口重建 →
+`[verifying]` → `connected`。**不重跑** `[ssh]` / `[probe]` / `[bootstrap]`，不会再次索要密码或主机指纹；
+结束后仍按原 `keepAlive` 策略。
+
+- 异步执行：立即返回 `{ "ok": true, "accepted": true }`，进度经 `/events` 推送（`status: "connecting"` + 进度码 `restarting-remote`）。已有连接 / 重启在进行时返回 `{ "ok": true, "accepted": false, "reason": "busy" }`。
+- 状态机：`connected` ✅；`error` + `error.code === "remote-unreachable"` ✅（该状态有意保留 SSH 会话）；其余状态（`unconfigured` / `disconnected` / `connecting` / `fingerprint-pending` / `conflict-pending` / 其它 `error` / `limited`）一律拒绝，HTTP **409** + `restart-unavailable`，`ErrorView.detail` 说明原因。
+- 只杀自己启动的实例：run registry 不再指向本连接的 pid 时不杀任何进程；仍在运行的手工实例走 `POST /hosts/:id/conflict` 的既有提示（`stop` / `alongside` / `cancel`）。取消时保留当前连接与隧道。
+- 未连接（或 SSH 已释放）时返回 409 `restart-unavailable`。
+- 成功后 `RemoteView.viewRev` 自增，旧 `url` / `webUrl` 与 token 失效；承载方应重新 `GET /hosts/:id/open` 并导航。
 
 ### `POST /hosts/:id/fingerprint`
 ```json
@@ -323,7 +363,7 @@ data: {}
 - `webUrl` 是同一界面的**同源**地址，交给浏览器半端的 iframe：`/dsh-remote-go/remote/<hostId>/` 由本机 DSH 的
   反向代理转发到该主机的回环隧道（见下文「远端界面同源代理」）。`token` 同样只在首次导航里出现一次；代理随后把远端的
   session cookie 收进 Host 侧，不交给浏览器。
-- 两个地址都绑定这一次连接；断开或重连后旧 URL 失效。
+- 两个地址都绑定这一次连接；断开、重连、本地重启或远端重挂后旧 URL 失效（`RemoteView.viewRev` 变化即为信号）。
 
 ### 远端界面同源代理（`/dsh-remote-go/remote/<hostId>/`）
 浏览器半端没有 guest 能力，故远端界面以同源 iframe 承载。该前缀**不是** JSON API，也不属于 `API_PREFIX`：
@@ -340,7 +380,8 @@ data: {}
   就是把这一页嵌进同源 frame。
 - 远端 DSH 唯一的 WebSocket 路由 `/api/remote.mux` 以**每主机一条精确升级路由**的形式注册
   （`/dsh-remote-go/remote/<hostId>/api/remote.mux`），Host 卸载或主机被删除时注销。
-- 上游不可达时返回 502 文本；代理只读、不写远端文件，也不缓存响应。
+- 上游不可达时返回 502 文本；代理只读、不写远端文件，也不缓存响应。上游连接失败会向 Host 上报一次
+  `remote-unreachable` 疑似事件（不把单次 502 当成远端重启；Host 用探活确认后再重挂）。
 
 ### `POST /downloads`
 启动一个后台下载任务（文件或文件夹），立即返回初始 `DownloadJobView`（`phase: "preparing"`）。Host 把远端内容**流式写入用户选择的本机目录**，不在内存里缓存文件字节；进度通过 SSE `download` 事件推送，也可用 `/status` 兜底轮询。
@@ -381,9 +422,13 @@ content-type: application/json
 { "ok": true, "report": { "summary": "ok",
   "checks": [{ "id": "ssh-reachable", "title": { "zh": "SSH 可达性", "en": "SSH reachability" },
     "status": "pass", "detail": { "zh": "...", "en": "..." } }],
+  "restarts": [{ "at": "…", "kind": "local-restart" | "remote-reattach",
+                 "fromPort": 38123, "toPort": 41234, "pid": 4242,
+                 "reason": "probe-failed-2", "source": "log" }],
   "redacted": true, "generatedAt": "2026-11-14T00:00:00.000Z", "logs": ["..."] } }
 ```
 报告恒为脱敏（`redacted: true`），`logs` 是最多 40 条已脱敏的连接日志；`summary` ∈ `ok | warning | error`。
+`restarts` 是最近最多 10 次本地重启 / 远端重挂（`toPort` 是新端口，`reason`/`source` 说明重挂依据）。
 检查项顺序固定：`ssh-reachable`、`auth`、`host-key`、`tunnel`、`remote-service`、`remote-ui`、`remote-node`、`remote-version`、`model-credentials`、`desktop-guard`。
 
 ### `POST /settings`
@@ -401,6 +446,8 @@ content-type: application/json
 - `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
+- `restarting-remote`（`reason`，可选 `pid` / `port` / `level`）：本地重启远端或远端自重启后的重挂；状态保持
+  `connecting`，阶段只走 `start` → `tunnel` → `verifying`
 
 ## 3. 安全约束（客户端必须遵守）
 

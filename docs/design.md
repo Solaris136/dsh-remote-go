@@ -39,7 +39,7 @@
 - 状态点即可用性：**已连接是绿色发光点**（点它就能切过去）；未连接 / 断线是灰点；连接中、待确认指纹、冲突、失败各有自己的颜色。
 - 点「本地」回本地页面；点某台主机切到那台（未连接时先浮出主机清单、在那里连接，连上自动接管）；每台主机的「打开」与它等价。
 - 已连接主机行右侧有「断开」，**鼠标移到该行才显示**：断开这台（并释放它的窗口），不会切过去。断的是当前这台，窗口回本地、主机条也回「本地」；断的是别的热窗口，主机条不动。
-- 「添加主机」与「管理界面」都是浮窗（`shell.overlay`）：浮在当前页面之上，远端开着时背景仍是远端，关掉回原来那一页。管理清单里是编辑 / 诊断 / 删除 / 重连；正在连接的那台**不进清单**——它有独立的连接窗口（§4.4）。密码与远端冲突按需弹窗。
+- 「添加主机」与「管理界面」都是浮窗（`shell.overlay`）：浮在当前页面之上，远端开着时背景仍是远端，关掉回原来那一页。管理清单里是编辑 / 诊断 / 删除 / 重连，已连接的卡片另有「重启远端 DSH」（见 §5.5）；正在连接的那台**不进清单**——它有独立的连接窗口（§4.4）。密码与远端冲突按需弹窗。
 - 没有单独的「刷新远端界面」：要重载用清单里的「重连」（重建窗口）；点同一台只是重新显示热窗口，不重新加载。
 
 主机条是页面 DOM 的一部分（用页面自己的主题变量绘制），继承该页面的字体、hover 与弹层遮罩，并带很高的 `z-index`，所以页面自己的模态遮罩弹出时也能点。数据只有一次常驻的 `/state` 订阅（在浮层宿主里），主机条、浮窗与远端窗口都读它；命令走两条一次性通道：`panelStore`（open / disconnect / manage / local）与 `wizardStore`（add / edit 草稿）。
@@ -100,6 +100,7 @@
 - **每次连接从干净的日志开始**：手动连接 / 重连 / 自动重连都会清空上一次的行与序号，先写一条带次数与时间的边界行（`— 第 N 次连接 · 时刻 —`），所以面板默认只有本次连接；每行还带写下它时所在的阶段（`phase`），面板在行首显示阶段标签，滚动时能看出停在哪一步。
 - **失败时日志自己就能说明问题**：失败被写成多行 `error` 级日志，顺序是「失败阶段 + 错误码」→ 双语原因（与错误卡片同一句）→ 每一条建议 → 脱敏并 `headTail` 截断的技术细节；`remote-dsh-start-failed` 的技术细节是远端日志尾部，逐行打印。日志里的双语行由 Host 下发 `text: { zh, en }`，面板按当前语言渲染。
 - 关窗不中断连接：连上后窗口自动闭合并接管整窗；失败时窗口留着，日志与错误一起可见。「返回」与主机条里的「管理界面」都回到主机清单。日志行本身不改写、不脱敏；脱敏只发生在**技术细节行**与**导出的诊断包**里。
+- 本地重启远端（§5.5）与远端自重启的**重挂**（§5.6）复用同一套阶段、日志与失败说明：状态是 `connecting`、进度码是 `restarting-remote`，所以不会出现「连接断开」的错误卡片；失败走 `logFailure` 的多行解释（阶段、错误码、原因、建议、脱敏细节）。成功后方才回到 `connected` 并让承载方重新导航。
 
 ### 4.5 诊断与设置
 - 诊断抽屉：10 项固定检查（SSH 可达性、认证、主机指纹、隧道、远端服务、远端界面、远端 Node、版本、模型凭据、桌面守卫），支持复制脱敏报告。
@@ -166,6 +167,8 @@
 
 `phase` 取值：`ssh` → `probe` → `bootstrap` → `start` → `tunnel` → `verifying` → `ready`。进度码是细粒度、可本地化的 `{ code, params }`，具体列表以 [api.md](api.md) 为准；客户端只按 code 查文案，不推断连接逻辑。
 
+`connecting` 不只表示首次连接：本地重启远端（§5.5）与远端自重启后的重挂（§5.6）也用它，但进度码固定是 `restarting-remote`，阶段只走 `start` → `tunnel` → `verifying`，不会重跑 `ssh` / `probe` / `bootstrap`；主机卡片据此显示「重启中」而不是「连接中」。`remote-unreachable` 是这两个动作之外的一种**错误**（没有可重挂实例时才出现，§8），不是状态。
+
 ### 5.2 连接流程
 ```text
 connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/identityFiles；known_hosts 指纹集合
@@ -182,6 +185,8 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 
 任一步失败都会落入分类错误（见 [api.md](api.md) 的 `ErrorView.code`），并执行同样的 teardown：关隧道、按策略决定是否停远端、清理状态。
 
+本地重启（§5.5）与远端重挂（§5.6）复用上表的**尾段**：`[start]` → `[tunnel]` → `[verifying]` → `connected`，但跳过 `[ssh]` / `[probe]` / `[bootstrap]`，因此既不会重跑托管 Node 与 npx 预检，也不会再次索要密码或主机指纹；失败同样落分类错误，重挂失败额外保留 SSH 会话以便用户直接重启或重连。
+
 ### 5.3 主机指纹
 - ssh2 `hostVerifier` 内计算 OpenSSH 形式的 `SHA256:<base64>`。
 - 已记录指纹：匹配放行；变化 → `host-key-changed` 阻塞。未记录且 known_hosts 有该主机条目：任意一条匹配即放行（等价 OpenSSH），无匹配 → `host-key-changed`。
@@ -193,6 +198,40 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 - 手动断开：关隧道；`keepAlive=stop` 同时停远端，`idle` 延迟停止，`keep` 保留远端。
 - 删除主机：先取消重连 / 空闲计时器，再 teardown，最后删记录；远端按该主机的存活策略处理。
 - 本地 DSH 退出：`shutdown()` 对每台主机执行同样的 teardown。
+
+### 5.5 本地主动重启远端
+`POST /hosts/:id/restart`，仅 `connected` 可用；`remote-unreachable` 错误状态（§5.6 有意保留了 SSH 会话）也允许用它恢复。响应先 `accepted`，进度走 `/state`。它**不重跑** `[ssh]` / `[probe]` / `[bootstrap]`，因此不会再次索要密码或主机指纹：
+
+```text
+restart(id)（同一条 SSH 会话）
+  ├─ 只认 run registry 里那个 pid：registry 的 pid 必须等于本连接记录的 pid，才走
+  │   `stopRemoteWeb`（SIGTERM → 等待 → SIGKILL）并删除注册表；否则不杀任何进程
+  ├─ 运行期冲突：仍在运行的手工实例（包括之前选择 alongside 的）走 §6.3 的冲突提示，
+  │   「取消」时保留当前连接与隧道，不做任何破坏
+  ├─ [start]  用已记录的 facts/plan 重新 npx 启动（`--port 0` → 新端口、新 token）
+  ├─ 刷新 run/web.json（新 pid/port/version/profile/dshHome/launch）
+  ├─ 关旧隧道 → [tunnel] 按新端口重建 → [verifying] 重新 token → cookie 种入
+  └─ connected：`remote.viewRev` +1，承载方（guest / iframe）重新导航到新的 `GET /hosts/:id/open`
+```
+
+重启是一次性动作：结束后仍按原 `keepAlive` 策略走，不写远端 `~/.dsh` 的插件、配置与凭据。失败按连接失败同样收尾（分类错误 + teardown），主机与配置保留。
+
+### 5.6 远端自重启：心跳、确认与重挂
+远端 DSH 可能自己重启（插件市场更新、supervisor、远端重启），而启动命令固定 `--port 0`，所以**重启后端口一定变化**，且市场发起的重启不会写插件的 `run/web.json`。处理分三层：
+
+1. **故障上报**：同源代理或隧道的 `ECONNREFUSED` / `ECONNRESET` 只上报一次 `remote-unreachable` 疑似事件（SSE 同名事件带 `phase: suspected`），由探活确认，不把一次请求失败当成进程重启。
+2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。
+3. **重挂而不是全量重连**（`reattachRemote`，状态 `connecting` + 进度码 `restarting-remote`）：
+   ```text
+   重读远端真实状态（resolveRemoteWeb，最多重试数秒）
+     ├─ run registry 的 pid 存活：端口取最新 `dsh web:` 行或该 pid 在 /proc 的监听端口
+     ├─ 日志行更新但 pid 变了：用监听端口的 socket inode 反查 pid（/proc）
+     └─ 日志被 supervisor 重定向：扫描本 profile 的 DSH 进程，再用 /proc 找监听端口
+   校验 pid 存活、版本（registry 或进程命令行里的 npx pin）、dshHome、profile
+   刷新 run/web.json → 关旧隧道 → 按新端口重建 → 重新 token → [verifying] → connected
+   写一条连接日志（重挂原因）与诊断 `restarts` 记录；remote.viewRev +1，承载方静默重载
+   ```
+   运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**，不弹「远端已有手工启动的 DSH」；没有可重挂实例时报可解释的 `remote-unreachable` 错误，保留主机与配置，用户可点「重启远端 DSH」或「重连」。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
 
 ## 6. 远端运行时
 ### 6.1 托管 Node + npx
@@ -209,7 +248,8 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 
 ### 6.3 收养与冲突
 - 收养：读插件状态目录的 `run/web.json`，要求 pid 存活、日志 URL 可解析、HTTP 可达。收养让本地重启后复用远端实例。
-- 冲突：远端已有手工启动的 DSH 时，列出进程并让用户选 `stop` / `alongside` / `cancel`；`alongside` 会在主机卡片留下共享 `~/.dsh` 的 warning。
+- 冲突：远端已有手工启动的 DSH 时，列出进程并让用户选 `stop` / `alongside` / `cancel`；`alongside` 会在主机卡片留下共享 `~/.dsh` 的 warning，并记住这些 pid，之后本地重启远端时不再重复询问（§5.5）。
+- 运行期重挂（§5.6）与连接期收养不是一回事：重挂只用于本连接对应的主机（同一 `~/.dsh` + profile），不弹冲突提示；连接期才需要用户在「停掉手工实例 / 并存 / 取消」之间选择。
 
 ### 6.4 存活策略
 | 策略 | 本地断开时 | 本地 DSH 退出时 |
@@ -253,6 +293,7 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 | 指纹变化 / 未知 | `host-key-changed` / `host-key-unknown` |
 | 远端装不上托管 Node / npx 失败 / 远端启动失败 | `remote-node-install-failed` / `remote-dsh-missing` / `remote-dsh-start-failed` |
 | 远端已有手工 DSH | 暂停为 `conflict-pending`；取消时 `remote-dsh-running` |
+| 远端自己重启后找不到可重挂实例 | `remote-unreachable`（保留主机与配置；可点「重启远端 DSH」或「重连」） |
 | 版本不一致 / 隧道或界面校验失败 / 非 Linux | `version-mismatch` / `remote-ui-unreachable` / `unsupported-os` |
 
 失败后状态与错误都通过 `/state` 与 SSE 推给客户端；重试从干净状态重新走管线。
@@ -273,6 +314,7 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 - **能力用 intent 桥，而不是扩大 iframe 权限**：`allow` 只能收窄、不能扩权，剪贴板还要求顶层焦点；把「链接/剪贴板/提示」
   变成顶层执行的 intent，既能覆盖前端 bundle 里改不到的实现，也不给 frame 额外的浏览器权限。
 - **本地 HTTP + SSE，而非远程 RPC**：端点少、无生成步骤、易测试。
+- **重启与重挂都复用已建立的 SSH 会话**：远端端口是随机的，重连（`reconnect`）在 keep/idle 下会收养同一个进程，只有「停掉受管进程再 `[start]`」才是真重启；重挂则只重读端口、刷新注册表、换隧道与 token。两者都不重跑 SSH/探测/自举，所以不会再出现密码或指纹提示。
 - **ssh2，而非系统 ssh**：需要程序化主机指纹、一次性密码认证与 `forwardOut`。
 - **插件托管 Node + npx 固定版本**：不依赖远端环境、版本一致、无需在远端分发插件。
 - **本地不复制远端能力**：插件 / 配置 / 凭据 / 设置仍在远端界面里操作；本地只负责连接与呈现。
