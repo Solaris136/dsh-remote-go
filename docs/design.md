@@ -161,9 +161,10 @@
 
 本地会话里的模型不需要用户先点主机条就能知道「有哪些主机、哪台连着、那台为什么失败」：Host 半端向 DSH 的 `tools` 服务注册**一个只读工具**。它只注册在**本地 Host**（浏览器半端是 UI bundle，远端 DSH 也不加载本插件），所以远端会话看不到它，也不新增 HTTP 路由。
 
-- `remote_hosts_list`（只读）：参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected }`，每行 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。声明 `isConcurrencySafe`（只读可并发）与 8s `timeoutMs`。
+- `remote_hosts_list`（只读）：参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，超出时 `truncated` 为 true），每行 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。声明 `isConcurrencySafe`（只读可并发）；**不声明 `timeoutMs`**——函数体只有一次本地快照读取加同步投影，没有可协作取消的等待，声明了反而误导。
 - **没有写操作面**：增删改、连接 / 断开 / 重连、重启或关闭远端 DSH 一律留在主机条的「添加主机 / 管理界面」里。因此工具既不需要审批门，也不需要 `confirm` / `dryRun` 参数——它不改变任何状态。
-- **白名单投影**：字段按名字挑（不 spread 配置或 HostView），再过 `redactText` 并按字段限长；密码、token、cookie、指纹原文与私钥路径都不进结果，`output.schema` 是 `additionalProperties: false`，投影里多一个未声明字段会让调用失败而不是漏出去。返回值里的远端主机名、版本与错误文本是不可信数据。
+- **白名单投影**：字段按名字挑（不 spread 配置或 HostView），再过 `redactText` 并按字段限长；**在 `redactText` 之外再抹掉两类只有主机才有的标识**：整段 `SHA256:<base64>` 指纹（连算法前缀一起去掉，`host-key-unknown` / `host-key-changed` 的失败原因原文带它）与所有 `.ssh` 下的路径（`auth` 失败会引用配置的密钥文件）。密码、token、cookie 与私钥路径都不进结果，`output.schema` 是 `additionalProperties: false`，投影里多一个未声明字段会让调用失败而不是漏出去。返回值里的远端主机名、版本与错误文本是不可信数据。
+- **可选服务**：`tools` 不写进 `inject`，用 `ctx.get('tools')` 取；取不到（旧内核或裁剪过的组合）就跳过注册并记一条日志，**主机条与 HTTP API 照常工作**。服务晚到时用 `ctx.inject(['tools'], …)` park 一个子 fiber，服务一就绪就注册，不会因为启动顺序永久丢工具。
 - **不做的事**：不碰远端 `~/.dsh`；不改已有 API 语义；不提供任何写动作（将来若要加，必须同时补上「不依赖 DSH 审批」的确认门——`approval.policy='never'` 的会话会确定性拒绝 `tools/pre-execute` 的 ask）。
 
 ## 5. 连接生命周期

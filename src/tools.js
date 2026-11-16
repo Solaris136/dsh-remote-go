@@ -17,8 +17,21 @@ const ADDRESS_LIMIT = 200
 const NAME_LIMIT = 120
 const ID_LIMIT = 120
 
+/** A result never carries more rows than this, so one call cannot flood the model's context. */
+const MAX_HOSTS = 500
+
 const ANSI_RE = /\u001B\[[0-9;]*[A-Za-z]/g
 const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
+
+/**
+ * Host identifiers that must never leave the tool. `redactText` covers tokens, passwords,
+ * private-key blocks and home directories, but not these two — and a connect failure's `detail`
+ * carries them verbatim: `prompts.js` builds the first-use fingerprint prompt (120s timeout,
+ * `first-use` is the default policy) and `ssh.js` builds the host-key-changed one, both from
+ * `SHA256:<base64>` fingerprints, while `auth` failures quote the configured key file.
+ */
+const FINGERPRINT_RE = /\bSHA256:[A-Za-z0-9+/=]{8,}/g
+const SSH_PATH_RE = /(?:[A-Za-z]:)?(?:~\/|[^\s"'`]*[\\/])?\.ssh(?:[\\/][^\s"'`]*)?/gi
 
 const ERROR_SCHEMA = {
   type: 'object',
@@ -55,11 +68,18 @@ const HOST_ROW_SCHEMA = {
   required: ['id', 'label', 'state', 'connected'],
   additionalProperties: false,
 }
-
 function truncate(text, limit) {
   const points = Array.from(text)
   if (points.length <= limit) return text
   return `${points.slice(0, Math.max(0, limit - 1)).join('')}…`
+}
+
+/**
+ * Strip the two host identifiers `redactText` does not know: the whole `SHA256:<base64>` token (the
+ * algorithm prefix goes with it, so not even the form survives) and every path under `.ssh`.
+ */
+function redactHostSecrets(text) {
+  return text.replace(FINGERPRINT_RE, '<fingerprint redacted>').replace(SSH_PATH_RE, '<private-key path>')
 }
 
 /**
@@ -68,7 +88,7 @@ function truncate(text, limit) {
  */
 function safeText(value, limit = TEXT_LIMIT) {
   if (typeof value !== 'string') return null
-  const cleaned = redactText(value.replace(ANSI_RE, '').replace(CONTROL_RE, '')).trim()
+  const cleaned = redactHostSecrets(redactText(value.replace(ANSI_RE, '').replace(CONTROL_RE, ''))).trim()
   if (cleaned === '') return null
   return truncate(cleaned, limit)
 }
@@ -195,7 +215,7 @@ const LIST_DESCRIPTION = [
  * @param {{ service: object, logger?: object }} options
  * @returns {object} a registry-ready tool definition.
  */
-export function listTool(options) {
+function listTool(options) {
   const service = options.service
   const logger = options.logger ?? console
   return {
@@ -217,8 +237,9 @@ export function listTool(options) {
         properties: {
           ok: { type: 'boolean' },
           hosts: { type: 'array', items: HOST_ROW_SCHEMA },
-          count: { type: 'integer', description: 'Number of rows returned.' },
-          connected: { type: 'integer', description: 'Number of rows in the connected state.' },
+          count: { type: 'integer', description: 'Number of rows returned (at most 500).' },
+          connected: { type: 'integer', description: 'Number of returned rows in the connected state.' },
+          truncated: { type: 'boolean', description: 'True when more hosts exist than the 500-row cap returned.' },
           error: ERROR_SCHEMA,
         },
         required: ['ok'],
@@ -229,8 +250,9 @@ export function listTool(options) {
           if (!value || value.ok !== true) return renderText([`[dsh-remote-go] ${renderFailure(value)}`])
           const rows = Array.isArray(value.hosts) ? value.hosts : []
           if (rows.length === 0) return renderText(['[dsh-remote-go] 还没有配置远端主机 / no remote hosts configured'])
+          const more = value.truncated === true ? `（只列前 ${rows.length} 台 / first ${rows.length} only）` : ''
           const lines = [
-            `[dsh-remote-go] ${rows.length} 台主机，已连接 ${value.connected ?? 0} 台 / hosts: ${rows.length}, connected: ${value.connected ?? 0}`,
+            `[dsh-remote-go] ${rows.length} 台主机，已连接 ${value.connected ?? 0} 台${more} / hosts: ${rows.length}, connected: ${value.connected ?? 0}`,
           ]
           for (const row of rows) lines.push(`- ${describeRow(row)}`)
           return renderText(lines)
@@ -239,14 +261,22 @@ export function listTool(options) {
         }
       },
     },
-    timeoutMs: 8_000,
+    // No `timeoutMs`: the body is one bounded in-memory read plus a synchronous projection, and this
+    // tool cannot honour a cooperative cancellation it never awaits. Leave the deadline to the kernel.
     isConcurrencySafe: () => true,
     async execute(args) {
       try {
         await service.init?.()
         const rows = hostRows(service)
-        const hosts = args?.includeDisconnected === false ? rows.filter((row) => row.connected) : rows
-        return { ok: true, hosts, count: hosts.length, connected: hosts.filter((row) => row.connected).length }
+        const kept = args?.includeDisconnected === false ? rows.filter((row) => row.connected) : rows
+        const hosts = kept.slice(0, MAX_HOSTS)
+        return {
+          ok: true,
+          hosts,
+          count: hosts.length,
+          connected: hosts.filter((row) => row.connected).length,
+          ...(kept.length > hosts.length ? { truncated: true } : {}),
+        }
       } catch (error) {
         logger.error?.('[dsh-remote-go] remote_hosts_list failed:', error)
         return { ok: false, error: serviceError(error) }
@@ -255,21 +285,24 @@ export function listTool(options) {
   }
 }
 
-/**
- * Register the host list on the host composition and return the disposer that removes it. It lives
- * only here (the plugin's Host half): the browser half is a UI bundle and the remote DSH never loads
- * this package, so a remote session cannot see it. A kernel that refuses the definition loses the
- * tool and a warn line, never the whole plugin: the host switcher has to keep working.
- * @param {object} ctx - the plugin context, with `tools` injected.
- * @param {{ service: object, logger?: object }} options
- * @returns {() => void} unregisters the tool.
- */
-export function registerHostTools(ctx, options) {
-  const logger = options?.logger ?? console
+/** The `tools` service of the composition running this plugin, or null when it has none (yet). */
+function toolsService(ctx) {
+  try {
+    const tools = typeof ctx?.get === 'function' ? ctx.get('tools') : null
+    return tools && typeof tools.register === 'function' ? tools : null
+  } catch {
+    return null
+  }
+}
+
+/** Register the definition on one context and hand back the disposer that removes it. */
+function registerOn(ctx, tools, options, logger) {
   return ctx.effect(() => {
     let dispose = null
     try {
-      dispose = ctx.tools.register(listTool(options))
+      dispose = tools.register(listTool(options))
+      // One line beside the mount logs, so a startup log says whether the tool is there at all.
+      logger.info?.('model tool registered: remote_hosts_list')
     } catch (error) {
       logger.warn?.('[dsh-remote-go] could not register remote_hosts_list:', error)
     }
@@ -281,4 +314,29 @@ export function registerHostTools(ctx, options) {
       }
     }
   }, 'dsh-remote-go: model tools')
+}
+
+/**
+ * Register the host list on the host composition and return the disposer that removes it. It lives
+ * only here (the plugin's Host half): the browser half is a UI bundle and the remote DSH never loads
+ * this package, so a remote session cannot see it.
+ *
+ * `tools` is an optional service here, not an injected one, so a composition without it (or with a
+ * different kernel shape) keeps the plugin — and with it the host switcher and the HTTP API — alive
+ * and merely loses the tool plus one log line. When the service is not up yet, `ctx.inject` parks a
+ * child fiber that registers as soon as it appears, so a slow `tools` start cannot silently cost the
+ * tool. A kernel that refuses the definition costs that tool too, never the plugin.
+ * @param {object} ctx - the plugin context (`webServer` injected; `tools` looked up by name).
+ * @param {{ service: object, logger?: object }} options
+ * @returns {() => void} unregisters the tool.
+ */
+export function registerHostTools(ctx, options) {
+  const logger = options?.logger ?? console
+  const tools = toolsService(ctx)
+  if (tools !== null) return registerOn(ctx, tools, options, logger)
+  if (typeof ctx?.inject !== 'function') {
+    logger.info?.('[dsh-remote-go] no tools service in this composition; remote_hosts_list is not registered')
+    return () => {}
+  }
+  return ctx.inject(['tools'], (toolsCtx) => registerOn(toolsCtx, toolsCtx.tools, options, logger))
 }

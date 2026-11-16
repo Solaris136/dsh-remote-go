@@ -74,7 +74,7 @@ dsh-remote-go
 
 `/health` 是唯一豁免：它是契约里的存活探针、不返回状态数据，因此不要求浏览器会话，但仍过 Host/Origin 栅栏（见 [api.md](api.md)）。`optional = ['connection','credentials']` 只声明可选依赖，不是访问凭据；其余依赖都是 node 内置模块或本仓库模块，发布包 `dependencies: {}`。
 
-模型工具在同一条 `ctx.effect` 里装配：`registerHostTools(ctx, { service, logger })`（`tools.js`）→ `ctx.tools.register(listTool(...))` 注册只读的 `remote_hosts_list`，effect 的清理函数调用 `register` 返回的 disposer，所以卸载后工具真的消失。`inject` 因此是 `['webServer','tools']`（`tools` 是 DSH 必有的内核服务）；注册失败只记一条 warn，不连坐插件（主机条必须还能用）。工具**没有写操作面**：没有 add / update / remove / connect，也就没有 confirm 门、没有 jobs、没有 `exec.agent.session.id`，维护主机仍走管理界面。它只注册在 Host 半端，`package.json` 的 `dsh.client` 与远端都没变。
+模型工具在同一条 `ctx.effect` 里装配：`registerHostTools(ctx, { service, logger })`（`tools.js`）→ `tools.register(listTool(...))` 注册只读的 `remote_hosts_list`，effect 的清理函数调用 `register` 返回的 disposer，所以卸载后工具真的消失。**`tools` 不进 `inject`**：它是可选服务，用 `ctx.get('tools')` 取（与 `connection` / `credentials` 同一条路径）；取不到时只记一条 info 并跳过注册——缺 `tools` 的宿主不会因此把整个插件停在 state 0（那会连主机条与 HTTP API 一起不可用），主机条必须还能用。服务晚到时 `ctx.inject(['tools'], …)` 会 park 一个子 fiber，等它就绪再注册；定义被内核拒绝也只记一条 warn。工具**没有写操作面**：没有 add / update / remove / connect，也就没有 confirm 门、没有 jobs、没有 `exec.agent.session.id`，维护主机仍走管理界面。它只注册在 Host 半端，`package.json` 的 `dsh.client` 与远端都没变。
 
 ## 3. 连接管线
 入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），交给 `connect-pipeline.js#startConnect`，把 `runtime.connectPromise` 设为 `connectPipeline(ctx, runtime)` 后立即返回；进度全走 `state` 事件。顺序：

@@ -16,7 +16,7 @@ import { registerHostTools } from './tools.js'
 import { messageOf } from './util.js'
 
 export const name = PLUGIN_ID
-export const inject = ['webServer', 'tools']
+export const inject = ['webServer']
 
 export const optional = ['connection', 'credentials']
 

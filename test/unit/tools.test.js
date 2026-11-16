@@ -1,14 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { LIST_TOOL_NAME, registerHostTools } from '../../src/tools.js'
-import { errors } from '../../src/errors.js'
+import { errors, toErrorView } from '../../src/errors.js'
 
 // ---- fixtures ----------------------------------------------------------------------------------
 
 const SECRET = 'hunter2-do-not-leak'
 const TOKEN = 'tok_live_abcdefghijklmnop'
 const KEY_PATH = '/home/dev/.ssh/id_ed25519'
-const FINGERPRINT = 'SHA256:deadbeefdeadbeef'
+const FINGERPRINT = 'SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG='
 
 /** A HostView with credentials and fingerprints deliberately filled in: none may reach a result. */
 function hostView(overrides = {}) {
@@ -49,6 +49,13 @@ function makeHarness(options = {}) {
     snapshot: () => ({ hosts: views }),
     ...(options.service ?? {}),
   }
+  const tools = {
+    register(definition) {
+      assert.equal(registered.has(definition.name), false, `duplicate tool ${definition.name}`)
+      registered.set(definition.name, definition)
+      return () => registered.delete(definition.name)
+    },
+  }
   const logger = {
     info: (...args) => logs.push(['info', ...args]),
     warn: (...args) => logs.push(['warn', ...args]),
@@ -56,13 +63,7 @@ function makeHarness(options = {}) {
     debug: (...args) => logs.push(['debug', ...args]),
   }
   const ctx = {
-    tools: {
-      register(definition) {
-        assert.equal(registered.has(definition.name), false, `duplicate tool ${definition.name}`)
-        registered.set(definition.name, definition)
-        return () => registered.delete(definition.name)
-      },
-    },
+    get: (name) => (name === 'tools' ? tools : null),
     effect(execute, label) {
       labels.push(label)
       const dispose = execute()
@@ -107,8 +108,18 @@ function assertMatchesSchema(schema, value, path = 'value') {
   else if (schema.type === 'boolean') assert.equal(typeof value, 'boolean', `${path} must be a boolean`)
 }
 
-/** The credentials and key material that must never appear in a result. */
-const FORBIDDEN = [SECRET, TOKEN, KEY_PATH, FINGERPRINT, 'PRIVATE KEY', '.ssh', 'passwordSaved', 'authKeyPath']
+/** The credentials, fingerprints and key material that must never appear in a result. */
+const FORBIDDEN = [
+  SECRET,
+  TOKEN,
+  KEY_PATH,
+  FINGERPRINT,
+  'SHA256',
+  'PRIVATE KEY',
+  '.ssh',
+  'passwordSaved',
+  'authKeyPath',
+]
 
 function assertNoSecrets(value) {
   const serialized = JSON.stringify(value)
@@ -137,25 +148,28 @@ test('the host list registers with a read-only contract and a working disposer',
   assert.equal(definition.output.schema.additionalProperties, false)
   assert.equal(typeof definition.output.render, 'function')
   assert.equal(typeof definition.execute, 'function')
-  assert.ok(definition.timeoutMs >= 5_000 && definition.timeoutMs <= 8_000, 'the timeout stays in the 5-8s budget')
+  assert.equal(definition.timeoutMs, undefined, 'a body with no cancellable wait must not promise a timeout')
   assert.equal(definition.isConcurrencySafe(), true, 'the read-only tool may run in parallel')
-  assert.equal(definition.isConcurrencySafe({ includeDisconnected: false }), true)
+  assert.ok(
+    harness.logs.some((line) => line[0] === 'info' && /model tool registered: remote_hosts_list/.test(line[1])),
+    'a startup log must say the tool is registered',
+  )
 
   harness.dispose()
   assert.equal(harness.registered.size, 0, 'unloading the plugin must remove the tool')
   assert.equal(harness.registered.get(LIST_TOOL_NAME), undefined)
 })
 
-test('render produces bounded text blocks and never throws on a failure value', () => {
+test('render produces bounded text blocks and never throws on a hostile value', () => {
   const harness = makeHarness()
   const render = harness.list.output.render
-  for (const value of [
-    { ok: false, error: { code: 'X', message: 'boom' } },
-    undefined,
-    {},
-    null,
-    { ok: true, hosts: [] },
-  ]) {
+  const hostile = {
+    ok: true,
+    get hosts() {
+      throw new Error('boom')
+    },
+  }
+  for (const value of [{ ok: false, error: { code: 'X', message: 'boom' } }, undefined, {}, null, hostile]) {
     const blocks = render({}, value)
     assert.ok(Array.isArray(blocks) && blocks.length > 0)
     for (const block of blocks) {
@@ -164,19 +178,6 @@ test('render produces bounded text blocks and never throws on a failure value', 
       assert.match(block.text, /\[dsh-remote-go\]/)
     }
   }
-})
-
-test('render never throws, even for a value whose fields explode', () => {
-  const harness = makeHarness()
-  const hostile = {
-    ok: true,
-    get hosts() {
-      throw new Error('boom')
-    },
-  }
-  const [block] = harness.list.output.render({}, hostile)
-  assert.equal(block.type, 'text')
-  assert.match(block.text, /结果无法渲染/)
 })
 
 test('render lists one line per host and reports an empty list', () => {
@@ -266,6 +267,67 @@ test('a host with no readable id is dropped instead of producing a broken row', 
   )
 })
 
+test('the result is capped and says so instead of flooding the model', async () => {
+  const views = Array.from({ length: 501 }, (_unused, index) => hostView({ id: `h_${index}`, name: `host ${index}` }))
+  const harness = makeHarness({ views })
+  const result = await harness.list.execute({}, {})
+  assertMatchesSchema(harness.list.output.schema, result)
+  assert.equal(result.count, 500, 'the cap keeps the result bounded')
+  assert.equal(result.truncated, true)
+  const [block] = harness.list.output.render({}, result)
+  assert.match(block.text, /只列前 500 台/)
+
+  const exactly = makeHarness({ views: views.slice(0, 500) })
+  const complete = await exactly.list.execute({}, {})
+  assert.equal(complete.count, 500)
+  assert.equal(complete.truncated, undefined, 'a list that fits carries no truncation flag')
+})
+
+test('a connect failure never echoes a fingerprint or a private-key path', async () => {
+  // The two failure shapes the pipeline really stores on the runtime: prompts.js builds the
+  // first-use host-key prompt (120s timeout) and ssh.js the changed-key one, both from SHA256
+  // fingerprints; an auth failure quotes the configured key file.
+  const unknown = toErrorView(errors.hostKeyUnknown(FINGERPRINT))
+  const changed = toErrorView(
+    errors.hostKeyChanged('SHA256:pinnedpinnedpinnedpinnedpinnedpinned00=', 'SHA256:actualactualactualactualactual00='),
+  )
+  assert.ok(JSON.stringify(unknown).includes('SHA256:'), 'fixture: the raw ErrorView does carry the fingerprint')
+  const harness = makeHarness({
+    views: [
+      hostView({ id: 'h_unknown', status: 'fingerprint-pending', error: unknown }),
+      hostView({
+        id: 'h_changed',
+        status: 'error',
+        error: changed,
+        remote: { version: null, uiReady: false },
+      }),
+      hostView({
+        id: 'h_keypath',
+        status: 'error',
+        error: {
+          code: 'auth',
+          detail: { zh: '密钥 ~/.ssh/id_ed25519 无法读取。', en: `Cannot read ${KEY_PATH}.` },
+        },
+      }),
+    ],
+  })
+  const result = await harness.list.execute({}, {})
+  assertMatchesSchema(harness.list.output.schema, result)
+  const serialized = JSON.stringify(result)
+  assert.equal(serialized.includes('SHA256:'), false, 'no fingerprint material may survive')
+  assert.equal(serialized.includes('.ssh'), false, 'no private-key path may survive')
+  assertNoSecrets(result)
+  // The line still says what happened — only the identifiers are gone.
+  assert.match(result.hosts[0].lastError, /^host-key-unknown: /)
+  assert.match(result.hosts[0].lastError, /<fingerprint redacted>/)
+  assert.match(result.hosts[1].lastError, /^host-key-changed: /)
+  assert.ok(
+    result.hosts[1].lastError.match(/<fingerprint redacted>/g).length >= 2,
+    'both the pinned and the actual fingerprint are redacted',
+  )
+  assert.match(result.hosts[2].lastError, /<private-key path>/)
+})
+
 test('long fields are truncated instead of returned whole', async () => {
   const long = 'x'.repeat(5_000)
   const harness = makeHarness({
@@ -288,10 +350,7 @@ test('planted regression: an extra projected field fails the whitelist check', (
     count: 1,
     connected: 1,
   }
-  assert.throws(
-    () => assertMatchesSchema(harness.list.output.schema, leaky),
-    /authKeyPath is not declared in the schema/,
-  )
+  assert.throws(() => assertMatchesSchema(harness.list.output.schema, leaky), /authKeyPath is not declared/)
   assert.throws(() => assertNoSecrets(leaky), /leaked/)
 })
 
@@ -318,7 +377,7 @@ test('a service failure becomes a structured error instead of a throw', async ()
   const crash = makeHarness({
     service: {
       snapshot() {
-        throw new Error('store is unreadable')
+        throw new Error(`socket hang up while reading ${KEY_PATH} (${FINGERPRINT})`)
       },
     },
   })
@@ -326,19 +385,78 @@ test('a service failure becomes a structured error instead of a throw', async ()
   assertMatchesSchema(crash.list.output.schema, second)
   assert.equal(second.ok, false)
   assert.equal(second.error.code, 'INTERNAL')
-  assert.match(second.error.message, /store is unreadable/)
+  assert.match(second.error.message, /socket hang up/)
   assert.equal(second.error.retryable, true)
   assertNoSecrets(second)
+})
+
+test('a composition without a tools service keeps the plugin and registers nothing', () => {
+  const logs = []
+  const logger = { info: (...args) => logs.push(args) }
+  const service = { snapshot: () => ({ hosts: [] }) }
+  const ctx = { get: () => null, effect: () => assert.fail('no effect without a tools service') }
+  const dispose = registerHostTools(ctx, { service, logger })
+  assert.equal(logs.length, 1)
+  assert.match(String(logs[0][0]), /no tools service/)
+  assert.equal(typeof dispose, 'function', 'the caller still gets a disposer to call on unload')
+  assert.doesNotThrow(() => dispose())
+
+  // A kernel that throws on an undeclared lookup (cordis without `inject`) is the same case.
+  const throwing = {
+    get() {
+      throw new Error('cannot get property "tools" without inject')
+    },
+    effect: () => assert.fail('a throwing lookup must not park the plugin either'),
+  }
+  const other = registerHostTools(throwing, { service, logger })
+  assert.equal(logs.length, 2)
+  assert.match(String(logs[1][0]), /no tools service/)
+  assert.doesNotThrow(() => other())
+})
+
+test('a tools service that arrives later still gets the tool', () => {
+  const registered = new Map()
+  const childEffects = []
+  const childTools = {
+    register(definition) {
+      registered.set(definition.name, definition)
+      return () => registered.delete(definition.name)
+    },
+  }
+  const ctx = {
+    get: () => null,
+    inject(names, callback) {
+      assert.deepEqual(names, ['tools'])
+      // cordis runs the child plugin once the injected service is active.
+      callback({
+        tools: childTools,
+        effect(execute, label) {
+          childEffects.push(label)
+          const dispose = execute()
+          return () => dispose?.()
+        },
+      })
+      return () => registered.clear()
+    },
+  }
+  const dispose = registerHostTools(ctx, {
+    service: { snapshot: () => ({ hosts: [] }) },
+    logger: { info() {}, warn() {} },
+  })
+  assert.deepEqual([...registered.keys()], [LIST_TOOL_NAME], 'the parked fiber registered once tools appeared')
+  assert.deepEqual(childEffects, ['dsh-remote-go: model tools'])
+  dispose()
+  assert.equal(registered.size, 0)
 })
 
 test('a kernel that refuses the definition costs the tool, never the plugin', () => {
   const warnings = []
   const ctx = {
-    tools: {
+    get: () => ({
       register() {
         throw new TypeError('tool "remote_hosts_list" must declare output { schema, render }')
       },
-    },
+    }),
     effect(execute) {
       const dispose = execute()
       return () => dispose?.()
@@ -356,11 +474,11 @@ test('a kernel that refuses the definition costs the tool, never the plugin', ()
 test('a disposer that throws is contained instead of breaking the unload', () => {
   const warnings = []
   const ctx = {
-    tools: {
+    get: () => ({
       register: () => () => {
         throw new Error('dispose failed')
       },
-    },
+    }),
     effect(execute) {
       const dispose = execute()
       return () => dispose?.()
