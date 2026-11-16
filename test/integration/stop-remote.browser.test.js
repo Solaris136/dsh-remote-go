@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
-import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { resolveBrowser, skipOrFail } from './harness-support.js'
 
