@@ -122,7 +122,9 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
   用户选 `stop` / `alongside` 后才 `[start]`，`cancel` 保留原连接；选择 `stop` 记 `stoppedOwn=true`，失败不会
   “恢复”已停掉的实例（N3）。该合并发生在扫描失败分支之前：`findForeign` 失败但 knownProcess 存在时仍会弹冲突，
   只有扫描失败且无已知实例时才继续。`stopWeb` 未确认停止（`ok:false`）时不启动第二个实例，保留原连接、写
-  `HostView.warning`，用户可重试或先断开。
+  `HostView.warning`，用户可重试或先断开。`await stopWeb` 之后重新检查动作令牌，`resumeConnected` 还要求
+  `desired=connected` + SSH 在线 + 隧道非空；disconnect / removeHost 同窗口时迟到的动作只返回，不写状态、不起
+  心跳。成功挂载会清掉 `restart-stop` 来源的 warning，`alongside` 提示保留。
 
 ## 4. SSH、指纹与运行时
 `ssh.js` 封装 ssh2：`hostVerifier` 计算 `SHA256:<base64>`，按 `pinnedFingerprint` → `knownHostFingerprints` → `hostKeyPolicy` 决策；认证回退只有私钥文件 →（密码认证时）密码，不支持 Agent；`exec(command,{timeoutMs,stdin})` 统一返回 `{ code, stdout, stderr }`，`forwardOut` 供隧道与跳板机。`onHostKey` 由 service 提供：`strict` 直接抛 `host-key-unknown`，否则把指纹挂到 runtime 并返回 promise，`confirmFingerprint()` 或 120s 超时后 resolve。

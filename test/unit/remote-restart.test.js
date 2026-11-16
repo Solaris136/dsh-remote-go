@@ -1544,3 +1544,130 @@ test('a successful restart clears the tunnel rebuild backoff', async () => {
   assert.equal(runtime.tunnelRepairFailures, 0)
   await service.shutdown()
 })
+
+test('a disconnect during an unconfirmed stop never resurrects the connection', async () => {
+  const registry = registryStore(null)
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const stopped = []
+  let starts = 0
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      await gate
+      return { ok: false, output: 'still alive' }
+    },
+    startWeb: async () => {
+      starts += 1
+      return starts === 1 ? webInfo(38123, 'tok_first', 4242) : webInfo(38210, 'tok_second', 4343)
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  registry.set(REGISTRY)
+  const runtime = service.runtimes.get(host.id)
+  assert.equal((await service.restart(host.id)).accepted, true)
+  await waitFor(() => stopped.length === 1, { label: 'stopWeb in flight' })
+  const disconnect = service.disconnect(host.id)
+  release()
+  await disconnect
+  await sleep(60)
+  assert.equal(service.snapshot().hosts[0].status, 'disconnected')
+  assert.equal(runtime.status, 'disconnected')
+  assert.equal(runtime.tunnel, null)
+  assert.equal(runtime.remote.localPort, null)
+  assert.equal(runtime.heartbeatTimer, null, 'a late action must not start a heartbeat')
+  assert.equal(starts, 1, 'a late action must not start a new instance')
+  assert.throws(
+    () => service.openInfo(host.id),
+    (error) => error.code === 'remote-ui-unreachable',
+  )
+  await service.shutdown()
+})
+
+test('removing a host during an unconfirmed stop cannot resurrect it', async () => {
+  const registry = registryStore(null)
+  let release = () => {}
+  const gate = new Promise((resolve) => {
+    release = resolve
+  })
+  const stopped = []
+  let starts = 0
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      await gate
+      return { ok: false, output: 'still alive' }
+    },
+    startWeb: async () => {
+      starts += 1
+      return starts === 1 ? webInfo(38123, 'tok_first', 4242) : webInfo(38210, 'tok_second', 4343)
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  registry.set(REGISTRY)
+  const runtime = service.runtimes.get(host.id)
+  assert.equal((await service.restart(host.id)).accepted, true)
+  await waitFor(() => stopped.length === 1, { label: 'stopWeb in flight' })
+  const removal = service.removeHost(host.id)
+  release()
+  await removal
+  await sleep(60)
+  assert.equal(service.snapshot().hosts.length, 0)
+  assert.notEqual(runtime.status, 'connected', 'a removed runtime must not be resumed')
+  assert.equal(runtime.tunnel, null)
+  assert.equal(runtime.heartbeatTimer, null, 'a late action must not start a heartbeat on a removed host')
+  assert.equal(starts, 1)
+  await service.shutdown()
+})
+
+test('a successful restart clears only the unconfirmed-stop warning', async () => {
+  const registry = registryStore(null)
+  let stops = 0
+  let starts = 0
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    writeRegistry: registry.write,
+    stopWeb: async () => {
+      stops += 1
+      return stops === 1 ? { ok: false, output: 'still alive' } : { ok: true, output: 'STOPPED' }
+    },
+    startWeb: async () => {
+      starts += 1
+      return webInfo(38000 + starts, `tok_${starts}`, starts === 1 ? 4242 : 4300 + starts)
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  registry.set(REGISTRY)
+  const runtime = service.runtimes.get(host.id)
+  await service.restart(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected' && runtime.warningSource === 'restart-stop', {
+    label: 'unconfirmed stop warning',
+  })
+  assert.ok(runtime.warning)
+  await service.restart(host.id)
+  await waitFor(
+    () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38002,
+  )
+  assert.equal(runtime.warning, null, 'a successful restart makes the stop warning stale')
+  assert.equal(runtime.warningSource, null)
+  // An alongside warning describes a process that is still running: it survives a restart.
+  runtime.warning = { zh: '并存', en: 'alongside' }
+  runtime.warningSource = 'alongside'
+  await service.restart(host.id)
+  await waitFor(
+    () => service.snapshot().hosts[0].status === 'connected' && service.snapshot().hosts[0].remote.port === 38003,
+  )
+  assert.equal(runtime.warningSource, 'alongside')
+  assert.deepEqual(runtime.warning, { zh: '并存', en: 'alongside' })
+  await service.shutdown()
+})

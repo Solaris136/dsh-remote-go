@@ -283,6 +283,7 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
       zh: '远端已有手工启动的 DSH；已按你的选择并存运行，两者共享 ~/.dsh，请避免同时操作同一会话。',
       en: 'A manually started DSH is already running; it was kept as you chose. Both share ~/.dsh, so avoid editing the same session in both.',
     }
+    runtime.warningSource = 'alongside'
     return 'alongside'
   }
   const stopped = await ctx.deps.stopForeign(runtime.ssh, processes)
@@ -516,6 +517,12 @@ function markConnected(ctx, runtime) {
   // A fresh attach is a new listener budget: an old rebuild failure must not keep it in backoff.
   runtime.tunnelRepairFailures = 0
   runtime.nextTunnelRepairAt = 0
+  // A successful attach makes a previous "stop not confirmed" warning stale. An alongside
+  // warning keeps describing a process that is still running, so it is not cleared here.
+  if (runtime.warningSource === 'restart-stop') {
+    runtime.warning = null
+    runtime.warningSource = null
+  }
   startRemoteHeartbeat(ctx, runtime)
   ctx.emitState()
 }
@@ -781,6 +788,9 @@ function planForRuntime(ctx, runtime, profile) {
 
 /** Put a host back into its connected state without pretending the launch URL changed. */
 function resumeConnected(ctx, runtime) {
+  // A late action must never resurrect a link that was torn down or replaced while it waited:
+  // the token is checked by callers, and these are the other three proofs that it still exists.
+  if (runtime.desired !== 'connected' || runtime.ssh?.connected !== true || runtime.tunnel === null) return false
   runtime.status = 'connected'
   runtime.phase = 'ready'
   runtime.progress = { code: 'ready' }
@@ -788,6 +798,7 @@ function resumeConnected(ctx, runtime) {
   runtime.remote.uiReady = true
   startRemoteHeartbeat(ctx, runtime)
   ctx.emitState()
+  return true
 }
 
 /**
@@ -911,6 +922,9 @@ async function runRestart(ctx, runtime, token) {
 
     if (killable) {
       const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, { pid: managedPid })
+      // A stop can take seconds; the link may have been dropped or replaced in the meantime.
+      // A late action must not write warning/connected state on top of that.
+      if (!isLinkWorkCurrent(runtime, token)) return
       stoppedOwn = stopped?.ok === true
       if (stoppedOwn) {
         log('info', `restart: stopped the managed remote web pid=${managedPid}`)
@@ -922,13 +936,31 @@ async function runRestart(ctx, runtime, token) {
           zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试，或先断开再重连。',
           en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly, or disconnect and reconnect.',
         }
+        runtime.warningSource = 'restart-stop'
         log(
           'warn',
           `restart: the managed remote web did not confirm its stop; not launching a second instance (${
             String(stopped?.output ?? '').slice(0, 300) || 'no output'
           })`,
         )
-        resumeConnected(ctx, runtime)
+        if (resumeConnected(ctx, runtime)) return
+        // The link changed under us, or there was no tunnel to keep (restart from the error
+        // state): never publish a fake "connected" state; explain instead of staying stuck.
+        if (isLinkWorkCurrent(runtime, token) && runtime.status === 'connecting') {
+          const view = toErrorView(
+            errors.restartUnavailable({
+              zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试。',
+              en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly.',
+            }),
+          )
+          runtime.error = view
+          runtime.status = 'error'
+          runtime.phase = null
+          runtime.progress = null
+          runtime.remote.uiReady = false
+          ctx.progress.logFailure(runtime, view, { phase: 'start' })
+          ctx.emitState()
+        }
         return
       }
     }
