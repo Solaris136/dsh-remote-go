@@ -30,10 +30,13 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
 
 /** One plain GET against the isolated server, without the browser's cookie/console side effects. */
-function httpRequest(origin, requestPath, onResponse, onError) {
+function httpRequest(origin, requestPath, onResponse, onError, headers = {}) {
   const url = new URL(requestPath, origin)
   return http
-    .request({ host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'GET' }, onResponse)
+    .request(
+      { host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'GET', headers },
+      onResponse,
+    )
     .on('error', onError)
 }
 
@@ -199,7 +202,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     })
     await t.test('the host API and the same-origin remote view seat are mounted', async () => {
       const origin = new URL(server.url).origin
-      const probe = (requestPath) =>
+      const probe = (requestPath, headers = {}) =>
         new Promise((resolve, reject) => {
           const request = httpRequest(
             origin,
@@ -216,14 +219,25 @@ test('dsh web renders the host-management window with legible buttons', { timeou
               )
             },
             reject,
+            headers,
           )
           request.end()
         })
+      // The liveness probe needs no browser session; it is still fenced by Host.
       const health = await probe('/dsh-remote-go/api/health')
       assert.equal(health.status, 200)
       assert.match(health.type, /application\/json/)
-      const view = await probe('/dsh-remote-go/remote/h_missing/')
-      // The SPA fallback would answer its own page; the proxy owns the prefix and 404s unknown hosts.
+      // Every other route passes DSH admission first: a bare local client has no session and is
+      // refused, while the GUI's own session reaches the proxy — which owns the prefix and 404s
+      // unknown hosts instead of falling through to the SPA.
+      const unauthenticated = await probe('/dsh-remote-go/remote/h_missing/')
+      assert.equal(
+        unauthenticated.status,
+        401,
+        `unauthenticated view seat: ${JSON.stringify(unauthenticated)}\n${tail(server.logs)}`,
+      )
+      const cookie = (await page.cookies()).map((entry) => `${entry.name}=${entry.value}`).join('; ')
+      const view = await probe('/dsh-remote-go/remote/h_missing/', { cookie })
       assert.equal(view.status, 404, `remote view seat: ${JSON.stringify(view)}\n${tail(server.logs)}`)
       assert.match(view.type, /text\/plain/)
       assert.doesNotMatch(view.body, /DeepSeek Harness/)

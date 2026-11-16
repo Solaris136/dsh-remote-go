@@ -79,7 +79,9 @@ env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
   per-host cookie jar 里，不交给浏览器，本地 DSH 的 cookie 也不会转发给远端。
 - SSH 密码默认只用于本次连接（内存）；勾选保存后写入 DSH 凭据存储（插件自有记录空间，不进 `hosts.json`），其保护强度由 DSH 的凭据实现决定，插件不额外加密。
 - 主机指纹首次确认、变化强提示；诊断导出默认脱敏（token / 密码 / 私钥 / 家目录）。
-- 本地 HTTP API 要求同源 + 自定义请求头（`x-dsh-remote-go`）；同源代理使用同一 Origin / `sec-fetch-site` 栅栏。跨站请求被拒绝。
+- 本地 HTTP API 与同源代理的每条请求都先过本机 DSH 自己的准入（`Host`/`Origin` 栅栏 + 浏览器会话），
+  与 DSH 自带路由一致；之后再要求同源 + 自定义请求头（`x-dsh-remote-go`）。`Host` 必须是本机 origin，
+  所以 DNS rebinding 的页面（`Host` 是攻击者域名）和任何跨站请求都被拒绝。
 - 操作都在远端执行；首次进入提示「你正在操作远端服务器」，关闭时提示「远端任务会继续运行」。
 
 发现安全问题请**不要**公开提交 issue，通过 [GitHub Security Advisory](https://github.com/Solaris136/dsh-remote-go/security/advisories/new) 私密报告。

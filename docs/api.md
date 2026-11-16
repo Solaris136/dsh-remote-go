@@ -3,7 +3,10 @@
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
 > 成功 `{ "ok": true, ... }`；失败 `{ "ok": false, "error": ErrorView }`。除 `/health` 与 `/events` 外，所有请求必须带 `x-dsh-remote-go: 1`。
-> HTTP 状态：成功 200；缺头或跨站 403；未知路径 404；`invalid-input` 400；其余业务错误 409；未知异常 500。
+> **准入**：每条请求（`/health` 除外）在进入路由前先过本机 DSH 自己的准入——`Host`/`Origin` 栅栏 + 浏览器会话认证
+> （`ctx.connection.requestRejection`），与 DSH 自带路由同一套检查；`/health` 不要求会话，但仍过 Host/Origin 栅栏。
+> 内核没有该服务时（旧内核）退回本插件自己的标识头 + 同源栅栏。
+> HTTP 状态：成功 200；DSH 准入拒绝 401（会话未认证/失效）或 403（Host/Origin 不通过）；缺头或跨站 403；未知路径 404；`invalid-input` 400；其余业务错误 409；未知异常 500。
 >
 > **v2.0 变更**：移除镜像/工作区相关端点（`GET /local/workspaces`、`GET /hosts/:id/workspaces`、`GET /hosts/:id/mirrors`、`POST /hosts/:id/mirrors/sync`）。主机、连接、诊断与设置端点保持不变。
 >
@@ -37,6 +40,14 @@
 > `null`），`text` / `boundary` 可选：旧 Host 响应没有 `phase` 时 Client 不渲染阶段标签、
 > 按 `message` 原样显示；新 Host 响应给旧 Client 时，`message` 仍是可读的英文兜底。没有
 > 新增端点，其余字段与端点不变。
+>
+> **v2.8 鉴权注记**（同一版本内的准入收紧，端点与字段仍不变）：每条请求在进入路由前先过本机 DSH
+> 自己的准入（`ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话），拒绝为 **401**
+> （会话未认证/失效，写在 `ErrorView.code = invalid-input` 里，状态码区分）或 **403**（Host/Origin
+> 不通过、缺标识头、跨站）。`/events` 现在**需要浏览器会话凭据**（之前只校验 Origin）；`/health`
+> 只豁免会话、仍过 Host/Origin 栅栏；其余 JSON 路由与 `/dsh-remote-go/remote/<hostId>/` 代理路径
+> （含每主机一条的 `remote.mux` 升级）走同一套准入。内核没有 Connection 服务时退回本插件原来的
+> 标识头 / 同源栅栏，行为与 v2.7 一致。
 
 ## 0. 通用类型
 
@@ -205,7 +216,8 @@ interface StateView {
 
 ## 1. 端点
 
-### `GET /health`（免鉴权）
+### `GET /health`（无需浏览器会话，仍过 Host/Origin 栅栏）
+存活探针，不返回任何状态数据，因此不要求 DSH 浏览器会话；`Host` 仍必须是本机 origin，`Origin`（若有）必须同源。
 ```json
 { "ok": true, "version": "0.1.0", "at": "2026-11-14T00:00:00.000Z" }
 ```
@@ -215,8 +227,8 @@ interface StateView {
 { "ok": true, "state": StateView }
 ```
 
-### `GET /events`（SSE，仅 Origin 栅栏）
-`text/event-stream`：连接后立即推一帧 `state`，随后状态变化时推送，每 15s 一次 `ping`。EventSource 无法设置自定义请求头，因此该路由只校验 Origin 同源 / 非 cross-site。
+### `GET /events`（SSE，DSH 准入 + Origin/Host 栅栏）
+`text/event-stream`：连接后立即推一帧 `state`，随后状态变化时推送，每 15s 一次 `ping`。EventSource 无法设置自定义请求头，因此该路由先过 DSH 准入（Host/Origin 栅栏 + 浏览器会话），再过本插件的 Origin / Host 同源 / 非 cross-site 栅栏；没有会话的调用方在开流前就被拒绝（401），DNS rebinding 的调用方因 `Host` 不是本机 origin 被拒绝（403）。
 ```text
 event: state
 data: { ...StateView }
@@ -399,5 +411,7 @@ content-type: application/json
 4. 所有 `fetch` 使用 `credentials: 'same-origin'` 并带 `x-dsh-remote-go: 1`。
 5. guest 只允许 `http://127.0.0.1:<port>`；浏览器 iframe 只允许 `/dsh-remote-go/remote/<hostId>/` 形状的
    同源路径（拒绝绝对 URL、`//`、转义与路径穿越），两端都在交给承载器前再校验一次。
-6. 跨站请求（Origin 不同或 `sec-fetch-site: cross-site`）必须被拒绝；同源代理使用同一栅栏。
-7. 代理只服务 `connected` 主机：断开后同一 URL 立即不再有上游；远端的 cookie 只存在 Host 内存里。
+6. 每条请求先过本机 DSH 的准入（Host/Origin 栅栏 + 浏览器会话）；内核没有 Connection 服务时退回本插件自己的栅栏。
+7. `Host` 必须是本机监听 origin：DNS rebinding 下浏览器会带上攻击者的域名，这是唯一能拦下它的检查（`/events` 也只有这一道）。
+8. 跨站请求（Origin 不同或 `sec-fetch-site: cross-site`）必须被拒绝；同源代理使用同一栅栏。
+9. 代理只服务 `connected` 主机：断开后同一 URL 立即不再有上游；远端的 cookie 只存在 Host 内存里。

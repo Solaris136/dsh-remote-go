@@ -224,8 +224,11 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 
 ## 7. 安全
 - 远端界面只绑 `127.0.0.1`，经 SSH 隧道访问；本地 HTTP API 与同源代理只挂在本机 DSH Web 服务上。
-- 本地 API：`x-dsh-remote-go: 1` 头 + Origin 同源 + 拒绝 `sec-fetch-site: cross-site`；`/events` 只做 Origin 栅栏。
-  同源代理使用同一栅栏（iframe 导航与 WebSocket 无法加自定义头）。
+- 准入与 DSH 自带路由一致：每条请求先进 `ctx.connection.requestRejection`（Host/Origin 栅栏 + 浏览器会话），
+  内核没有该服务时退回插件自己的栅栏（旧内核仍可用）。`/health` 不要求会话，但仍过 Host/Origin 栅栏。
+- 本地 API：`x-dsh-remote-go: 1` 头 + `Host` 必须是本机 origin + Origin 同源 + 拒绝 `sec-fetch-site: cross-site`；
+  `/events` 只做 Host/Origin 栅栏（EventSource 不能加头）。同源代理使用同一份 `request-trust.js` 栅栏。
+  `Host` 检查挡的是 DNS rebinding：攻击页只能用 `Host` 声明自己的域名，而 `Host` 是它无法伪造的字段。
 - 同源代理只服务**已连接主机**：未知 / 未连接 id 直接 404，不建立上游连接；不代理调用方给出的任意 URL。
 - 远端 session cookie 只存在 Host 侧 per-host jar，浏览器拿不到；本地 DSH 的 cookie 也永不转发给远端。
   转发时 `Host`/`Origin` 改写为远端 listener 的 authority，远端的同源与 cookie 校验仍成立。

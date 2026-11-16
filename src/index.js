@@ -5,6 +5,7 @@
 import { API_PREFIX, PLUGIN_ID, REMOTE_VIEW_PREFIX } from './constants.js'
 import { statSync } from 'node:fs'
 import path from 'node:path'
+import { createAdmission } from './admission.js'
 import { createApi } from './api.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { createRemoteProxy } from './remote-proxy.js'
@@ -40,9 +41,14 @@ export function apply(ctx, config = {}) {
       return null
     }
   }
+  // DSH's own admission for every route this plugin serves: the kernel's Host/Origin fence plus
+  // browser-session authentication. `connection` is optional, so the gate hands the request to the
+  // plugin's own fence when the service is absent (see admission.js).
+  const admit = createAdmission(ctx, logger)
   const api = createApi({
     service,
     getOrigin,
+    admit,
     logger,
     diagnostics: () =>
       describeSelf(ctx, {
@@ -57,6 +63,7 @@ export function apply(ctx, config = {}) {
   const proxy = createRemoteProxy({
     webServer: ctx.webServer,
     getOrigin,
+    admit,
     resolveHost: (id) => service.webViewTarget(id),
     logger,
   })

@@ -14,18 +14,18 @@
  *   per connected host, because the local web server matches upgrades by exact pathname.
  *
  * It proxies nothing but a host that is currently connected: an unknown or disconnected host id
- * is a 404, and the same-origin fence rejects cross-site requests, matching the local API.
+ * is a 404, DSH's own admission decides whether the caller may use the seat at all, and the
+ * same-origin fence rejects cross-site requests, matching the local API.
  */
 import http from 'node:http'
 import net from 'node:net'
 import { REMOTE_VIEW_PREFIX } from './constants.js'
+import { trustedRequest } from './request-trust.js'
 
 /** How long the remote web UI's own stream route is (the only upgrade a DSH web serves). */
 const REMOTE_STREAM_PATH = '/api/remote.mux'
 
 const HOST_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
-
-const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
 
 /** Headers that describe one hop and must not be copied to the other connection. */
 const HOP_BY_HOP = new Set([
@@ -246,53 +246,6 @@ export function responseHeaders(rawHeaders, input = {}) {
   return out
 }
 
-/** The port a URL actually names, counting an omitted default port. */
-function effectivePort(url) {
-  if (url.port !== '') return url.port
-  return url.protocol === 'https:' ? '443' : '80'
-}
-
-/** Hostname/port match for a `Host` header (which carries no scheme). */
-function sameServerHost(value, origin) {
-  if (typeof value !== 'string' || value === '') return false
-  let candidate
-  try {
-    candidate = new URL(`${origin.protocol}//${value}`)
-  } catch {
-    return false
-  }
-  if (effectivePort(candidate) !== effectivePort(origin)) return false
-  if (candidate.hostname === origin.hostname) return true
-  return LOOPBACK_HOSTNAMES.has(origin.hostname) && LOOPBACK_HOSTNAMES.has(candidate.hostname)
-}
-
-/** Full same-origin match for an `Origin` header (scheme included). */
-function sameServerOrigin(value, origin) {
-  if (typeof value !== 'string' || value === '') return false
-  let candidate
-  try {
-    candidate = new URL(value)
-  } catch {
-    return false
-  }
-  return candidate.protocol === origin.protocol && sameServerHost(candidate.host, origin)
-}
-
-/**
- * The same-origin fence the local API uses, applied to a browser navigation and its subresources:
- * the request must name this server and must not be announced as cross-site.
- * @param {{ headers: Record<string, string | string[] | undefined> }} req
- * @param {URL} origin
- * @returns {boolean}
- */
-export function trustedRequest(req, origin) {
-  if (!sameServerHost(req.headers.host, origin)) return false
-  const originHeader = req.headers.origin
-  if (typeof originHeader === 'string' && originHeader !== '' && !sameServerOrigin(originHeader, origin)) return false
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false
-  return true
-}
-
 function plain(res, status, text) {
   const body = String(text)
   try {
@@ -315,6 +268,9 @@ function plain(res, status, text) {
  * @param {object} options.webServer - local DSH web server (register/registerUpgrade/getOrigin).
  * @param {() => string | null} options.getOrigin - local origin, read per request.
  * @param {(hostId: string) => ({ localPort: number, remotePort: number } | null)} options.resolveHost
+ * @param {(req: object) => (number | undefined)} [options.admit] - DSH admission
+ *   (`ctx.connection.requestRejection`): the rejection status for a request, or undefined when it may
+ *   proceed. Absent on kernels without the Connection service, where the fence below is the gate.
  * @param {{ warn?: Function, debug?: Function, error?: Function }} [options.logger]
  */
 export function createRemoteProxy(options) {
@@ -322,6 +278,7 @@ export function createRemoteProxy(options) {
   const webServer = options.webServer
   const getOrigin = options.getOrigin
   const resolveHost = options.resolveHost
+  const admit = typeof options.admit === 'function' ? options.admit : () => undefined
   const jars = new Map()
   const upgrades = new Map()
   const sockets = new Set()
@@ -357,6 +314,13 @@ export function createRemoteProxy(options) {
   function handle(req, res) {
     if (disposed) {
       plain(res, 503, 'proxy disposed')
+      return
+    }
+    // DSH's own admission gate runs before anything this module decides: the proxy reaches a
+    // connected host's remote session (its cookie jar), so only an admitted caller may use it.
+    const rejection = admit(req)
+    if (rejection !== undefined) {
+      plain(res, rejection, 'request rejected by DSH admission')
       return
     }
     const origin = localOrigin()
@@ -438,6 +402,16 @@ export function createRemoteProxy(options) {
   function handleUpgrade(hostId, req, socket, head) {
     if (disposed) {
       socket.destroy()
+      return
+    }
+    const rejection = admit(req)
+    if (rejection !== undefined) {
+      // An upgrade owns its socket: answer the handshake with the status, then close it.
+      socket.on('error', () => {})
+      socket.end(
+        `HTTP/1.1 ${rejection} ${http.STATUS_CODES[rejection] ?? 'Rejected'}\r\n` +
+          'connection: close\r\ncontent-length: 0\r\n\r\n',
+      )
       return
     }
     const origin = localOrigin()
