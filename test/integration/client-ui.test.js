@@ -92,6 +92,7 @@ function harnessPage() {
   window.__savedHost = null
   window.__connectMode = 'ok'
   window.__connectAttempts = 0
+  window.__settingsMode = 'ok'
   const json = (payload, status) => ({
     ok: status === undefined || status === 200, status: status || 200,
     headers: { get: () => 'application/json' },
@@ -137,6 +138,10 @@ function harnessPage() {
       }
       await delay(window.__connectMode === 'slow' ? 1200 : 150)
       return json({ ok: true })
+    }
+    if (url === '/dsh-remote-go/api/settings' && method === 'POST') {
+      if (window.__settingsMode === 'slow') await delay(1200)
+      return json({ ok: true, settings: window.__state.settings })
     }
     return json({ ok: true })
   }
@@ -551,6 +556,35 @@ window.ReactDOM = { createRoot }`,
         await closeManage()
       })
 
+      await t.test('the settings footer cancel follows the busy save', async () => {
+        await openManage()
+        await page.click('[data-testid="host-settings"]')
+        await page.waitForSelector('[data-testid="settings"]', { timeout: 5000 })
+        await page.evaluate(() => {
+          window.__settingsMode = 'slow'
+        })
+        await page.click('[data-testid="settings-save"]')
+        await page.waitForFunction(
+          () => document.querySelector('[data-testid="settings"]')?.getAttribute('aria-busy') === 'true',
+          { timeout: 5000 },
+        )
+        const cancel = await page.$('[data-testid="settings-cancel"]')
+        assert.ok(cancel)
+        assert.equal(await cancel.evaluate((node) => node.disabled), true)
+        await cancel.click()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="settings"]'))),
+          true,
+          'a save in flight cannot be cancelled from the footer',
+        )
+        await page.waitForFunction(() => !document.querySelector('[data-testid="settings"]'), { timeout: 5000 })
+        await page.evaluate(() => {
+          window.__settingsMode = 'ok'
+        })
+        await closeManage()
+      })
+
       await t.test('a dropped SSE stream shows polling and reconnects on demand', async () => {
         await openManage()
         await page.evaluate(() => window.__failStream())
@@ -762,7 +796,7 @@ window.ReactDOM = { createRoot }`,
             const layer = document.querySelector('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-error"]')
             return Boolean(layer && layer.style.display === 'flex')
           },
-          { timeout: 20_000 },
+          { timeout: 35_000 },
         )
         const layer = await page.evaluate(() => {
           const node = document.querySelector('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-error"]')

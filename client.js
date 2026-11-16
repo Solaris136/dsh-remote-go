@@ -4062,7 +4062,39 @@ window.__ModuleLoader__.load({
     const CARRIER_READY_TIMEOUT_MS = 1200
     const CARRIER_PAINT_TIMEOUT_MS = 320
     /** A framed page that never fires `load` still needs a visible failure and a way out. */
-    const CARRIER_LOAD_TIMEOUT_MS = 10000
+    const CARRIER_LOAD_TIMEOUT_MS = 25000
+
+    /**
+     * The one-shot timer behind a carrier's load failure. A cold remote on a slow SSH tunnel can
+     * take well over ten seconds for the whole document, so the timeout is deliberately generous;
+     * the timer only fires when no committed document arrived and is cancelled by the first real
+     * `load`. Exposed for the fake-clock test (`__test.createLoadGuard`).
+     */
+    function createLoadGuard(timeoutMs, onTimeout) {
+      let timer = null
+      let disposed = false
+      const cancel = () => {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
+        timer = null
+      }
+      return {
+        arm() {
+          if (disposed) return
+          cancel()
+          if (typeof setTimeout !== 'function') return
+          timer = setTimeout(() => {
+            timer = null
+            if (!disposed && typeof onTimeout === 'function') onTimeout()
+          }, timeoutMs)
+          unrefTimer(timer)
+        },
+        cancel,
+        dispose() {
+          disposed = true
+          cancel()
+        },
+      }
+    }
     /** Installing the injected row can fail while the sidebar is still mounting: retry soon. */
     const CARRIER_INSTALL_RETRY_MS = 1500
     const CARRIER_INSTALL_MAX_ATTEMPTS = 8
@@ -4710,37 +4742,24 @@ window.__ModuleLoader__.load({
         timer: null,
         installAttempts: 0,
         installTimer: null,
-        loadTimer: null,
+        /** Arms the "the document never committed" timer for this navigation. */
+        loadGuard: null,
         /** What the frame shows when the loaded document is not the DSH UI. */
         notDshMessage: typeof message === 'string' ? message : '',
       }
       frame.addEventListener('load', () => onWebFrameLoad(entry))
       root.append(style, frame, errorLayer)
       document.body.appendChild(root)
-      // Assign after the listener and the element are in place, so the first load is observed.
-      frame.src = url
-      armCarrierLoadTimeout(entry)
-      return entry
-    }
-
-    /** A frame that never commits still gets the failure layer instead of an empty window. */
-    function clearCarrierLoadTimeout(entry) {
-      if (entry === null || entry === undefined || entry.loadTimer === null || entry.loadTimer === undefined) return
-      if (typeof clearTimeout === 'function') clearTimeout(entry.loadTimer)
-      entry.loadTimer = null
-    }
-    function armCarrierLoadTimeout(entry) {
-      if (entry === null || entry === undefined) return
-      clearCarrierLoadTimeout(entry)
-      if (typeof setTimeout !== 'function') return
-      entry.loadTimer = setTimeout(() => {
-        entry.loadTimer = null
+      entry.loadGuard = createLoadGuard(CARRIER_LOAD_TIMEOUT_MS, () => {
         if (!carrierPool.entries.includes(entry)) return
         if (entry.ready === true) return
         showCarrierError(entry.errorLayer)
         markCarrierReady(entry)
-      }, CARRIER_LOAD_TIMEOUT_MS)
-      unrefTimer(entry.loadTimer)
+      })
+      // Assign after the listener and the element are in place, so the first load is observed.
+      frame.src = url
+      entry.loadGuard.arm()
+      return entry
     }
 
     function webWindow(entry) {
@@ -4766,7 +4785,7 @@ window.__ModuleLoader__.load({
       } catch (_error) {
         // a cross-origin document is handled below (the frame is reset to its view path)
       }
-      clearCarrierLoadTimeout(entry)
+      if (entry.loadGuard) entry.loadGuard.cancel()
       if (win === null) {
         // The framed page left this origin (an external link, an OAuth hop): a cross-origin
         // frame would hide the host switcher and trap the window there, so bring it back.
@@ -5020,7 +5039,7 @@ window.__ModuleLoader__.load({
         stopCarrierInstall(entry)
         try {
           entry.frame.src = url
-          armCarrierLoadTimeout(entry)
+          if (entry.loadGuard) entry.loadGuard.arm()
         } catch (_error) {
           // a frame that refuses a navigation reports it through the load event
         }
@@ -5042,7 +5061,7 @@ window.__ModuleLoader__.load({
 
     function disposeWebCarrier(entry) {
       stopCarrierInstall(entry)
-      clearCarrierLoadTimeout(entry)
+      if (entry.loadGuard) entry.loadGuard.dispose()
       try {
         entry.frame.src = 'about:blank'
       } catch (_error) {
@@ -6238,7 +6257,12 @@ window.__ModuleLoader__.load({
       }
       const set = (field) => (value) => patch({ [field]: value })
 
-      const fieldRow = (spec) => formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
+      const fieldRow = (spec) => {
+        const row = formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
+        // The settings body is built from `.map(fieldRow)`: every element needs a stable key or
+        // React reports a missing-key warning on every render.
+        return React.cloneElement(row, { key: spec.key })
+      }
       const focusField = (field) => {
         if (typeof document === 'undefined' || !document.querySelector) return
         const node = document.querySelector('[data-testid="settings-' + field + '"]')
@@ -6267,7 +6291,13 @@ window.__ModuleLoader__.load({
       }
 
       const footer = footerRow(
-        h(Button, { variant: 'ghost', onClick: props.onClose }, t('cancel')),
+        // Same dismissal contract as Escape / the backdrop / the header ×: a save in flight
+        // cannot be cancelled by the footer button either.
+        h(
+          Button,
+          { variant: 'ghost', testId: 'settings-cancel', disabled: saving, onClick: props.onClose },
+          t('cancel'),
+        ),
         h(
           Button,
           { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave },
@@ -8497,6 +8527,7 @@ window.__ModuleLoader__.load({
       limits: HOST_LIMITS,
       sanitizeGuestIntent,
       createCarrierErrorLayer,
+      createLoadGuard,
       captionMenuStart,
       withTimeout,
     }

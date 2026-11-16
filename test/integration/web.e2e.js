@@ -19,6 +19,7 @@ import {
   resolveDshCli,
   resolvePnpm,
   runCommand,
+  seedFixtureHost,
   skipOrFail,
   stopChild,
   tail,
@@ -129,6 +130,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
   const dshHome = path.join(tempRoot, 'home')
   const userDataDir = path.join(tempRoot, 'browser')
   mkdirSync(dshHome, { recursive: true })
+  seedFixtureHost(dshHome)
   const childEnv = { ...process.env, DSH_HOME: dshHome }
   if (pnpm.pathPrefix) childEnv.PATH = `${pnpm.pathPrefix}${path.delimiter}${process.env.PATH ?? ''}`
   if (harness.command.toLowerCase().endsWith('.exe')) childEnv.ELECTRON_RUN_AS_NODE = '1'

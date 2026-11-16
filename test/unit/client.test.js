@@ -3667,6 +3667,47 @@ test('a guest intent can act on its own host only', () => {
   assert.equal(sanitizeGuestIntent({ action: 'download-file', path: 'relative' }, 'h_a'), null)
 })
 
+test('a carrier load guard does not fire for a 15s slow document before the 25s budget', () => {
+  let now = 0
+  const timers = []
+  const client = loadClientPlugin({
+    setTimeout: (fn, ms) => {
+      const timer = { at: now + ms, fn, cancelled: false }
+      timers.push(timer)
+      return timer
+    },
+    clearTimeout: (timer) => {
+      timer.cancelled = true
+    },
+  })
+  const fired = []
+  const guard = client.__test.createLoadGuard(25000, () => fired.push(now))
+  const advance = (ms) => {
+    now += ms
+    for (const timer of [...timers]) {
+      if (timer.cancelled || timer.at > now) continue
+      timers.splice(timers.indexOf(timer), 1)
+      timer.fn()
+    }
+  }
+  guard.arm()
+  advance(15000)
+  assert.deepEqual(fired, [], 'a document still arriving at 15s must not be reported as failed')
+  advance(9999)
+  assert.deepEqual(fired, [])
+  advance(1)
+  assert.deepEqual(fired, [25000], 'only the 25s budget fires the failure layer')
+  // A cancelled timer (the document committed) never fires, and dispose makes arm() inert.
+  guard.arm()
+  guard.cancel()
+  advance(30000)
+  assert.deepEqual(fired, [25000])
+  guard.dispose()
+  guard.arm()
+  advance(30000)
+  assert.deepEqual(fired, [25000])
+})
+
 test('the caption menubar inset accepts unitless computed values', () => {
   const { captionMenuStart } = plugin.__test
   assert.equal(captionMenuStart(true, '84px'), '84px')

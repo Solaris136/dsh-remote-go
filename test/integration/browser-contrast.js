@@ -165,6 +165,12 @@ export async function assertMeasured(measured, mode) {
     measured.buttons.length >= 2,
     `${mode}: expected the plugin's action buttons, found ${measured.buttons.length}`,
   )
+  // A clean profile has no host cards, so `smallText` would be empty and the 4.5:1 loop below
+  // would never run (review nit 4). The fixtures seed one host; require it to be measured.
+  assert.ok(
+    (measured.smallText?.length ?? 0) > 0,
+    `${mode}: no 11-12px host-card metadata was measured; the contrast gate would be vacuous`,
+  )
   for (const button of measured.buttons) {
     const name = `${button.testId ?? button.text ?? 'button'}`
     assert.equal(

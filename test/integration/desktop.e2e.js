@@ -17,6 +17,7 @@ import {
   resolveDesktopApp,
   resolvePnpm,
   runCommand,
+  seedFixtureHost,
   skipOrFail,
   stopChild,
   tail,
@@ -212,6 +213,7 @@ test('the desktop shell renders the host-management window with legible buttons'
   const dshHome = path.join(tempRoot, 'home')
   const userDataDir = path.join(tempRoot, 'userdata')
   mkdirSync(dshHome, { recursive: true })
+  seedFixtureHost(dshHome)
   mkdirSync(userDataDir, { recursive: true })
   const childEnv = { ...process.env, DSH_HOME: dshHome }
   if (pnpm.pathPrefix) childEnv.PATH = `${pnpm.pathPrefix}${path.delimiter}${process.env.PATH ?? ''}`
