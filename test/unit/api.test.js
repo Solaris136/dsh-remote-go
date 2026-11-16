@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import { createAdmission } from '../../src/admission.js'
 import { createApi } from '../../src/api.js'
 import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
@@ -371,6 +372,80 @@ test('DSH admission runs before dispatch and covers the SSE route', async () => 
     const health = await call(api.base, '/health')
     assert.equal(health.status, 200)
     assert.deepEqual(paths, ['/dsh-remote-go/api/state', '/dsh-remote-go/api/events', '/dsh-remote-go/api/state'])
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a failing DSH admission rejects the request instead of admitting it', async () => {
+  const { service } = await makeTestService()
+  const logged = []
+  const admit = createAdmission(
+    {
+      get: () => ({
+        requestRejection() {
+          throw new Error('kernel exploded')
+        },
+      }),
+    },
+    { warn: (...args) => logged.push(args.map(String).join(' ')) },
+  )
+  assert.equal(admit({ headers: {} }), 500)
+  const api = await startApi(service, { admit })
+  try {
+    const state = await call(api.base, '/state')
+    assert.equal(state.status, 500)
+    assert.equal(state.json.ok, false)
+    assert.equal(state.json.error.code, 'internal')
+    // A rejected request never reaches its route: the write below must not have happened.
+    const active = await call(api.base, '/active', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'h_never' }),
+    })
+    assert.equal(active.status, 500)
+    assert.equal(service.snapshot().activeHostId, null)
+    const events = await call(api.base, '/events')
+    assert.equal(events.status, 500)
+    // One warning from the direct call above, one per rejected request; none of them silent.
+    assert.equal(logged.length, 4, logged.join('\n'))
+    for (const line of logged) assert.match(line, /admission failed/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('without the Connection service the plugin keeps its own fence, Host check included', async () => {
+  const { service } = await makeTestService()
+  const admit = createAdmission({ get: () => undefined }, { warn() {} })
+  assert.equal(admit({ headers: {} }), undefined)
+  // A context that cannot report services at all degrades the same way, with a warning.
+  assert.equal(createAdmission({}, { warn() {} })({ headers: {} }), undefined)
+  const brokenLookup = createAdmission(
+    {
+      get() {
+        throw new Error('reflection unavailable')
+      },
+    },
+    { warn() {} },
+  )
+  assert.equal(brokenLookup({ headers: {} }), undefined)
+  const api = await startApi(service, { admit })
+  try {
+    // The marker header is the old gate again, but the Host self-check still bites.
+    const local = `127.0.0.1:${api.port}`
+    const allowed = await rawGet(api.base, '/state', { host: local, ...HEADER })
+    assert.equal(allowed.status, 200)
+    const rebound = await rawGet(api.base, '/state', {
+      host: 'attacker.example',
+      'sec-fetch-site': 'same-origin',
+      ...HEADER,
+    })
+    assert.equal(rebound.status, 403)
+    const events = await rawGet(api.base, '/events', { host: `attacker.example:${api.port}` })
+    assert.equal(events.status, 403)
   } finally {
     await api.close()
     await service.shutdown()

@@ -71,6 +71,10 @@ export function createApi(options) {
 
   /** Response body for an admission rejection: the kernel decided, and this route never ran. */
   function admissionView(status) {
+    // A gate that could not decide is this plugin's problem, not a client mistake.
+    if (status === 500) {
+      return { ok: false, error: toErrorView(errors.internal('the DSH connection admission check failed')) }
+    }
     const detail =
       status === 401
         ? {

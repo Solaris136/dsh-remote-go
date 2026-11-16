@@ -159,6 +159,19 @@ test('the proxy fence mirrors the local API: same host authority, same Origin, n
   assert.equal(trustedRequest({ headers: { host: '127.0.0.1' } }, new URL('http://127.0.0.1:80')), true)
   assert.equal(trustedRequest({ headers: { host: '127.0.0.1' } }, new URL('https://127.0.0.1')), true)
   assert.equal(trustedRequest({ headers: { host: '127.0.0.1' } }, new URL('https://127.0.0.1:443')), true)
+  // Host is case-insensitive, and a loopback spelling may differ from the listener's own.
+  assert.equal(trustedRequest({ headers: { host: 'LOCALHOST:57442' } }, origin), true)
+  // A parser has to rewrite each of these into a loopback authority; a browser fills Host from the
+  // serialized URL, so such a value never arrives from one — and the fence must not trust it.
+  for (const host of [
+    'attacker.example@127.0.0.1:57442',
+    '127.0.0.1:57442\\@attacker.example',
+    '127.0.0.1:57442#@attacker.example',
+    '127.0.0.1.:57442',
+    '127.0.0.1:057442',
+  ]) {
+    assert.equal(trustedRequest({ headers: { host } }, origin), false, `Host ${JSON.stringify(host)} must be rejected`)
+  }
 })
 
 test('response headers drop the remote cookie, framing denial and remote redirects', () => {

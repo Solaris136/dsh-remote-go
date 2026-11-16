@@ -33,6 +33,12 @@ export function sameServerHost(value, origin) {
   } catch {
     return false
   }
+  // WHATWG parsing rewrites anything that is not a bare authority: `user@host` drops its userinfo,
+  // a backslash becomes a path separator, `#`/`?` start the fragment/query, and a trailing dot or a
+  // zero-padded port is normalized away. A browser fills `Host` from the serialized URL, so a value
+  // the parser had to rewrite is not an authority this server answers to; comparing the rewritten
+  // hostname would let `attacker.example@127.0.0.1:port` pass as loopback.
+  if (candidate.host !== value.toLowerCase()) return false
   if (effectivePort(candidate) !== effectivePort(origin)) return false
   if (candidate.hostname === origin.hostname) return true
   return LOOPBACK_HOSTNAMES.has(origin.hostname) && LOOPBACK_HOSTNAMES.has(candidate.hostname)
