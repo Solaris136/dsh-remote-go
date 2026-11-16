@@ -95,6 +95,26 @@ function flakyRenameFs(suffix, failures) {
   })
 }
 
+/** A filesystem whose read of one file fails like a permission problem, not like bad JSON. */
+function unreadableFs(suffix) {
+  return new Proxy(realFs, {
+    get(target, prop, receiver) {
+      if (prop === 'readFile') {
+        return async (/** @type {string} */ file, ...rest) => {
+          if (typeof file === 'string' && file.endsWith(suffix)) {
+            const error = new Error('permission denied')
+            error.code = 'EACCES'
+            throw error
+          }
+          return realFs.readFile(file, ...rest)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
 async function tempStore() {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-'))
   const store = new HostStore({ dir, logger: { warn() {} } })
@@ -153,6 +173,77 @@ test('settings round-trip and malformed file recovery', async () => {
   const recovered = new HostStore({ dir, logger: { warn() {} } })
   await recovered.load()
   assert.equal(recovered.getSettings().defaultPort, 22)
+  // The damaged bytes survive as a `.corrupt-<stamp>` copy beside the recovered file.
+  const backups = (await readdir(dir)).filter((name) => name.startsWith('settings.json.corrupt-'))
+  assert.equal(backups.length, 1)
+  assert.equal(await readFile(path.join(dir, backups[0]), 'utf8'), '{not json')
+})
+
+test('a corrupt hosts.json is kept aside instead of being silently overwritten', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-corrupt-'))
+  const original = '{"hosts":[{"id":"h_pinned","pinnedFingerprint":"SHA256:abc"'
+  await writeFile(path.join(dir, 'hosts.json'), original, 'utf8')
+  const store = new HostStore({ dir, logger: { warn() {} } })
+  await store.load()
+  assert.deepEqual(store.listHosts(), [])
+  assert.equal(store.hostsCorrupt, true)
+  const backups = (await readdir(dir)).filter((name) => name.startsWith('hosts.json.corrupt-'))
+  assert.equal(backups.length, 1)
+  // One write after the recovery must touch the recovered file only, never the copy.
+  await store.upsertHost({ address: 'new.example.com' })
+  const written = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
+  assert.deepEqual(
+    written.map((host) => host.address),
+    ['new.example.com'],
+  )
+  assert.equal(await readFile(path.join(dir, backups[0]), 'utf8'), original)
+  // The recovered file is authoritative again: no permanent "corrupt" warning.
+  assert.equal(store.hostsCorrupt, false)
+})
+
+test('a file that merely could not be read is left in place, not quarantined', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-store-unreadable-'))
+  await writeFile(path.join(dir, 'hosts.json'), '[{"id":"h_x","address":"kept.example.com"}]', 'utf8')
+  const store = new HostStore({ dir, logger: { warn() {} }, fsImpl: unreadableFs('hosts.json') })
+  await store.load()
+  // This run falls back to an empty list…
+  assert.deepEqual(store.listHosts(), [])
+  assert.equal(store.hostsCorrupt, false, 'a read error is not corruption')
+  // …but the bytes are still there for the next run, and nothing was renamed.
+  assert.deepEqual(
+    (await readdir(dir)).filter((name) => name.includes('.corrupt-')),
+    [],
+  )
+  const kept = JSON.parse(await readFile(path.join(dir, 'hosts.json'), 'utf8'))
+  assert.equal(kept[0].address, 'kept.example.com')
+})
+
+test('saveSettings patches the current settings instead of resetting sibling fields', async () => {
+  const { store } = await tempStore()
+  await store.saveSettings({ autoReconnect: { maxAttempts: 12, baseDelayMs: 5000 } })
+  assert.equal(store.getSettings().autoReconnect.baseDelayMs, 5000)
+  // A nested patch used to be spread over the defaults, so this call rewound baseDelayMs 5000 -> 800.
+  const patched = await store.saveSettings({ autoReconnect: { maxAttempts: 3 } })
+  assert.equal(patched.autoReconnect.maxAttempts, 3)
+  assert.equal(patched.autoReconnect.baseDelayMs, 5000)
+  assert.equal(patched.autoReconnect.enabled, true)
+  assert.equal(patched.defaultPort, 22)
+})
+
+test('a host id is issued by the store, never taken from the caller', async () => {
+  const { store } = await tempStore()
+  const created = await store.upsertHost({ id: 'pwned', address: 'a.example.com' })
+  assert.match(created.id, /^h_[a-z0-9]{1,32}$/)
+  assert.notEqual(created.id, 'pwned')
+  const updated = await store.upsertHost({ id: created.id, address: 'b.example.com' })
+  assert.equal(updated.id, created.id)
+  assert.equal(updated.address, 'b.example.com')
+  const oversized = `h_${'z'.repeat(200)}`
+  const forged = await store.upsertHost({ id: oversized, address: 'c.example.com' })
+  assert.match(forged.id, /^h_[a-z0-9]{1,32}$/)
+  assert.notEqual(forged.id, oversized)
+  // Two hosts: the second call updated the first; the forged id added its own entry.
+  assert.equal(store.listHosts().length, 2)
 })
 
 test('tokens are only stored when saveTokens is enabled', async () => {
@@ -166,6 +257,20 @@ test('tokens are only stored when saveTokens is enabled', async () => {
   assert.equal(secrets[host.id], 'token-a')
   await store.saveSettings({ saveTokens: false })
   assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'secrets.json'), 'utf8')), {})
+})
+
+test('saveToken reads the secrets file before writing it', async () => {
+  const { store, dir } = await tempStore()
+  await store.saveSettings({ saveTokens: true })
+  const hostA = await store.upsertHost({ address: 'a.example.com' })
+  const hostB = await store.upsertHost({ address: 'b.example.com' })
+  await store.saveToken(hostA.id, 'token-a')
+  // A fresh instance (nothing loaded yet) used to write `{ b: token-b }` over the whole file.
+  const fresh = new HostStore({ dir, logger: { warn() {} } })
+  await fresh.saveToken(hostB.id, 'token-b')
+  const secrets = JSON.parse(await readFile(path.join(dir, 'secrets.json'), 'utf8'))
+  assert.equal(secrets[hostA.id], 'token-a')
+  assert.equal(secrets[hostB.id], 'token-b')
 })
 
 test('hosts.json never contains password fields', async () => {

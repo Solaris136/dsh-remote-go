@@ -179,15 +179,32 @@ async function syncDir(fsImpl, dir) {
   }
 }
 
+/**
+ * Read one JSON state file.
+ *
+ * The three outcomes are deliberately distinct: `missing` (never written), `corrupt` (the bytes
+ * are not JSON — the caller may quarantine them and recover) and `unreadable` (the file exists
+ * but could not be read: EACCES/EPERM/EISDIR/IO). A merely unreadable file must not be renamed
+ * away: that would turn a transient permission problem into a lost host list.
+ * @param {string} file
+ * @param {{ fs?: object, logger?: object }} [options]
+ * @returns {Promise<{ status: 'ok', value: any } | { status: 'missing'|'corrupt'|'unreadable', value: null }>}
+ */
 export async function readJsonFile(file, options = {}) {
   const fsImpl = options.fs ?? fs
   const logger = options.logger ?? console
+  let text
   try {
     if (!existsSync(file)) return { status: 'missing', value: null }
-    const text = await fsImpl.readFile(file, 'utf8')
-    return { status: 'ok', value: JSON.parse(text) }
+    text = await fsImpl.readFile(file, 'utf8')
   } catch (error) {
     logger.warn?.(`[dsh-remote-go] cannot read ${path.basename(file)}:`, error)
+    return { status: 'unreadable', value: null }
+  }
+  try {
+    return { status: 'ok', value: JSON.parse(text) }
+  } catch (error) {
+    logger.warn?.(`[dsh-remote-go] ${path.basename(file)} is not valid JSON:`, error)
     return { status: 'corrupt', value: null }
   }
 }

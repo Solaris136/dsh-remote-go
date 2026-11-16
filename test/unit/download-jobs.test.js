@@ -58,6 +58,22 @@ test('a folder job writes to the chosen directory', async () => {
   assert.ok(events.some((job) => job.kind === 'folder'))
 })
 
+test('the job carries the home root the API judged against into the writer', async () => {
+  const seen = []
+  const { jobs } = makeJobs(async (_runtime, _path, options) => {
+    seen.push(options.home)
+    return { kind: 'file', name: 'a.txt', destination: '/home/me/Downloads/a.txt', totalBytes: 1, files: 1 }
+  })
+  const started = jobs.start(runtime, '/home/ubuntu/a.txt', {
+    destination: '/home/me/Downloads',
+    home: '/home/me',
+  })
+  await tick(20)
+  // The writer must judge the same root the pre-flight used, not `os.homedir()`.
+  assert.deepEqual(seen, ['/home/me'])
+  assert.equal('home' in jobs.status(started.id), false, 'the home root is not part of the client view')
+})
+
 test('a failed preparation publishes a client-safe error and keeps the job for inspection', async () => {
   const { jobs, events } = makeJobs(async () => {
     throw errors.remoteFileUnavailable({

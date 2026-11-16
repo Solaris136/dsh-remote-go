@@ -38,7 +38,12 @@ function normalizeText(value) {
 }
 
 export function appendConnectLog(runtime, input) {
-  const message = typeof input.message === 'string' ? input.message : String(input.message ?? '')
+  const raw = typeof input.message === 'string' ? input.message : String(input.message ?? '')
+  // The remote's own stdout arrives here (`remote-web.js` hands every start line to `onLine`, and
+  // the first one is the launch URL with its session token). This ring is the second exit of that
+  // text — `HostView.logs`, the SSE state frames and the diagnostics export all read it — so it
+  // is redacted at write time, not only when the failure view is built.
+  const message = headTail(redactText(raw), LOG_TECHNICAL_LIMIT)
   const entry = {
     seq: (typeof runtime.logSeq === 'number' ? runtime.logSeq : 0) + 1,
     at: typeof input.at === 'string' ? input.at : '',

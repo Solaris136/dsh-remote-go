@@ -4,6 +4,7 @@
 import { EventEmitter } from 'node:events'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
 import {
+  MIN_DSH_VERSION,
   REMOTE_CONFLICT_TIMEOUT_MS,
   REMOTE_REATTACH_ATTEMPTS,
   REMOTE_REATTACH_INTERVAL_MS,
@@ -36,13 +37,14 @@ import {
   snapshot,
 } from './host-registry.js'
 import { disconnectHost, noteRemoteUnreachable, shutdownAll } from './host-lifecycle.js'
+import { requireDestination } from './local-download.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { ensureRemoteNode } from './node-runtime.js'
 import { confirmConflict, confirmHostKey } from './prompts.js'
 import { probeRemote } from './probe.js'
 import { SshConnection } from './ssh.js'
 import { createTunnel, probeLoopback } from './tunnel.js'
-import { normalizeVersion } from './version.js'
+import { compareVersions, normalizeVersion, parseVersion } from './version.js'
 import { nowIso } from './util.js'
 import {
   adoptRemoteWeb,
@@ -183,12 +185,43 @@ export class RemoteGoService extends EventEmitter {
     }
   }
 
-  setLocalVersion(version) {
-    const normalized = version ? normalizeVersion(version) : null
-    if (normalized) {
-      this.localVersion = normalized
-      this.emitState()
+  /**
+   * Adopt a DSH version for this machine.
+   *
+   * `source === 'client'` is the browser's `POST /local-version` backfill: it exists for the
+   * case where the Host could not detect the version by itself, so it must never overwrite a
+   * detected one, and it must stay inside the range this plugin supports. Without both guards
+   * any local page could pin the remote npx runtime (and the version-parity check) to a value
+   * of its choosing.
+   * @param {unknown} version - a DSH semver string.
+   * @param {string} [source] - where the value came from; only `client` is distrusted.
+   * @returns {boolean} whether the value was adopted.
+   */
+  setLocalVersion(version, source = 'detected') {
+    const normalized = version ? normalizeVersion(String(version)) : null
+    const valid = normalized !== null && parseVersion(normalized) !== null
+    if (source === 'client') {
+      if (this.localVersion !== null) return false
+      // A page may only name a real DSH version: a typo or a crafted value is a client mistake
+      // (400), not a silent no-op the page could mistake for success.
+      if (!valid) {
+        throw errors.invalidInput('version', {
+          zh: '本机 DSH 版本格式不合法。',
+          en: 'The local DSH version is not a valid version.',
+        })
+      }
+      if (compareVersions(normalized, MIN_DSH_VERSION) < 0) {
+        throw errors.invalidInput('version', {
+          zh: `本机 DSH 版本 ${normalized} 低于插件要求的最低版本 ${MIN_DSH_VERSION}。`,
+          en: `Local DSH ${normalized} is below the minimum this plugin supports (${MIN_DSH_VERSION}).`,
+        })
+      }
+    } else if (!valid) {
+      return false
     }
+    this.localVersion = normalized
+    this.emitState()
+    return true
   }
 
   setLocalEnginesNode(range) {
@@ -332,7 +365,16 @@ export class RemoteGoService extends EventEmitter {
    */
   async startRemoteDownload(id, path, options = {}) {
     await this.init()
-    return this.downloads.start(runtimeOf(this.ctx, id), path, options)
+    const runtime = runtimeOf(this.ctx, id)
+    // One home root for both checks: the pre-flight below and the write itself. Falling back to
+    // `os.homedir()` later could disagree with `userHome()` when HOME/USERPROFILE is unset, and
+    // then a destination accepted here would be refused by the job.
+    const home = this.userHome()
+    // The local folder is checked before a job exists: a refused destination is the caller's
+    // mistake (HTTP 400 `invalid-input`), not a job that first answers `preparing` and then
+    // reports the refusal asynchronously (which also wasted a job slot and an SFTP stat).
+    await requireDestination(options.destination, { home })
+    return this.downloads.start(runtime, path, { ...options, home })
   }
 
   /** Current view of one download job. */

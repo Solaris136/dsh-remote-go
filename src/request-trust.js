@@ -46,18 +46,30 @@ export function sameServerHost(value, origin) {
 
 /**
  * Full same-origin match for an `Origin` header (scheme included).
+ *
+ * The authority is compared verbatim (case-insensitively) as well as through `sameServerHost`.
+ * A browser fills `Origin` from the serialized URL, so anything the URL parser had to rewrite —
+ * `user@host`, a trailing dot, a zero-padded port — cannot have come from one, and letting the
+ * rewritten form through would accept `http://attacker.example@127.0.0.1:port` as loopback.
  * @param {string | undefined} value - verbatim `Origin` header.
  * @param {URL} origin - this listener's own origin.
  * @returns {boolean}
  */
 export function sameServerOrigin(value, origin) {
   if (typeof value !== 'string' || value === '') return false
+  // One trailing slash is tolerated (`Origin: http://host/` is not what a browser sends, but a
+  // hand-written caller may); no regex on this string, it is attacker-controlled.
+  const text = value.endsWith('/') ? value.slice(0, -1) : value
   let candidate
   try {
-    candidate = new URL(value)
+    candidate = new URL(text)
   } catch {
     return false
   }
+  // Drop the scheme without a regex: `scheme://rest` is the only shape left after URL parsing.
+  const schemeEnd = text.indexOf('://')
+  const authority = schemeEnd === -1 ? '' : text.slice(schemeEnd + 3)
+  if (authority.toLowerCase() !== candidate.host) return false
   return candidate.protocol === origin.protocol && sameServerHost(candidate.host, origin)
 }
 

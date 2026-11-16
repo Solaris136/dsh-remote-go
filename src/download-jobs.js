@@ -92,6 +92,8 @@ export function createDownloadJobs(options) {
     try {
       const result = await readDownload(runtime, job.path, {
         destination: job.destination ?? undefined,
+        // The same home root the API pre-flight used; the write is judged by it again.
+        home: job.home,
         isCancelled: () => job.cancelled === true,
         onInventory: (info) => {
           if (job.cancelled) return
@@ -167,6 +169,8 @@ export function createDownloadJobs(options) {
         totalFiles: 0,
         doneFiles: 0,
         destination: typeof options.destination === 'string' && options.destination !== '' ? options.destination : null,
+        // The local home root the destination policy must judge against; not part of the view.
+        home: typeof options.home === 'string' && options.home !== '' ? options.home : undefined,
         startedAt: new Date(now()).toISOString(),
         error: null,
         timer: null,

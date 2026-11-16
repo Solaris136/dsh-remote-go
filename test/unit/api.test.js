@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createAdmission } from '../../src/admission.js'
 import { createApi } from '../../src/api.js'
+import { errors } from '../../src/errors.js'
 import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
@@ -73,15 +74,87 @@ function rawGet(base, path, headers) {
   })
 }
 
-test('health is open, every other endpoint requires the local plugin header', async () => {
+/** One GET whose response is dropped as soon as the headers arrive (for never-ending streams). */
+function rawHead(base, path, headers) {
+  const url = new URL(`${base}${path}`)
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: url.hostname, port: url.port, path: url.pathname + url.search, method: 'GET', headers },
+      (response) => {
+        const status = response.statusCode
+        response.destroy()
+        resolve({ status })
+      },
+    )
+    request.on('error', reject)
+    request.end()
+  })
+}
+
+/** Race one promise against a deadline so a broken SSE case cannot hang the suite. */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out: ${label}`)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
+  })
+}
+
+/** One open `/events` stream: its response, the collected frames and a promise that it ended. */
+function openSse(base) {
+  const url = new URL(`${base}/events`)
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      { host: url.hostname, port: url.port, path: url.pathname, method: 'GET' },
+      (response) => {
+        let text = ''
+        response.setEncoding('utf8')
+        response.on('data', (chunk) => {
+          text += chunk
+        })
+        const ended = new Promise((endResolve) => {
+          response.once('end', () => endResolve('end'))
+          response.once('close', () => endResolve('close'))
+        })
+        resolve({
+          request,
+          response,
+          text: () => text,
+          ended: ended.then(() => text),
+        })
+      },
+    )
+    request.on('error', reject)
+    request.end()
+  })
+}
+
+/** Wait until one SSE client's collected text contains `needle`. */
+async function waitForText(client, needle, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (client.text().includes(needle)) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`SSE frame ${needle} never arrived; got ${JSON.stringify(client.text().slice(0, 200))}`)
+}
+
+test('health is a bare liveness probe; every other endpoint requires the local plugin header', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)
   try {
     const health = await fetch(`${api.base}/health`)
     assert.equal(health.status, 200)
-    const healthJson = await health.json()
-    assert.equal(healthJson.ok, true)
-    assert.equal(typeof healthJson.version, 'string')
+    // `{ ok: true }` only: this route needs no session, so it must carry no state at all.
+    assert.deepEqual(await health.json(), { ok: true })
     const unauth = await fetch(`${api.base}/state`)
     assert.equal(unauth.status, 403)
     const body = await unauth.json()
@@ -163,43 +236,40 @@ test('POST /downloads starts a job; status and cancel are separate', async () =>
     const host = await createHost(service)
     const started = []
     let cancelled = null
-    service.downloads = {
-      start(runtime, path, options) {
-        started.push({ runtimeId: runtime.id, path, destination: options?.destination })
-        return {
-          id: 'dl_1',
-          hostId: runtime.id,
-          path,
-          name: 'report.bin',
-          kind: 'file',
-          phase: 'preparing',
-          totalBytes: 0,
-          doneBytes: 0,
-          totalFiles: 0,
-          doneFiles: 0,
-          destination: options?.destination ?? null,
-          error: null,
-        }
-      },
-      status(id) {
-        return {
-          id,
-          phase: 'ready',
-          name: 'report.bin',
-          kind: 'file',
-          totalBytes: 4,
-          doneBytes: 4,
-          totalFiles: 1,
-          doneFiles: 1,
-          destination: 'C:/Users/me/Downloads/report.bin',
-          error: null,
-        }
-      },
-      cancel(id) {
-        cancelled = id
-        return true
-      },
-      dispose() {},
+    // The local folder check lives in `service.startRemoteDownload` (see the refusal test below);
+    // this case is about the HTTP shapes, so it stubs the three route-level methods.
+    service.startRemoteDownload = async (id, path, options) => {
+      started.push({ runtimeId: id, path, destination: options?.destination })
+      return {
+        id: 'dl_1',
+        hostId: id,
+        path,
+        name: 'report.bin',
+        kind: 'file',
+        phase: 'preparing',
+        totalBytes: 0,
+        doneBytes: 0,
+        totalFiles: 0,
+        doneFiles: 0,
+        destination: options?.destination ?? null,
+        error: null,
+      }
+    }
+    service.remoteDownloadStatus = async (id) => ({
+      id,
+      phase: 'ready',
+      name: 'report.bin',
+      kind: 'file',
+      totalBytes: 4,
+      doneBytes: 4,
+      totalFiles: 1,
+      doneFiles: 1,
+      destination: 'C:/Users/me/Downloads/report.bin',
+      error: null,
+    })
+    service.cancelRemoteDownload = async (id) => {
+      cancelled = id
+      return true
     }
     const start = await call(api.base, '/downloads', {
       method: 'POST',
@@ -478,10 +548,11 @@ test('settings and local-version endpoints update the snapshot', async () => {
     const version = await call(api.base, '/local-version', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ version: '0.2.2-rc.1' }),
+      body: JSON.stringify({ version: '0.2.2-rc.3' }),
     })
     assert.equal(version.status, 200)
-    assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
+    assert.equal(version.json.accepted, true)
+    assert.equal(service.snapshot().hostVersion, '0.2.2-rc.3')
     const settings = await call(api.base, '/settings', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -781,6 +852,432 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.apiVersion, '2.9')
   } finally {
     await api.close()
+    await service.shutdown()
+  }
+})
+
+// --- Audit regressions: each test proves a blocked behavior, not that a helper exists. ---
+
+test('the same-origin fence accepts every loopback spelling of this listener', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    // A user who opened the GUI on `localhost` sends `Origin: http://localhost:<port>` and
+    // `Host: localhost:<port>`. The old string comparison rejected every write (403) while a
+    // request without an Origin still worked, which is the "can read but cannot write" bug.
+    const localhostOrigin = `http://localhost:${api.port}`
+    const localhost = await rawGet(api.base, '/state', {
+      host: `localhost:${api.port}`,
+      origin: localhostOrigin,
+      ...HEADER,
+    })
+    assert.equal(localhost.status, 200)
+    assert.equal(localhost.json.ok, true)
+    const ipv6 = await rawGet(api.base, '/state', {
+      host: `[::1]:${api.port}`,
+      origin: `http://[::1]:${api.port}`,
+      ...HEADER,
+    })
+    assert.equal(ipv6.status, 200)
+    // A different port, a different scheme and a foreign domain are still cross-origin.
+    for (const origin of [
+      `http://127.0.0.1:${api.port + 1}`,
+      `https://127.0.0.1:${api.port}`,
+      `http://localhost.evil.example:${api.port}`,
+    ]) {
+      const refused = await rawGet(api.base, '/state', { host: `127.0.0.1:${api.port}`, origin, ...HEADER })
+      assert.equal(refused.status, 403, `Origin ${origin} must be refused`)
+    }
+    // The SSE route uses the same fence, so the write path cannot disagree with the read path.
+    // (A stream never ends by itself: only the status matters here.)
+    const events = await rawHead(api.base, '/events', { host: `localhost:${api.port}`, origin: localhostOrigin })
+    assert.equal(events.status, 200)
+    const refusedEvents = await rawHead(api.base, '/events', {
+      host: `localhost:${api.port}`,
+      origin: `http://127.0.0.1:${api.port + 1}`,
+    })
+    assert.equal(refusedEvents.status, 403)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a failed connect never leaks the remote launch token, headers or home path through /state', async () => {
+  const tail = [
+    'dsh web: http://127.0.0.1:38123/?token=SUPERSECRET-TOKEN',
+    'Authorization: Bearer local-session-value-9911',
+    '/home/alice/.dsh/remote-go/run/web.log',
+  ].join('\n')
+  const { service } = await makeTestService({
+    startWeb: async () => {
+      throw errors.remoteDshStartFailed(tail)
+    },
+  })
+  const api = await startApi(service)
+  try {
+    await createHost(service)
+    await call(api.base, `/hosts/${service.snapshot().hosts[0].id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'connect failed' })
+    const result = await call(api.base, '/state')
+    assert.equal(result.status, 200)
+    // Nothing from the captured remote output may reach the API response.
+    for (const secret of ['SUPERSECRET-TOKEN', 'local-session-value-9911', 'alice']) {
+      assert.equal(result.text.includes(secret), false, `the response leaked ${secret}`)
+    }
+    const view = result.json.state.hosts[0].error
+    assert.equal(view.code, 'remote-dsh-start-failed')
+    assert.match(view.technical, /token=<redacted>/)
+    assert.match(view.technical, /<user>/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('GET /diagnostics/self never returns a machine path or user name', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service, {
+    diagnostics: () => ({
+      home: 'C:\\Users\\alice',
+      stateDir: 'C:\\Users\\alice\\.dsh\\remote-go',
+      hostVersion: '0.2.2-rc.3',
+      entry: { id: 'dsh-remote-go' },
+    }),
+  })
+  try {
+    const result = await call(api.base, '/diagnostics/self')
+    assert.equal(result.status, 200)
+    assert.equal(result.json.ok, true)
+    assert.equal(result.text.includes('alice'), false, 'the diagnostics leaked the user name')
+    assert.match(result.json.home, /<user>/)
+    assert.match(result.json.stateDir, /<user>/)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('an internal failure answers 500, not 409', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service, {
+    diagnostics: () => {
+      throw new Error('diagnostics exploded')
+    },
+  })
+  try {
+    const result = await call(api.base, '/diagnostics/self')
+    assert.equal(result.status, 500)
+    assert.equal(result.json.ok, false)
+    assert.equal(result.json.error.code, 'internal')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('an oversized body answers 413 with a JSON error body instead of resetting the socket', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const body = JSON.stringify({ host: { name: 'x', address: 'a'.repeat(2 * 1024 * 1024) } })
+    const result = await call(api.base, '/hosts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+    assert.equal(result.status, 413)
+    assert.equal(result.json.ok, false)
+    assert.equal(result.json.error.code, 'invalid-input')
+    assert.equal(service.snapshot().hosts.length, 0)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a malformed host id is a 400, not an escaped URIError', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const result = await call(api.base, '/hosts/%E0%A4%A/activate', { method: 'POST' })
+    assert.equal(result.status, 400)
+    assert.equal(result.json.ok, false)
+    assert.equal(result.json.error.code, 'invalid-input')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('the key-file picker refuses a path outside the home directory without echoing it', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const result = await call(api.base, `/keyfile/list?path=${encodeURIComponent('C:\\Windows')}`)
+    assert.equal(result.status, 400)
+    assert.equal(result.json.ok, false)
+    assert.equal(result.json.error.code, 'invalid-input')
+    assert.equal(result.text.includes('Windows'), false, 'the refusal echoed the requested path')
+    assert.equal(result.json.error.technical, undefined)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a client-chosen host id is never adopted, an existing one still updates', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const created = await call(api.base, '/hosts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ host: { id: 'pwned-by-client', name: 'x', address: 'a.example.com' } }),
+    })
+    assert.equal(created.status, 200)
+    assert.match(created.json.host.id, /^h_[a-z0-9]{1,32}$/)
+    assert.notEqual(created.json.host.id, 'pwned-by-client')
+    const updated = await call(api.base, '/hosts', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ host: { id: created.json.host.id, address: 'b.example.com' } }),
+    })
+    assert.equal(updated.json.host.id, created.json.host.id)
+    assert.equal(updated.json.host.address, 'b.example.com')
+    assert.equal(service.snapshot().hosts.length, 1)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /local-version only backfills a missing version and refuses one below the floor', async () => {
+  const known = await makeTestService({ localVersion: '0.2.2-rc.3' })
+  const knownApi = await startApi(known.service)
+  try {
+    const ignored = await call(knownApi.base, '/local-version', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: '9.9.9' }),
+    })
+    assert.equal(ignored.status, 200)
+    assert.equal(ignored.json.accepted, false)
+    assert.equal(known.service.snapshot().hostVersion, '0.2.2-rc.3')
+  } finally {
+    await knownApi.close()
+    await known.service.shutdown()
+  }
+
+  const missing = await makeTestService({ localVersion: null })
+  const missingApi = await startApi(missing.service)
+  try {
+    const tooOld = await call(missingApi.base, '/local-version', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: '0.1.0' }),
+    })
+    assert.equal(tooOld.status, 400)
+    assert.equal(tooOld.json.error.code, 'invalid-input')
+    assert.equal(missing.service.snapshot().hostVersion, null)
+    const accepted = await call(missingApi.base, '/local-version', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: '0.2.2-rc.3' }),
+    })
+    assert.equal(accepted.json.accepted, true)
+    assert.equal(missing.service.snapshot().hostVersion, '0.2.2-rc.3')
+  } finally {
+    await missingApi.close()
+    await missing.service.shutdown()
+  }
+})
+
+test('the SSE fan-out is bounded: a ninth stream evicts the oldest', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  const clients = []
+  try {
+    for (let index = 0; index < 9; index += 1) clients.push(await openSse(api.base))
+    // The cap (8) evicts the oldest subscriber rather than growing the set.
+    await withTimeout(clients[0].ended, 4000, 'the oldest SSE stream was not evicted')
+    // The newest subscriber is still live and receives a broadcast.
+    service.emit('download', { id: 'dl_sse', phase: 'preparing', doneBytes: 1, totalBytes: 2 })
+    await withTimeout(waitForText(clients[8], 'event: download'), 4000, 'the newest SSE stream received no frame')
+  } finally {
+    for (const client of clients) client.response.destroy()
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('the connect log is redacted at its producer: a start line never reaches /state, SSE or diagnostics', async () => {
+  const tokenLine = 'LINE:dsh web: http://127.0.0.1:38123/?token=SUPERSECRET-TOKEN'
+  const { service } = await makeTestService({
+    // The real `remote-web.js` hands every start line to `options.onLine`, including the launch
+    // URL with its token; the old fake threw before calling it, so the leak had no coverage.
+    startWeb: async (_ssh, options) => {
+      options.onLine(tokenLine)
+      throw errors.remoteDshStartFailed(tokenLine)
+    },
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await call(api.base, `/hosts/${host.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'connect failed' })
+    const state = await call(api.base, '/state')
+    assert.equal(state.status, 200)
+    assert.equal(state.text.includes('SUPERSECRET-TOKEN'), false, 'the state frame leaked the launch token')
+    const logs = state.json.state.hosts[0].logs
+    assert.ok(logs.length > 0, 'the failed start must leave log lines')
+    assert.ok(
+      logs.some((entry) => entry.message.includes('token=<redacted>')),
+      'the launch line is kept, redacted',
+    )
+    // The diagnostics export reads the same ring (`entry.line`).
+    const diagnosed = await call(api.base, `/hosts/${host.id}/diagnose`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(diagnosed.status, 200)
+    assert.equal(diagnosed.text.includes('SUPERSECRET-TOKEN'), false, 'the diagnostics export leaked the launch token')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('the connecting state frame carries the redacted start line, not the token', async () => {
+  const tokenLine = 'LINE:dsh web: http://127.0.0.1:38124/?token=SUPERSECRET-TOKEN'
+  const { service } = await makeTestService({
+    // Connect stays in `connecting` long enough for the SSE frame to be observed.
+    startWeb: async (_ssh, options) => {
+      options.onLine(tokenLine)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      return {
+        pid: 4242,
+        port: 38124,
+        token: 'tok_connecting',
+        url: 'http://127.0.0.1:38124/?token=tok_connecting',
+        logPath: '/tmp/web.log',
+        startedAt: new Date().toISOString(),
+        rawLine: '',
+        profile: 'web',
+        dshHome: '/home/ubuntu/.dsh',
+      }
+    },
+  })
+  const api = await startApi(service)
+  const controller = new AbortController()
+  try {
+    const host = await createHost(service)
+    const response = await fetch(`${api.base}/events`, { signal: controller.signal })
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let text = ''
+    const connect = call(api.base, `/hosts/${host.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    const deadline = Date.now() + 4000
+    while (Date.now() < deadline && !text.includes('dsh web')) {
+      const { value, done } = await reader.read()
+      if (done) break
+      text += decoder.decode(value, { stream: true })
+    }
+    await connect
+    assert.ok(text.includes('dsh web'), `the connecting frame never carried the start line: ${text.slice(0, 400)}`)
+    assert.equal(text.includes('SUPERSECRET-TOKEN'), false, 'the SSE state frame leaked the launch token')
+    assert.match(text, /token=<redacted>/)
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  } finally {
+    controller.abort()
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /downloads refuses a protected destination synchronously with 400', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const response = await call(api.base, '/downloads', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        hostId: host.id,
+        path: '/home/ubuntu/project',
+        destination: 'C:\\Windows',
+      }),
+    })
+    // The old flow created a job and reported the refusal asynchronously as a job error.
+    assert.equal(response.status, 400)
+    assert.equal(response.json.ok, false)
+    assert.equal(response.json.error.code, 'invalid-input')
+    assert.equal(service.downloads.size, 0, 'a refused destination must not consume a job slot')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /local-version answers 400 for a value that is not a version', async () => {
+  const { service } = await makeTestService({ localVersion: null })
+  const api = await startApi(service)
+  try {
+    const result = await call(api.base, '/local-version', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 'not-a-version' }),
+    })
+    assert.equal(result.status, 400)
+    assert.equal(result.json.error.code, 'invalid-input')
+    assert.equal(service.snapshot().hostVersion, null)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a quarantined hosts.json is visible on /state and on every HostView', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    await createHost(service)
+    // A successful write clears the flag (the recovered file is authoritative again), so the
+    // flag is set here after the list exists; the projection is what this test pins.
+    service.store.corrupt.add('hosts.json')
+    const state = await call(api.base, '/state')
+    assert.equal(state.status, 200)
+    assert.equal(state.json.state.storeCorrupt, true)
+    assert.equal(state.json.state.hosts[0].storeCorrupt, true)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('a successful write clears the corruption flag instead of warning forever', async () => {
+  const { service } = await makeTestService()
+  try {
+    service.store.corrupt.add('hosts.json')
+    assert.equal(service.snapshot().storeCorrupt, true)
+    await createHost(service)
+    assert.equal(service.store.hostsCorrupt, false)
+    assert.equal(service.snapshot().storeCorrupt, false)
+  } finally {
     await service.shutdown()
   }
 })

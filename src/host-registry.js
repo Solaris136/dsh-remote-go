@@ -6,7 +6,7 @@ import path from 'node:path'
 import { errors } from './errors.js'
 import { createHostRuntime } from './host-runtime.js'
 import { hostView } from './host-view.js'
-import { listKeyFiles as listKeyFilesInHome } from './key-files.js'
+import { listKeyFiles as listKeyFilesInHome, OUTSIDE_HOME } from './key-files.js'
 import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import {
   cancelIdleStop,
@@ -45,6 +45,8 @@ function hostViewFor(ctx, runtime) {
   return hostView(runtime, {
     targetVersion: ctx.localVersion(),
     passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,
+    // A quarantined hosts.json means the list beside it is the empty recovery fallback.
+    storeCorrupt: ctx.store?.hostsCorrupt === true,
   })
 }
 
@@ -59,6 +61,9 @@ export function snapshot(ctx) {
     settings: ctx.store.getSettings(),
     activeHostId: ctx.state.activeHostId,
     firstRun: hosts.length === 0,
+    // Store-wide, and deliberately not per host: a quarantined hosts.json leaves this list
+    // empty, which is exactly the case the user has to be told about.
+    storeCorrupt: ctx.store?.hostsCorrupt === true,
   }
 }
 
@@ -133,7 +138,21 @@ export async function listKeyFiles(ctx, dir) {
   // The picker is rooted at the OS user home, not DSH_HOME: private keys live in
   // `~/.ssh` of the account, while the service's `home` is the DSH state root.
   const userHome = homedir()
-  const listing = await listKeyFilesInHome({ home: userHome, dir: typeof dir === 'string' ? dir : '' })
+  let listing
+  try {
+    listing = await listKeyFilesInHome({ home: userHome, dir: typeof dir === 'string' ? dir : '' })
+  } catch (error) {
+    // A path outside the home directory (`C:\Windows`, `..`, a symlink escape) or an
+    // unreadable one is the caller's mistake: answer 400 instead of turning a bare `Error`
+    // into a 500, and never echo the requested path back in `technical`.
+    if (error?.code === OUTSIDE_HOME || ['ENOENT', 'EACCES', 'EPERM', 'ENOTDIR'].includes(error?.code)) {
+      throw errors.invalidInput('path', {
+        zh: '这个目录不在用户主目录内，或无法读取。',
+        en: 'This folder is outside the home directory, or cannot be read.',
+      })
+    }
+    throw error
+  }
   const settings = ctx.store.getSettings()
   return { ...listing, defaultKeyPath: settings.defaultKeyPath, defaultDir: path.join(userHome, '.ssh') }
 }

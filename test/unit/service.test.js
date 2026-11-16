@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, waitFor } from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 import { describePreflightEvent } from '../../src/service.js'
@@ -685,12 +687,71 @@ test('saving and removing hosts updates the snapshot', async () => {
   assert.equal(service.snapshot().firstRun, true)
 })
 
-test('setLocalVersion enables local-version parity resolution', async () => {
+test('a download is judged against the same home root the writer receives', async () => {
+  const { service } = await makeTestService()
+  const base = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-download-home-'))
+  delete service.userHome
+  service.userHome = () => base
+  try {
+    const host = await createHost(service)
+    const seen = []
+    service.downloads = {
+      start(runtime, path, options) {
+        seen.push({ runtimeId: runtime.id, path, home: options.home })
+        return { id: 'dl_home', phase: 'preparing' }
+      },
+      dispose() {},
+    }
+    const started = await service.startRemoteDownload(host.id, '/home/ubuntu/a.txt', { destination: base })
+    assert.equal(started.id, 'dl_home')
+    // The pre-flight and the writer must agree on the root: a fallback to `os.homedir()` in the
+    // job would disagree whenever HOME/USERPROFILE is unset.
+    assert.deepEqual(seen, [{ runtimeId: host.id, path: '/home/ubuntu/a.txt', home: base }])
+    await assert.rejects(
+      service.startRemoteDownload(host.id, '/home/ubuntu/a.txt', {
+        destination: path.join(base, '..', 'elsewhere'),
+      }),
+      (error) => error.code === 'invalid-input',
+    )
+    assert.equal(seen.length, 1, 'a refused destination never reaches the job')
+  } finally {
+    delete service.userHome
+    await rm(base, { recursive: true, force: true })
+    await service.shutdown()
+  }
+})
+test('setLocalVersion adopts a detected version and only backfills a missing one', async () => {
   const { service } = await makeTestService({ localVersion: null })
   assert.equal(service.snapshot().hostVersion, null)
-  service.setLocalVersion('v0.2.2-rc.1', 'client')
-  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
-  assert.equal(service.snapshot().targetVersion, '0.2.2-rc.1')
+  // The client may fill in a version the Host could not detect…
+  assert.equal(service.setLocalVersion('v0.2.2-rc.3', 'client'), true)
+  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.3')
+  assert.equal(service.snapshot().targetVersion, '0.2.2-rc.3')
+  // …but a version that is already known is never overwritten by the page.
+  assert.equal(service.setLocalVersion('0.9.9', 'client'), false)
+  assert.equal(service.snapshot().hostVersion, '0.2.2-rc.3')
+  // A locally detected version replaces the backfill: it is the Host's own reading.
+  assert.equal(service.setLocalVersion('0.3.0', 'package.json:/x'), true)
+  assert.equal(service.snapshot().hostVersion, '0.3.0')
+})
+
+test('the client backfill refuses a version below the supported floor or one that is not a version', async () => {
+  const { service } = await makeTestService({ localVersion: null })
+  assert.throws(
+    () => service.setLocalVersion('0.2.2-rc.1', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.equal(service.snapshot().hostVersion, null)
+  // A malformed value is a client mistake, not a silent `accepted:false` (docs/api.md says 400).
+  assert.throws(
+    () => service.setLocalVersion('not-a-version', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.throws(
+    () => service.setLocalVersion('', 'client'),
+    (error) => error.code === 'invalid-input',
+  )
+  assert.equal(service.snapshot().hostVersion, null)
 })
 
 test('a re-attached instance with another version is never stopped by the next connect', async () => {

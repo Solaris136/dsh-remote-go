@@ -147,18 +147,25 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 - 托管 Node 版本取本机 DSH `engines.node` 下限（`node-runtime.js` 负责下载、SHA-256 校验、解压与复用）；`remote-web.js` 持有全部远端 shell 命令模板：启动脚本写 `logs/web.log` 并读 `dsh web:` 行，`run/web.json` 只记录 pid/port/version/profile/dshHome/launch 标记（无 token）。
 
 ## 5. 本地 HTTP API 与同源远端代理
-`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；每条请求先过 `admit`（§2，`/health` 除外），再按路由走 `authorize()`（`x-dsh-remote-go: 1` + Host 自检 + Origin 同源 + 拒绝 cross-site）或 `/events` 的 `authorizeOrigin()`（EventSource 不能加头，Host 自检与同源栅栏照旧）；`/health` 免会话、但同样过 Host/Origin 栅栏。Host 自检就是 `request-trust.js#sameServerHost`（与代理侧同一份实现）：Host 必须指向本机监听 origin，loopback 拼写互换，省略默认端口按协议折算——DNS rebinding 下攻击页的 `Host` 是攻击者域名，这一条是唯一能拦下它的检查，`/events` 只有这一道。解析器需要改写的 authority 一律拒绝（`user@host`、反斜杠、`#`/`?`、尾点 `127.0.0.1.`、补零端口 `:057442` 等），因为浏览器只会送出序列化后的 authority，而按改写结果比对会把 `attacker.example@127.0.0.1:port` 当成回环。`getOrigin()` 在监听尚未绑定（或内核没有该方法）时返回 null，此时 Host 自检跳过、保留旧行为：受支持的 `engines.dsh` 范围都提供 `webServer.getOrigin`，这一边界只为不让内核差异把插件变成全 403。请求体上限 1 MiB；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、未知异常→500；SSE 在 `service.on('state')`、`service.on('download')` 与 `service.on('remote-unreachable')` 上广播，连接先推一帧、15s 一次 `ping`。重启 / 关闭两个一次性动作的路由同样挂在同一 dispatcher 之后，自动继承 `admit`，不单独放行。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行，用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`DELETE` 取消；Host 用同一条 SSH/SFTP 连接把文件或文件夹**流式写入用户选择的本地目录**，不返回二进制字节、不打包 ZIP、不在远端落盘（取消会清理由本次任务创建的文件/目录）。
-
+`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；每条请求先过 `admit`（§2，`/health` 除外），再按路由走 `authorize()`（`x-dsh-remote-go: 1` + Host 自检 + Origin 同源 + 拒绝 cross-site）或 `/events` 的 `authorizeOrigin()`（EventSource 不能加头，Host 自检与同源栅栏照旧）；`/health` 免会话、但同样过 Host/Origin 栅栏。Host 自检就是 `request-trust.js#sameServerHost`（与代理侧同一份实现）：Host 必须指向本机监听 origin，loopback 拼写互换，省略默认端口按协议折算——DNS rebinding 下攻击页的 `Host` 是攻击者域名，这一条是唯一能拦下它的检查，`/events` 只有这一道。解析器需要改写的 authority 一律拒绝（`user@host`、反斜杠、`#`/`?`、尾点 `127.0.0.1.`、补零端口 `:057442` 等），因为浏览器只会送出序列化后的 authority，而按改写结果比对会把 `attacker.example@127.0.0.1:port` 当成回环。`getOrigin()` 在监听尚未绑定（或内核没有该方法）时返回 null，此时 Host 自检跳过、保留旧行为：受支持的 `engines.dsh` 范围都提供 `webServer.getOrigin`，这一边界只为不让内核差异把插件变成全 403。`Origin` 同源比较用 `request-trust.js#sameServerOrigin`（回环拼写互换、默认端口折算），不是字符串相等：用 `http://localhost:<port>` 打开 GUI 与内核给出的 `127.0.0.1:<port>` 是同一个 origin，字符串比较会把这类用户的写请求全判成 403。请求体上限 1 MiB，超出先回 **413**（JSON `ErrorView`）再结束，不 `req.destroy()`（否则客户端只看到 `ECONNRESET`）；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、`internal`→500，且 `ErrorView` 在 `toErrorView` 里统一脱敏并限长（审计 §A）；连接日志在 `appendConnectLog` 写入时脱敏并 `headTail` 限长（`remote-web.js` 的 `onLine` 首行就是带 token 的 launch URL，`HostView.logs` / SSE / 诊断导出读的都是这个 ring，所以 `/state` 与 `/events` 不含 token）；SSE 在 `service.on('state')`、`service.on('download')` 与 `service.on('remote-unreachable')` 上广播，连接先推一帧、15s 一次 `ping`，最多 8 个订阅者（第 9 个踢最旧）、慢消费者与超过 1 MiB 的帧直接丢弃。重启 / 关闭两个一次性动作的路由同样挂在同一 dispatcher 之后，自动继承 `admit`，不单独放行。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行（`home`/`stateDir` 已脱敏），用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`DELETE` 取消；Host 用同一条 SSH/SFTP 连接把文件或文件夹**流式写入用户选择的本地目录**，不返回二进制字节、不打包 ZIP、不在远端落盘（取消会清理由本次任务创建的文件/目录）。`destination` 由 `local-download.js#destinationPolicy` 校验：必须在用户主目录下，且不是系统 / 自启动（`Startup`、`autostart`、`systemd`、macOS `Library/LaunchAgents` 等）/ 凭据（`.ssh`、`.gnupg`）/ 登录脚本与配置（`.bashrc`、`.profile`、`.xsessionrc`、`.config`、`.local` 等）目录；**远端命名的最终路径**（`base/<远端名>`）再跑一次同一策略并拒绝受保护位置的上级目录（`assertCandidateAllowed`），拒绝时零写入。`POST /downloads` 在 `service.startRemoteDownload` 里同步校验 destination（坏路径直接 400，不创建任务、不占 job 槽）。主机 `id` 只由 `store.js#upsertHost` 签发，客户端传来的未知或畸形 id 一律换成新的 `h_*`；`POST /local-version` 只在探测失败时接受回填，且不低于 `engines.dsh` 下限。
 `remote-proxy.js` 是浏览器半端的远端界面承载面（契约「远端界面同源代理」）：`parseViewPath` 把
 `/dsh-remote-go/remote/<hostId>/<rest>` 拆成主机与上游路径；`handle` 与 `handleUpgrade` 都先过 `admit`
 （代理后面是一台已连接主机的**远端会话 cookie**，只有通过 DSH 准入的调用方才能用它），再过
 `request-trust.js#trustedRequest` 的同源栅栏（Host/Origin 同源、非 cross-site）；请求经 `upstreamHeaders`
-去掉逐跳字段、把 `Host`/`Origin` 改写为该主机的
-回环 authority、并用 per-host jar 注入远端 cookie；响应经 `storeCookies` 收走 `Set-Cookie`、`responseHeaders`
-去掉逐跳字段与 `X-Frame-Options`、只从 CSP 移除 `frame-ancestors`（`withoutFrameAncestors`）、把指回远端的
-`Location` 折回前缀。WebSocket 只处理远端唯一的路由
+**按白名单**只转发 `accept*`（含 `accept-encoding`）/ `content-*` / `range` / `if-*` / `cache-control` /
+`user-agent` / `x-requested-with`（升级另加 WebSocket 握手头），本机会话的 `authorization` / `cookie` / `x-dsh-*` 与
+`forwarded` / `x-forwarded-*` / `sec-fetch-*` 一律丢弃；随后把 `Host`/`Origin` 改写为该主机的
+回环 authority、并用 per-host jar 注入远端 cookie（jar 限 64 条 / 值 4 KiB，`Secure` cookie 不入明文 jar）；
+响应经 `storeCookies` 收走 `Set-Cookie`、`responseHeaders` 去掉逐跳字段与 `X-Frame-Options`、按名丢弃
+`clear-site-data` / `access-control-*` / `refresh` / `content-location` / `report-to` / `nel` /
+`permissions-policy` / `alt-svc`、只从 CSP 移除 `frame-ancestors`（`withoutFrameAncestors`），并把指回远端的
+`Location` 折回前缀（其它绝对地址与含反斜杠的相对引用直接丢弃，`safeLocation`）。上游 30s 内没有响应头即 502
+并销毁上下游连接（`upstreamTimeoutMs`：`http.request` 的 `timeout`，升级路径用 `net.connect({ timeout })`
+加握手计时器），已建立的响应流不再受该超时约束。WebSocket 只处理远端唯一的路由
 `/api/remote.mux`：`sync(hostIds)` 为每台配置主机注册一条精确升级路由，升级握手保留 `Connection`/`Upgrade`
-并注入 jar cookie。`resolveHost` 由 `service.webViewTarget(id)` 提供，只对 `connected` 且有隧道的 runtime 返回
+并注入 jar cookie；**101 响应头同样过 `responseHeaders`**（`filterResponseHead`，只解析响应头、之后的帧原样流转），
+否则远端的 `Set-Cookie` 与策略头会借着握手绕过响应策略；远端结束时关闭浏览器侧 socket。
+`resolveHost` 由 `service.webViewTarget(id)` 提供，只对 `connected` 且有隧道的 runtime 返回
 `{ localPort, remotePort }`；因此断开即失配、无需额外清理。代理在 `dispose()` 时注销全部升级路由、销毁升级
 socket 并清空 jar。
 
@@ -189,7 +196,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | `settings.json` | 设置（见契约 SettingsView） | 0600 |
 | `secrets.json` | 仅 `saveTokens=true` 时保存的 launch token | 0600 |
 
-全部走 `atomic-json.js`：目录 0700、文件 0600、临时文件 `wx`、fsync、rename 重试、失败清理临时文件。密码不进 `hosts.json`，保存时写 DSH 凭据存储。远端 `~/.dsh/remote-go/`：`logs/web.log`、`run/web.json`、`node/`、`downloads/`；远端 DSH 自己的数据始终在 `~/.dsh`，本插件不写它的插件、配置或凭据。
+全部走 `atomic-json.js`：目录 0700、文件 0600、临时文件 `wx`、fsync、rename 重试、失败清理临时文件。只有**解析失败**（内容不是 JSON）的文件先改名为 `<name>.corrupt-<stamp>` 再回落到默认值；读取错误（EACCES/IO）只回落、不改名（`readJsonFile` 返回 `unreadable` 与 `corrupt` 两种状态，`HostStore.corrupt` 只在后者置位，并随下一次成功写入清除）。`HostStore.corrupt` 经 `HostView.storeCorrupt` / `StateView.storeCorrupt` 与 `/diagnostics/self` 暴露，下一次写入不会覆盖那份字节；`saveSettings` 与**当前值**深合并（不是与默认值），`saveToken` 先 `load()` 再写。密码不进 `hosts.json`，保存时写 DSH 凭据存储。远端 `~/.dsh/remote-go/`：`logs/web.log`、`run/web.json`、`node/`、`downloads/`；远端 DSH 自己的数据始终在 `~/.dsh`，本插件不写它的插件、配置或凭据。
 
 ## 7. Client 半端
 `client.js` 是**单文件、无构建**的浏览器插件：`window.__ModuleLoader__.load({ id, factory(require) })`，只 `require('react')`。
@@ -214,11 +221,11 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 ## 8. 测试、结构守卫与维护约定
 | 层 | 文件 | 覆盖 |
 |---|---|---|
-| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe/remote-files/local-download` | 解析、比较、指纹、脱敏、校验、远端路径、本机落盘与重名改名 |
+| 纯函数 | `util/version/ssh-config/known-hosts/redact/settings/local-version/probe/remote-files/local-download` | 解析、比较、指纹、脱敏（表驱动：端口不算密码、裸 `token=`、`x-*-token`）、校验、远端路径、本机落盘与重名改名、下载目标目录策略（home / 系统 / 自启动 / 凭据） |
 | 准入栅栏 | `request-trust`（经 `api` / `remote-proxy` 用例覆盖） | `Host` 同源（loopback 互换、默认端口折算）、`Origin` 同源、`cross-site` 拒绝 |
 | 运行时 | `node-runtime/bootstrap/remote-web/remote-proc/tunnel/ssh` | 托管 Node、npx 判定与命令模板、启动/收养、URL/token 握手、隧道、认证与指纹 |
-| 同源代理 | `remote-proxy` | 视图路径解析、cookie jar / 路径与过期 / 按 remote authority 重置、Host/Origin 栅栏、准入拒绝（HTTP 与升级）、头部与 Location 改写、HTTP 转发、升级转发 |
-| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart/stop-remote` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、关闭远端（状态机 + 归属授权 + registry 清理 + `keepAlive:"stop"` 不重复信号）、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权、原子写、下载任务 |
+| 同源代理 | `remote-proxy` | 视图路径解析、cookie jar（路径与过期、按 remote authority 重置、64 条上限、`Secure` 不入 jar）、Host/Origin 栅栏、准入拒绝（HTTP 与升级）、请求头白名单（表驱动）、响应头阻止列表（表驱动）、`Location` 折回与绝对地址丢弃、HTTP 转发、升级转发、上游无响应 30s 超时（HTTP 与握手） |
+| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart/stop-remote` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、关闭远端（状态机 + 归属授权 + registry 清理 + `keepAlive:"stop"` 不重复信号）、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权（含 8 个客户端上限）、`ErrorView` 脱敏与限长、状态码映射（400/409/413/500）、`localhost` 与 `127.0.0.1` 等价、畸形 id 与越界 keyfile 的 400、原子写与损坏文件隔离、设置深合并、token 落盘、主机 id 签发、下载任务 |
 | 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、两种载体、关键组件、重启/关闭按钮与 viewRev 重导航、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫；远端 stop 真正关闭监听器与 token |
 | 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表；监听器重建与重挂后重启冲突在单测覆盖（含三种 keepAlive 的 disconnect 窗口与 removeHost/shutdown） |

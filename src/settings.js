@@ -104,6 +104,9 @@ export function sanitizeSettings(raw) {
   }
 }
 
+/** The only id shape this plugin issues: `randomId('h')` (docs/api.md `HostView.id`). */
+export const HOST_ID_RE = /^h_[a-z0-9]{1,32}$/
+
 export function sanitizeHostEntry(raw, options = {}) {
   const settings = options.settings ?? defaultSettings()
   const existing = options.existing ?? null
@@ -131,7 +134,9 @@ export function sanitizeHostEntry(raw, options = {}) {
     existing?.hostKeyPolicy ?? settings.hostKeyPolicy,
   )
   return {
-    id: typeof raw.id === 'string' && raw.id !== '' ? raw.id : (existing?.id ?? undefined),
+    // A malformed or over-long id is never echoed: an id names the secrets entry, the proxy
+    // route and the client's host link, so only the shape this plugin issues is accepted.
+    id: typeof raw.id === 'string' && HOST_ID_RE.test(raw.id) ? raw.id : (existing?.id ?? undefined),
     name: name || destination.host || destination.alias || 'remote',
     address,
     port: numberIn(raw.port ?? destination.port ?? existing?.port, 1, 65535, settings.defaultPort),

@@ -5,11 +5,16 @@ import net from 'node:net'
 import {
   cookieHeader,
   createRemoteProxy,
+  filterResponseHead,
+  MAX_COOKIE_VALUE,
+  MAX_JAR_COOKIES,
   parseSetCookie,
   parseViewPath,
   responseHeaders,
+  safeLocation,
   storeCookies,
   upgradePath,
+  upstreamHeaders,
 } from '../../src/remote-proxy.js'
 import { trustedRequest } from '../../src/request-trust.js'
 
@@ -146,8 +151,34 @@ test('the cookie jar honours path, expiry and deletion', () => {
   assert.equal(cookieHeader(jar, '/apis'), 'dsh-auth-a=one')
   storeCookies(jar, 'dsh-auth-a=; Max-Age=0')
   assert.equal(cookieHeader(jar, '/'), '')
-  assert.deepEqual(Object.keys(parseSetCookie('x=1; Path=/; Max-Age=60')), ['name', 'value', 'path', 'expiresAt'])
+  assert.deepEqual(Object.keys(parseSetCookie('x=1; Path=/; Max-Age=60')), [
+    'name',
+    'value',
+    'path',
+    'expiresAt',
+    'secure',
+  ])
   assert.equal(parseSetCookie('nodots'), null)
+})
+
+test('the cookie jar is bounded and never keeps a Secure cookie in its plaintext store', () => {
+  const jar = new Map()
+  // A `Secure` cookie would be stored and replayed over the plaintext loopback tunnel.
+  storeCookies(jar, 'session=secret-value; Path=/; Secure')
+  assert.equal(cookieHeader(jar, '/'), '')
+  assert.equal(jar.size, 0)
+  // Over-long values (and names) are dropped instead of buffered.
+  storeCookies(jar, `long=${'a'.repeat(MAX_COOKIE_VALUE + 1)}`)
+  assert.equal(jar.size, 0)
+  storeCookies(jar, `${'n'.repeat(200)}=x`)
+  assert.equal(jar.size, 0)
+  // The jar stops at its cap while a known cookie may still be refreshed at the cap.
+  for (let index = 0; index < MAX_JAR_COOKIES + 17; index += 1) storeCookies(jar, `c${index}=v${index}; Path=/`)
+  assert.equal(jar.size, MAX_JAR_COOKIES)
+  assert.equal(cookieHeader(jar, '/').split('; ').length, MAX_JAR_COOKIES)
+  storeCookies(jar, 'c0=renewed; Path=/')
+  assert.match(cookieHeader(jar, '/'), /c0=renewed/)
+  assert.equal(jar.size, MAX_JAR_COOKIES)
 })
 
 test('the proxy fence mirrors the local API: same host authority, same Origin, no cross-site', () => {
@@ -163,6 +194,22 @@ test('the proxy fence mirrors the local API: same host authority, same Origin, n
   assert.equal(trustedRequest({ headers: { host: '127.0.0.1' } }, new URL('https://127.0.0.1:443')), true)
   // Host is case-insensitive, and a loopback spelling may differ from the listener's own.
   assert.equal(trustedRequest({ headers: { host: 'LOCALHOST:57442' } }, origin), true)
+  assert.equal(trustedRequest({ headers: { host: LOCAL_AUTHORITY, origin: 'http://LOCALHOST:57442' } }, origin), true)
+  // The Origin authority is compared verbatim: a value the URL parser rewrote (userinfo, a
+  // trailing dot, a zero-padded port) cannot have come from a browser, and the rewritten form
+  // must not be accepted as loopback.
+  for (const originHeader of [
+    'http://evil.example@127.0.0.1:57442',
+    'http://127.0.0.1.:57442',
+    'http://127.0.0.1:057442',
+    'http://user:pass@localhost:57442',
+  ]) {
+    assert.equal(
+      trustedRequest({ headers: { host: LOCAL_AUTHORITY, origin: originHeader } }, origin),
+      false,
+      `Origin ${originHeader} must be rejected`,
+    )
+  }
   // A parser has to rewrite each of these into a loopback authority; a browser fills Host from the
   // serialized URL, so such a value never arrives from one — and the fence must not trust it.
   for (const host of [
@@ -204,6 +251,306 @@ test('response headers drop the remote cookie, framing denial and remote redirec
     'content-length',
     '10',
   ])
+})
+
+test('upstreamHeaders forwards only the allowlisted content headers', () => {
+  const jar = new Map([['dsh-auth-remote', { value: 'remote-cookie', path: '/', expiresAt: Infinity }]])
+  const input = {
+    target: { localPort: 5000, remotePort: 43210 },
+    localOrigin: 'http://127.0.0.1:57442',
+    path: '/',
+    jar,
+  }
+  const raw = [
+    'accept',
+    'text/html',
+    'accept-encoding',
+    'gzip, deflate, br',
+    'accept-language',
+    'zh-CN',
+    'content-type',
+    'application/json',
+    'content-length',
+    '12',
+    'range',
+    'bytes=0-9',
+    'if-none-match',
+    '"abc"',
+    'if-modified-since',
+    'Tue, 01 Jan 2030 00:00:00 GMT',
+    'cache-control',
+    'no-cache',
+    'user-agent',
+    'Mozilla/5.0',
+    'x-requested-with',
+    'dsh',
+    'authorization',
+    'Bearer local-session-token',
+    'x-dsh-remote-go',
+    '1',
+    'x-dsh-session',
+    'local-session',
+    'forwarded',
+    'for=203.0.113.9',
+    'x-forwarded-for',
+    '203.0.113.9',
+    'x-forwarded-host',
+    'evil.example',
+    'sec-fetch-site',
+    'same-origin',
+    'sec-fetch-mode',
+    'cors',
+    'cookie',
+    'dsh-auth-local=local-cookie',
+    'host',
+    '127.0.0.1:57442',
+    'origin',
+    'http://127.0.0.1:57442',
+    'referer',
+    'http://127.0.0.1:57442/page',
+    'te',
+    'trailers',
+    'connection',
+    'keep-alive',
+  ]
+  const out = upstreamHeaders(raw, input)
+  assert.deepEqual(Object.keys(out).sort(), [
+    'accept',
+    'accept-encoding',
+    'accept-language',
+    'cache-control',
+    'content-length',
+    'content-type',
+    'cookie',
+    'host',
+    'if-modified-since',
+    'if-none-match',
+    'origin',
+    'range',
+    'referer',
+    'user-agent',
+    'x-requested-with',
+  ])
+  // The local session credential and every hop/authority field never reach the remote host.
+  for (const name of [
+    'authorization',
+    'x-dsh-remote-go',
+    'x-dsh-session',
+    'forwarded',
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'sec-fetch-site',
+    'sec-fetch-mode',
+    'te',
+    'connection',
+  ]) {
+    assert.equal(out[name], undefined, `${name} must not be forwarded`)
+  }
+  assert.equal(out.host, '127.0.0.1:43210')
+  assert.equal(out.origin, 'http://127.0.0.1:43210')
+  assert.equal(out.referer, 'http://127.0.0.1:43210/page')
+  // Only this host's own jar cookie, never the local GUI's cookie.
+  assert.equal(out.cookie, 'dsh-auth-remote=remote-cookie')
+})
+
+test('only a WebSocket handshake carries the upgrade headers, credentials still excluded', () => {
+  const input = {
+    target: { localPort: 5000, remotePort: 43210 },
+    localOrigin: 'http://127.0.0.1:57442',
+    path: '/api/remote.mux',
+    jar: new Map(),
+  }
+  const raw = [
+    'connection',
+    'Upgrade',
+    'upgrade',
+    'websocket',
+    'sec-websocket-key',
+    'dGhlIHNhbXBsZSBub25jZQ==',
+    'sec-websocket-version',
+    '13',
+    'sec-websocket-protocol',
+    'dsh',
+    'sec-websocket-extensions',
+    'permessage-deflate',
+    'authorization',
+    'Bearer local-session-token',
+    'sec-fetch-mode',
+    'websocket',
+    'x-dsh-remote-go',
+    '1',
+  ]
+  const upgrade = upstreamHeaders(raw, { ...input, preserveUpgrade: true })
+  assert.equal(upgrade.connection, 'Upgrade')
+  assert.equal(upgrade.upgrade, 'websocket')
+  assert.equal(upgrade['sec-websocket-key'], 'dGhlIHNhbXBsZSBub25jZQ==')
+  assert.equal(upgrade['sec-websocket-version'], '13')
+  assert.equal(upgrade['sec-websocket-protocol'], 'dsh')
+  assert.equal(upgrade['sec-websocket-extensions'], 'permessage-deflate')
+  for (const name of ['authorization', 'x-dsh-remote-go', 'sec-fetch-mode']) {
+    assert.equal(upgrade[name], undefined, `${name} must not be forwarded even on an upgrade`)
+  }
+  // The same headers on an ordinary request are hop-by-hop and dropped.
+  const plainRequest = upstreamHeaders(raw, input)
+  for (const name of ['connection', 'upgrade', 'sec-websocket-key', 'sec-websocket-version']) {
+    assert.equal(plainRequest[name], undefined, `${name} must not be forwarded on a plain request`)
+  }
+})
+
+test('responseHeaders blocks the browser-policy headers a remote must not set locally', () => {
+  const out = responseHeaders(
+    [
+      'content-type',
+      'text/html',
+      'clear-site-data',
+      '"cookies", "storage"',
+      'access-control-allow-origin',
+      '*',
+      'access-control-allow-credentials',
+      'true',
+      'refresh',
+      '0; url=https://evil.example/',
+      'content-location',
+      'https://evil.example/',
+      'report-to',
+      '{"group":"default"}',
+      'nel',
+      '{"report_to":"default"}',
+      'permissions-policy',
+      'geolocation=()',
+      'alt-svc',
+      'h3=":443"; ma=60',
+      'cache-control',
+      'no-store',
+    ],
+    { hostId: 'h_a', remoteOrigin: 'http://127.0.0.1:43210' },
+  )
+  assert.deepEqual(out, ['content-type', 'text/html', 'cache-control', 'no-store'])
+})
+
+test('a redirect may only stay on the remote listener', () => {
+  const at = { hostId: 'h_a', remoteOrigin: 'http://127.0.0.1:43210' }
+  const fold = (value) => responseHeaders(['location', value], at)
+  assert.deepEqual(fold('http://127.0.0.1:43210/next?x=1'), ['location', '/dsh-remote-go/remote/h_a/next?x=1'])
+  assert.deepEqual(fold('http://127.0.0.1:43210'), ['location', '/dsh-remote-go/remote/h_a/'])
+  assert.deepEqual(fold('http://127.0.0.1:43210?token=one'), ['location', '/dsh-remote-go/remote/h_a/?token=one'])
+  // Relative references already resolve inside the seat, so they pass through.
+  for (const value of ['./', './next', '/assets/app.js', '#frag']) {
+    assert.deepEqual(fold(value), ['location', value], `relative ${JSON.stringify(value)} must be kept`)
+  }
+  // Everything absolute that is not the remote's own listener is dropped, not passed on.
+  for (const value of [
+    'https://evil.example/',
+    '//evil.example/x',
+    '\\\\evil.example\\x',
+    // A backslash is a slash to the URL parser for http(s): these two resolve to
+    // `http://evil.example/…`, so a "relative" reference carrying one is off-origin.
+    '/\\evil.example/x',
+    '\\/evil.example',
+    '/assets\\..\\evil',
+    'http://127.0.0.1:5000/other-port',
+    'http://localhost:43210/loopback-alias',
+    'javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    ' http://evil.example/',
+    '',
+  ]) {
+    assert.deepEqual(fold(value), [], `Location ${JSON.stringify(value)} must be dropped`)
+  }
+  // A percent-encoded backslash is not a separator and stays a normal relative reference.
+  assert.deepEqual(fold('/a%5cb'), ['location', '/a%5cb'])
+  assert.equal(safeLocation('rel', {}), 'rel')
+  assert.equal(safeLocation('https://evil.example/', {}), null)
+})
+
+test('filterResponseHead applies the response policy to a 101 handshake', () => {
+  const head = [
+    'HTTP/1.1 101 Switching Protocols',
+    'upgrade: websocket',
+    'connection: Upgrade',
+    'sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=',
+    'set-cookie: dsh-auth=stolen; Path=/',
+    'clear-site-data: "cookies", "storage"',
+    'access-control-allow-origin: *',
+    'permissions-policy: geolocation=()',
+  ].join('\r\n')
+  assert.equal(
+    filterResponseHead(head, { hostId: 'h_a', remoteOrigin: 'http://127.0.0.1:43210' }),
+    [
+      'HTTP/1.1 101 Switching Protocols',
+      'upgrade: websocket',
+      'connection: Upgrade',
+      'sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=',
+    ].join('\r\n') + '\r\n',
+  )
+  // Anything that is not a status line is not a head this proxy will speak.
+  assert.equal(filterResponseHead('nonsense\r\nx: y', {}), '')
+})
+
+test('the upgrade forwards a filtered 101 and streams the frames after it', async () => {
+  const upgraded = []
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(200)
+    res.end('not used')
+  })
+  upstream.on('upgrade', (_req, socket) => {
+    upgraded.push(socket)
+    // Keep the server side readable so a peer FIN is processed instead of staying buffered.
+    socket.resume()
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\r\n' +
+        'upgrade: websocket\r\nconnection: Upgrade\r\n' +
+        'sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n' +
+        'set-cookie: dsh-auth=stolen; Path=/\r\n' +
+        'clear-site-data: "cookies"\r\n' +
+        'access-control-allow-origin: *\r\n\r\n' +
+        'FRAME-AFTER-HEADERS',
+    )
+  })
+  const upstreamPort = await listen(upstream)
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
+  try {
+    local.proxy.sync(['h_a'])
+    const received = await new Promise((resolve, reject) => {
+      const socket = net.connect(local.port, '127.0.0.1', () => {
+        socket.write(
+          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
+            `Host: ${LOCAL_AUTHORITY}\r\n` +
+            'Connection: Upgrade\r\nUpgrade: websocket\r\n' +
+            'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+        )
+      })
+      const chunks = []
+      const timer = setTimeout(() => {
+        socket.destroy()
+        reject(new Error('the upgrade never answered'))
+      }, 5000)
+      timer.unref?.()
+      socket.on('data', (chunk) => {
+        chunks.push(Buffer.from(chunk))
+        const text = Buffer.concat(chunks).toString('utf8')
+        if (text.includes('FRAME-AFTER-HEADERS')) {
+          clearTimeout(timer)
+          socket.destroy()
+          resolve(text)
+        }
+      })
+      socket.on('error', reject)
+    })
+    assert.match(received, /^HTTP\/1\.1 101/)
+    assert.match(received, /upgrade: websocket/i)
+    assert.match(received, /connection: Upgrade/i)
+    assert.match(received, /sec-websocket-accept:/i)
+    assert.equal(received.includes('set-cookie'), false, 'a 101 must not install a cookie')
+    assert.equal(received.includes('clear-site-data'), false, 'a 101 must not clear local state')
+    assert.equal(received.includes('access-control-allow-origin'), false)
+    assert.match(received, /FRAME-AFTER-HEADERS/, 'the frames after the head still stream')
+  } finally {
+    for (const socket of upgraded) socket.destroy()
+    local.proxy.dispose()
+    await close(local.server)
+    await close(upstream)
+  }
 })
 
 test('the HTTP proxy strips the prefix, keeps cookies server-side and rewrites authority', async () => {
@@ -487,6 +834,164 @@ test('a throwing upstream reporter cannot fail the proxied request', async () =>
   } finally {
     local.proxy.dispose()
     await close(local.server)
+  }
+})
+
+test('the proxy never forwards the local session credential to the remote host', async () => {
+  const seen = []
+  const upstream = http.createServer((req, res) => {
+    seen.push(req.headers)
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('ok')
+  })
+  const upstreamPort = await listen(upstream)
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
+  try {
+    const response = await request(local.port, '/dsh-remote-go/remote/h_a/page', {
+      headers: {
+        accept: 'text/html',
+        origin: LOCAL_ORIGIN,
+        authorization: 'Bearer local-session-token',
+        'x-dsh-remote-go': '1',
+        'x-dsh-session': 'local-session',
+        'x-forwarded-for': '203.0.113.9',
+        forwarded: 'for=203.0.113.9',
+        'sec-fetch-site': 'same-origin',
+        'x-custom-trace': 'trace-1',
+      },
+    })
+    assert.equal(response.status, 200)
+    assert.equal(seen.length, 1)
+    const headers = seen[0]
+    // The upstream received the request, but not the browser's local credentials or the
+    // one-hop routing fields.
+    for (const name of [
+      'authorization',
+      'x-dsh-remote-go',
+      'x-dsh-session',
+      'x-forwarded-for',
+      'forwarded',
+      'sec-fetch-site',
+      'x-custom-trace',
+    ]) {
+      assert.equal(headers[name], undefined, `${name} reached the remote host`)
+    }
+    assert.equal(headers.accept, 'text/html', 'ordinary content headers still work')
+    assert.equal(headers.host, `127.0.0.1:${upstreamPort}`)
+    assert.equal(headers.origin, `http://127.0.0.1:${upstreamPort}`)
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
+    await close(upstream)
+  }
+})
+
+test('a hostile remote response cannot clear local cookies or navigate the frame away', async () => {
+  const upstream = http.createServer((_req, res) => {
+    if (_req.url.startsWith('/?token=')) {
+      res.writeHead(303, { location: './', 'set-cookie': ['dsh-auth=ok; Path=/'] })
+      res.end('token-consumed')
+      return
+    }
+    res.writeHead(302, {
+      location: 'https://evil.example/login',
+      'clear-site-data': '"cookies", "storage"',
+      'access-control-allow-origin': '*',
+      'content-location': 'https://evil.example/',
+      refresh: '0; url=https://evil.example/',
+      'permissions-policy': 'geolocation=()',
+      'content-type': 'text/html',
+    })
+    res.end('redirecting')
+  })
+  const upstreamPort = await listen(upstream)
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
+  try {
+    await request(local.port, '/dsh-remote-go/remote/h_a/?token=t')
+    const redirected = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(redirected.status, 302)
+    for (const name of [
+      'location',
+      'clear-site-data',
+      'access-control-allow-origin',
+      'content-location',
+      'refresh',
+      'permissions-policy',
+    ]) {
+      assert.equal(redirected.headers[name], undefined, `the remote set ${name} on the local origin`)
+    }
+    assert.equal(redirected.headers['content-type'], 'text/html')
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
+    await close(upstream)
+  }
+})
+
+test('an upstream that accepts and never answers fails with 502 instead of hanging', async () => {
+  const hungSockets = new Set()
+  const hung = net.createServer((socket) => {
+    hungSockets.add(socket)
+    socket.on('close', () => hungSockets.delete(socket))
+    // Accept and never answer: the old proxy waited forever.
+  })
+  const upstreamPort = await listen(hung)
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), fakeWebServer(), {
+    upstreamTimeoutMs: 150,
+  })
+  try {
+    const started = Date.now()
+    const response = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(response.status, 502)
+    assert.ok(Date.now() - started < 10_000, 'the request must not hang on a silent upstream')
+  } finally {
+    for (const socket of hungSockets) socket.destroy()
+    local.proxy.dispose()
+    await close(local.server)
+    await close(hung)
+  }
+})
+
+test('an upgrade upstream that accepts and never answers the handshake is dropped and reported', async () => {
+  const hungSockets = new Set()
+  const hung = net.createServer((socket) => {
+    hungSockets.add(socket)
+    socket.on('close', () => hungSockets.delete(socket))
+  })
+  const upstreamPort = await listen(hung)
+  const failures = []
+  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), fakeWebServer(), {
+    upstreamTimeoutMs: 150,
+    onUpstreamError: (hostId) => failures.push(hostId),
+  })
+  try {
+    local.proxy.sync(['h_a'])
+    await new Promise((resolve, reject) => {
+      const socket = net.connect(local.port, '127.0.0.1', () => {
+        socket.write(
+          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
+            `Host: ${LOCAL_AUTHORITY}\r\n` +
+            'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+        )
+      })
+      const timer = setTimeout(() => {
+        socket.destroy()
+        reject(new Error('the upgrade socket was never dropped'))
+      }, 10_000)
+      timer.unref?.()
+      socket.on('close', () => {
+        clearTimeout(timer)
+        resolve(undefined)
+      })
+      socket.on('error', () => {})
+      socket.resume()
+    })
+    assert.deepEqual(failures, ['h_a'])
+  } finally {
+    for (const socket of hungSockets) socket.destroy()
+    local.proxy.dispose()
+    await close(local.server)
+    await close(hung)
   }
 })
 

@@ -22,6 +22,12 @@ import net from 'node:net'
 import { REMOTE_VIEW_PREFIX } from './constants.js'
 import { trustedRequest } from './request-trust.js'
 
+/** How long the remote may take to accept a connection and answer; see `createRemoteProxy`. */
+export const UPSTREAM_TIMEOUT_MS = 30_000
+
+/** A handshake response head larger than this is not a WebSocket upgrade; it is dropped. */
+const MAX_UPSTREAM_HEAD_BYTES = 64 * 1024
+
 /** How long the remote web UI's own stream route is (the only upgrade a DSH web serves). */
 const REMOTE_STREAM_PATH = '/api/remote.mux'
 
@@ -38,6 +44,80 @@ const HOP_BY_HOP = new Set([
   'transfer-encoding',
   'upgrade',
 ])
+
+/**
+ * The request headers this proxy forwards. This is an allowlist on purpose: the browser's own
+ * credentials belong to the *local* origin (`authorization`, `cookie`, `x-dsh-*`) and the
+ * traffic-shaping headers belong to this hop (`forwarded`, `x-forwarded-*`, `sec-fetch-*`).
+ * A blacklist forwarded them all to a host that the remote controls.
+ */
+const FORWARDED_REQUEST_HEADERS = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'cache-control',
+  'content-length',
+  'content-type',
+  'range',
+  'user-agent',
+  'x-requested-with',
+])
+
+/** Conditional-request headers: `if-match`, `if-none-match`, `if-modified-since`, `if-range`, … */
+const FORWARDED_REQUEST_PREFIX = 'if-'
+
+/** The fields a WebSocket handshake needs, forwarded only on an upgrade. */
+const UPGRADE_REQUEST_HEADERS = new Set([
+  'connection',
+  'upgrade',
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-protocol',
+  'sec-websocket-extensions',
+])
+
+/**
+ * Response headers a remote page may not set on the local origin. `clear-site-data` would let a
+ * compromised remote wipe this GUI's own cookies and storage, `access-control-*` would open the
+ * local origin to other sites, and `refresh` / `content-location` / `report-to` / `nel` /
+ * `permissions-policy` / `alt-svc` redirect or reshape the browser's view of a server it does
+ * not own.
+ */
+const BLOCKED_RESPONSE_HEADERS = new Set([
+  'clear-site-data',
+  'refresh',
+  'content-location',
+  'report-to',
+  'nel',
+  'permissions-policy',
+  'alt-svc',
+])
+
+/** Every `access-control-*` response header belongs to the remote's origin, not this one. */
+const BLOCKED_RESPONSE_PREFIX = 'access-control-'
+
+/**
+ * Whether one browser request header may reach the remote.
+ * @param {string} name - lowercase header name.
+ * @param {boolean} preserveUpgrade - whether this is a WebSocket handshake.
+ * @returns {boolean}
+ */
+export function forwardableRequestHeader(name, preserveUpgrade = false) {
+  if (FORWARDED_REQUEST_HEADERS.has(name)) return true
+  if (name.startsWith(FORWARDED_REQUEST_PREFIX)) return true
+  return preserveUpgrade === true && UPGRADE_REQUEST_HEADERS.has(name)
+}
+
+/**
+ * Whether one upstream response header may reach the browser.
+ * @param {string} name - lowercase header name.
+ * @returns {boolean}
+ */
+export function forwardableResponseHeader(name) {
+  if (BLOCKED_RESPONSE_HEADERS.has(name)) return false
+  if (name.startsWith(BLOCKED_RESPONSE_PREFIX)) return false
+  return true
+}
 
 /**
  * Split `/dsh-remote-go/remote/<hostId>/<rest>` into its host and the upstream path.
@@ -69,10 +149,19 @@ export function upgradePath(hostId) {
 }
 
 /**
+ * Bounds of one host's cookie jar. The remote decides what to set, so the jar needs a ceiling:
+ * 64 cookies of at most 4 KiB keep a hostile or simply broken remote from growing the process,
+ * and a cookie the remote marks `Secure` never lands in this plaintext, in-memory jar at all.
+ */
+export const MAX_JAR_COOKIES = 64
+export const MAX_COOKIE_VALUE = 4096
+export const MAX_COOKIE_NAME = 128
+
+/**
  * Parse one `Set-Cookie` line into the jar entry it should replace.
  * Only the attributes that decide whether and where the value is sent are kept.
  * @param {string} line - one Set-Cookie header value.
- * @returns {{ name: string, value: string, path: string, expiresAt: number } | null}
+ * @returns {{ name: string, value: string, path: string, expiresAt: number, secure: boolean } | null}
  */
 export function parseSetCookie(line) {
   const [pair, ...attributes] = String(line ?? '').split(';')
@@ -80,14 +169,17 @@ export function parseSetCookie(line) {
   if (equals <= 0) return null
   const name = pair.slice(0, equals).trim()
   const value = pair.slice(equals + 1).trim()
-  if (name === '') return null
+  if (name === '' || name.length > MAX_COOKIE_NAME) return null
+  if (value.length > MAX_COOKIE_VALUE) return null
   let cookiePath = '/'
   let expiresAt = Number.POSITIVE_INFINITY
+  let secure = false
   for (const attribute of attributes) {
     const at = attribute.indexOf('=')
     const key = (at === -1 ? attribute : attribute.slice(0, at)).trim().toLowerCase()
     const raw = at === -1 ? '' : attribute.slice(at + 1).trim()
     if (key === 'path' && raw.startsWith('/')) cookiePath = raw
+    if (key === 'secure') secure = true
     if (key === 'max-age') {
       const seconds = Number(raw)
       if (Number.isFinite(seconds)) expiresAt = seconds <= 0 ? 0 : Date.now() + seconds * 1000
@@ -97,7 +189,7 @@ export function parseSetCookie(line) {
       if (Number.isFinite(parsed)) expiresAt = parsed
     }
   }
-  return { name, value, path: cookiePath, expiresAt }
+  return { name, value, path: cookiePath, expiresAt, secure }
 }
 
 /** One host's cookies, keyed by name; values never leave this process. */
@@ -107,7 +199,7 @@ function createCookieJar() {
 
 /**
  * Store every non-expired cookie from one response and drop the ones it cleared.
- * @param {Map<string, { value: string, path: string, expiresAt: number }>} jar - host jar.
+ * @param {Map<string, { value: string, path: string, expiresAt: number, secure?: boolean }>} jar - host jar.
  * @param {string | string[] | undefined} setCookie - raw Set-Cookie value(s).
  */
 export function storeCookies(jar, setCookie) {
@@ -115,8 +207,18 @@ export function storeCookies(jar, setCookie) {
   for (const line of Array.isArray(setCookie) ? setCookie : [setCookie]) {
     const entry = parseSetCookie(line)
     if (entry === null) continue
-    if (entry.value === '' || entry.expiresAt <= Date.now()) jar.delete(entry.name)
-    else jar.set(entry.name, entry)
+    if (entry.value === '' || entry.expiresAt <= Date.now()) {
+      jar.delete(entry.name)
+      continue
+    }
+    // The tunnel is plain HTTP to 127.0.0.1, so a `Secure` cookie is not one this jar may
+    // keep: storing and replaying it would downgrade a flag the remote asked for.
+    if (entry.secure) {
+      jar.delete(entry.name)
+      continue
+    }
+    if (!jar.has(entry.name) && jar.size >= MAX_JAR_COOKIES) continue
+    jar.set(entry.name, { name: entry.name, value: entry.value, path: entry.path, expiresAt: entry.expiresAt })
   }
 }
 
@@ -164,20 +266,18 @@ function rewriteSameOrigin(value, localOrigin, target) {
 }
 
 /**
- * Request headers for the upstream: hop-by-hop and browser-authority fields are replaced, and
- * only this host's own cookies are added. Everything else (accept, content-type, range…) is kept.
+ * Request headers for the upstream: only the allowlisted content headers are copied, the two
+ * authority fields are rewritten, and only this host's own cookies are added.
  * @param {string[]} rawHeaders - node raw header list.
  * @param {{ target: object, localOrigin: string, path: string, jar: Map }} input
  * @returns {Record<string, string | string[]>}
  */
 export function upstreamHeaders(rawHeaders, input) {
   const out = {}
+  const preserveUpgrade = input.preserveUpgrade === true
   for (let at = 0; at < rawHeaders.length; at += 2) {
     const name = String(rawHeaders[at]).toLowerCase()
     const value = rawHeaders[at + 1]
-    // A WebSocket handshake is exactly the two hop-by-hop fields an ordinary request drops.
-    const upgradeField = name === 'connection' || name === 'upgrade'
-    if (HOP_BY_HOP.has(name) && !(input.preserveUpgrade === true && upgradeField)) continue
     if (name === 'host' || name === 'cookie') continue
     if (name === 'origin') {
       out.origin = remoteOrigin(input.target)
@@ -187,6 +287,7 @@ export function upstreamHeaders(rawHeaders, input) {
       out.referer = rewriteSameOrigin(value, input.localOrigin, input.target)
       continue
     }
+    if (!forwardableRequestHeader(name, preserveUpgrade)) continue
     out[name] = out[name] === undefined ? value : [].concat(out[name], value)
   }
   out.host = remoteAuthority(input.target)
@@ -212,37 +313,104 @@ export function withoutFrameAncestors(value) {
 }
 
 /**
+ * Rewrite one upstream `Location` for the browser.
+ *
+ * A redirect that names the remote's own loopback listener is folded back under the view
+ * prefix, so a form post or a token exchange stays inside the frame. Everything else that is an
+ * absolute URL — another host, another scheme, a protocol-relative `//evil.example`, or a
+ * different loopback port — is refused (`null`): the header is dropped, because navigation
+ * inside this same-origin frame must never leave the seat the user opened. A relative
+ * reference (`.`, `./next`, `/assets/app.js`) is already resolved against that seat, so it is
+ * passed through untouched.
+ * @param {string} value - one upstream Location header value.
+ * @param {{ hostId?: string, remoteOrigin?: string }} [input]
+ * @returns {string | null} the header value to send, or null to drop the header.
+ */
+export function safeLocation(value, input = {}) {
+  const text = String(value ?? '')
+    .replace(/[\r\n]/g, '')
+    .trim()
+  if (text === '') return null
+  if (input.hostId && input.remoteOrigin) {
+    if (text === input.remoteOrigin) return `${REMOTE_VIEW_PREFIX}${input.hostId}/`
+    if (text.startsWith(`${input.remoteOrigin}/`)) {
+      return `${REMOTE_VIEW_PREFIX}${input.hostId}${text.slice(input.remoteOrigin.length)}`
+    }
+    if (text.startsWith(`${input.remoteOrigin}?`) || text.startsWith(`${input.remoteOrigin}#`)) {
+      return `${REMOTE_VIEW_PREFIX}${input.hostId}/${text.slice(input.remoteOrigin.length)}`
+    }
+  }
+  // Any scheme (`https:`, `javascript:`, `data:`…) is an absolute target.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) return null
+  // A backslash is a slash to the URL parser for special schemes: `/\evil.example/x` and
+  // `\/evil.example` both resolve to `http://evil.example/`, so a surviving backslash in what
+  // looks like a relative reference is an off-origin escape. (`%5c` stays percent-encoded and is
+  // not a separator, so it is not caught here.)
+  if (text.includes('\\')) return null
+  // `//host/…`: a browser reads it as protocol-relative, i.e. off-origin.
+  if (text.startsWith('//')) return null
+  return text
+}
+
+/**
  * Response headers to hand the browser: drop hop-by-hop fields, this connection's framing, the
- * remote's cookies (they go to the jar), and any frame denial the remote inherited from another
- * deployment — this proxy exists to frame that one page. A `Location` that names the remote's own
- * listener is folded back under the view prefix so a redirect cannot slip out of the frame.
+ * remote's cookies (they go to the jar), any frame denial the remote inherited from another
+ * deployment, and browser-policy headers the remote must not set on the local origin. A
+ * `Location` that names the remote's own listener is folded back under the view prefix; any
+ * other absolute target is dropped so a redirect cannot slip out of the frame.
  * @param {string[]} rawHeaders - upstream raw header list.
  * @param {{ hostId?: string, remoteOrigin?: string }} [input]
  * @returns {string[]} flat [name, value, …] pairs.
  */
 export function responseHeaders(rawHeaders, input = {}) {
   const out = []
+  const preserveUpgrade = input.preserveUpgrade === true
   for (let at = 0; at < rawHeaders.length; at += 2) {
     const name = String(rawHeaders[at]).toLowerCase()
-    if (HOP_BY_HOP.has(name)) continue
+    // `Connection`/`Upgrade` are hop-by-hop, except in the response to a WebSocket handshake:
+    // dropping them there would turn a valid 101 into a protocol error.
+    if (HOP_BY_HOP.has(name) && !(preserveUpgrade && (name === 'connection' || name === 'upgrade'))) continue
     if (name === 'set-cookie' || name === 'x-frame-options') continue
+    if (!forwardableResponseHeader(name)) continue
     if (name === 'content-security-policy') {
       out.push(rawHeaders[at], withoutFrameAncestors(String(rawHeaders[at + 1])))
       continue
     }
-    if (name === 'location' && input.hostId && input.remoteOrigin) {
-      const value = String(rawHeaders[at + 1])
-      if (value.startsWith(`${input.remoteOrigin}/`)) {
-        out.push(rawHeaders[at], `${REMOTE_VIEW_PREFIX}${input.hostId}${value.slice(input.remoteOrigin.length)}`)
-        continue
-      }
-      if (value === input.remoteOrigin) {
-        out.push(rawHeaders[at], `${REMOTE_VIEW_PREFIX}${input.hostId}/`)
-        continue
-      }
+    if (name === 'location') {
+      const location = safeLocation(rawHeaders[at + 1], input)
+      if (location === null) continue
+      out.push(rawHeaders[at], location)
+      continue
     }
     out.push(rawHeaders[at], rawHeaders[at + 1])
   }
+  return out
+}
+
+/**
+ * Rewrite one raw upstream response head (status line + headers, without the final blank line).
+ *
+ * The upgrade path forwards a 101 byte-for-byte if left alone, which also forwarded
+ * `Set-Cookie` and every browser-policy header the remote chose to attach to the handshake. The
+ * same policy as `responseHeaders` applies here; only the status line and the header block are
+ * touched, never the frames that follow.
+ * @param {string} headText - latin1-decoded head, `HTTP/1.1 101 …\r\nkey: value…`.
+ * @param {{ hostId?: string, remoteOrigin?: string }} [input]
+ * @returns {string} the filtered head (without the trailing blank line), or '' when unparseable.
+ */
+export function filterResponseHead(headText, input = {}) {
+  const lines = String(headText ?? '').split('\r\n')
+  const statusLine = lines.shift() ?? ''
+  if (!/^HTTP\/1\.[01] \d{3}(?: .*)?$/.test(statusLine)) return ''
+  const raw = []
+  for (const line of lines) {
+    const colon = line.indexOf(':')
+    if (colon <= 0) continue
+    raw.push(line.slice(0, colon).trim(), line.slice(colon + 1).trim())
+  }
+  const filtered = responseHeaders(raw, { ...input, preserveUpgrade: true })
+  let out = `${statusLine}\r\n`
+  for (let at = 0; at < filtered.length; at += 2) out += `${filtered[at]}: ${filtered[at + 1]}\r\n`
   return out
 }
 
@@ -282,6 +450,10 @@ export function createRemoteProxy(options) {
   const resolveHost = options.resolveHost
   const admit = typeof options.admit === 'function' ? options.admit : () => undefined
   const onUpstreamError = options.onUpstreamError
+  const upstreamTimeoutMs =
+    Number.isSafeInteger(options.upstreamTimeoutMs) && options.upstreamTimeoutMs > 0
+      ? options.upstreamTimeoutMs
+      : UPSTREAM_TIMEOUT_MS
   const jars = new Map()
   const upgrades = new Map()
   const sockets = new Set()
@@ -377,6 +549,11 @@ export function createRemoteProxy(options) {
       path: parsed.path,
       jar,
     })
+    // The remote is reached over a tunnel; a listener that accepts and never answers used to
+    // hang the local request forever. The deadline covers the wait for response headers only —
+    // once the response started, an idle stream (SSE, a large asset) is legitimate.
+    let answered = false
+    let failed = false
     const upstream = http.request(
       {
         host: '127.0.0.1',
@@ -384,8 +561,11 @@ export function createRemoteProxy(options) {
         path: upstreamPath,
         method: req.method,
         headers,
+        timeout: upstreamTimeoutMs,
       },
       (response) => {
+        answered = true
+        upstream.setTimeout(0)
         storeCookies(jar, response.headers['set-cookie'])
         try {
           res.writeHead(
@@ -404,13 +584,29 @@ export function createRemoteProxy(options) {
         response.pipe(res)
       },
     )
-    upstream.on('error', () => {
-      // Nothing from this failure reaches the log line: the emitter is request-driven, so CodeQL
-      // treats its error as user-controlled (log injection). The loopback port names the host to an
-      // operator, and the browser only ever sees the 502 below.
+    /**
+     * One failed upstream: report it once and answer 502 (or nothing, when the response has
+     * already started). Nothing from the failure reaches the log line: the emitter is
+     * request-driven, so CodeQL treats its error as user-controlled (log injection). The
+     * loopback port names the host to an operator, and the browser only ever sees the 502.
+     */
+    const upstreamFailed = () => {
+      if (failed) return
+      failed = true
       logger.debug?.(`[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed`)
       plain(res, 502, 'remote UI is unreachable')
       reportUpstreamFailure(parsed.hostId)
+    }
+    upstream.on('timeout', () => {
+      if (answered) return
+      answered = true
+      upstream.destroy()
+      upstreamFailed()
+    })
+    upstream.on('error', () => {
+      // A failure after the response started is still worth reporting (the Host confirms it
+      // with probes); `plain` is a no-op once the headers are out.
+      upstreamFailed()
     })
     req.once('aborted', () => upstream.destroy())
     req.pipe(upstream)
@@ -467,21 +663,93 @@ export function createRemoteProxy(options) {
       for (const item of Array.isArray(value) ? value : [value]) raw += `${name}: ${item}\r\n`
     }
     raw += '\r\n'
-    const upstream = net.connect(target.localPort, '127.0.0.1')
+    const upstream = net.connect({ port: target.localPort, host: '127.0.0.1', timeout: upstreamTimeoutMs })
+    // An upgrade owns its socket, so the deadline covers the handshake only: an upstream that
+    // accepts and never answers would otherwise leave both sockets dangling forever.
+    let settled = false
+    const handshakeTimer = setTimeout(() => failUpgrade(), upstreamTimeoutMs)
+    handshakeTimer.unref?.()
+    function failUpgrade() {
+      clearTimeout(handshakeTimer)
+      if (settled) return
+      settled = true
+      upstream.destroy()
+      socket.destroy()
+      reportUpstreamFailure(hostId)
+    }
     sockets.add(socket)
+    // The upstream's response head is filtered before the browser sees it: a 101 used to be
+    // forwarded byte-for-byte, which also handed the remote's `Set-Cookie` and policy headers to
+    // the local origin. Only the head is parsed; everything after it streams untouched.
+    let upstreamHead = Buffer.alloc(0)
+    let headForwarded = false
+    const writeToClient = (chunk) => {
+      if (!socket.write(chunk)) upstream.pause()
+    }
+    const forwardUpstreamData = (chunk) => {
+      if (settled) return
+      clearTimeout(handshakeTimer)
+      upstream.setTimeout(0)
+      if (headForwarded) {
+        writeToClient(chunk)
+        return
+      }
+      upstreamHead = upstreamHead.length === 0 ? Buffer.from(chunk) : Buffer.concat([upstreamHead, chunk])
+      if (upstreamHead.length > MAX_UPSTREAM_HEAD_BYTES) {
+        // Nothing legitimate answers a handshake with a head this large.
+        failUpgrade()
+        return
+      }
+      const end = upstreamHead.indexOf('\r\n\r\n')
+      if (end === -1) return
+      const filtered = filterResponseHead(upstreamHead.subarray(0, end).toString('latin1'), {
+        hostId,
+        remoteOrigin: remoteOrigin(target),
+      })
+      if (filtered === '') {
+        failUpgrade()
+        return
+      }
+      headForwarded = true
+      writeToClient(`${filtered}\r\n`)
+      const rest = upstreamHead.subarray(end + 4)
+      upstreamHead = Buffer.alloc(0)
+      if (rest.length > 0) writeToClient(rest)
+    }
+    upstream.on('data', forwardUpstreamData)
+    socket.on('drain', () => upstream.resume())
+    upstream.on('timeout', () => failUpgrade())
+    upstream.on('error', () => failUpgrade())
+    /**
+     * The remote ended the stream. `upstream.pipe(socket)` used to forward that EOF implicitly;
+     * the head is parsed here, so the end of the upstream must still close the browser side or
+     * the page would hold a dead socket forever.
+     */
+    const endClient = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(handshakeTimer)
+      try {
+        socket.end()
+      } catch {}
+    }
+    upstream.on('end', endClient)
+    upstream.on('close', endClient)
     socket.once('close', () => {
+      settled = true
+      clearTimeout(handshakeTimer)
       sockets.delete(socket)
       upstream.destroy()
     })
-    socket.on('error', () => upstream.destroy())
-    upstream.on('error', () => {
-      socket.destroy()
-      reportUpstreamFailure(hostId)
+    socket.on('error', () => {
+      settled = true
+      clearTimeout(handshakeTimer)
+      upstream.destroy()
     })
     upstream.once('connect', () => {
+      if (settled) return
       upstream.write(raw)
       if (head && head.length > 0) upstream.write(head)
-      upstream.pipe(socket)
       socket.pipe(upstream)
     })
   }

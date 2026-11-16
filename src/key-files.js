@@ -7,6 +7,9 @@ import { expandHome } from './util.js'
 
 const MAX_ENTRIES = 500
 
+/** Code of the "not inside the home directory" refusal, so callers can map it to an HTTP 400. */
+export const OUTSIDE_HOME = 'EOUTSIDEHOME'
+
 export async function listKeyFiles(options) {
   const home = path.resolve(options.home)
   const impl = options.fsImpl ?? fs
@@ -21,7 +24,9 @@ export async function listKeyFiles(options) {
   // that does not exist keeps its requested spelling, which the check still judges.
   const realTarget = await impl.realpath(target).catch(() => target)
   if (realTarget !== realHome && !realTarget.startsWith(realHome + path.sep)) {
-    throw new Error('key-file path must stay inside the home directory')
+    const error = new Error('key-file path must stay inside the home directory')
+    error.code = OUTSIDE_HOME
+    throw error
   }
 
   const dirents = await impl.readdir(realTarget, { withFileTypes: true })

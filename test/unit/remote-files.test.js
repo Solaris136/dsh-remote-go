@@ -38,7 +38,7 @@ test('readHostDownload streams a file into a unique local file', async () => {
       return { size: 12 }
     },
   })
-  const result = await readHostDownload(runtime, '/home/ubuntu/report.md', { destination: base })
+  const result = await readHostDownload(runtime, '/home/ubuntu/report.md', { destination: base, home: tmpdir() })
   assert.equal(result.kind, 'file')
   assert.equal(result.name, 'report (2).md')
   assert.equal(result.destination, path.join(base, 'report (2).md'))
@@ -61,14 +61,14 @@ test('readHostDownload saves a folder into a unique local directory', async () =
       return { destination: targetRoot, totalBytes: 3, totalFiles: 1 }
     },
   })
-  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base })
+  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
   assert.equal(result.kind, 'folder')
   assert.equal(result.name, 'project')
   assert.equal(result.destination, path.join(base, 'project'))
   assert.equal(result.files, 1)
   assert.equal(calls.length, 1)
   assert.equal(calls[0].targetRoot, path.join(base, 'project'))
-  const second = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base })
+  const second = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
   assert.equal(second.destination, path.join(base, 'project (2)'))
 })
 
@@ -84,7 +84,7 @@ test('readHostDownload renames the target file/folder when a file has the same n
       return { destination: targetRoot, totalBytes: 0, totalFiles: 0 }
     },
   })
-  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base })
+  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
   assert.equal(result.destination, path.join(base, 'project (2)'))
 })
 
@@ -99,7 +99,10 @@ test('readHostDownload requires a destination for every download', async () => {
 
 test('readHostDownload rejects unsupported paths and disconnected hosts', async () => {
   await assert.rejects(
-    readHostDownload({ status: 'disconnected', ssh: null }, '/home/ubuntu/a.txt', { destination: tmpdir() }),
+    readHostDownload({ status: 'disconnected', ssh: null }, '/home/ubuntu/a.txt', {
+      destination: tmpdir(),
+      home: tmpdir(),
+    }),
     /remote-file-unavailable/,
   )
   const weird = runtimeWith({
@@ -108,7 +111,7 @@ test('readHostDownload rejects unsupported paths and disconnected hosts', async 
     },
   })
   await assert.rejects(
-    readHostDownload(weird, '/home/ubuntu/socket', { destination: tmpdir() }),
+    readHostDownload(weird, '/home/ubuntu/socket', { destination: tmpdir(), home: tmpdir() }),
     /remote-file-unavailable/,
   )
 })
