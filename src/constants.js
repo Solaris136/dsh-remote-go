@@ -57,6 +57,12 @@ export const REMOTE_UNREACHABLE_CONFIRM_DELAY_MS = 750
 export const REMOTE_UNREACHABLE_RECHECK_DELAY_MS = 1200
 
 /**
+ * After a transient (proxy/tunnel) episode is confirmed healthy, the same kind of report is
+ * ignored for this long: a flapping tunnel must not emit suspected/recovered on every request.
+ */
+export const REMOTE_EPISODE_COOLDOWN_MS = 15_000
+
+/**
  * A remote restart needs a little time to print its new readiness line. The
  * re-attach retries the read-back a few times before it declares the remote gone.
  */

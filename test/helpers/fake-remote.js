@@ -171,6 +171,14 @@ export async function makeTestService(overrides = {}) {
     resolveRemote: overrides.resolveRemote ?? (async () => ({ ok: false, reason: 'no-running-web' })),
     writeRegistry: overrides.writeRegistry ?? (async () => ({ ok: true, output: 'REGISTRY-WRITTEN' })),
     remoteStatus: overrides.remoteStatus ?? (async () => 200),
+    processIdentity:
+      overrides.processIdentity ??
+      (async (_ssh, pid) => ({
+        ok: true,
+        startTime: `start-${pid}`,
+        command: 'node /home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web',
+        dshHome: '/home/ubuntu/.dsh',
+      })),
     loadSshMaterial: async () => ({
       sshDir: '/home/test/.ssh',
       configText: 'Host test-host\n  HostName 2001:db8::1\n  User ubuntu\n',

@@ -19,6 +19,8 @@ export {
   writeRunRegistry,
   commandMatchesProfile,
   versionFromCommand,
+  dshPackageDirFromCommand,
+  remoteDshVersion,
   resolveRemoteWeb,
 } from './remote-web.js'
 
@@ -30,6 +32,8 @@ export {
   parseListenPorts,
   remoteListenPorts,
   remotePortOwnerPid,
+  parseProcessIdentity,
+  remoteProcessIdentity,
   remoteHttpStatus,
   waitForRemoteUi,
   exchangeTokenOverTunnel,

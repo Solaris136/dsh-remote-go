@@ -204,34 +204,39 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 
 ```text
 restart(id)（同一条 SSH 会话）
-  ├─ 只认 run registry 里那个 pid：registry 的 pid 必须等于本连接记录的 pid，才走
-  │   `stopRemoteWeb`（SIGTERM → 等待 → SIGKILL）并删除注册表；否则不杀任何进程
-  ├─ 运行期冲突：仍在运行的手工实例（包括之前选择 alongside 的）走 §6.3 的冲突提示，
-  │   「取消」时保留当前连接与隧道，不做任何破坏
-  ├─ [start]  用已记录的 facts/plan 重新 npx 启动（`--port 0` → 新端口、新 token）
-  ├─ 刷新 run/web.json（新 pid/port/version/profile/dshHome/launch）
+  ├─ 先弹冲突提示（若有手工实例），用户取消时**尚未停止任何东西**，保留原连接与隧道
+  ├─ 只有同时满足三条才允许 kill：
+  │   1) run registry 命名它；2) 本连接实际启动过它（start 脚本的 pid，或 adopt 自 launch 记录）；
+  │   3) /proc/<pid> 的 starttime 与记录的启动时刻一致（排除 pid 复用），cmdline/env 仍是同一 DSH home/profile
+  │   不满足就只「接管显示」，不 kill，转冲突流程
+  ├─ [start]  用已记录的 facts/plan 重新 npx 启动（`--port 0` → 新端口、新 token），记录新 pid 身份
+  ├─ 刷新 run/web.json（新 pid/port/version/profile/dshHome/launch；origin 标为 launch）
   ├─ 关旧隧道 → [tunnel] 按新端口重建 → [verifying] 重新 token → cookie 种入
   └─ connected：`remote.viewRev` +1，承载方（guest / iframe）重新导航到新的 `GET /hosts/:id/open`
 ```
 
-重启是一次性动作：结束后仍按原 `keepAlive` 策略走，不写远端 `~/.dsh` 的插件、配置与凭据。失败按连接失败同样收尾（分类错误 + teardown），主机与配置保留。
+重启是一次性动作：结束后仍按原 `keepAlive` 策略走，不写远端 `~/.dsh` 的插件、配置与凭据。动作内创建的隧道在 `finally` 里收尾：disconnect / 删主机 / 退出让令牌失效时，监听器一律关闭并清空 `remote.localPort`，绝不留下持有已释放 SSH 的隧道。失败按连接失败同样收尾（分类错误 + teardown），主机与配置保留。
 
 ### 5.6 远端自重启：心跳、确认与重挂
 远端 DSH 可能自己重启（插件市场更新、supervisor、远端重启），而启动命令固定 `--port 0`，所以**重启后端口一定变化**，且市场发起的重启不会写插件的 `run/web.json`。处理分三层：
 
-1. **故障上报**：同源代理或隧道的 `ECONNREFUSED` / `ECONNRESET` 只上报一次 `remote-unreachable` 疑似事件（SSE 同名事件带 `phase: suspected`），由探活确认，不把一次请求失败当成进程重启。
-2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。
+1. **故障上报**：同源代理或隧道的 `ECONNREFUSED` / `ECONNRESET` 只上报一次 `remote-unreachable` 疑似事件（SSE 同名事件带 `phase: suspected`），由探活确认，不把一次请求失败当成进程重启。同一类上报在 recovered 后有 15s 冷却窗口，避免「隧道坏、远端健康」时反复抖动。
+2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭并即时生效）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。若远端健康但页面请求失败（典型是隧道坏了），恢复时会**重建本地监听器**（同一远端端口、token 不变），而不是把远端判成重启。
 3. **重挂而不是全量重连**（`reattachRemote`，状态 `connecting` + 进度码 `restarting-remote`）：
    ```text
-   重读远端真实状态（resolveRemoteWeb，最多重试数秒）
-     ├─ run registry 的 pid 存活：端口取最新 `dsh web:` 行或该 pid 在 /proc 的监听端口
-     ├─ 日志行更新但 pid 变了：用监听端口的 socket inode 反查 pid（/proc）
-     └─ 日志被 supervisor 重定向：扫描本 profile 的 DSH 进程，再用 /proc 找监听端口
-   校验 pid 存活、版本（registry 或进程命令行里的 npx pin）、dshHome、profile
-   刷新 run/web.json → 关旧隧道 → 按新端口重建 → 重新 token → [verifying] → connected
-   写一条连接日志（重挂原因）与诊断 `restarts` 记录；remote.viewRev +1，承载方静默重载
+   重读远端真实状态（resolveRemoteWeb，最多重试数秒），一个候选必须同时满足：
+     ├─ 监听端口属于该 pid（registry 存活 pid 的 /proc 监听端口；否则用端口反查 pid）
+     ├─ /proc/<pid> 的 cmdline 含 `--profile <profile>` 且 environ 的 DSH_HOME 等于本连接的真实 home
+     └─ 最新 `dsh web:` 行命中的是同一个端口（launch token 只能来自这一行）
+   token 为空 → 明确失败（真实 DSH 对 `/?token=` 与无 cookie 请求都回 401），绝不假装成功
+   版本：cmdline 的 `@deepseek-ai/dsh@<ver>`，或 argv 指向的 `node_modules/@deepseek-ai/dsh/package.json`；
+        证明不了就保持未知，不把本机版本写进 registry「洗白」
+   校验通过 → 刷新 run/web.json（origin=reattach）→ 关旧隧道 → 按新端口重建 → 重新 token → [verifying]
+             → connected；写连接日志（重挂原因）与诊断 `restarts`；`remote.viewRev` +1，承载方静默重载
+   没有可重挂实例 / 拿不到 token → 报可解释的 `remote-unreachable`，保留主机、配置与 SSH；
+            用户可点「重启远端 DSH」或「重连」（进程扫描只用于解释 `no-token`，不产生接管）
    ```
-   运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**，不弹「远端已有手工启动的 DSH」；没有可重挂实例时报可解释的 `remote-unreachable` 错误，保留主机与配置，用户可点「重启远端 DSH」或「重连」。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
+   运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**；重挂发现的 pid 只有显示/承载权，**没有 kill 权**（`run/web.json` 记 `origin: "reattach"`，下一次连接 adoption 也只接管不授权）。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
 
 ## 6. 远端运行时
 ### 6.1 托管 Node + npx
@@ -247,8 +252,8 @@ restart(id)（同一条 SSH 会话）
 - 预检回读不一致 → `version-mismatch`，连接中止。收养旧进程前校验 run registry（`dshHome`、`profile`、版本）；版本不符且属于本插件时先停止再另起。
 
 ### 6.3 收养与冲突
-- 收养：读插件状态目录的 `run/web.json`，要求 pid 存活、日志 URL 可解析、HTTP 可达。收养让本地重启后复用远端实例。
-- 冲突：远端已有手工启动的 DSH 时，列出进程并让用户选 `stop` / `alongside` / `cancel`；`alongside` 会在主机卡片留下共享 `~/.dsh` 的 warning，并记住这些 pid，之后本地重启远端时不再重复询问（§5.5）。
+- 收养：读插件状态目录的 `run/web.json`，要求 pid 存活、日志 URL 可解析、HTTP 可达。收养让本地重启后复用远端实例。记录里 `origin: "launch"`（启动脚本或本地重启写的）才授予 kill 权；`origin: "reattach"`（运行期重挂写的）只接管显示。
+- 冲突：远端已有手工启动的 DSH 时，列出进程并让用户选 `stop` / `alongside` / `cancel`；`alongside` 会在主机卡片留下共享 `~/.dsh` 的 warning，并记住这些 pid，之后本地重启远端时不再重复询问（§5.5），且这些 pid 永不被自动 kill。
 - 运行期重挂（§5.6）与连接期收养不是一回事：重挂只用于本连接对应的主机（同一 `~/.dsh` + profile），不弹冲突提示；连接期才需要用户在「停掉手工实例 / 并存 / 取消」之间选择。
 
 ### 6.4 存活策略

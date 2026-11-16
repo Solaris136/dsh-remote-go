@@ -26,15 +26,17 @@
 ### 新增
 
 - **远端 DSH 重启**：主机清单里已连接的卡片新增「重启远端 DSH」。Host 用同一条 SSH 会话停掉自己拉起的
-  远端进程（只认 run registry 里的 pid，SIGTERM → 等待 → SIGKILL），重新 `npx` 启动、刷新 `run/web.json`、
-  按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，不会再次索要密码或主机指纹。手工实例仍走
-  既有冲突提示，不会被静默杀掉；结束后仍按原存活策略。
+  远端进程，重新 `npx` 启动、刷新 `run/web.json`、按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，
+  不会再次索要密码或主机指纹。只有同时满足「run registry 命名」「本连接启动过」「`/proc` starttime 仍是同一
+  进程且 profile/home 一致」才会 kill；重挂发现的 pid、pid 复用与 `alongside` 保留的进程一律不杀。冲突提示在
+  kill 之前，取消不做任何破坏；动作内新建的隧道在取消/断开/删主机时关闭，不留持有已释放 SSH 的监听器。
 - **远端自重启（插件市场更新等）自动恢复**：新增 `POST /hosts/:id/restart`、`remote-unreachable` SSE 事件
-  （疑似 / 确认 / 恢复）、`RemoteView.viewRev`（承载方据此重新导航）与 `remoteHeartbeat` 设置（默认 30s 可关）。
-  同源代理与隧道不再把一次 `ECONNREFUSED` 当成进程重启；连续两次探活失败后才重读远端真实状态（新的
-  `dsh web:` 行，或 `/proc` 里的监听端口）、校验 pid/版本/dshHome/profile、刷新 `run/web.json`、关旧隧道并按
-  新端口重建，再静默重载界面。重挂期间显示 `restarting-remote` 进度码而不是「连接断开」；没有可重挂实例时
-  报可解释的 `remote-unreachable` 并保留主机与配置（该状态保留 SSH 会话，因此「重启远端 DSH」无需重新认证）。
+  （疑似 / 确认 / 恢复，带 15s 冷却）、`RemoteView.viewRev`（承载方据此重新导航）与 `remoteHeartbeat` 设置
+  （默认 30s 可关，保存即生效）。同源代理与隧道不再把一次 `ECONNREFUSED` 当成进程重启；连续两次探活失败后
+  才重读远端真实状态——候选必须能证明「同一 profile、同一 `~/.dsh`、端口属于该 pid，且最新就绪行给出 launch
+  token」，`/proc` 进程扫描只用于解释失败；拿不到 token 不会假装重挂，而是报可解释的 `remote-unreachable` 并
+  保留主机与配置。版本来自 npx pin 或被加载包的 `package.json`，证明不了就保持未知、不写进 registry。远端健康
+  但隧道坏时重建本地监听器，而不是误判进程重启。重挂期间显示 `restarting-remote` 进度码而不是「连接断开」；
   诊断报告新增最近 10 次重启 / 重挂记录。
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
   本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发

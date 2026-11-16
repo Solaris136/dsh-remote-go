@@ -3,6 +3,7 @@
  */
 import {
   DEFAULT_IDLE_MINUTES,
+  REMOTE_EPISODE_COOLDOWN_MS,
   REMOTE_HEARTBEAT_DEFAULT_SEC,
   REMOTE_HEARTBEAT_MAX_SEC,
   REMOTE_HEARTBEAT_MIN_SEC,
@@ -84,6 +85,9 @@ export function stopRemoteHeartbeat(runtime) {
   cancelRemoteCheck(runtime)
   runtime.remoteFailures = 0
   runtime.remoteEpisode = false
+  runtime.episodeSource = null
+  // A new attach starts a new episode budget; the cooldown only exists to damp one connection.
+  runtime.episodeCooldownUntil = 0
 }
 
 /** Start the light liveness probe for a host that just became connected. */
@@ -114,20 +118,52 @@ function watchable(ctx, runtime) {
   )
 }
 
+/**
+ * Open a liveness episode at most once. Transient reports (a proxy/tunnel failure) are
+ * coalesced: after a confirmed-healthy episode the same kind of report is ignored for a
+ * cooldown window, so a flapping tunnel cannot emit suspected/recovered on every request.
+ * Returns whether a new episode was opened.
+ */
 function beginRemoteEpisode(ctx, runtime, source) {
-  if (runtime.remoteEpisode === true) return
+  if (runtime.remoteEpisode === true) return false
+  const transient = source === 'proxy' || source === 'tunnel'
+  if (transient && Date.now() < (Number(runtime.episodeCooldownUntil) || 0)) {
+    ctx.progress.log(runtime, 'debug', `remote-unreachable reported again (${source}); episode cooldown, ignoring`)
+    return false
+  }
   runtime.remoteEpisode = true
+  runtime.episodeSource = source
   ctx.progress.log(runtime, 'debug', `remote-unreachable suspected (${source}); confirming with probes`)
   ctx.onRemoteUnreachable?.(runtime, { phase: 'suspected', source })
+  return true
 }
 
-/** Reset the failure streak; report the recovery once when an episode was open. */
-function clearRemoteEpisode(ctx, runtime, source) {
+/**
+ * Reset the failure streak; report the recovery once when an episode was open. A transient
+ * episode also rebuilds the local listener: the remote answering the probe while the page
+ * got a 502 usually means the tunnel, not the remote, is what broke.
+ */
+async function clearRemoteEpisode(ctx, runtime, source) {
   const wasOpen = runtime.remoteEpisode === true
+  const transient = runtime.episodeSource === 'proxy' || runtime.episodeSource === 'tunnel'
   runtime.remoteEpisode = false
   runtime.remoteFailures = 0
   if (!wasOpen) return
+  runtime.episodeSource = null
+  if (transient) {
+    runtime.episodeCooldownUntil = Date.now() + REMOTE_EPISODE_COOLDOWN_MS
+    try {
+      const repaired = await ctx.repairTunnel?.(runtime)
+      if (repaired && repaired.ok !== true) {
+        ctx.progress.log(runtime, 'warn', `tunnel rebuild failed (${repaired.reason ?? 'unknown'})`)
+      }
+    } catch (error) {
+      // swallow-ok: a failed repair is reported by the helper; the episode still recovers
+      ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
+    }
+  }
   ctx.progress.log(runtime, 'info', `remote heartbeat: the remote UI answers again (${source})`)
+  if (!watchable(ctx, runtime)) return
   ctx.onRemoteUnreachable?.(runtime, { phase: 'recovered', source })
 }
 
@@ -159,7 +195,7 @@ async function checkRemoteNow(ctx, runtime, source) {
   // The transport may have gone away while the probe was in flight; the close handler owns that.
   if (!watchable(ctx, runtime) || runtime.ssh !== ssh) return
   if (isUiUp(status)) {
-    clearRemoteEpisode(ctx, runtime, source)
+    await clearRemoteEpisode(ctx, runtime, source)
     return
   }
   runtime.remoteFailures = (Number(runtime.remoteFailures) || 0) + 1
@@ -200,7 +236,7 @@ export async function remoteHeartbeatTick(ctx, runtime) {
  */
 export function noteRemoteUnreachable(ctx, runtime, source) {
   if (!watchable(ctx, runtime)) return
-  beginRemoteEpisode(ctx, runtime, source)
+  if (!beginRemoteEpisode(ctx, runtime, source)) return
   scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteConfirmDelayMs)
 }
 
@@ -272,6 +308,9 @@ async function stopRemoteQuietly(ctx, runtime) {
 export async function closeTunnel(runtime) {
   const tunnel = runtime.tunnel
   runtime.tunnel = null
+  // `localPort` is a view of the live listener: a closed tunnel must not leave a stale port
+  // behind (the proxy and diagnostics read this field).
+  runtime.remote.localPort = null
   if (tunnel) {
     try {
       await tunnel.close()

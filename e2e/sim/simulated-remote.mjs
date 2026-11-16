@@ -409,6 +409,8 @@ function runRegistryRecord(sim) {
     dshHome: SIM.dshHome,
     // The simulator emulates a current launch, so adoption is allowed.
     launch: 'browser-carrier-v1',
+    // A launch record, not a re-attach: the next connection may grant kill rights.
+    origin: 'launch',
   }
 }
 
@@ -577,13 +579,25 @@ async function respond(command, sim) {
     return ok('REGISTRY-WRITTEN\n')
   }
 
-  // 2d. Listening ports of a pid (src/remote-proc.js remoteListenPorts): report the stub.
+  // 2d. Process identity read before a kill decision (src/remote-proc.js remoteProcessIdentity):
+  //     a stable start time per pid, the npx launch line, and the DSH home it was started with.
+  if (cmd.startsWith('set -u\nPID=') && cmd.includes('/proc/$PID/stat')) {
+    const pid = Number(/^PID=(\d+)$/m.exec(cmd)?.[1] ?? 0)
+    if (pid !== sim.pid) return ok('MISSING\n')
+    return ok(
+      `START:${50_000 + sim.pid}\n` +
+        `CMD:${SIM.managedNodeDir}/bin/npx -y @deepseek-ai/dsh@${SIM.dshVersion} --profile web --no-open --port 0\n` +
+        `DSH_HOME:${SIM.dshHome}\n`,
+    )
+  }
+
+  // 2e. Listening ports of a pid (src/remote-proc.js remoteListenPorts): report the stub.
   if (cmd.startsWith('set -u\nPID=') && cmd.includes('/net/tcp')) {
     const portHex = sim.remotePort.toString(16).toUpperCase().padStart(4, '0')
     return ok(`INODE:77\nLISTEN:0100007F:${portHex}:77\n`)
   }
 
-  // 2e. The pid behind a listening port (remotePortOwnerPid): this simulator's single pid.
+  // 2f. The pid behind a listening port (remotePortOwnerPid): this simulator's single pid.
   if (cmd.startsWith('set -u\nPORT_HEX=')) {
     const port = Number(/printf '%04X' (\d+)/.exec(cmd)?.[1] ?? 0)
     return ok(port === sim.remotePort ? `PID:${sim.pid}\n` : '')

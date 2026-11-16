@@ -201,6 +201,59 @@ done
   }
 }
 
+/**
+ * The identity of one remote process, read from `/proc` before the plugin ever signals it.
+ * The kernel start time is stable across `exec` (so an in-place DSH restart keeps it) and
+ * changes when a pid is reused by another process - which is exactly what a kill decision
+ * must rule out. The command line and `DSH_HOME` prove the process is the DSH the plugin
+ * thinks it is.
+ *
+ * @param {object} ssh - SSH transport.
+ * @param {number} pid - remote process id.
+ * @returns {Promise<{ ok: true, startTime: string, command: string, dshHome: string } |
+ *   { ok: false, reason: 'invalid-pid' | 'missing' | 'unreadable' }>}
+ */
+export async function remoteProcessIdentity(ssh, pid) {
+  if (!isPid(pid)) return { ok: false, reason: 'invalid-pid' }
+  const script = `set -u
+PID=${pid}
+[ -d "/proc/$PID" ] || { echo "MISSING"; exit 0; }
+RAW=$(cat "/proc/$PID/stat" 2>/dev/null || true)
+[ -n "$RAW" ] || { echo "NO-STAT"; exit 0; }
+REST=$(printf '%s' "$RAW" | sed 's/^.*) //')
+set -- $REST
+printf 'START:%s\\n' "\${20}"
+CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null || true)
+printf 'CMD:%s\\n' "$CMD"
+HOME_LINE=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
+printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 10_000, maxBytes: 32_000 })
+    return parseProcessIdentity(result.stdout)
+  } catch {
+    // swallow-ok: an unreadable /proc means the pid cannot be proven, and callers fail closed
+    return { ok: false, reason: 'unreadable' }
+  }
+}
+
+/** Decode the `START:` / `CMD:` / `DSH_HOME:` lines of {@link remoteProcessIdentity}. */
+export function parseProcessIdentity(stdout) {
+  const text = String(stdout ?? '')
+  if (text.includes('MISSING')) return { ok: false, reason: 'missing' }
+  if (text.includes('NO-STAT')) return { ok: false, reason: 'unreadable' }
+  const start = /^START:(\d+)$/m.exec(text)
+  const command = /^CMD:(.*)$/m.exec(text)
+  if (!start || !command) return { ok: false, reason: 'unreadable' }
+  const home = /^DSH_HOME:(.*)$/m.exec(text)
+  return {
+    ok: true,
+    startTime: start[1],
+    command: command[1].trim(),
+    dshHome: home === null ? '' : home[1].trim(),
+  }
+}
+
 export async function remoteHttpStatus(ssh, port) {
   if (!isPid(port)) return null
   const script = `URL="http://127.0.0.1:${port}/"

@@ -4139,11 +4139,15 @@ window.__ModuleLoader__.load({
       let entry = carrierOf(hostId)
       const reused = entry !== null
       const surface = entry === null ? carrierSurface() : entry.kind
+      // The revision of the attach this call actually navigated to. Only a real navigation
+      // (a new carrier, or a reload of an existing one) may claim the new revision.
+      let navigatedRev = null
       if (entry === null) {
         if (surface === null) return { ok: false, reason: 'acquire-failed' }
         if (!acceptsCarrierUrl(surface, url)) return { ok: false, reason: 'bad-url' }
         entry = await createCarrier(hostId, url, options.message)
         if (entry === null) return { ok: false, reason: 'acquire-failed' }
+        navigatedRev = options.viewRev
         // The user moved on (another host, or back to local) while this one was being
         // built: drop it instead of stealing the window.
         if (carrierPool.wanted !== hostId) {
@@ -4158,9 +4162,10 @@ window.__ModuleLoader__.load({
         // A reconnect or a remote restart hands out a new one-shot URL and a new attach
         // revision: the warm page is stale, reload it.
         await entry.backend.load(entry, url)
+        navigatedRev = options.viewRev
       }
       // Remember which attach this carrier was navigated for: the next attach invalidates it.
-      if (Number.isInteger(options.viewRev)) entry.viewRev = options.viewRev
+      if (navigatedRev !== null && Number.isInteger(navigatedRev)) entry.viewRev = navigatedRev
       // A desktop guest whose page failed is not worth showing as-is: retry it once.
       if (reused && entry.kind === 'desktop' && entry.failed === true) {
         entry.failed = false

@@ -286,7 +286,6 @@ export function createRemoteProxy(options) {
   const upgrades = new Map()
   const sockets = new Set()
   let disposed = false
-
   /** Report one failed upstream without letting the reporter break the proxy. */
   function reportUpstreamFailure(hostId) {
     try {
@@ -296,13 +295,19 @@ export function createRemoteProxy(options) {
     }
   }
 
-  function jarOf(hostId) {
-    let jar = jars.get(hostId)
-    if (jar === undefined) {
-      jar = createCookieJar()
-      jars.set(hostId, jar)
+  /**
+   * The per-host cookie jar is bound to the remote authority it was filled from: after a
+   * restart or a re-attach the remote comes back on a new random port, and cookies issued
+   * by the old instance must not be sent to the new one (nor kept after the host is gone).
+   */
+  function jarOf(hostId, target) {
+    const authority = remoteAuthority(target)
+    let entry = jars.get(hostId)
+    if (entry === undefined || entry.authority !== authority) {
+      entry = { authority, jar: createCookieJar() }
+      jars.set(hostId, entry)
     }
-    return jar
+    return entry.jar
   }
 
   function localOrigin() {
@@ -364,7 +369,7 @@ export function createRemoteProxy(options) {
       plain(res, 404, 'host is not connected')
       return
     }
-    const jar = jarOf(parsed.hostId)
+    const jar = jarOf(parsed.hostId, target)
     const upstreamPath = parsed.path + search
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
@@ -449,7 +454,7 @@ export function createRemoteProxy(options) {
       socket.destroy()
       return
     }
-    const jar = jarOf(hostId)
+    const jar = jarOf(hostId, target)
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
       localOrigin: origin.origin,
@@ -526,8 +531,8 @@ export function createRemoteProxy(options) {
     sync,
     /** One host's current cookie header, for diagnostics and tests. */
     cookies(hostId) {
-      const jar = jars.get(hostId)
-      return jar === undefined ? '' : cookieHeader(jar, '/')
+      const entry = jars.get(hostId)
+      return entry === undefined ? '' : cookieHeader(entry.jar, '/')
     },
     dispose() {
       if (disposed) return

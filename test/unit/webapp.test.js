@@ -11,13 +11,16 @@ import {
   buildStartCommand,
   buildStartScript,
   commandMatchesProfile,
+  dshPackageDirFromCommand,
   ensureBrowserCarrier,
   exchangeTokenOverTunnel,
   findForeignDshProcesses,
   parseForeignDshOutput,
   parseListenPorts,
+  parseProcessIdentity,
   parseWebLine,
   readWebLineFromLog,
+  remoteDshVersion,
   remoteListenPorts,
   remotePortOwnerPid,
   resolveRemoteWeb,
@@ -233,6 +236,30 @@ test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL
   assert.equal(adopted.token, 'adopted')
   assert.equal(adopted.version, '0.2.2-rc.1')
   assert.equal(adopted.dshHome, '/home/ubuntu/.dsh')
+  // A record written by the launch script grants kill rights to the connection that adopts it.
+  assert.equal(adopted.origin, 'launch')
+  const reattached = JSON.stringify({
+    pid: 4242,
+    port: 38123,
+    version: '0.2.2-rc.1',
+    profile: 'web',
+    dshHome: '/home/ubuntu/.dsh',
+    launch: LAUNCH_MARKER,
+    origin: 'reattach',
+  })
+  const reattachResponses = [
+    { code: 0, stdout: reattached, stderr: '' },
+    { code: 0, stdout: 'alive', stderr: '' },
+    { code: 0, stdout: 'dsh web: http://127.0.0.1:38123/?token=adopted\n', stderr: '' },
+    { code: 0, stdout: '200', stderr: '' },
+  ]
+  const reattachedSsh = {
+    async exec() {
+      return reattachResponses.shift() ?? { code: 1, stdout: '', stderr: '' }
+    },
+  }
+  // A re-attached record is hosted, not owned: the adopting connection must not kill it later.
+  assert.equal((await adoptRemoteWeb(reattachedSsh, LAYOUT, { profile: 'web' })).origin, 'reattach')
   const dead = {
     async exec() {
       return { code: 1, stdout: '', stderr: '' }
@@ -348,14 +375,28 @@ const REGISTRY_JSON = JSON.stringify({
 const HTTP_PROBE = /curl -s -o \/dev\/null -w|--server-response/
 const LISTEN_SCAN = /\/proc\/\$PID\/fd/
 const PROCESS_PS = /ps -eww -o pid=,comm=,args=/
+const OWNER_PROBE = /\/proc\/net\/tcp/
+const IDENTITY_PROBE = /\/proc\/\$PID\/stat/
+
+/** One `/proc` identity answer for a pid (see src/remote-proc.js remoteProcessIdentity). */
+function identityAnswer(pid, overrides = {}) {
+  const profile = overrides.profile ?? 'web'
+  const dshHome = overrides.dshHome ?? '/home/ubuntu/.dsh'
+  const command =
+    overrides.command ??
+    `node /opt/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js web --profile ${profile} --no-open --port 0`
+  return ok(`START:${7000 + pid}\nCMD:${command}\nDSH_HOME:${dshHome}\n`)
+}
 
 test('resolveRemoteWeb re-reads the random port after an in-place restart', async () => {
   const ssh = routedSsh([
     [/^cat '.*run\/web\.json'/, ok(`${REGISTRY_JSON}\n`)],
     [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=newtok\n')],
     [/^kill -0 4242/, ok('alive\n')],
-    [LISTEN_SCAN, ok('INODE:700\nLISTEN:0100007F:9A32:700\n')],
-    [HTTP_PROBE, (command) => ok(/38123/.test(command) ? '000' : '200')],
+    [LISTEN_SCAN, ok('INODE:700\nLISTEN:0100007F:A112:700\n')],
+    [IDENTITY_PROBE, identityAnswer(4242)],
+    [OWNER_PROBE, ok('PID:4242\n')],
+    [HTTP_PROBE, (command) => ok(/41234/.test(command) ? '200' : '000')],
   ])
   const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
   assert.equal(found.ok, true)
@@ -375,8 +416,8 @@ test('resolveRemoteWeb recovers a new pid from a fresh readiness line', async ()
     [/^cat '.*run\/web\.json'/, ok(`${deadRegistry}\n`)],
     [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=newtok\n')],
     [/^kill -0 4242/, ok('')],
-    [/\/proc\/net\/tcp/, ok('PID:5150\n')],
-    [/(ps -p 5150 -o args=|tr '\\0' ' ' < "\/proc\/5150\/cmdline")/, ok('node /x/bin.js --profile web --no-open\n')],
+    [OWNER_PROBE, ok('PID:5150\n')],
+    [IDENTITY_PROBE, identityAnswer(5150)],
     [HTTP_PROBE, ok('200')],
   ])
   const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
@@ -385,25 +426,80 @@ test('resolveRemoteWeb recovers a new pid from a fresh readiness line', async ()
   assert.equal(found.port, 41234)
   assert.equal(found.token, 'newtok')
   assert.equal(found.source, 'log')
+  // A new pid cannot be assumed to run the local version.
+  assert.equal(found.version, null)
 })
 
-test('resolveRemoteWeb falls back to the DSH process for this profile when the log is stale', async () => {
+test('resolveRemoteWeb never takes over without a launch token (process-scan fallback degrades)', async () => {
   const ssh = routedSsh([
     [/^cat '.*run\/web\.json'/, ok('')],
     [/grep 'dsh web:'/, ok('')],
     [PROCESS_PS, ok('5150\t/bin/node /x/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --no-open\n')],
     [/\/proc\/\$PID\/fd/, ok('INODE:900\nLISTEN:0100007F:B6E2:900\n')],
-    [/ps -p 5150 -o args=/, ok('node bin.js @deepseek-ai/dsh@0.2.2-rc.1 --profile web\n')],
+    [IDENTITY_PROBE, identityAnswer(5150)],
     [HTTP_PROBE, ok('200')],
   ])
+  assert.deepEqual(await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' }), {
+    ok: false,
+    reason: 'no-token',
+  })
+})
+
+test('resolveRemoteWeb reports no-token instead of accepting an empty token', async () => {
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok(`${REGISTRY_JSON}\n`)],
+    // The log line still names an older port; the live port has no token to offer.
+    [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=stale\n')],
+    [/^kill -0 4242/, ok('alive\n')],
+    [LISTEN_SCAN, ok('INODE:700\nLISTEN:0100007F:9513:700\n')],
+    [IDENTITY_PROBE, identityAnswer(4242)],
+    [OWNER_PROBE, ok('PID:4242\n')],
+    [HTTP_PROBE, (command) => ok(/38123/.test(command) ? '200' : '000')],
+    [PROCESS_PS, ok('')],
+  ])
+  assert.deepEqual(await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' }), {
+    ok: false,
+    reason: 'no-token',
+  })
+})
+
+test('resolveRemoteWeb refuses a readiness line owned by another profile', async () => {
+  const sharedRegistry = JSON.stringify({ ...JSON.parse(REGISTRY_JSON), port: 38123 })
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok(`${sharedRegistry}\n`)],
+    [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=other-profile\n')],
+    [/^kill -0 4242/, ok('alive\n')],
+    // The registry pid owns 38123, the newest line's port belongs to another pid/profile.
+    [LISTEN_SCAN, ok('INODE:700\nLISTEN:0100007F:9513:700\n')],
+    [
+      IDENTITY_PROBE,
+      (command) => {
+        const pid = Number(/^PID=(\d+)/m.exec(command)[1])
+        return identityAnswer(pid, pid === 9999 ? { profile: 'other' } : {})
+      },
+    ],
+    [OWNER_PROBE, (command) => ok(/41234/.test(command) ? 'PID:9999\n' : 'PID:4242\n')],
+    [HTTP_PROBE, ok('200')],
+    [PROCESS_PS, ok('')],
+  ])
   const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
-  assert.equal(found.ok, true)
-  assert.equal(found.pid, 5150)
-  assert.equal(found.port, 0xb6e2)
-  assert.equal(found.token, '')
-  assert.equal(found.url, `http://127.0.0.1:${0xb6e2}/`)
-  assert.equal(found.version, '0.2.2-rc.1')
-  assert.equal(found.source, 'process')
+  assert.notEqual(found.ok, true)
+  assert.equal(found.reason, 'profile-mismatch')
+})
+
+test('resolveRemoteWeb refuses a process with another DSH_HOME', async () => {
+  const ssh = routedSsh([
+    [/^cat '.*run\/web\.json'/, ok('')],
+    [/grep 'dsh web:'/, ok('dsh web: http://127.0.0.1:41234/?token=foreign\n')],
+    [/^kill -0 4242/, ok('')],
+    [OWNER_PROBE, ok('PID:9999\n')],
+    [IDENTITY_PROBE, identityAnswer(9999, { dshHome: '/home/other/.dsh' })],
+    [HTTP_PROBE, ok('200')],
+    [PROCESS_PS, ok('')],
+  ])
+  const found = await resolveRemoteWeb(ssh, LAYOUT, { profile: 'web' })
+  assert.notEqual(found.ok, true)
+  assert.equal(found.reason, 'dsh-home-mismatch')
 })
 
 test('resolveRemoteWeb reports a typed reason when nothing can be re-attached', async () => {
@@ -430,6 +526,47 @@ test('resolveRemoteWeb reports a typed reason when nothing can be re-attached', 
   })
 })
 
+test('process identity parsing fails closed and keeps the kernel start time', () => {
+  const identity = parseProcessIdentity(
+    'START:12345\nCMD:/usr/bin/node /x/node_modules/@deepseek-ai/dsh/lib/bin.js web --profile web\nDSH_HOME:/home/ubuntu/.dsh\n',
+  )
+  assert.deepEqual(identity, {
+    ok: true,
+    startTime: '12345',
+    command: '/usr/bin/node /x/node_modules/@deepseek-ai/dsh/lib/bin.js web --profile web',
+    dshHome: '/home/ubuntu/.dsh',
+  })
+  assert.deepEqual(parseProcessIdentity('MISSING\n'), { ok: false, reason: 'missing' })
+  assert.deepEqual(parseProcessIdentity('NO-STAT\n'), { ok: false, reason: 'unreadable' })
+  assert.deepEqual(parseProcessIdentity('garbage'), { ok: false, reason: 'unreadable' })
+  // A missing environ yields an empty home, which callers treat as unproven (never a match).
+  const withoutHome = parseProcessIdentity('START:9\nCMD:node bin.js --profile web\n')
+  assert.equal(withoutHome.ok, true)
+  assert.equal(withoutHome.dshHome, '')
+})
+
+test('real npx/app argv yields the version from the loaded package, never a guess', async () => {
+  const argv = '/usr/bin/node /home/u/.npm/_npx/1a2b/node_modules/@deepseek-ai/dsh/lib/bin.js web --profile web'
+  assert.equal(versionFromCommand(argv), null)
+  assert.equal(dshPackageDirFromCommand(argv), '/home/u/.npm/_npx/1a2b/node_modules/@deepseek-ai/dsh')
+  const ssh = {
+    files: new Map([
+      [
+        '/home/u/.npm/_npx/1a2b/node_modules/@deepseek-ai/dsh/package.json',
+        JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.2.2-rc.1' }),
+      ],
+    ]),
+    async readRemoteFile(file) {
+      const content = this.files.get(file)
+      if (content === undefined) throw new Error('no such file')
+      return { data: Buffer.from(content), size: content.length }
+    },
+  }
+  assert.equal(await remoteDshVersion(ssh, argv), '0.2.2-rc.1')
+  assert.equal(await remoteDshVersion(ssh, '/usr/bin/node /opt/unknown/bin.js web'), null)
+  assert.equal(dshPackageDirFromCommand('/x/../../etc/node_modules/@deepseek-ai/dsh/lib/bin.js'), null)
+})
+
 test('writeRunRegistry writes a shell-quoted record and reports the acknowledgement', async () => {
   const record = buildRunRegistryRecord({
     pid: 4242,
@@ -441,6 +578,8 @@ test('writeRunRegistry writes a shell-quoted record and reports the acknowledgem
   })
   assert.equal(record.launch, LAUNCH_MARKER)
   assert.equal(record.version, '0.2.2-rc.1')
+  assert.equal(record.origin, 'launch')
+  assert.equal(buildRunRegistryRecord({ ...record, origin: 'reattach' }).origin, 'reattach')
   const ssh = routedSsh([[/printf '%s\\n'/, ok('REGISTRY-WRITTEN\n')]])
   const written = await writeRunRegistry(ssh, LAYOUT, record)
   assert.deepEqual(written, { ok: true, output: 'REGISTRY-WRITTEN' })

@@ -20,7 +20,14 @@ export async function createTunnel(options) {
     }
     socket.once('close', cleanup)
     socket.once('error', cleanup)
-    options.ssh
+    const ssh = options.ssh
+    if (!ssh) {
+      // A listener can outlive its transport if a caller leaks it; never throw from a net
+      // connection callback (an uncaught exception there ends the whole host process).
+      socket.destroy()
+      return
+    }
+    ssh
       .forwardOut(remoteHost, options.remotePort, '127.0.0.1', socket.remotePort ?? 0)
       .then((stream) => {
         if (closed) {

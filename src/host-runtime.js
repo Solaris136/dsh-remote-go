@@ -57,11 +57,21 @@ export function createHostRuntime(host) {
     linkToken: 0,
     restartPromise: null,
     reattachPromise: null,
+    /**
+     * Processes this connection actually launched (pid -> start time), plus pids adopted from a
+     * registry record written by a launch. Only these may ever be stopped; a pid a re-attach
+     * discovered gets display rights, never kill rights.
+     */
+    launched: new Map(),
+    /** Current tunnel repair (a broken local listener under a healthy remote). */
+    tunnelRepair: null,
     /** Liveness probes: a confirmed episode is two consecutive failed probes. */
     heartbeatTimer: null,
     remoteCheckTimer: null,
     remoteFailures: 0,
     remoteEpisode: false,
+    episodeSource: null,
+    episodeCooldownUntil: 0,
     /** Processes kept alongside this connection (chosen in the conflict prompt). */
     alongsidePids: [],
     /** Bounded, client-independent record of restarts / re-attaches for diagnostics. */

@@ -13,7 +13,7 @@ import {
 } from './constants.js'
 import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
 import { createDownloadJobs } from './download-jobs.js'
-import { reattachHost, reconnectHost, restartHost, startConnect } from './connect-pipeline.js'
+import { reattachHost, reconnectHost, repairTunnel, restartHost, startConnect } from './connect-pipeline.js'
 import { diagnoseHost } from './diagnostics.js'
 import { errors } from './errors.js'
 import {
@@ -42,6 +42,7 @@ import {
   findForeignDshProcesses,
   readRunRegistry,
   remoteHttpStatus,
+  remoteProcessIdentity,
   resolveRemoteWeb,
   startRemoteWeb,
   stopForeignDshProcesses,
@@ -85,6 +86,7 @@ export class RemoteGoService extends EventEmitter {
       resolveRemote: options.resolveRemote ?? resolveRemoteWeb,
       writeRegistry: options.writeRegistry ?? writeRunRegistry,
       remoteStatus: options.remoteStatus ?? remoteHttpStatus,
+      processIdentity: options.processIdentity ?? remoteProcessIdentity,
       findForeign: options.findForeign ?? findForeignDshProcesses,
       stopForeign: options.stopForeign ?? stopForeignDshProcesses,
       readRegistry: options.readRegistry ?? readRunRegistry,
@@ -132,6 +134,8 @@ export class RemoteGoService extends EventEmitter {
       requestReattach: (runtime, info) => {
         void reattachHost(this.ctx, runtime, info)
       },
+      /** The remote answers but proxied requests fail: rebuild the local listener (B8). */
+      repairTunnel: (runtime) => repairTunnel(this.ctx, runtime),
     }
     this.ctx.progress = createConnectProgress({
       logger: this.logger,

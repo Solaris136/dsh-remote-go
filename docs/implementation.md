@@ -93,19 +93,24 @@ dsh-remote-go
 teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消冲突提示与一次性动作令牌、停止心跳、置 `closing`、取消空闲计时器、按策略停远端、关隧道、释放 SSH、清空 probe/exchange/token/remote；`disconnect`、`removeHost`、连接失败与 `shutdown` 都复用它。
 
 ### 3.1 重启与重挂（同一份管线代码）
-- `restartHost`：仅 `connected` 可用；用 runtime 里已记录的 facts 重算 plan，在**同一条 SSH** 上
-  `stopRemoteWeb(registry pid)` → `[start]` → `writeRunRegistry` → 关旧隧道、按新端口 `openTunnel` →
-  `verifyRemoteUi` → `markConnected`。registry 不指向本连接的 pid 时绝不 kill，交给 `resolveForeignConflict`；
-  `alongside` 记下的 pid 记在 `runtime.alongsidePids`，后续重启不再重复询问。取消冲突时若尚未停过任何进程、
-  隧道仍完好，则 `resumeConnected` 回到原连接。
-- `reattachHost`：由 watchdog 的「连续两次探活失败」调用（也可由代理/隧道上报触发确认）。用
-  `ctx.deps.resolveRemote` 重读远端（`remote-web.js#resolveRemoteWeb`：registry pid + 最新 `dsh web:` 行 +
-  `/proc` 监听端口 + profile 进程扫描），比较版本，`writeRunRegistry` 后关旧隧道、按新端口重建、换 token、
-  `verifyRemoteUi`、`markConnected`，并写 `runtime.restarts`（诊断导出）。重挂失败报 `remote-unreachable`，
-  保留 SSH 与主机配置，等用户重启或重连。
+- `restartHost`：仅 `connected` / `remote-unreachable` 可用；用 runtime 里已记录的 facts 重算 plan，在**同一条 SSH** 上
+  **先**走 `resolveForeignConflict`（用户取消时尚未停止任何东西），**再** `stopRemoteWeb` 经授权的 pid →
+  `[start]` → `rememberLaunched` → `writeRunRegistry` → 关旧隧道、按新端口 `openTunnel` → `verifyRemoteUi` →
+  `markConnected`。kill 授权由 `killAuthorized` 判定：registry 命名 + `runtime.launched`（只由 start 脚本结果 /
+  `origin:"launch"` 的 adopt 写入）+ `/proc` starttime 一致 + cmdline/env 的 profile/home 一致，四者缺一不杀；
+  `alongsidePids` 永不 kill。动作内创建的隧道由 `finally` 收尾（令牌失效则关闭并清 `remote.localPort`），
+  `openTunnelFor` 在 ssh 已释放时直接抛错，不会把 null 传输交给监听器。取消冲突且未停过任何进程时
+  `resumeConnected` 回到原连接。
+- `reattachHost`：由 watchdog 的「连续两次探活失败」调用。`ctx.deps.resolveRemote`（`remote-web.js#resolveRemoteWeb`）
+  只接受同时满足「端口属于该 pid」「cmdline 是同一 profile」「environ 的 DSH_HOME 是同一 home」「最新就绪行命中
+  同一端口（有 launch token）」的候选；进程扫描路径只用于给出 `no-token` 解释，不产生接管；版本来自 npx pin 或
+  被加载包的 `package.json`，证明不了就保持未知且不写进 registry。通过后 `writeRunRegistry(origin:"reattach")`、
+  关旧隧道、按新端口重建、换 token、`verifyRemoteUi`、`markConnected`，并写 `runtime.restarts`（诊断导出）。
+  重挂失败报 `remote-unreachable`，保留 SSH 与主机配置。
 - 两个动作都持有一个**令牌**（`beginLinkWork` / `isLinkWorkCurrent` / `endLinkWork`）：disconnect、SSH `close`
   或新的连接会 `cancelLinkWork`，迟到的旧动作只会打一行 debug 日志，不能写状态。`markConnected` 每次
-  `remote.viewRev + 1` 并重启心跳。
+  `remote.viewRev + 1` 并重启心跳。心跳的代理/隧道疑似事件有 15s 冷却；远端健康而代理失败时
+  `repairTunnel` 重建本地监听器（单飞、同一远端端口、token 不变）。
 
 ## 4. SSH、指纹与运行时
 `ssh.js` 封装 ssh2：`hostVerifier` 计算 `SHA256:<base64>`，按 `pinnedFingerprint` → `knownHostFingerprints` → `hostKeyPolicy` 决策；认证回退只有私钥文件 →（密码认证时）密码，不支持 Agent；`exec(command,{timeoutMs,stdin})` 统一返回 `{ code, stdout, stderr }`，`forwardOut` 供隧道与跳板机。`onHostKey` 由 service 提供：`strict` 直接抛 `host-key-unknown`，否则把指纹挂到 runtime 并返回 promise，`confirmFingerprint()` 或 120s 超时后 resolve。
