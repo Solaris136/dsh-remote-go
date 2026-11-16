@@ -15,6 +15,13 @@ export {
   readWebLineFromLog,
   remotePidAlive,
   adoptRemoteWeb,
+  buildRunRegistryRecord,
+  writeRunRegistry,
+  commandMatchesProfile,
+  versionFromCommand,
+  dshPackageDirFromCommand,
+  remoteDshVersion,
+  resolveRemoteWeb,
 } from './remote-web.js'
 
 export {
@@ -22,6 +29,11 @@ export {
   parseForeignDshOutput,
   findForeignDshProcesses,
   stopForeignDshProcesses,
+  parseListenPorts,
+  remoteListenPorts,
+  remotePortOwnerPid,
+  parseProcessIdentity,
+  remoteProcessIdentity,
   remoteHttpStatus,
   waitForRemoteUi,
   exchangeTokenOverTunnel,

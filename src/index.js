@@ -65,6 +65,8 @@ export function apply(ctx, config = {}) {
     getOrigin,
     admit,
     resolveHost: (id) => service.webViewTarget(id),
+    // A failed upstream is a suspicion, not a restart: the service confirms it with probes.
+    onUpstreamError: (id) => service.noteUpstreamFailure(id),
     logger,
   })
 

@@ -34,6 +34,11 @@ export function createApi(options) {
   service.on('state', broadcastState)
   const broadcastDownload = (job) => writeAll(`event: download\ndata: ${JSON.stringify(job)}\n\n`)
   service.on('download', broadcastDownload)
+  // One frame per liveness episode transition (suspected / confirmed / recovered); the
+  // progress line lives in `state`, this event only makes the transition observable.
+  const broadcastRemoteUnreachable = (event) =>
+    writeAll(`event: remote-unreachable\ndata: ${JSON.stringify(event)}\n\n`)
+  service.on('remote-unreachable', broadcastRemoteUnreachable)
 
   const heartbeat = setInterval(() => writeAll('event: ping\ndata: {}\n\n'), 15_000)
   heartbeat.unref?.()
@@ -247,6 +252,7 @@ export function createApi(options) {
       await service.reconnect(id)
       return { ok: true }
     },
+    'POST restart': async (id) => ({ ok: true, ...(await service.restart(id)) }),
     'POST fingerprint': async (id, req) => {
       const body = await readJson(req)
       await service.confirmFingerprint(id, {
@@ -397,6 +403,7 @@ export function createApi(options) {
     dispose() {
       service.removeListener('state', broadcastState)
       service.removeListener('download', broadcastDownload)
+      service.removeListener('remote-unreachable', broadcastRemoteUnreachable)
       clearInterval(heartbeat)
       for (const client of sseClients) {
         try {

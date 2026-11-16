@@ -1,7 +1,15 @@
 /**
  * Plugin settings: defaults, validation and sanitization; unknown or invalid fields fall back to defaults instead of failing activation.
  */
-import { DEFAULT_IDLE_MINUTES, DEFAULT_KEY_PATH, DEFAULT_REMOTE_PROFILE, SSH_READY_TIMEOUT_MS } from './constants.js'
+import {
+  DEFAULT_IDLE_MINUTES,
+  DEFAULT_KEY_PATH,
+  DEFAULT_REMOTE_PROFILE,
+  REMOTE_HEARTBEAT_DEFAULT_SEC,
+  REMOTE_HEARTBEAT_MAX_SEC,
+  REMOTE_HEARTBEAT_MIN_SEC,
+  SSH_READY_TIMEOUT_MS,
+} from './constants.js'
 import { clamp, deepMerge, isPlainObject, parseSshDestination } from './util.js'
 
 export function defaultSettings() {
@@ -13,6 +21,11 @@ export function defaultSettings() {
     defaultKeyPath: DEFAULT_KEY_PATH,
     connectTimeoutSec: Math.round(SSH_READY_TIMEOUT_MS / 1000),
     autoReconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 800 },
+    /**
+     * Light liveness probe of a connected host's remote UI. Two consecutive
+     * failures re-read the remote and re-attach; one failed request never does.
+     */
+    remoteHeartbeat: { enabled: true, intervalSec: REMOTE_HEARTBEAT_DEFAULT_SEC },
     hostKeyPolicy: 'first-use',
     saveTokens: false,
     language: 'auto',
@@ -53,6 +66,7 @@ export function sanitizeSettings(raw) {
   if (!isPlainObject(raw)) return defaults
   const input = deepMerge(defaults, raw)
   const autoReconnect = isPlainObject(input.autoReconnect) ? input.autoReconnect : defaults.autoReconnect
+  const remoteHeartbeat = isPlainObject(input.remoteHeartbeat) ? input.remoteHeartbeat : defaults.remoteHeartbeat
   const bootstrap = isPlainObject(input.bootstrap) ? input.bootstrap : defaults.bootstrap
   const profile = normalizeProfileName(bootstrap.profile) ?? defaults.bootstrap.profile
   return {
@@ -70,6 +84,15 @@ export function sanitizeSettings(raw) {
       enabled: boolean(autoReconnect.enabled, defaults.autoReconnect.enabled),
       maxAttempts: numberIn(autoReconnect.maxAttempts, 0, 20, defaults.autoReconnect.maxAttempts),
       baseDelayMs: numberIn(autoReconnect.baseDelayMs, 100, 30_000, defaults.autoReconnect.baseDelayMs),
+    },
+    remoteHeartbeat: {
+      enabled: boolean(remoteHeartbeat.enabled, defaults.remoteHeartbeat.enabled),
+      intervalSec: numberIn(
+        remoteHeartbeat.intervalSec,
+        REMOTE_HEARTBEAT_MIN_SEC,
+        REMOTE_HEARTBEAT_MAX_SEC,
+        defaults.remoteHeartbeat.intervalSec,
+      ),
     },
     hostKeyPolicy: oneOf(input.hostKeyPolicy, ['first-use', 'strict'], defaults.hostKeyPolicy),
     saveTokens: boolean(input.saveTokens, defaults.saveTokens),

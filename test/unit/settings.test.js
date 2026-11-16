@@ -41,6 +41,19 @@ test('sanitizeSettings recovers from malformed input', () => {
   assert.deepEqual(sanitizeSettings('garbage'), defaultSettings())
 })
 
+test('the remote heartbeat defaults to on and is sanitized', () => {
+  assert.deepEqual(defaultSettings().remoteHeartbeat, { enabled: true, intervalSec: 30 })
+  assert.deepEqual(sanitizeSettings({}).remoteHeartbeat, { enabled: true, intervalSec: 30 })
+  assert.deepEqual(sanitizeSettings({ remoteHeartbeat: { enabled: false } }).remoteHeartbeat, {
+    enabled: false,
+    intervalSec: 30,
+  })
+  assert.equal(sanitizeSettings({ remoteHeartbeat: { intervalSec: 1 } }).remoteHeartbeat.intervalSec, 5)
+  assert.equal(sanitizeSettings({ remoteHeartbeat: { intervalSec: 9999 } }).remoteHeartbeat.intervalSec, 600)
+  assert.equal(sanitizeSettings({ remoteHeartbeat: { intervalSec: 'nope' } }).remoteHeartbeat.intervalSec, 30)
+  assert.equal(sanitizeSettings({ remoteHeartbeat: 'off' }).remoteHeartbeat.enabled, true)
+})
+
 test('sanitizeHostEntry validates and normalizes a first host', () => {
   const settings = defaultSettings()
   const entry = sanitizeHostEntry(

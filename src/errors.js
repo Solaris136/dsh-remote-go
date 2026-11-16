@@ -12,6 +12,8 @@ const ErrorCode = Object.freeze({
   REMOTE_DSH_START_FAILED: 'remote-dsh-start-failed',
   REMOTE_DSH_RUNNING: 'remote-dsh-running',
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
+  REMOTE_UNREACHABLE: 'remote-unreachable',
+  RESTART_UNAVAILABLE: 'restart-unavailable',
   REMOTE_FILE_UNAVAILABLE: 'remote-file-unavailable',
   DOWNLOAD_NOT_READY: 'download-not-ready',
   DOWNLOAD_BUSY: 'download-busy',
@@ -45,6 +47,14 @@ const CODE_TABLE = {
   [ErrorCode.REMOTE_UI_UNREACHABLE]: {
     retryable: true,
     title: { zh: '远端界面打不开', en: 'The remote interface is unreachable' },
+  },
+  [ErrorCode.REMOTE_UNREACHABLE]: {
+    retryable: true,
+    title: { zh: '远端 DSH 已不在运行', en: 'The remote DSH is no longer running' },
+  },
+  [ErrorCode.RESTART_UNAVAILABLE]: {
+    retryable: true,
+    title: { zh: '现在不能重启远端 DSH', en: 'The remote DSH cannot be restarted now' },
   },
   [ErrorCode.REMOTE_FILE_UNAVAILABLE]: {
     retryable: true,
@@ -217,6 +227,46 @@ export const errors = {
         ['点「重连」重试一次', 'Retry with Reconnect'],
         ['查看诊断中的隧道与界面可达性检查', 'Check tunnel and UI reachability in diagnostics'],
       ],
+    ),
+  /**
+   * The remote web went away and nothing adoptable came back. Kept apart from
+   * `remote-ui-unreachable`: here the tunnel may be perfectly fine and the process
+   * is what is missing, which is what the restart button exists for.
+   */
+  remoteUnreachable: (detail, options) =>
+    fail(
+      ErrorCode.REMOTE_UNREACHABLE,
+      detail ??
+        say(
+          '远端 DSH 已经停止响应，而且没有找到可以重新挂载的实例；主机配置保留。',
+          'The remote DSH stopped responding and no instance could be re-attached to; the host configuration is kept.',
+        ),
+      [
+        [
+          '点「重启远端 DSH」用同一份配置重新拉起远端进程',
+          'Use "Restart remote DSH" to start the remote process again with the same settings',
+        ],
+        ['点「重连」按存活策略重新连接', 'Use Reconnect to connect again under the keep-alive policy'],
+      ],
+      options,
+    ),
+  /**
+   * One-shot restart requested in a state that cannot support it (not connected, no live
+   * SSH, or already busy with another action). The HTTP API answers 409 for this.
+   */
+  restartUnavailable: (detail, options) =>
+    fail(
+      ErrorCode.RESTART_UNAVAILABLE,
+      detail ??
+        say(
+          '只有已连接、或远端不可达但仍保留 SSH 连接的主机才能重启远端 DSH。',
+          'The remote DSH can only be restarted while this host is connected, or after a remote-unreachable failure that kept the SSH session.',
+        ),
+      [
+        ['先连接这台主机，再点「重启远端 DSH」', 'Connect the host first, then use "Restart remote DSH"'],
+        ['如果连接已断开，点「重连」重新建立连接', 'If the link dropped, use Reconnect to establish it again'],
+      ],
+      options,
     ),
   remoteFileUnavailable: (detail, options) =>
     fail(

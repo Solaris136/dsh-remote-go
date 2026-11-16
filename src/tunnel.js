@@ -1,7 +1,41 @@
 /**
  * Local loopback TCP listener piped through the SSH transport; the guest points at it, so its cookies never mix with the local GUI's.
  */
+import http from 'node:http'
 import net from 'node:net'
+
+/**
+ * Ask the *local* listener whether it still serves, without trusting the SSH-side probe:
+ * any HTTP answer (even 401/404) proves the tunnel forwards, while a refused/destroyed
+ * socket means it is broken. Used before rebuilding a tunnel for a transient proxy failure.
+ * @param {number | null} localPort - tunnel's local port, if any.
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<boolean>} whether the listener answered.
+ */
+export function probeLoopback(localPort, options = {}) {
+  const port = Number(localPort)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (ok) => {
+      if (settled) return
+      settled = true
+      resolve(ok)
+    }
+    const request = http.get(
+      { host: '127.0.0.1', port, path: '/', timeout: options.timeoutMs ?? 1_500 },
+      (response) => {
+        response.resume()
+        finish(true)
+      },
+    )
+    request.on('timeout', () => {
+      request.destroy()
+      finish(false)
+    })
+    request.on('error', () => finish(false))
+  })
+}
 
 export async function createTunnel(options) {
   const remoteHost = options.remoteHost ?? '127.0.0.1'
@@ -20,7 +54,14 @@ export async function createTunnel(options) {
     }
     socket.once('close', cleanup)
     socket.once('error', cleanup)
-    options.ssh
+    const ssh = options.ssh
+    if (!ssh) {
+      // A listener can outlive its transport if a caller leaks it; never throw from a net
+      // connection callback (an uncaught exception there ends the whole host process).
+      socket.destroy()
+      return
+    }
+    ssh
       .forwardOut(remoteHost, options.remotePort, '127.0.0.1', socket.remotePort ?? 0)
       .then((stream) => {
         if (closed) {

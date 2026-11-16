@@ -4,9 +4,16 @@
 import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS } from './constants.js'
 import { errors } from './errors.js'
 import { remoteLayout } from './layout.js'
-import { headTail, isLoopbackHost, isPid, messageOf, shellQuote } from './util.js'
+import { headTail, isLoopbackHost, isPid, messageOf, nowIso, shellQuote } from './util.js'
 import { normalizeVersion } from './version.js'
-import { isUiUp, remoteHttpStatus } from './remote-proc.js'
+import {
+  findForeignDshProcesses,
+  isUiUp,
+  remoteHttpStatus,
+  remoteListenPorts,
+  remotePortOwnerPid,
+  remoteProcessIdentity,
+} from './remote-proc.js'
 
 const WEB_LINE_RE = /dsh web:\s*(https?:\/\/[^\s]+)/
 
@@ -282,7 +289,7 @@ export async function adoptRemoteWeb(ssh, layout, options = {}) {
   const pid = Number(registry?.pid ?? 0)
   if (!(await remotePidAlive(ssh, pid))) return null
   const line = await readWebLineFromLog(ssh, layout)
-  if (!line) return null
+  if (!line || line.token === '') return null
   const status = await remoteHttpStatus(ssh, line.port)
   if (!isUiUp(status)) return null
   const version =
@@ -296,5 +303,265 @@ export async function adoptRemoteWeb(ssh, layout, options = {}) {
     profile,
     dshHome: layout.dshHome,
     adopted: true,
+    // Only a record written by the launch script (or a local restart) proves the process was
+    // started by this plugin; a re-attached record names a process the remote restarted itself
+    // and must not grant kill rights to the next connection.
+    origin: registry.origin === 'reattach' ? 'reattach' : 'launch',
   }
+}
+
+/**
+ * The pid/port record the plugin writes to `run/web.json` (the same shape the
+ * launch script writes). Kept pure so a re-attach can be tested without SSH.
+ * @param {object} input - pid, port, profile, dshHome, version, startedAt.
+ * @returns {object} the registry record.
+ */
+export function buildRunRegistryRecord(input = {}) {
+  const pid = Number(input.pid ?? 0)
+  const port = Number(input.port ?? 0)
+  if (!isPid(pid)) throw errors.invalidInput('pid', { zh: 'pid 不合法。', en: 'The pid is invalid.' })
+  if (!isPid(port) || port > 65535)
+    throw errors.invalidInput('port', { zh: '端口不合法。', en: 'The port is invalid.' })
+  const dshHome = String(input.dshHome ?? '').trim()
+  if (dshHome === '') {
+    throw errors.invalidInput('dshHome', { zh: '远端 DSH_HOME 未知。', en: 'The remote DSH_HOME is unknown.' })
+  }
+  return {
+    pid,
+    port,
+    startedAt: typeof input.startedAt === 'string' && input.startedAt !== '' ? input.startedAt : nowIso(),
+    profile: typeof input.profile === 'string' && input.profile !== '' ? input.profile : DEFAULT_REMOTE_PROFILE,
+    version: normalizeVersion(input.version ?? ''),
+    dshHome,
+    launch: LAUNCH_MARKER,
+    // `launch`: this plugin started the process; `reattach`: the plugin only took it over.
+    // The next connection reads this so a re-attached process never gains kill rights.
+    origin: input.origin === 'reattach' ? 'reattach' : 'launch',
+  }
+}
+
+/**
+ * Rewrite `run/web.json` after a re-attach: the remote restarted on a new port
+ * (and possibly a new pid) without going through the launch script, so the stale
+ * record would mislead the next connect's adopt step.
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout.
+ * @param {object} record - validated record from {@link buildRunRegistryRecord}.
+ * @returns {Promise<{ ok: boolean, output: string }>} whether the write was acknowledged.
+ */
+export async function writeRunRegistry(ssh, layout, record) {
+  const payload = JSON.stringify(record)
+  const script = `set -eu
+mkdir -p ${shellQuote(layout.runDir)}
+printf '%s\\n' ${shellQuote(payload)} > ${shellQuote(layout.runFile)}
+echo "REGISTRY-WRITTEN"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 15_000, maxBytes: 8_000 })
+    return { ok: result.code === 0 && result.stdout.includes('REGISTRY-WRITTEN'), output: result.stdout.trim() }
+  } catch (error) {
+    // A registry write failure is reported to the caller, which logs it and carries on:
+    // the live tunnel is what matters, the next connect re-adopts from the log line.
+    return { ok: false, output: messageOf(error) }
+  }
+}
+
+/** Whether a `ps` command line is the DSH process for this profile. */
+export function commandMatchesProfile(command, profile) {
+  const wanted = String(profile ?? '')
+  if (wanted === '') return false
+  const escaped = wanted.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`--profile[=\\s]+${escaped}(?:\\s|$)`).test(String(command ?? ''))
+}
+
+/** The pinned `@deepseek-ai/dsh@<version>` an npx command line names, if any. */
+export function versionFromCommand(command) {
+  const match = /@deepseek-ai\/dsh@([^\s'"]+)/.exec(String(command ?? ''))
+  return match ? normalizeVersion(match[1]) : null
+}
+
+/**
+ * The installed package directory a real node argv names, e.g.
+ * `/home/u/.npm/_npx/<hash>/node_modules/@deepseek-ai/dsh` or an app install path.
+ * The version is read from that directory's `package.json` (the argv itself does not
+ * carry one in the npx-cache and app-install shapes).
+ */
+export function dshPackageDirFromCommand(command) {
+  const text = String(command ?? '')
+  const marker = '/node_modules/@deepseek-ai/dsh'
+  // Linear scan on purpose: a nested-quantifier regex over an argv with many `/` segments can be
+  // made to backtrack exponentially, and the command line is remote input.
+  let at = text.indexOf(marker)
+  while (at !== -1) {
+    const rest = text.slice(at + marker.length)
+    if (/^(?:\/lib\/bin\.js|[\s'"]|$)/.test(rest)) {
+      let start = at
+      while (start > 0 && !/[\s'"]/.test(text[start - 1])) start -= 1
+      const dir = text.slice(start, at + marker.length)
+      if (dir.startsWith('/') && !dir.split('/').includes('..')) return dir
+      return null
+    }
+    at = text.indexOf(marker, at + marker.length)
+  }
+  return null
+}
+
+/** Read the version of the DSH package a process actually loaded, over SFTP (no shell). */
+async function packageVersionFromDir(ssh, dir) {
+  if (!dir || typeof ssh.readRemoteFile !== 'function') return null
+  try {
+    const file = await ssh.readRemoteFile(`${dir}/package.json`, { maxBytes: 64 * 1024 })
+    const text = Buffer.isBuffer(file?.data) ? file.data.toString('utf8') : String(file?.data ?? '')
+    const parsed = JSON.parse(text)
+    const version = typeof parsed?.version === 'string' ? normalizeVersion(parsed.version) : ''
+    return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) ? version : null
+  } catch {
+    // swallow-ok: an unreadable package.json only means the version stays unknown (never assumed)
+    return null
+  }
+}
+
+/**
+ * The real version a remote DSH process runs: the pinned npx spec when there is one,
+ * otherwise the `package.json` of the package its argv loaded. Null when it cannot be
+ * proven - the caller must not fill in the local version.
+ */
+export async function remoteDshVersion(ssh, command) {
+  const pinned = versionFromCommand(command)
+  if (pinned) return pinned
+  const dir = dshPackageDirFromCommand(command)
+  return dir === null ? null : packageVersionFromDir(ssh, dir)
+}
+
+/**
+ * Re-read the remote's real web state after it restarted: the same pid on a new
+ * random port (in-place exec) or a new pid from a supervisor. The run registry is only
+ * a hint; a candidate is accepted only when all of these hold:
+ *
+ * - the listening port belongs to the pid the plugin thinks it owns;
+ * - that pid's `/proc` identity proves the same `DSH_HOME` and the same `--profile`;
+ * - the newest `dsh web:` line names that exact port, so a launch token is available.
+ *
+ * A candidate that answers HTTP but has no token is **not** usable: a real DSH answers
+ * `/?token=` with 401, so claiming success would be dishonest. The process-scan fallback
+ * therefore never yields a takeover; it only turns the failure reason into `no-token`
+ * ("still running, but no way to authenticate") so the user gets the right remedy.
+ *
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout (`~/.dsh/remote-go`).
+ * @param {{ profile?: string, timeoutMs?: number }} [options]
+ * @returns {Promise<{ ok: true, pid: number, port: number, token: string, url: string,
+ *   version: string | null, profile: string, dshHome: string, source: string } |
+ *   { ok: false, reason: string }>}
+ */
+export async function resolveRemoteWeb(ssh, layout, options = {}) {
+  const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
+  const registry = await readRunRegistry(ssh, layout)
+  const line = await readWebLineFromLog(ssh, layout)
+  const registryMatches =
+    registry !== null &&
+    registry.dshHome === layout.dshHome &&
+    registry.profile === profile &&
+    registry.launch === LAUNCH_MARKER
+  const registryPid = Number(registry?.pid ?? 0)
+  const registryVersion =
+    typeof registry?.version === 'string' && registry.version !== '' ? normalizeVersion(registry.version) : null
+  const alive = registryMatches && isPid(registryPid) && (await remotePidAlive(ssh, registryPid))
+  let listeners = null
+  const listenersOf = async (pid) => {
+    if (listeners === null) listeners = await remoteListenPorts(ssh, pid)
+    return listeners
+  }
+  let tokenlessPort = 0
+  let firstFailure = null
+
+  /**
+   * Accept one reachable candidate only when its identity and its token both check out.
+   * Returns null for "reachable but no token" and a typed failure for "wrong process".
+   */
+  const take = async (pid, port, source) => {
+    const identity = await remoteProcessIdentity(ssh, pid)
+    if (identity.ok !== true) return { ok: false, reason: `identity-${identity.reason}` }
+    if (!commandMatchesProfile(identity.command, profile)) return { ok: false, reason: 'profile-mismatch' }
+    if (identity.dshHome === '' || identity.dshHome !== layout.dshHome) {
+      return { ok: false, reason: 'dsh-home-mismatch' }
+    }
+    const token = line !== null && line.port === port ? line.token : ''
+    if (token === '') {
+      tokenlessPort = port
+      return null
+    }
+    const proven = await remoteDshVersion(ssh, identity.command)
+    return {
+      ok: true,
+      pid,
+      port,
+      token,
+      url: line.url,
+      // Never backfill the local version: an unproven version stays null.
+      version: proven ?? (pid === registryPid ? registryVersion : null),
+      profile,
+      dshHome: identity.dshHome,
+      source,
+    }
+  }
+  const rememberFailure = (candidate) => {
+    if (candidate !== null && candidate.ok !== true && firstFailure === null) firstFailure = candidate
+  }
+
+  // 1. The instance this plugin started: the registry still names a live pid. Only ports
+  //    that pid actually listens on are candidates, and the readiness line must name the
+  //    same port for its launch token to be used.
+  if (alive) {
+    const candidates = [...(await listenersOf(registryPid))]
+    if (isPid(Number(registry?.port ?? 0))) candidates.push(Number(registry.port))
+    for (const port of [...new Set(candidates.filter((value) => isPid(value) && value <= 65535))]) {
+      if (!isUiUp(await remoteHttpStatus(ssh, port))) continue
+      // The port must belong to the pid whose identity we are about to trust. Without a
+      // readable owner (restricted /proc) the candidate is refused: fail closed.
+      const owner = await remotePortOwnerPid(ssh, port)
+      if (!isPid(owner) || owner !== registryPid) continue
+      const candidate = await take(registryPid, port, 'registry')
+      if (candidate?.ok === true) return candidate
+      rememberFailure(candidate)
+    }
+  }
+
+  // 2. A readiness line for a port owned by some other pid (the market restart re-execs
+  //    in place, or a supervisor re-launched it). The owner pid must prove itself.
+  if (line !== null && isPid(line.port) && isUiUp(await remoteHttpStatus(ssh, line.port))) {
+    let pid = 0
+    if (alive && (await listenersOf(registryPid)).includes(line.port)) pid = registryPid
+    // The owner lookup is authoritative even when the registry pid is alive: the newest line
+    // may belong to another profile's process that shares this plugin's log file.
+    if (!isPid(pid)) pid = await remotePortOwnerPid(ssh, line.port)
+    if (isPid(pid)) {
+      const candidate = await take(pid, line.port, 'log')
+      if (candidate?.ok === true) return candidate
+      rememberFailure(candidate)
+    } else {
+      firstFailure = { ok: false, reason: 'pid-unknown' }
+    }
+  }
+
+  // 3. No usable readiness line (a supervisor may redirect stdout). Find the same-profile
+  //    DSH process only to explain the failure: without its launch token it cannot be
+  //    re-attached, so this path never returns ok.
+  const scanned = await findForeignDshProcesses(ssh, { ignorePids: alive ? [registryPid] : [] })
+  if (scanned.ok === true) {
+    for (const process of scanned.processes) {
+      if (!commandMatchesProfile(process.command, profile)) continue
+      const ports = await remoteListenPorts(ssh, process.pid)
+      for (const port of ports) {
+        if (!isUiUp(await remoteHttpStatus(ssh, port))) continue
+        const identity = await remoteProcessIdentity(ssh, process.pid)
+        if (identity.ok === true && identity.dshHome === layout.dshHome) {
+          return { ok: false, reason: 'no-token' }
+        }
+      }
+    }
+  }
+  if (firstFailure !== null) return firstFailure
+  if (tokenlessPort !== 0) return { ok: false, reason: 'no-token' }
+  return { ok: false, reason: alive ? 'no-listener' : 'no-running-web' }
 }

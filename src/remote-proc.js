@@ -121,6 +121,141 @@ echo "STOPPED"
   }
 }
 
+/**
+ * TCP ports a pid is listening on, read from its own `/proc` network tables and
+ * matched against the socket inodes it holds. Used after a remote restart: the
+ * process may be the same pid with a new random port, or a new pid entirely.
+ * @param {object} ssh - SSH transport.
+ * @param {number} pid - remote process id.
+ * @returns {Promise<number[]>} listening ports, ascending and unique.
+ */
+export async function remoteListenPorts(ssh, pid) {
+  if (!isPid(pid)) return []
+  const script = `set -u
+PID=${pid}
+[ -d "/proc/$PID" ] || exit 0
+ls -l "/proc/$PID/fd" 2>/dev/null | sed -n 's/.*socket:\\[\\([0-9][0-9]*\\)\\].*/INODE:\\1/p' | sort -u
+for NET in "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6"; do
+  [ -r "$NET" ] || continue
+  awk 'NR > 1 && $4 == "0A" { print "LISTEN:" $2 ":" $10 }' "$NET" 2>/dev/null
+done
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 15_000 })
+    return parseListenPorts(result.stdout)
+  } catch {
+    // swallow-ok: an unreadable /proc directory yields no candidate ports
+    return []
+  }
+}
+
+/** Decode the `INODE:` / `LISTEN:<addr-hex>:<port-hex>:<inode>` lines of {@link remoteListenPorts}. */
+export function parseListenPorts(stdout) {
+  const inodes = new Set()
+  const ports = []
+  for (const line of String(stdout ?? '').split(/\r?\n/)) {
+    const inode = /^INODE:(\d+)$/.exec(line)
+    if (inode) {
+      inodes.add(inode[1])
+      continue
+    }
+    const listen = /^LISTEN:[0-9A-Fa-f]+:([0-9A-Fa-f]{1,4}):(\d+)$/.exec(line)
+    if (!listen) continue
+    const port = Number.parseInt(listen[1], 16)
+    if (isPid(port) && port <= 65535) ports.push({ port, inode: listen[2] })
+  }
+  return [...new Set(ports.filter((entry) => inodes.has(entry.inode)).map((entry) => entry.port))].sort(
+    (left, right) => left - right,
+  )
+}
+
+/**
+ * The pid behind one listening loopback port, found by matching the port's socket
+ * inode against every `/proc/<pid>/fd`. Needed when the remote restarted into a new
+ * pid that the run registry does not know yet.
+ * @param {object} ssh - SSH transport.
+ * @param {number} port - TCP port on the remote's loopback.
+ * @returns {Promise<number | null>} the owning pid, or null when it cannot be read.
+ */
+export async function remotePortOwnerPid(ssh, port) {
+  if (!isPid(port) || port > 65535) return null
+  const script = `set -u
+PORT_HEX=$(printf '%04X' ${port})
+INODE=$(awk -v p=":$PORT_HEX" '$2 ~ p"$" && $4 == "0A" { print $10; exit }' /proc/net/tcp 2>/dev/null)
+[ -n "\${INODE:-}" ] || exit 0
+for D in /proc/[0-9]*; do
+  if ls -l "$D/fd" 2>/dev/null | grep -q "socket:\\[\${INODE}\\]"; then
+    echo "PID:\${D#/proc/}"
+    exit 0
+  fi
+done
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 20_000 })
+    const match = /^PID:(\d+)$/m.exec(String(result.stdout ?? ''))
+    const pid = match ? Number(match[1]) : 0
+    return isPid(pid) ? pid : null
+  } catch {
+    // swallow-ok: an unreadable /proc scan means the pid is unknown, the caller falls back
+    return null
+  }
+}
+
+/**
+ * The identity of one remote process, read from `/proc` before the plugin ever signals it.
+ * The kernel start time is stable across `exec` (so an in-place DSH restart keeps it) and
+ * changes when a pid is reused by another process - which is exactly what a kill decision
+ * must rule out. The command line and `DSH_HOME` prove the process is the DSH the plugin
+ * thinks it is.
+ *
+ * @param {object} ssh - SSH transport.
+ * @param {number} pid - remote process id.
+ * @returns {Promise<{ ok: true, startTime: string, command: string, dshHome: string } |
+ *   { ok: false, reason: 'invalid-pid' | 'missing' | 'unreadable' }>}
+ */
+export async function remoteProcessIdentity(ssh, pid) {
+  if (!isPid(pid)) return { ok: false, reason: 'invalid-pid' }
+  const script = `set -u
+PID=${pid}
+[ -d "/proc/$PID" ] || { echo "MISSING"; exit 0; }
+RAW=$(cat "/proc/$PID/stat" 2>/dev/null || true)
+[ -n "$RAW" ] || { echo "NO-STAT"; exit 0; }
+REST=$(printf '%s' "$RAW" | sed 's/^.*) //')
+set -- $REST
+printf 'START:%s\\n' "\${20}"
+CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null || true)
+printf 'CMD:%s\\n' "$CMD"
+HOME_LINE=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
+printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
+`
+  try {
+    const result = await ssh.exec(script, { timeoutMs: 10_000, maxBytes: 32_000 })
+    return parseProcessIdentity(result.stdout)
+  } catch {
+    // swallow-ok: an unreadable /proc means the pid cannot be proven, and callers fail closed
+    return { ok: false, reason: 'unreadable' }
+  }
+}
+
+/** Decode the `START:` / `CMD:` / `DSH_HOME:` lines of {@link remoteProcessIdentity}. */
+export function parseProcessIdentity(stdout) {
+  const text = String(stdout ?? '')
+  // The markers below are matched anywhere in the output, deliberately: a command line that
+  // happens to contain MISSING/NO-STAT must not be mistaken for a readable identity (fail closed).
+  if (text.includes('MISSING')) return { ok: false, reason: 'missing' }
+  if (text.includes('NO-STAT')) return { ok: false, reason: 'unreadable' }
+  const start = /^START:(\d+)$/m.exec(text)
+  const command = /^CMD:(.*)$/m.exec(text)
+  if (!start || !command) return { ok: false, reason: 'unreadable' }
+  const home = /^DSH_HOME:(.*)$/m.exec(text)
+  return {
+    ok: true,
+    startTime: start[1],
+    command: command[1].trim(),
+    dshHome: home === null ? '' : home[1].trim(),
+  }
+}
+
 export async function remoteHttpStatus(ssh, port) {
   if (!isPid(port)) return null
   const script = `URL="http://127.0.0.1:${port}/"

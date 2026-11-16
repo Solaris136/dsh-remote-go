@@ -3,10 +3,18 @@
  */
 import { EventEmitter } from 'node:events'
 import { planNpx, verifyNpxVersion } from './bootstrap.js'
-import { REMOTE_CONFLICT_TIMEOUT_MS, REMOTE_VIEW_PREFIX } from './constants.js'
+import {
+  REMOTE_CONFLICT_TIMEOUT_MS,
+  REMOTE_REATTACH_ATTEMPTS,
+  REMOTE_REATTACH_INTERVAL_MS,
+  REMOTE_TUNNEL_REPAIR_SETTLE_MS,
+  REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
+  REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
+  REMOTE_VIEW_PREFIX,
+} from './constants.js'
 import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
 import { createDownloadJobs } from './download-jobs.js'
-import { reconnectHost, startConnect } from './connect-pipeline.js'
+import { reattachHost, reconnectHost, repairTunnel, restartHost, startConnect } from './connect-pipeline.js'
 import { diagnoseHost } from './diagnostics.js'
 import { errors } from './errors.js'
 import {
@@ -20,23 +28,28 @@ import {
   setActiveHost,
   snapshot,
 } from './host-registry.js'
-import { disconnectHost, shutdownAll } from './host-lifecycle.js'
+import { disconnectHost, noteRemoteUnreachable, shutdownAll } from './host-lifecycle.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { ensureRemoteNode } from './node-runtime.js'
 import { confirmConflict, confirmHostKey } from './prompts.js'
 import { probeRemote } from './probe.js'
 import { SshConnection } from './ssh.js'
-import { createTunnel } from './tunnel.js'
+import { createTunnel, probeLoopback } from './tunnel.js'
 import { normalizeVersion } from './version.js'
+import { nowIso } from './util.js'
 import {
   adoptRemoteWeb,
   exchangeTokenOverTunnel,
   findForeignDshProcesses,
   readRunRegistry,
+  remoteHttpStatus,
+  remoteProcessIdentity,
+  resolveRemoteWeb,
   startRemoteWeb,
   stopForeignDshProcesses,
   stopRemoteWeb,
   waitForRemoteUi,
+  writeRunRegistry,
 } from './webapp.js'
 
 export { describePreflightEvent }
@@ -62,6 +75,8 @@ export class RemoteGoService extends EventEmitter {
     const deps = {
       sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
       tunnelFactory: options.tunnelFactory ?? createTunnel,
+      /** Local listener health: decides whether a transient proxy failure needs a rebuild. */
+      tunnelProbe: options.tunnelProbe ?? probeLoopback,
       probe: options.probe ?? probeRemote,
       plan: options.plan ?? planNpx,
       ensureNode: options.ensureNode ?? ensureRemoteNode,
@@ -71,6 +86,10 @@ export class RemoteGoService extends EventEmitter {
       waitUi: options.waitUi ?? waitForRemoteUi,
       exchange: options.exchange ?? exchangeTokenOverTunnel,
       adopt: options.adopt ?? adoptRemoteWeb,
+      resolveRemote: options.resolveRemote ?? resolveRemoteWeb,
+      writeRegistry: options.writeRegistry ?? writeRunRegistry,
+      remoteStatus: options.remoteStatus ?? remoteHttpStatus,
+      processIdentity: options.processIdentity ?? remoteProcessIdentity,
       findForeign: options.findForeign ?? findForeignDshProcesses,
       stopForeign: options.stopForeign ?? stopForeignDshProcesses,
       readRegistry: options.readRegistry ?? readRunRegistry,
@@ -86,6 +105,12 @@ export class RemoteGoService extends EventEmitter {
       timers: {
         hostKeyConfirmMs: this.hostKeyConfirmTimeoutMs,
         conflictConfirmMs: this.conflictConfirmTimeoutMs,
+        // Liveness confirmation and the re-attach retry loop; tests shorten these.
+        remoteConfirmDelayMs: options.remoteConfirmDelayMs ?? REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
+        remoteRecheckMs: options.remoteRecheckMs ?? REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
+        reattachAttempts: options.reattachAttempts ?? REMOTE_REATTACH_ATTEMPTS,
+        reattachIntervalMs: options.reattachIntervalMs ?? REMOTE_REATTACH_INTERVAL_MS,
+        tunnelRepairSettleMs: options.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS,
       },
       // Live readers, never cached: a setting or a detected version can change
       // while a connect is already in flight.
@@ -95,6 +120,26 @@ export class RemoteGoService extends EventEmitter {
       userHome: () => process.env.USERPROFILE || process.env.HOME || this.home,
       emitState: () => this.emitState(),
       init: () => this.init(),
+      /**
+       * The watchdog reports an episode (suspected -> confirmed -> recovered); the Client
+       * contract gets the same transitions as one SSE event, and the state frames carry the
+       * `restarting-remote` progress. Never let a listener failure break the probe.
+       */
+      onRemoteUnreachable: (runtime, info) => {
+        try {
+          this.emit('remote-unreachable', { hostId: runtime.id, at: nowIso(), ...info })
+        } catch (error) {
+          this.logger.warn?.('[dsh-remote-go] remote-unreachable listener failed:', error)
+        }
+      },
+      /** A proxy or tunnel failure arrived: confirm it with probes instead of trusting one request. */
+      noteRemoteUnreachable: (runtime, source) => noteRemoteUnreachable(this.ctx, runtime, source),
+      /** Confirmed by probes: re-read the remote, rewrite the registry, rebuild the tunnel. */
+      requestReattach: (runtime, info) => {
+        void reattachHost(this.ctx, runtime, info)
+      },
+      /** The remote answers but proxied requests fail: rebuild the local listener (B8). */
+      repairTunnel: (runtime) => repairTunnel(this.ctx, runtime),
     }
     this.ctx.progress = createConnectProgress({
       logger: this.logger,
@@ -189,6 +234,16 @@ export class RemoteGoService extends EventEmitter {
     return reconnectHost(this.ctx, runtimeOf(this.ctx, id))
   }
 
+  /**
+   * Restart the managed remote web on the same SSH session (the "Restart remote DSH"
+   * card action). Only a connected host can be restarted; the work runs in the
+   * background and reports through `/state` like a connect does.
+   */
+  async restart(id) {
+    await this.init()
+    return restartHost(this.ctx, runtimeOf(this.ctx, id))
+  }
+
   async confirmFingerprint(id, decision) {
     return confirmHostKey(this.ctx, runtimeOf(this.ctx, id), decision)
   }
@@ -230,6 +285,17 @@ export class RemoteGoService extends EventEmitter {
     const runtime = this.ctx.state.runtimes.get(id)
     if (!runtime || runtime.status !== 'connected' || !runtime.tunnel) return null
     return { localPort: runtime.tunnel.localPort, remotePort: runtime.remote.port }
+  }
+
+  /**
+   * The same-origin proxy could not reach a host's tunnel. One failed request is not a
+   * restart: it starts the same probe confirmation the heartbeat uses.
+   * @param {string} id - host id the proxy serves.
+   */
+  noteUpstreamFailure(id) {
+    const runtime = this.ctx.state.runtimes.get(id)
+    if (!runtime) return
+    noteRemoteUnreachable(this.ctx, runtime, 'proxy')
   }
 
   async diagnose(id) {

@@ -126,6 +126,9 @@ export async function makeTestService(overrides = {}) {
       return ssh
     })
   const tunnelFactory = overrides.tunnelFactory ?? (async () => new FakeTunnel(45123))
+  // The fake tunnel is not a real listener: tests that want "the listener still answers"
+  // override this. Default false keeps the rebuild path exercised.
+  const tunnelProbe = overrides.tunnelProbe ?? (async () => false)
   const service = new RemoteGoService({
     store,
     home: path.join(dir, 'home'),
@@ -134,7 +137,8 @@ export async function makeTestService(overrides = {}) {
     engineNodeRange: overrides.engineNodeRange,
     sshFactory,
     tunnelFactory,
-    probe: async () => facts,
+    tunnelProbe,
+    probe: overrides.probe ?? (async () => facts),
     plan: (await import('../../src/bootstrap.js')).planNpx,
     ensureNode: overrides.ensureNode ?? (async () => managedNodeFixture()),
     preflight: overrides.preflight ?? (async (_ssh, plan) => plan.targetVersion),
@@ -168,6 +172,17 @@ export async function makeTestService(overrides = {}) {
         bodyLength: 1024,
       })),
     adopt: overrides.adopt ?? (async () => null),
+    resolveRemote: overrides.resolveRemote ?? (async () => ({ ok: false, reason: 'no-running-web' })),
+    writeRegistry: overrides.writeRegistry ?? (async () => ({ ok: true, output: 'REGISTRY-WRITTEN' })),
+    remoteStatus: overrides.remoteStatus ?? (async () => 200),
+    processIdentity:
+      overrides.processIdentity ??
+      (async (_ssh, pid) => ({
+        ok: true,
+        startTime: `start-${pid}`,
+        command: 'node /home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web',
+        dshHome: '/home/ubuntu/.dsh',
+      })),
     loadSshMaterial: async () => ({
       sshDir: '/home/test/.ssh',
       configText: 'Host test-host\n  HostName 2001:db8::1\n  User ubuntu\n',
@@ -177,6 +192,12 @@ export async function makeTestService(overrides = {}) {
     }),
     hostKeyConfirmTimeoutMs: overrides.hostKeyConfirmTimeoutMs ?? 2000,
     sessionAdapter: overrides.sessionAdapter ?? null,
+    // Liveness confirmation and the re-attach retry loop run on short timers in tests.
+    remoteConfirmDelayMs: overrides.remoteConfirmDelayMs ?? 5,
+    remoteRecheckMs: overrides.remoteRecheckMs ?? 5,
+    reattachAttempts: overrides.reattachAttempts ?? 2,
+    reattachIntervalMs: overrides.reattachIntervalMs ?? 0,
+    tunnelRepairSettleMs: overrides.tunnelRepairSettleMs ?? 1000,
   })
   await service.init()
   return { service, store, dir, events, facts }

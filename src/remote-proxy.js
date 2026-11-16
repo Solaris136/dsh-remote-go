@@ -271,6 +271,8 @@ function plain(res, status, text) {
  * @param {(req: object) => (number | undefined)} [options.admit] - DSH admission
  *   (`ctx.connection.requestRejection`): the rejection status for a request, or undefined when it may
  *   proceed. Absent on kernels without the Connection service, where the fence below is the gate.
+ * @param {(hostId: string) => void} [options.onUpstreamError] - called once per failed upstream
+ *   connection so the Host can confirm a suspected remote restart (the browser still gets a 502).
  * @param {{ warn?: Function, debug?: Function, error?: Function }} [options.logger]
  */
 export function createRemoteProxy(options) {
@@ -279,18 +281,33 @@ export function createRemoteProxy(options) {
   const getOrigin = options.getOrigin
   const resolveHost = options.resolveHost
   const admit = typeof options.admit === 'function' ? options.admit : () => undefined
+  const onUpstreamError = options.onUpstreamError
   const jars = new Map()
   const upgrades = new Map()
   const sockets = new Set()
   let disposed = false
-
-  function jarOf(hostId) {
-    let jar = jars.get(hostId)
-    if (jar === undefined) {
-      jar = createCookieJar()
-      jars.set(hostId, jar)
+  /** Report one failed upstream without letting the reporter break the proxy. */
+  function reportUpstreamFailure(hostId) {
+    try {
+      onUpstreamError?.(hostId)
+    } catch {
+      // swallow-ok: reporting only feeds the liveness confirmation, it must never fail a request
     }
-    return jar
+  }
+
+  /**
+   * The per-host cookie jar is bound to the remote authority it was filled from: after a
+   * restart or a re-attach the remote comes back on a new random port, and cookies issued
+   * by the old instance must not be sent to the new one (nor kept after the host is gone).
+   */
+  function jarOf(hostId, target) {
+    const authority = remoteAuthority(target)
+    let entry = jars.get(hostId)
+    if (entry === undefined || entry.authority !== authority) {
+      entry = { authority, jar: createCookieJar() }
+      jars.set(hostId, entry)
+    }
+    return entry.jar
   }
 
   function localOrigin() {
@@ -352,7 +369,7 @@ export function createRemoteProxy(options) {
       plain(res, 404, 'host is not connected')
       return
     }
-    const jar = jarOf(parsed.hostId)
+    const jar = jarOf(parsed.hostId, target)
     const upstreamPath = parsed.path + search
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
@@ -393,6 +410,7 @@ export function createRemoteProxy(options) {
       // operator, and the browser only ever sees the 502 below.
       logger.debug?.(`[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed`)
       plain(res, 502, 'remote UI is unreachable')
+      reportUpstreamFailure(parsed.hostId)
     })
     req.once('aborted', () => upstream.destroy())
     req.pipe(upstream)
@@ -436,7 +454,7 @@ export function createRemoteProxy(options) {
       socket.destroy()
       return
     }
-    const jar = jarOf(hostId)
+    const jar = jarOf(hostId, target)
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
       localOrigin: origin.origin,
@@ -456,7 +474,10 @@ export function createRemoteProxy(options) {
       upstream.destroy()
     })
     socket.on('error', () => upstream.destroy())
-    upstream.on('error', () => socket.destroy())
+    upstream.on('error', () => {
+      socket.destroy()
+      reportUpstreamFailure(hostId)
+    })
     upstream.once('connect', () => {
       upstream.write(raw)
       if (head && head.length > 0) upstream.write(head)
@@ -510,8 +531,8 @@ export function createRemoteProxy(options) {
     sync,
     /** One host's current cookie header, for diagnostics and tests. */
     cookies(hostId) {
-      const jar = jars.get(hostId)
-      return jar === undefined ? '' : cookieHeader(jar, '/')
+      const entry = jars.get(hostId)
+      return entry === undefined ? '' : cookieHeader(entry.jar, '/')
     },
     dispose() {
       if (disposed) return

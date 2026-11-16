@@ -169,6 +169,12 @@ window.__ModuleLoader__.load({
       cardConnect: ['连接', 'Connect'],
       cardDisconnect: ['断开', 'Disconnect'],
       cardReconnect: ['重连', 'Reconnect'],
+      cardRestart: ['重启远端 DSH', 'Restart remote DSH'],
+      cardRestarting: ['正在重启远端 DSH…', 'Restarting the remote DSH…'],
+      remoteRestartBusy: [
+        '远端链路正在重建隧道，请稍后再试。',
+        'The remote link is rebuilding its tunnel; try again shortly.',
+      ],
       cardDiagnose: ['诊断', 'Diagnose'],
       cardEdit: ['编辑', 'Edit'],
       cardDelete: ['删除', 'Delete'],
@@ -254,6 +260,10 @@ window.__ModuleLoader__.load({
       'progress.verifying': ['正在验证远端界面…', 'Verifying the remote UI…'],
       'progress.ready': ['就绪', 'Ready'],
       'progress.reconnecting': ['断线重连中（第 {attempt}/{max} 次）…', 'Reconnecting ({attempt}/{max})…'],
+      'progress.restarting-remote': [
+        '远端 DSH 正在重启，正在重新挂载界面…',
+        'The remote DSH is restarting; re-attaching the remote UI…',
+      ],
       'progress.default': ['正在连接…', 'Connecting…'],
       'phase.ssh': ['SSH', 'SSH'],
       'phase.probe': ['探测', 'Probe'],
@@ -859,6 +869,14 @@ window.__ModuleLoader__.load({
       },
       async reconnect(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
+      },
+      /**
+       * Restart the managed remote web on the same SSH session. The Host accepts and
+       * reports progress through `/state` (progress code `restarting-remote`); the old
+       * launch URL and its tunnel are gone once it finishes.
+       */
+      async restart(hostId) {
+        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/restart', { method: 'POST', body: {} })
       },
       async openHost(hostId) {
         const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
@@ -1610,6 +1628,14 @@ window.__ModuleLoader__.load({
       const lastOpened = host.lastOpenedAt ? formatTime(host.lastOpenedAt, locale) : t('neverOpened')
       const reason = host.error ? resolveText(host.error.detail, locale) || resolveText(host.error.title, locale) : ''
       const primaryDisabled = busy || meta.wait === true
+      // A restart of the managed remote web is visible on the card itself: the host is
+      // `connecting` (not `disconnected`) while it runs, so no "connection lost" shows up.
+      const restarting =
+        host.status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
+      // `remote-unreachable` keeps the SSH session on purpose, so a restart is the other way
+      // back besides reconnecting (docs/design.md §5.6).
+      const recoverable = host.status === 'error' && host.error !== null && host.error.code === 'remote-unreachable'
+      const restartAvailable = host.status === 'connected' || restarting || recoverable
 
       return h(
         'li',
@@ -1645,6 +1671,13 @@ window.__ModuleLoader__.load({
           h(Badge, { tone: meta.tone, title: t(meta.hint) }, statusLabel),
         ),
         h('div', { className: 'drg-card-address', title: displayAddress(host) }, displayAddress(host) || '—'),
+        host.status === 'connecting' && host.progress
+          ? h(
+              'p',
+              { className: 'drg-card-progress', 'data-progress': host.progress.code },
+              progressText(t, host.progress),
+            )
+          : null,
         box(
           'dl',
           'drg-card-meta',
@@ -1677,6 +1710,18 @@ window.__ModuleLoader__.load({
                   disabled: busy,
                 },
                 t('cardDisconnect'),
+              )
+            : null,
+          restartAvailable
+            ? h(
+                Button,
+                {
+                  variant: 'ghost',
+                  testId: 'host-restart',
+                  onClick: () => props.onRestart && props.onRestart(host),
+                  disabled: busy || restarting,
+                },
+                restarting ? t('cardRestarting') : t('cardRestart'),
               )
             : null,
           meta.retry === true
@@ -1766,6 +1811,7 @@ window.__ModuleLoader__.load({
                 onOpen: props.onOpenHost,
                 onDisconnect: props.onDisconnectHost,
                 onReconnect: props.onReconnectHost,
+                onRestart: props.onRestartHost,
                 onEdit: props.onEditHost,
                 onDelete: props.onDeleteHost,
                 onDiagnose: props.onDiagnoseHost,
@@ -4097,21 +4143,33 @@ window.__ModuleLoader__.load({
       let entry = carrierOf(hostId)
       const reused = entry !== null
       const surface = entry === null ? carrierSurface() : entry.kind
+      // The revision of the attach this call actually navigated to. Only a real navigation
+      // (a new carrier, or a reload of an existing one) may claim the new revision.
+      let navigatedRev = null
       if (entry === null) {
         if (surface === null) return { ok: false, reason: 'acquire-failed' }
         if (!acceptsCarrierUrl(surface, url)) return { ok: false, reason: 'bad-url' }
         entry = await createCarrier(hostId, url, options.message)
         if (entry === null) return { ok: false, reason: 'acquire-failed' }
+        navigatedRev = options.viewRev
         // The user moved on (another host, or back to local) while this one was being
         // built: drop it instead of stealing the window.
         if (carrierPool.wanted !== hostId) {
           await disposeCarrier(entry)
           return { ok: false, reason: 'superseded' }
         }
-      } else if (url !== '' && entry.url !== url && acceptsCarrierUrl(entry.kind, url)) {
-        // A reconnect hands out a new one-shot URL: the warm page is stale, reload it.
+      } else if (
+        url !== '' &&
+        (entry.url !== url || (Number.isInteger(options.viewRev) && entry.viewRev !== options.viewRev)) &&
+        acceptsCarrierUrl(entry.kind, url)
+      ) {
+        // A reconnect or a remote restart hands out a new one-shot URL and a new attach
+        // revision: the warm page is stale, reload it.
         await entry.backend.load(entry, url)
+        navigatedRev = options.viewRev
       }
+      // Remember which attach this carrier was navigated for: the next attach invalidates it.
+      if (navigatedRev !== null && Number.isInteger(navigatedRev)) entry.viewRev = navigatedRev
       // A desktop guest whose page failed is not worth showing as-is: retry it once.
       if (reused && entry.kind === 'desktop' && entry.failed === true) {
         entry.failed = false
@@ -5419,6 +5477,7 @@ window.__ModuleLoader__.load({
                 onOpenHost: props.onOpenHost,
                 onDisconnectHost: props.onDisconnectHost,
                 onReconnectHost: props.onReconnectHost,
+                onRestartHost: props.onRestartHost,
                 onEditHost: props.onEditHost,
                 onDeleteHost: props.onDeleteHost,
                 onDiagnoseHost: props.onDiagnoseHost,
@@ -5692,6 +5751,22 @@ window.__ModuleLoader__.load({
       const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
       const activeHost = target ? hosts.find((host) => host && host.id === target) || null : null
       const activeStatus = activeHost ? activeHost.status : null
+      /**
+       * Which attach the remote window belongs to. `remote.viewRev` changes on every successful
+       * connect / restart / re-attach, so a warm carrier built for an older tunnel is stale even
+       * though its host is connected again.
+       */
+      const activeViewRev =
+        activeHost && activeHost.remote && Number.isInteger(activeHost.remote.viewRev)
+          ? activeHost.remote.viewRev
+          : null
+      /** True when the warm carrier was navigated for the given attach. */
+      const carrierHoldsView = (hostId, viewRev) => {
+        const entry = carrierOf(hostId)
+        if (entry === null) return false
+        const entryRev = Number.isInteger(entry.viewRev) ? entry.viewRev : null
+        return entryRev === viewRev
+      }
       const hostsRef = useRef(hosts)
       hostsRef.current = hosts
       // A host we asked for that still has to connect: the list stays up until it is ready.
@@ -5712,16 +5787,19 @@ window.__ModuleLoader__.load({
         if (activeStatus === 'connecting') setRemoteUrl(null)
       }, [activeStatus])
 
-      // Fetch `GET /hosts/:id/open` only for a host that is up and not already warm: the
-      // guest needs the launch-token URL once, and a warm window is shown without it.
+      // Fetch `GET /hosts/:id/open` only for a host that is up and not already warm for this
+      // attach: the carrier needs the launch-token URL once, and a warm window is shown without it.
+      // A cached URL from an older `viewRev` is stale even for the same host (its token and
+      // tunnel are gone), so it is refetched rather than replayed.
       useEffect(() => {
-        if (target === null || carrierWarm(target)) return undefined
-        if (remoteUrl !== null && remoteUrl.hostId === target) return undefined
+        if (target === null || carrierHoldsView(target, activeViewRev)) return undefined
+        if (remoteUrl !== null && remoteUrl.hostId === target && remoteUrl.viewRev === activeViewRev) return undefined
         if (activeStatus !== 'connected') return undefined
         let cancelled = false
         api.openHost(target).then(
           (opened) => {
-            if (!cancelled) setRemoteUrl({ hostId: target, url: opened.url, webUrl: opened.webUrl })
+            if (!cancelled)
+              setRemoteUrl({ hostId: target, url: opened.url, webUrl: opened.webUrl, viewRev: activeViewRev })
           },
           (error) => {
             if (cancelled) return
@@ -5731,7 +5809,7 @@ window.__ModuleLoader__.load({
         return () => {
           cancelled = true
         }
-      }, [target, activeStatus, remoteUrl])
+      }, [target, activeStatus, remoteUrl, activeViewRev])
 
       // Where the window is. Guests stay warm: a warm one is shown again without any load,
       // which is what makes switching between remotes (and coming back from local) instant.
@@ -5744,13 +5822,15 @@ window.__ModuleLoader__.load({
           hideOverlays()
           return
         }
-        if (carrierWarm(target)) {
-          showOverlay({ hostId: target, message: t('viewportOverlayLoadFailed') })
+        if (carrierHoldsView(target, activeViewRev)) {
+          showOverlay({ hostId: target, message: t('viewportOverlayLoadFailed'), viewRev: activeViewRev })
           return
         }
         // The launch URL for *this* host is still being fetched: keep the current carrier up
         // so switching does not flash the local UI behind it.
         if (remoteUrl === null || remoteUrl.hostId !== target) return
+        // Never replay a launch URL issued for an older attach (its token and tunnel are gone).
+        if (activeViewRev !== null && remoteUrl.viewRev !== activeViewRev) return
         const surface = carrierSurface()
         const carrierUrl = surface === 'desktop' ? remoteUrl.url : remoteUrl.webUrl
         if (surface === 'web' && (typeof carrierUrl !== 'string' || carrierUrl === '')) {
@@ -5760,7 +5840,12 @@ window.__ModuleLoader__.load({
           }
           return
         }
-        const shown = showOverlay({ hostId: target, url: carrierUrl, message: t('viewportOverlayLoadFailed') })
+        const shown = showOverlay({
+          hostId: target,
+          url: carrierUrl,
+          message: t('viewportOverlayLoadFailed'),
+          viewRev: remoteUrl.viewRev,
+        })
         if (shown && typeof shown.then === 'function') {
           shown.then(
             (outcome) => {
@@ -5772,7 +5857,7 @@ window.__ModuleLoader__.load({
             () => {},
           )
         }
-      }, [target, activeStatus, remoteUrl])
+      }, [target, activeStatus, remoteUrl, activeViewRev])
 
       // When the host we asked for comes up, the window switches and the connect window gets
       // out of the way; a failure left it up (with its error and the log) until it is closed.
@@ -5994,6 +6079,25 @@ window.__ModuleLoader__.load({
         runAction(host, () => api.reconnect(host.id))
       }
 
+      /**
+       * Restart the managed remote web. The Host stops the pid it launched on the same SSH
+       * session and re-runs `[start]`; the state stream shows `restarting-remote` and the
+       * carrier navigates to the new launch URL once the host is connected again.
+       */
+      const restartHost = (host) => {
+        if (!host) return
+        runAction(
+          host,
+          () => api.restart(host.id),
+          (result) => {
+            // A repair or another one-shot action owns the link: say so instead of doing nothing.
+            if (result && result.accepted === false && result.reason === 'busy') {
+              notify(t('remoteRestartBusy'), 'info')
+            }
+          },
+        )
+      }
+
       const resolveConflict = (host, action) => {
         if (!host || !host.id) return
         setConflictBusy(true)
@@ -6102,6 +6206,7 @@ window.__ModuleLoader__.load({
           onOpenHost: openHost,
           onDisconnectHost: disconnectHost,
           onReconnectHost: reconnectHost,
+          onRestartHost: restartHost,
           onEditHost: (host) => openWizard({ mode: 'edit', host }),
           onDeleteHost: (host) => setPendingDelete(host),
           onDiagnoseHost: runDiagnose,
@@ -6395,6 +6500,7 @@ window.__ModuleLoader__.load({
     .drg-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
     .drg-card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 500; line-height: 22px; }
     .drg-card-address { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-tertiary); font-family: var(--ds-font-family-code, var(--dsw-font-markdown-code-font-family, monospace)); font-size: 12px; }
+    .drg-card-progress { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
     .drg-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
     .drg-card-meta > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
     .drg-card-meta dt { color: var(--dsw-alias-label-caption); font-size: 11px; }

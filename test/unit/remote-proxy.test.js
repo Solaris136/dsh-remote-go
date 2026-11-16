@@ -85,7 +85,9 @@ async function startProxy(resolveHost, webServer = fakeWebServer(), options = {}
     getOrigin: () => LOCAL_ORIGIN,
     resolveHost,
     admit: options.admit,
+    onUpstreamError: options.onUpstreamError,
     logger: { debug() {}, warn() {}, error() {} },
+    ...options,
   })
   webServer.register({ kind: 'prefix', path: proxy.routePath, handler: (req, res) => proxy.handle(req, res) })
   const server = http.createServer((req, res) => {
@@ -390,6 +392,101 @@ test('the upgrade route forwards only the host stream path and injects the jar c
     local.proxy.dispose()
     await close(local.server)
     await close(upstream)
+  }
+})
+
+test('the cookie jar is bound to the remote authority and resets when the remote moves', async () => {
+  const first = http.createServer((req, res) => {
+    if (req.url.startsWith('/?token=')) {
+      res.writeHead(303, { location: './', 'set-cookie': ['dsh-auth=first-instance; Path=/; HttpOnly'] })
+      res.end('token-consumed')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end(`cookie=${req.headers.cookie ?? ''}`)
+  })
+  const second = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end(`cookie=${req.headers.cookie ?? ''}`)
+  })
+  const firstPort = await listen(first)
+  const secondPort = await listen(second)
+  const target = { current: { localPort: firstPort, remotePort: firstPort } }
+  const local = await startProxy(() => target.current)
+  try {
+    await request(local.port, '/dsh-remote-go/remote/h_a/?token=one')
+    const sameAuthority = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(sameAuthority.body, 'cookie=dsh-auth=first-instance')
+    // The remote restarted on a new random port: its authority changed, so the old instance's
+    // cookie must not be sent to (or kept for) the new one.
+    target.current = { localPort: secondPort, remotePort: secondPort }
+    const afterRestart = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(afterRestart.body, 'cookie=')
+    assert.equal(local.proxy.cookies('h_a'), '')
+    // Dropping the host drops its jar with it.
+    local.proxy.sync([])
+    assert.equal(local.proxy.cookies('h_a'), '')
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
+    await close(first)
+    await close(second)
+  }
+})
+
+test('a failed upstream reports the fault once per request and still answers 502', async () => {
+  // Bind then release a port so the proxy forwards to a loopback listener that is really gone.
+  const probe = net.createServer()
+  const deadPort = await listen(probe)
+  await close(probe)
+  const failures = []
+  const local = await startProxy(() => ({ localPort: deadPort, remotePort: deadPort }), fakeWebServer(), {
+    onUpstreamError: (hostId) => failures.push(hostId),
+  })
+  try {
+    const first = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(first.status, 502)
+    assert.deepEqual(failures, ['h_a'])
+    const second = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(second.status, 502)
+    assert.deepEqual(failures, ['h_a', 'h_a'])
+
+    local.proxy.sync(['h_a'])
+    await new Promise((resolve, reject) => {
+      const socket = net.connect(local.port, '127.0.0.1', () => {
+        socket.write(
+          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
+            `Host: ${LOCAL_AUTHORITY}\r\n` +
+            'Connection: Upgrade\r\n' +
+            'Upgrade: websocket\r\n\r\n',
+        )
+      })
+      socket.on('close', resolve)
+      socket.on('error', reject)
+      socket.resume()
+    })
+    assert.deepEqual(failures, ['h_a', 'h_a', 'h_a'], 'the upgrade failure is reported too')
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
+  }
+})
+
+test('a throwing upstream reporter cannot fail the proxied request', async () => {
+  const probe = net.createServer()
+  const deadPort = await listen(probe)
+  await close(probe)
+  const local = await startProxy(() => ({ localPort: deadPort, remotePort: deadPort }), fakeWebServer(), {
+    onUpstreamError: () => {
+      throw new Error('reporter exploded')
+    },
+  })
+  try {
+    const response = await request(local.port, '/dsh-remote-go/remote/h_a/')
+    assert.equal(response.status, 502)
+  } finally {
+    local.proxy.dispose()
+    await close(local.server)
   }
 })
 

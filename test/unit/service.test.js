@@ -692,3 +692,56 @@ test('setLocalVersion enables local-version parity resolution', async () => {
   assert.equal(service.snapshot().hostVersion, '0.2.2-rc.1')
   assert.equal(service.snapshot().targetVersion, '0.2.2-rc.1')
 })
+
+test('a re-attached instance with another version is never stopped by the next connect', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    adopt: async () => ({
+      pid: 77,
+      port: 4000,
+      token: 'old',
+      url: 'http://127.0.0.1:4000/?token=old',
+      version: '0.0.1-old',
+      profile: 'web',
+      dshHome: '/home/ubuntu/.dsh',
+      adopted: true,
+      origin: 'reattach',
+    }),
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.deepEqual(stopped, [], 'an instance the plugin did not launch must not be killed')
+  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  await service.shutdown()
+})
+
+test('a leftover registry record from a re-attach is left running by a new connection', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    adopt: async () => null,
+    readRegistry: async () => ({
+      pid: 77,
+      port: 4000,
+      startedAt: '2026-11-16T00:00:00.000Z',
+      profile: 'web',
+      version: '0.2.2-rc.1',
+      dshHome: '/home/ubuntu/.dsh',
+      launch: 'browser-carrier-v1',
+      origin: 'reattach',
+    }),
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+  assert.deepEqual(stopped, [])
+  await service.shutdown()
+})
