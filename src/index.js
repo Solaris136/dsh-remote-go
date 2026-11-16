@@ -113,7 +113,13 @@ export function apply(ctx, config = {}) {
 
     return () => {
       service.removeListener('state', syncViewRoutes)
-      disposeTools()
+      // A failing disposer must not skip the rest of the unload: the proxy, the API and the SSH
+      // transports below still have to be released.
+      try {
+        disposeTools()
+      } catch (error) {
+        logger.error('unload: could not dispose the model tools:', error)
+      }
       proxy.dispose()
       api.dispose()
       void service.shutdown()

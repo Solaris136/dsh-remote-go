@@ -38,11 +38,18 @@ function hostView(overrides = {}) {
   }
 }
 
-/** A fake host composition: `register`/`effect` behave like cordis (the effect runs now). */
+/**
+ * A fake host composition. `inject` behaves like cordis: it returns a *fiber* (not a disposer),
+ * whose `dispose()` unloads the child effect, and it can deliver the injected context immediately
+ * or later (`deferInject`), exactly as a parked fiber would.
+ */
 function makeHarness(options = {}) {
   const registered = new Map()
   const labels = []
   const logs = []
+  const injects = []
+  const fibers = []
+  const cleanups = []
   const views = options.views ?? [hostView()]
   const service = {
     init: async () => {},
@@ -62,19 +69,42 @@ function makeHarness(options = {}) {
     error: (...args) => logs.push(['error', ...args]),
     debug: (...args) => logs.push(['debug', ...args]),
   }
-  const ctx = {
-    get: (name) => (name === 'tools' ? tools : null),
+  const childCtx = {
+    tools,
     effect(execute, label) {
       labels.push(label)
       const dispose = execute()
+      cleanups.push(dispose)
       return () => dispose?.()
     },
   }
+  const ctx = {
+    get: (name) => (name === 'tools' && options.hideTools !== true ? tools : null),
+    inject(names, callback) {
+      injects.push(names)
+      const fiber = {
+        disposed: false,
+        deliver: () => callback(childCtx),
+        dispose() {
+          fiber.disposed = true
+          if (options.fiberDisposeThrows === true) throw new Error('fiber dispose failed')
+          for (const run of cleanups.splice(0)) {
+            try {
+              run?.()
+            } catch {
+              // a real fiber tolerates one failing effect; the test only needs the next ones to run
+            }
+          }
+        },
+      }
+      fibers.push(fiber)
+      if (options.deferInject !== true) fiber.deliver()
+      return fiber
+    },
+  }
   const dispose = registerHostTools(ctx, { service, logger })
-  return { registered, labels, logs, views, service, logger, dispose, list: registered.get(LIST_TOOL_NAME) }
+  return { registered, labels, logs, injects, fibers, service, logger, dispose, list: registered.get(LIST_TOOL_NAME) }
 }
-
-// ---- output contract ---------------------------------------------------------------------------
 
 /**
  * Validate one result against the tool's declared `output.schema` the way the kernel does: required
@@ -133,6 +163,7 @@ function assertNoSecrets(value) {
 test('the host list registers with a read-only contract and a working disposer', () => {
   const harness = makeHarness()
   assert.deepEqual([...harness.registered.keys()], [LIST_TOOL_NAME])
+  assert.deepEqual(harness.injects, [['tools']], 'registration goes through the injected service')
   assert.ok(harness.labels.includes('dsh-remote-go: model tools'))
 
   const definition = harness.list
@@ -155,10 +186,157 @@ test('the host list registers with a read-only contract and a working disposer',
     'a startup log must say the tool is registered',
   )
 
-  harness.dispose()
+  // `ctx.inject` hands back the fiber, so the returned disposer must dispose it — and it must not
+  // throw, because `apply`'s cleanup runs the rest of the unload after this line.
+  assert.equal(typeof harness.dispose, 'function')
+  assert.doesNotThrow(() => harness.dispose())
+  assert.equal(harness.fibers.length, 1)
+  assert.equal(harness.fibers[0].disposed, true, 'the parked fiber must be disposed')
   assert.equal(harness.registered.size, 0, 'unloading the plugin must remove the tool')
-  assert.equal(harness.registered.get(LIST_TOOL_NAME), undefined)
 })
+
+test('a failed fiber disposal is contained and lets the rest of the unload run', () => {
+  const harness = makeHarness({ fiberDisposeThrows: true })
+  const order = []
+  assert.equal(typeof harness.dispose, 'function')
+  assert.doesNotThrow(() => {
+    for (const step of [() => harness.dispose(), () => order.push('proxy'), () => order.push('api')]) step()
+  })
+  assert.deepEqual(order, ['proxy', 'api'], 'a failing disposer must not skip the remaining cleanup')
+  assert.ok(
+    harness.logs.some((line) => line[0] === 'warn' && /could not dispose the model tool fiber/.test(line[1])),
+    'the failure is logged instead of swallowed',
+  )
+})
+
+test('the tool is registered through ctx.inject even when the service is already live', () => {
+  // A replaced `tools` service only reaches us through the fiber's re-apply; a one-shot
+  // `ctx.get` fast path would leave the tool registered against the dead service.
+  const harness = makeHarness()
+  assert.deepEqual(harness.injects, [['tools']])
+  assert.equal(harness.registered.size, 1)
+})
+
+test('a tools service that arrives later still gets the tool', () => {
+  const harness = makeHarness({ hideTools: true, deferInject: true })
+  assert.equal(harness.registered.size, 0, 'nothing registers while the service is absent')
+  assert.ok(
+    harness.logs.some((line) => line[0] === 'info' && /tools service is not ready yet/.test(line[1])),
+    'the parked state is logged, not silent',
+  )
+  harness.fibers[0].deliver()
+  assert.deepEqual([...harness.registered.keys()], [LIST_TOOL_NAME], 'the parked fiber registers on arrival')
+  harness.dispose()
+  assert.equal(harness.registered.size, 0)
+})
+
+test('a composition without ctx.inject falls back to the lookup', () => {
+  const logs = []
+  const service = { snapshot: () => ({ hosts: [] }) }
+  const ctx = { get: () => null, effect: () => assert.fail('no effect without a tools service') }
+  const dispose = registerHostTools(ctx, {
+    service,
+    logger: { info: (...a) => logs.push(a) },
+  })
+  assert.equal(logs.length, 1)
+  assert.match(String(logs[0][0]), /no tools service/)
+  assert.equal(typeof dispose, 'function', 'the caller still gets a disposer to call on unload')
+  assert.doesNotThrow(() => dispose())
+
+  // Service present: register directly against it, and the result is disposable too.
+  const registered = new Map()
+  const tools = {
+    register(definition) {
+      registered.set(definition.name, definition)
+      return () => registered.delete(definition.name)
+    },
+  }
+  const direct = registerHostTools(
+    {
+      get: () => tools,
+      effect(execute) {
+        const run = execute()
+        return () => run?.()
+      },
+    },
+    { service, logger: { info() {}, warn() {} } },
+  )
+  assert.deepEqual([...registered.keys()], [LIST_TOOL_NAME])
+  direct()
+  assert.equal(registered.size, 0)
+
+  // A lookup that throws is the same "missing" case: never park the plugin on it.
+  const throwing = registerHostTools(
+    {
+      get() {
+        throw new Error('cannot get property "tools" without inject')
+      },
+      effect: () => assert.fail('a throwing lookup must not park the plugin'),
+    },
+    { service, logger: { info: (...a) => logs.push(a) } },
+  )
+  assert.match(String(logs[logs.length - 1][0]), /no tools service/)
+  assert.doesNotThrow(() => throwing())
+})
+
+test('a kernel that refuses the definition costs the tool, never the plugin', () => {
+  const warnings = []
+  const ctx = {
+    inject: (_names, callback) =>
+      callback({
+        tools: {
+          register() {
+            throw new TypeError('tool "remote_hosts_list" must declare output { schema, render }')
+          },
+        },
+        effect: (execute) => execute(),
+      }),
+  }
+  const fiber = registerHostTools(ctx, {
+    service: { snapshot: () => ({ hosts: [] }) },
+    logger: { warn: (...a) => warnings.push(a) },
+  })
+  assert.equal(warnings.length, 1)
+  assert.match(String(warnings[0][0]), /could not register remote_hosts_list/)
+  assert.equal(typeof fiber, 'function')
+})
+
+test('an unregister that throws is contained like every other teardown failure', () => {
+  const warnings = []
+  const cleanups = []
+  const ctx = {
+    inject: (_names, callback) => {
+      callback({
+        tools: {
+          register: () => () => {
+            throw new Error('dispose failed')
+          },
+        },
+        effect(execute) {
+          const run = execute()
+          cleanups.push(run)
+          return () => run?.()
+        },
+      })
+      return {
+        dispose() {
+          for (const run of cleanups.splice(0)) run?.()
+        },
+      }
+    },
+  }
+  const dispose = registerHostTools(ctx, {
+    service: { snapshot: () => ({ hosts: [] }) },
+    logger: { warn: (...a) => warnings.push(a) },
+  })
+  assert.doesNotThrow(() => dispose())
+  assert.ok(
+    warnings.some((line) => /could not unregister remote_hosts_list/.test(String(line[0]))),
+    'the teardown failure is logged instead of escaping',
+  )
+})
+
+// ---- output contract ---------------------------------------------------------------------------
 
 test('render produces bounded text blocks and never throws on a hostile value', () => {
   const harness = makeHarness()
@@ -267,8 +445,8 @@ test('a host with no readable id is dropped instead of producing a broken row', 
   )
 })
 
-test('the result is capped and says so instead of flooding the model', async () => {
-  const views = Array.from({ length: 501 }, (_unused, index) => hostView({ id: `h_${index}`, name: `host ${index}` }))
+test('the result is capped, stops projecting early and says so', async () => {
+  const views = Array.from({ length: 5_000 }, (_unused, index) => hostView({ id: `h_${index}`, name: `host ${index}` }))
   const harness = makeHarness({ views })
   const result = await harness.list.execute({}, {})
   assertMatchesSchema(harness.list.output.schema, result)
@@ -295,19 +473,11 @@ test('a connect failure never echoes a fingerprint or a private-key path', async
   const harness = makeHarness({
     views: [
       hostView({ id: 'h_unknown', status: 'fingerprint-pending', error: unknown }),
-      hostView({
-        id: 'h_changed',
-        status: 'error',
-        error: changed,
-        remote: { version: null, uiReady: false },
-      }),
+      hostView({ id: 'h_changed', status: 'error', error: changed, remote: { version: null, uiReady: false } }),
       hostView({
         id: 'h_keypath',
         status: 'error',
-        error: {
-          code: 'auth',
-          detail: { zh: '密钥 ~/.ssh/id_ed25519 无法读取。', en: `Cannot read ${KEY_PATH}.` },
-        },
+        error: { code: 'auth', detail: { zh: '密钥 ~/.ssh/id_ed25519 无法读取。', en: `Cannot read ${KEY_PATH}.` } },
       }),
     ],
   })
@@ -326,6 +496,49 @@ test('a connect failure never echoes a fingerprint or a private-key path', async
     'both the pinned and the actual fingerprint are redacted',
   )
   assert.match(result.hosts[2].lastError, /<private-key path>/)
+})
+
+test('redaction covers case, short tokens and key files outside .ssh', async () => {
+  const harness = makeHarness({
+    views: [
+      hostView({
+        id: 'h_case',
+        address: 'box.example.com',
+        error: {
+          code: 'host-key-unknown',
+          detail: {
+            zh: '指纹 sha256:lowercaselowercaselowercase00=',
+            en: 'fingerprint SHA256:abc and key D:\\keys\\prod.pem',
+          },
+        },
+      }),
+      hostView({ id: 'h_name', address: 'box.ssh.example.com', error: null }),
+    ],
+  })
+  const result = await harness.list.execute({}, {})
+  const [row] = result.hosts
+  assert.equal(JSON.stringify(result).toLowerCase().includes('sha256:'), false, 'lowercase and short forms go too')
+  assert.match(row.lastError, /<fingerprint redacted>/)
+  assert.match(row.lastError, /<private-key path>/, 'a .pem outside .ssh is still a key file')
+  // A host whose name merely contains `.ssh` is not a path and stays readable.
+  assert.equal(result.hosts[1].address, 'box.ssh.example.com')
+})
+
+test('a 50 KB field cannot stall the host event loop', async () => {
+  // `address` has no upstream length limit and the projection is synchronous, so a separator-free
+  // 50 KB token used to cost seconds of regex backtracking.
+  const long = `${FINGERPRINT} ${KEY_PATH} ${'a'.repeat(50_000)}`
+  const harness = makeHarness({
+    views: [hostView({ address: long, error: { code: 'network', detail: { zh: long, en: long } } })],
+  })
+  const started = performance.now()
+  const result = await harness.list.execute({}, {})
+  const elapsed = performance.now() - started
+  assert.ok(elapsed < 100, `the projection took ${elapsed.toFixed(1)} ms for a 50 KB field`)
+  assertMatchesSchema(harness.list.output.schema, result)
+  assert.match(result.hosts[0].address, /^<fingerprint redacted> <private-key path>/, 'the identifiers are gone')
+  assert.equal(JSON.stringify(result).includes('SHA256:'), false)
+  assert.equal(JSON.stringify(result).includes('.ssh'), false)
 })
 
 test('long fields are truncated instead of returned whole', async () => {
@@ -388,107 +601,4 @@ test('a service failure becomes a structured error instead of a throw', async ()
   assert.match(second.error.message, /socket hang up/)
   assert.equal(second.error.retryable, true)
   assertNoSecrets(second)
-})
-
-test('a composition without a tools service keeps the plugin and registers nothing', () => {
-  const logs = []
-  const logger = { info: (...args) => logs.push(args) }
-  const service = { snapshot: () => ({ hosts: [] }) }
-  const ctx = { get: () => null, effect: () => assert.fail('no effect without a tools service') }
-  const dispose = registerHostTools(ctx, { service, logger })
-  assert.equal(logs.length, 1)
-  assert.match(String(logs[0][0]), /no tools service/)
-  assert.equal(typeof dispose, 'function', 'the caller still gets a disposer to call on unload')
-  assert.doesNotThrow(() => dispose())
-
-  // A kernel that throws on an undeclared lookup (cordis without `inject`) is the same case.
-  const throwing = {
-    get() {
-      throw new Error('cannot get property "tools" without inject')
-    },
-    effect: () => assert.fail('a throwing lookup must not park the plugin either'),
-  }
-  const other = registerHostTools(throwing, { service, logger })
-  assert.equal(logs.length, 2)
-  assert.match(String(logs[1][0]), /no tools service/)
-  assert.doesNotThrow(() => other())
-})
-
-test('a tools service that arrives later still gets the tool', () => {
-  const registered = new Map()
-  const childEffects = []
-  const childTools = {
-    register(definition) {
-      registered.set(definition.name, definition)
-      return () => registered.delete(definition.name)
-    },
-  }
-  const ctx = {
-    get: () => null,
-    inject(names, callback) {
-      assert.deepEqual(names, ['tools'])
-      // cordis runs the child plugin once the injected service is active.
-      callback({
-        tools: childTools,
-        effect(execute, label) {
-          childEffects.push(label)
-          const dispose = execute()
-          return () => dispose?.()
-        },
-      })
-      return () => registered.clear()
-    },
-  }
-  const dispose = registerHostTools(ctx, {
-    service: { snapshot: () => ({ hosts: [] }) },
-    logger: { info() {}, warn() {} },
-  })
-  assert.deepEqual([...registered.keys()], [LIST_TOOL_NAME], 'the parked fiber registered once tools appeared')
-  assert.deepEqual(childEffects, ['dsh-remote-go: model tools'])
-  dispose()
-  assert.equal(registered.size, 0)
-})
-
-test('a kernel that refuses the definition costs the tool, never the plugin', () => {
-  const warnings = []
-  const ctx = {
-    get: () => ({
-      register() {
-        throw new TypeError('tool "remote_hosts_list" must declare output { schema, render }')
-      },
-    }),
-    effect(execute) {
-      const dispose = execute()
-      return () => dispose?.()
-    },
-  }
-  const dispose = registerHostTools(ctx, {
-    service: { snapshot: () => ({ hosts: [] }) },
-    logger: { warn: (...args) => warnings.push(args) },
-  })
-  assert.equal(warnings.length, 1)
-  assert.match(String(warnings[0][0]), /could not register remote_hosts_list/)
-  dispose()
-})
-
-test('a disposer that throws is contained instead of breaking the unload', () => {
-  const warnings = []
-  const ctx = {
-    get: () => ({
-      register: () => () => {
-        throw new Error('dispose failed')
-      },
-    }),
-    effect(execute) {
-      const dispose = execute()
-      return () => dispose?.()
-    },
-  }
-  const dispose = registerHostTools(ctx, {
-    service: { snapshot: () => ({ hosts: [] }) },
-    logger: { warn: (...args) => warnings.push(args) },
-  })
-  assert.doesNotThrow(() => dispose())
-  assert.equal(warnings.length, 1)
-  assert.match(String(warnings[0][0]), /could not unregister remote_hosts_list/)
 })

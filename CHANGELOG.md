@@ -55,12 +55,12 @@
   参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，
   超出时带 `truncated`），每行是 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH
   版本。返回值是**字段白名单投影**（再用 `redactText` 脱敏、按字段限长）：连接失败的原因原文里带的
-  `SHA256:…` 主机指纹与 `.ssh` 下的密钥路径会分别替换成 `<fingerprint redacted>` / `<private-key path>`，
-  因此结果里既没有密码、token、cookie，也没有指纹原文或私钥路径；`output.schema` 也声明为
-  `additionalProperties: false`，投影里多一个字段会让调用失败而不是漏出去。**维护主机仍然在主机条的「添加主机 /
-  管理界面」里**——工具没有写操作面（没有 add / update / remove / connect / disconnect），因此也不需要审批或
-  确认门；它只注册在本地 Host 半端，远端 DSH 不加载本插件，远端会话看不到它。`tools` 是可选服务：宿主没有它时
-  只少这一个工具，主机条与本地 API 照常工作。
+  `SHA256:…` 主机指纹与密钥文件路径（`.ssh` 下路径，以及 `.pem` / `.key` / `.ppk` 或 `id_*` 命名的密钥文件）
+  会分别替换成 `<fingerprint redacted>` / `<private-key path>`，因此结果里既没有密码、token、cookie，也没有
+  指纹原文或私钥路径；`output.schema` 也声明为 `additionalProperties: false`，投影里多一个字段会让调用失败而
+  不是漏出去。**维护主机仍然在主机条的「添加主机 / 管理界面」里**——工具没有写操作面（没有 add / update / remove / connect / disconnect），因此也不需要审批或
+  确认门；它只注册在本地 Host 半端，远端 DSH 不加载本插件，远端会话看不到它。`tools` 是可选服务：注册走
+  `ctx.inject`，宿主没有它时只少这一个工具，主机条与本地 API 照常工作，服务晚到或被替换时会重新注册。
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
   本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
   HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端
