@@ -14,6 +14,7 @@ const ErrorCode = Object.freeze({
   REMOTE_UI_UNREACHABLE: 'remote-ui-unreachable',
   REMOTE_UNREACHABLE: 'remote-unreachable',
   RESTART_UNAVAILABLE: 'restart-unavailable',
+  STOP_UNAVAILABLE: 'stop-unavailable',
   REMOTE_FILE_UNAVAILABLE: 'remote-file-unavailable',
   DOWNLOAD_NOT_READY: 'download-not-ready',
   DOWNLOAD_BUSY: 'download-busy',
@@ -55,6 +56,10 @@ const CODE_TABLE = {
   [ErrorCode.RESTART_UNAVAILABLE]: {
     retryable: true,
     title: { zh: '现在不能重启远端 DSH', en: 'The remote DSH cannot be restarted now' },
+  },
+  [ErrorCode.STOP_UNAVAILABLE]: {
+    retryable: true,
+    title: { zh: '现在不能关闭远端 DSH', en: 'The remote DSH cannot be stopped now' },
   },
   [ErrorCode.REMOTE_FILE_UNAVAILABLE]: {
     retryable: true,
@@ -265,6 +270,28 @@ export const errors = {
       [
         ['先连接这台主机，再点「重启远端 DSH」', 'Connect the host first, then use "Restart remote DSH"'],
         ['如果连接已断开，点「重连」重新建立连接', 'If the link dropped, use Reconnect to establish it again'],
+      ],
+      options,
+    ),
+  /**
+   * The explicit "stop remote DSH" action was refused: wrong state, another link action in
+   * flight, or the bound process could not be proven to be this connection's own. The HTTP
+   * API answers 409 for this.
+   */
+  stopRemoteUnavailable: (detail, options) =>
+    fail(
+      ErrorCode.STOP_UNAVAILABLE,
+      detail ??
+        say(
+          '只有已连接、或远端不可达但仍保留 SSH 连接的主机才能关闭远端 DSH，而且只能关闭本连接启动或接管的那一个进程。',
+          'The remote DSH can only be stopped while this host is connected (or after a remote-unreachable failure that kept the SSH session), and only when it is the process this connection launched or took over.',
+        ),
+      [
+        ['先连接这台主机，再点「关闭远端 DSH」', 'Connect the host first, then use "Stop remote DSH"'],
+        [
+          '如果强烈怀疑远端进程不属于本连接，点「重连」重建连接后再试',
+          'If the remote process may not belong to this connection, use Reconnect and try again',
+        ],
       ],
       options,
     ),

@@ -52,7 +52,7 @@ export function createHostRuntime(host) {
     reconnectTimer: null,
     idleTimer: null,
     connectPromise: null,
-    /** One-shot link actions (local restart / remote re-attach) and the token that owns them. */
+    /** One-shot link actions (local restart / remote re-attach / listener repair / stop) and their token. */
     linkBusy: null,
     linkToken: 0,
     restartPromise: null,
@@ -63,6 +63,13 @@ export function createHostRuntime(host) {
      * discovered gets display rights, never kill rights.
      */
     launched: new Map(),
+    /**
+     * The remote web this connection is bound to, with the `/proc` identity proved when it bound:
+     * `{ pid, startTime, origin: 'launch' | 'reattach' }`. A re-attached pid lives here (never in
+     * `launched`), so the explicit "Stop remote DSH" action can stop exactly that one process
+     * without granting the kill right to a restart.
+     */
+    bound: null,
     /** Current tunnel repair (a broken local listener under a healthy remote). */
     tunnelRepair: null,
     tunnelRepairFailures: 0,

@@ -253,6 +253,7 @@ export function createApi(options) {
       return { ok: true }
     },
     'POST restart': async (id) => ({ ok: true, ...(await service.restart(id)) }),
+    'POST stop-remote': async (id) => ({ ok: true, ...(await service.stopRemote(id)) }),
     'POST fingerprint': async (id, req) => {
       const body = await readJson(req)
       await service.confirmFingerprint(id, {

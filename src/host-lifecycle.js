@@ -36,7 +36,7 @@ export function cancelIdleStop(runtime) {
  * token so a disconnect, a dropped transport or a newer action can invalidate an older one:
  * an action must never write state on top of whatever replaced it.
  * @param {object} runtime - host runtime.
- * @param {string} kind - `restart`, `reattach` or `repair`.
+ * @param {string} kind - `restart`, `reattach`, `repair` or `stop`.
  * @returns {number} the token that owns the action.
  */
 export function beginLinkWork(runtime, kind) {
@@ -416,6 +416,12 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
 /**
  * Tear one host down and leave it idle: the keep-alive policy decides whether the
  * remote web is stopped and whether the transport survives for a fast resume.
+ * `stopped` says the caller already stopped the remote web itself (the explicit
+ * "stop remote DSH" action): the policy must then neither arm an idle stop nor send
+ * a second stop signal. That second signal would be based on a pid captured several
+ * SSH round-trips earlier - a pid the action just proved is the right one (or that
+ * it is already gone), so re-signalling it is at best redundant and at worst kills
+ * an unrelated process after a pid reuse.
  */
 export async function disconnectHost(ctx, runtime, options = {}) {
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
@@ -424,8 +430,12 @@ export async function disconnectHost(ctx, runtime, options = {}) {
   cancelLinkWork(runtime)
   stopRemoteHeartbeat(runtime)
   const policy = runtime.entry.keepAlive
-  const stopRemote = options.stopRemote === true || policy === 'stop'
-  await teardownRuntime(ctx, runtime, { stopRemote, keepSshForIdle: policy === 'idle' && !stopRemote })
+  const alreadyStopped = options.stopped === true
+  const stopRemote = alreadyStopped !== true && (options.stopRemote === true || policy === 'stop')
+  await teardownRuntime(ctx, runtime, {
+    stopRemote,
+    keepSshForIdle: policy === 'idle' && !stopRemote && !alreadyStopped,
+  })
   runtime.status = 'disconnected'
   runtime.phase = null
   runtime.progress = null
@@ -433,7 +443,7 @@ export async function disconnectHost(ctx, runtime, options = {}) {
   runtime.remote.localPort = null
   runtime.token = null
   ctx.progress.set(runtime, {})
-  if (policy === 'idle' && !stopRemote) scheduleIdleStop(ctx, runtime)
+  if (policy === 'idle' && !stopRemote && !alreadyStopped) scheduleIdleStop(ctx, runtime)
   return { ok: true }
 }
 

@@ -341,6 +341,24 @@ export function buildRunRegistryRecord(input = {}) {
 }
 
 /**
+ * Drop `run/web.json` without signalling anything: used when the bound process is already
+ * gone (a stop) or the record is known stale. Never kills a pid.
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout.
+ * @returns {Promise<{ ok: boolean, output: string }>} whether the removal was acknowledged.
+ */
+export async function clearRunRegistry(ssh, layout) {
+  try {
+    const result = await ssh.exec(`rm -f ${shellQuote(layout.runFile)}`, { timeoutMs: 10_000 })
+    return { ok: result.code === 0, output: String(result.stdout ?? '').trim() }
+  } catch (error) {
+    // swallow-ok: a failed removal is returned as ok:false and the caller logs it; the next
+    // connect still re-checks the registry, and a dead pid is never adopted
+    return { ok: false, output: messageOf(error) }
+  }
+}
+
+/**
  * Rewrite `run/web.json` after a re-attach: the remote restarted on a new port
  * (and possibly a new pid) without going through the launch script, so the stale
  * record would mislead the next connect's adopt step.

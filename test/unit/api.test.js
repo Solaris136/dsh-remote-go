@@ -300,6 +300,105 @@ test('POST /hosts/:id/restart accepts on a connected host and relaunches on the 
   }
 })
 
+test('POST /hosts/:id/stop-remote requires a stoppable state', async () => {
+  const { service } = await makeTestService()
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    const refused = await call(api.base, `/hosts/${host.id}/stop-remote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(refused.status, 409)
+    assert.equal(refused.json.ok, false)
+    assert.equal(refused.json.error.code, 'stop-unavailable')
+    assert.ok(refused.json.error.detail.zh.length > 0)
+    assert.equal(service.snapshot().hosts[0].status, 'unconfigured')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /hosts/:id/stop-remote stops the bound remote web and leaves the host disconnected', async () => {
+  const stopped = []
+  let registry = null
+  const { service } = await makeTestService({
+    readRegistry: async () => registry,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      registry = null
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await call(api.base, `/hosts/${host.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    registry = { pid: 4242, port: 38123, profile: 'web', dshHome: '/home/ubuntu/.dsh' }
+    const stop = await call(api.base, `/hosts/${host.id}/stop-remote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(stop.status, 200)
+    assert.equal(stop.json.ok, true)
+    assert.equal(stop.json.pid, 4242)
+    assert.deepEqual(stopped, [4242])
+    const view = service.snapshot().hosts[0]
+    assert.equal(view.status, 'disconnected')
+    assert.equal(view.keepAlive, 'keep')
+    // The remote UI is gone from the API surface: opening it is refused, the settings stay.
+    const open = await call(api.base, `/hosts/${host.id}/open`)
+    assert.equal(open.status, 409)
+    assert.equal(open.json.error.code, 'remote-ui-unreachable')
+    assert.equal((await call(api.base, '/state')).json.state.hosts.length, 1)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('POST /hosts/:id/stop-remote refuses a pid it cannot prove and keeps the link', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    readRegistry: async () => null,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service)
+    await call(api.base, `/hosts/${host.id}/connect`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+    const refused = await call(api.base, `/hosts/${host.id}/stop-remote`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    })
+    assert.equal(refused.status, 409)
+    assert.equal(refused.json.error.code, 'stop-unavailable')
+    assert.match(refused.json.error.detail.zh + refused.json.error.detail.en, /run\/web\.json/)
+    assert.deepEqual(stopped, [])
+    assert.equal(service.snapshot().hosts[0].status, 'connected')
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
 test('SSE /events also broadcasts remote-unreachable episode frames', async () => {
   const { service } = await makeTestService()
   const api = await startApi(service)
@@ -679,7 +778,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.8')
+    assert.equal(result.json.apiVersion, '2.9')
   } finally {
     await api.close()
     await service.shutdown()
