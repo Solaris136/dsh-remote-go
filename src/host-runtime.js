@@ -50,12 +50,13 @@ export function createHostRuntime(host) {
     password: null,
     facts: null,
     /**
-     * The last known remote home and managed web pid. `facts`/`remote` are cleared by every
-     * teardown, but the idle policy still has to stop the right process on the right host
-     * path afterwards (H1).
+     * The last known remote home, managed web pid and profile. `facts`/`remote` are cleared by
+     * every teardown, but the idle policy still has to prove and stop the right process on the
+     * right host path afterwards (H1).
      */
     remoteHome: null,
     remotePid: null,
+    remoteProfile: null,
     exchange: null,
     pendingHostKey: null,
     pendingConflict: null,

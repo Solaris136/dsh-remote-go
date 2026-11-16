@@ -137,6 +137,9 @@ export async function startConnect(ctx, id, options = {}) {
   if (runtime.status === 'connected' && runtime.ssh?.connected) return { accepted: false, reason: 'already-connected' }
   // A new connect owns the link from here on: any pending one-shot action is stale.
   cancelLinkWork(runtime)
+  // An idle host keeps a timer that would stop the remote web; connecting again makes that
+  // policy stale (the timer used to fire into a live link: review blocker 1).
+  cancelIdleStop(runtime)
   stopRemoteHeartbeat(runtime)
   runtime.alongsidePids = []
   runtime.password = options.password ?? runtime.password
@@ -217,15 +220,20 @@ function retryNow(ctx, runtime) {
 }
 
 /**
- * Watch a transport that is still being dialled. A close during the handshake must settle a
- * parked host-key prompt immediately (instead of waiting for its timeout) and marks the loss
- * so the pipeline classifies the failure as a dropped link, not a key decision (H3/M1).
+ * Watch a transport that is still being dialled. `SshConnection` attaches its client `close`
+ * handling before the handshake, so a transport that dies while a host-key prompt is parked
+ * reaches this listener: the prompt is settled at once (instead of waiting for its timeout)
+ * and the loss is recorded so the pipeline classifies the failure as a dropped link, not a
+ * key decision (H3/M1).
  * @param {object} runtime - host runtime.
  * @param {object} ssh - the transport that was just created.
  */
 function watchHandshakeTransport(runtime, ssh) {
   if (!ssh || typeof ssh.on !== 'function') return
   ssh.on('close', () => {
+    // A transport this runtime no longer dials (replaced, or disposed before a new attempt)
+    // is not a lost link: its close is the teardown itself.
+    if (runtime.ssh !== ssh && runtime.jumpSsh !== ssh) return
     if (runtime.closing || runtime.desired !== 'connected') return
     runtime.transportLost = true
     cancelHostKeyPrompt(runtime)
@@ -314,12 +322,19 @@ async function openTransport(ctx, runtime, target) {
     // A per-host policy and pin describe the saved target. A jump host only obeys the
     // global policy and, at most, a pin remembered for this session (it is not persisted).
     const hostKeyPolicy = isJump ? settings.hostKeyPolicy : (runtime.entry.hostKeyPolicy ?? settings.hostKeyPolicy)
+    const resolvedPort = resolved.port ?? 22
+    const jumpPinMatches =
+      isJump &&
+      runtime.jumpFingerprint?.host === resolved.host &&
+      (Number(runtime.jumpFingerprint?.port) || 22) === resolvedPort
     const pinnedFingerprint = isJump
-      ? (runtime.jumpFingerprint?.pinned ?? null)
+      ? jumpPinMatches
+        ? (runtime.jumpFingerprint?.pinned ?? null)
+        : null
       : (runtime.entry.pinnedFingerprint ?? null)
     return {
       host: resolved.host,
-      port: resolved.port ?? 22,
+      port: resolvedPort,
       username: resolved.username ?? resolved.user ?? null,
       // The key path expands against the *user* home (`~/.ssh/...`), never against
       // DSH_HOME, so the SSH layer needs to know which one that is.
@@ -332,7 +347,7 @@ async function openTransport(ctx, runtime, target) {
       acceptUnknownHostKey: false,
       readyTimeoutMs: settings.connectTimeoutSec * 1000 || SSH_READY_TIMEOUT_MS,
       ...(sock ? { sock } : {}),
-      onHostKey: (info) => requestHostKey(ctx, runtime, info, { role, host: resolved.host }),
+      onHostKey: (info) => requestHostKey(ctx, runtime, info, { role, host: resolved.host, port: resolvedPort }),
     }
   }
   if (!target.jumpHost) {
@@ -351,6 +366,18 @@ async function openTransport(ctx, runtime, target) {
       target.jumpHost.host,
       target.jumpHost.port ?? 22,
     ).map((item) => item.fingerprint),
+  }
+  // An edited `jumpHost` is a different machine: a pin remembered for the previous jump host
+  // must not make the new one fail as `host-key-changed` (review blocker 3).
+  const rememberedJump = runtime.jumpFingerprint
+  const rememberedJumpPort = (Number(rememberedJump?.port) || 22) === (jumpTarget.port ?? 22)
+  if (rememberedJump !== null && (!rememberedJumpPort || rememberedJump.host !== jumpTarget.host)) {
+    ctx.progress.log(
+      runtime,
+      'info',
+      `the jump host changed (${rememberedJump.host ?? 'unknown'} -> ${jumpTarget.host}); forgetting its previous host key`,
+    )
+    runtime.jumpFingerprint = null
   }
   runtime.jumpSsh = ctx.deps.sshFactory(buildOptions(jumpTarget, 'jump'))
   watchHandshakeTransport(runtime, runtime.jumpSsh)
@@ -473,9 +500,7 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
 async function openTunnelFor(ctx, runtime, remotePort) {
   // Never hand the tunnel factory a missing transport: a listener created with no SSH channel
   // would crash the host process on the first connection (see tunnel.js's own guard).
-  if (runtime.ssh?.connected !== true) {
-    throw errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed-before-tunnel' })
-  }
+  assertTransportOpen(runtime)
   if (!isPid(remotePort) || remotePort > 65535) {
     throw errors.internal(new Error(`invalid remote port for the tunnel: ${remotePort}`))
   }
@@ -490,11 +515,14 @@ async function openTunnelFor(ctx, runtime, remotePort) {
   }
   // The listener was created while the caller awaited the factory: a disconnect or a host
   // removal in that window must close it instead of publishing it (H4).
-  if (linkTaken(ctx, runtime) || runtime.ssh?.connected !== true) {
+  try {
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
+  } catch (error) {
     try {
       await tunnel.close()
     } catch {}
-    throw new LinkCancelled('the link went away while the tunnel was opening')
+    throw error
   }
   runtime.tunnel = tunnel
   runtime.remote.localPort = localPort
@@ -714,6 +742,10 @@ async function verifyRemoteUi(ctx, runtime, port, token, localPort) {
   }
   ctx.progress.log(runtime, 'debug', `verifying the remote UI on 127.0.0.1:${tunnelPort}`)
   const ui = await ctx.deps.waitUi(runtime.ssh, port, { attempts: 20, intervalMs: 500 })
+  // The probe retries for up to ten seconds: the user may have cancelled in that window, and
+  // the token exchange must not touch the (possibly closed) tunnel after it (H4).
+  assertStillWanted(ctx, runtime)
+  assertTransportOpen(runtime)
   if (!ui.ok) {
     throw errors.remoteUiUnreachable({
       zh: `远端 DSH 的本地 127.0.0.1:${port} 没有响应（HTTP ${ui.status ?? '无'}）。`,
@@ -736,6 +768,8 @@ async function verifyRemoteUi(ctx, runtime, port, token, localPort) {
 
 /** Publish the connected state and start watching the remote for its own restarts. */
 function markConnected(ctx, runtime) {
+  // A live link is not idle: no idle-stop timer may survive the attach (review blocker 1).
+  cancelIdleStop(runtime)
   // Only a success resets the retry budget: a failed attempt must spend it (H2).
   runtime.reconnectAttempts = 0
   runtime.connectCancelled = false
@@ -803,6 +837,13 @@ async function connectPipeline(ctx, runtime) {
       assertStillWanted(ctx, runtime)
     }
     phase('ssh', 'ssh-connecting', { host: runtime.entry.name })
+    // An idle host keeps its SSH session for a fast resume; this attempt replaces it, so the
+    // old one is released here instead of being overwritten (and leaked) by openTransport.
+    if (runtime.ssh !== null || runtime.jumpSsh !== null) {
+      log('debug', 'releasing the transport kept by the idle policy before dialling again')
+      await disposeSsh(runtime)
+      assertStillWanted(ctx, runtime)
+    }
     await openTransport(ctx, runtime, target)
     // The transport is the link from here on: a drop during probe/bootstrap is a lost
     // connection too, so the close handler is attached before the remaining steps (H3).

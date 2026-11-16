@@ -95,10 +95,6 @@ export class SshConnection extends EventEmitter {
     for (const candidate of candidates) {
       try {
         const info = await this.connectOnce(candidate)
-        this.client?.on('close', () => {
-          this.closed = true
-          this.emit('close')
-        })
         this.client?.on('error', (error) => {
           this.emit('error', error)
         })
@@ -125,6 +121,18 @@ export class SshConnection extends EventEmitter {
       // `connected === false` and every later `exec`/`forwardOut` would throw
       // "SSH connection is not open" on a transport that is actually up.
       this.closed = false
+      // Attach the close handling *before* dialling: a transport that dies during the
+      // handshake (for example while a host-key prompt is open) must be observable and must
+      // reject the connect promise instead of hanging until the ready timeout. `this.client
+      // !== client` filters a superseded auth attempt, whose teardown is not a lost link.
+      client.once('close', () => {
+        if (this.client !== client) return
+        this.closed = true
+        this.emit('close')
+        settle(
+          toSshError(new Error('the connection closed during the SSH handshake'), this.options.host, this.options.port),
+        )
+      })
       client.once('ready', () => {
         settle(null, { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '' })
       })
@@ -395,7 +403,9 @@ export class SshConnection extends EventEmitter {
    * @param {{ onInventory?: (info: { totalBytes: number, totalFiles: number }) => void,
    *   onProgress?: (info: { doneBytes: number, totalBytes: number, doneFiles: number,
    *     totalFiles: number }) => void, isCancelled?: () => boolean,
-   *   caseInsensitive?: boolean }} [options]
+   *   caseInsensitive?: boolean, ignoreWindowsNames?: boolean }} [options]
+   *   `caseInsensitive` defaults to the local platform (Windows/macOS); `ignoreWindowsNames`
+   *   defaults to Windows and is the only platform where the Windows-only names are skipped.
    * @returns {Promise<{ destination: string, totalBytes: number, totalFiles: number,
    *   renamedFiles?: number, ignoredNames?: string[], cancelled?: boolean }>}
    */
@@ -413,9 +423,12 @@ export class SshConnection extends EventEmitter {
       }
       const localRoot = path.resolve(targetRoot)
       // Case-insensitive local filesystems map `Report.md` and `report.md` to one file: the
-      // download would silently lose one of them. The default follows the platform; tests
-      // can force it to prove the behavior on a case-preserving machine too.
-      const caseInsensitive = options.caseInsensitive ?? process.platform === 'win32'
+      // download would silently lose one of them. The default follows the platform (Windows
+      // and macOS both default to case-insensitive volumes); tests can force it either way.
+      const caseInsensitive = options.caseInsensitive ?? (process.platform === 'win32' || process.platform === 'darwin')
+      // The Windows metadata / shortcut names are only special on Windows: on Linux/macOS
+      // `*.lnk` or `desktop.ini` are ordinary files and must be downloaded like any other.
+      const ignoreWindowsNames = options.ignoreWindowsNames ?? process.platform === 'win32'
       const insideRoot = (candidate) => {
         const resolved = path.resolve(candidate)
         if (resolved !== localRoot && !resolved.startsWith(localRoot + path.sep)) {
@@ -444,8 +457,9 @@ export class SshConnection extends EventEmitter {
           if (filename === '' || filename === '.' || filename === '..') continue
           const attrs = item?.attrs ?? {}
           if (attrs.isSymbolicLink?.() === true) continue
-          // Windows metadata and shell entries are never planted in a local download (M6).
-          if (isIgnoredLocalName(filename)) {
+          // Windows metadata and shell entries are never planted in a local download (M6);
+          // the skipped names are reported in the result so nothing disappears silently.
+          if (ignoreWindowsNames && isIgnoredLocalName(filename)) {
             ignoredNames.push(relative === '' ? filename : `${relative}/${filename}`)
             continue
           }

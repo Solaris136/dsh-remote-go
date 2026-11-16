@@ -791,9 +791,13 @@ test('stopRemoteWeb keeps the run registry when the process does not confirm its
   assert.equal(result.ok, false)
   assert.equal(result.reason, 'alive')
   const script = calls.find((command) => command.includes('kill -TERM'))
-  // The registry may only be removed after the process is confirmed gone (M4). The only
-  // `rm` that may follow the ALIVE probe is the one on the confirmed path.
-  assert.ok(script.indexOf('ALIVE:') < script.lastIndexOf('rm -f "$RUN"'), script)
+  // The registry may only be removed after the process is confirmed gone (M4), and only when
+  // it names *this* pid: a record that belongs to another instance is not ours to delete.
+  assert.equal((script.match(/rm -f "\$RUN"/g) ?? []).length, 1, script)
+  assert.ok(script.indexOf('drop_own_record()') < script.indexOf('rm -f "$RUN"'), script)
+  assert.ok(script.indexOf('"${REC_PID:-}" = "$PID"') < script.indexOf('rm -f "$RUN"'), script)
+  // The ALIVE branch exits before the confirmed-path call, so an unconfirmed stop keeps it.
+  assert.ok(script.indexOf('echo "ALIVE:$PID"') < script.lastIndexOf('drop_own_record'), script)
   assert.equal(script.indexOf('ALIVE:'), script.lastIndexOf('ALIVE:'))
 })
 
@@ -852,4 +856,47 @@ test('the launch script keeps its private files private and writes the registry 
   // Both the failure path and the success path remove the profile dump.
   assert.ok(probe.indexOf('DUMP-FAILED') < probe.indexOf('rm -f "$DUMP"'), probe)
   assert.ok(probe.lastIndexOf('echo "CLEAR"') < probe.lastIndexOf('rm -f "$DUMP"'), probe)
+})
+
+test('startRemoteWeb never stops a pid it did not launch, even when the registry names one', async () => {
+  const calls = []
+  const registry = JSON.stringify({
+    pid: 9999,
+    port: 38123,
+    profile: 'web',
+    dshHome: '/home/ubuntu/.dsh',
+    launch: LAUNCH_MARKER,
+    origin: 'reattach',
+  })
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      if (command.includes('--dump-config')) return { code: 0, stdout: 'CLEAR\n', stderr: '' }
+      if (command.includes('setsid nohup')) {
+        // The wrapper printed its pid and then died: nothing of this launch is left alive.
+        return { code: 4, stdout: 'PID:1234\nTIMEOUT\n---LOG---\n', stderr: '' }
+      }
+      if (command.startsWith('kill -0 1234')) return { code: 0, stdout: '', stderr: '' }
+      if (command.startsWith('kill -0 9999')) return { code: 0, stdout: 'alive\n', stderr: '' }
+      if (command.startsWith('cat ')) return { code: 0, stdout: `${registry}\n`, stderr: '' }
+      if (command.includes('kill -TERM')) return { code: 0, stdout: 'STOPPED:9999\n', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    },
+  }
+  await assert.rejects(
+    () => startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT }),
+    (error) => error.code === 'remote-dsh-start-failed',
+  )
+  assert.equal(
+    calls.some((command) => command.includes('kill -TERM')),
+    false,
+    'a re-attached instance named by the registry must never be signalled',
+  )
+})
+
+test('a truncated registry that names no complete pid yields no record', () => {
+  assert.equal(parseRunRegistry('{"pid":42'), null)
+  assert.equal(parseRunRegistry('{"pid":4242'), null)
+  assert.equal(parseRunRegistry('garbage {"pid":4242'), null)
+  assert.equal(parseRunRegistry('{"pid":4242,"port":38123}').pid, 4242)
 })

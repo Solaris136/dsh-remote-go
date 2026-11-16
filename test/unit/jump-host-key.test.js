@@ -8,10 +8,17 @@ import { errors } from '../../src/errors.js'
  * jump connection dials. Every call records the options that decided the verification, so a
  * test can prove the jump host and the target were checked against different pins (B1).
  */
-function jumpFactory({ jumpSha, targetSha, calls, autoAccept = false }) {
+function jumpFactory({
+  jumpSha = 'SHA256:jump-key',
+  jumpShaFor = null,
+  targetSha = 'SHA256:target-key',
+  calls,
+  autoAccept = false,
+  isJumpHost = (host) => host === 'jump-host',
+}) {
   return (options) => {
-    const role = options.host === 'jump-host' ? 'jump' : 'target'
-    const actual = role === 'jump' ? jumpSha : targetSha
+    const role = isJumpHost(options.host) ? 'jump' : 'target'
+    const actual = role === 'jump' ? (jumpShaFor ? jumpShaFor(options.host) : jumpSha) : targetSha
     calls.push({
       role,
       host: options.host,
@@ -175,5 +182,72 @@ test('the target host-key policy does not apply to the jump host', async () => {
       ['target', 'strict'],
     ],
   )
+  await service.shutdown()
+})
+
+test('editing the jump host re-asks for its key instead of reporting host-key-changed', async () => {
+  const calls = []
+  const { service, store } = await makeTestService({
+    sshFactory: jumpFactory({
+      isJumpHost: (host) => String(host).startsWith('jump-host'),
+      jumpShaFor: (host) => (host === 'jump-host' ? 'SHA256:key-jump-old' : 'SHA256:key-jump-new'),
+      targetSha: 'SHA256:target-key',
+      calls,
+    }),
+  })
+  const host = await createHost(service, { jumpHost: 'jump-host' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'fingerprint-pending', { label: 'old jump prompt' })
+  await service.confirmFingerprint(host.id, { accept: true, remember: true, sha256: 'SHA256:key-jump-old' })
+  await waitFor(
+    () =>
+      service.snapshot().hosts[0].status === 'fingerprint-pending' &&
+      service.snapshot().hosts[0].fingerprint?.sha256 === 'SHA256:target-key',
+    { label: 'target prompt' },
+  )
+  await service.confirmFingerprint(host.id, { accept: true, remember: true, sha256: 'SHA256:target-key' })
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  assert.equal(runtime.jumpFingerprint.host, 'jump-host')
+  assert.equal(runtime.jumpFingerprint.pinned, 'SHA256:key-jump-old')
+
+  // Editing the host keeps the runtime object: only the jump host changed, not the target.
+  await service.saveHost({ ...store.getHost(host.id), jumpHost: 'jump-host-new' })
+  assert.equal(service.runtimes.get(host.id), runtime, 'the runtime is preserved by an edit')
+  await service.disconnect(host.id)
+  await service.connect(host.id)
+  // The new jump host must be askable again: its key is not the old machine's pin.
+  await waitFor(() => ['fingerprint-pending', 'connected', 'error'].includes(service.snapshot().hosts[0].status), {
+    timeoutMs: 5_000,
+    label: 'new jump host settled',
+  })
+  assert.equal(
+    service.snapshot().hosts[0].status,
+    'fingerprint-pending',
+    `the edited jump host must ask again, not fail: ${JSON.stringify(service.snapshot().hosts[0].error)}`,
+  )
+  assert.equal(service.snapshot().hosts[0].progress?.params?.role, 'jump')
+  const prompt = service.snapshot().hosts[0]
+  assert.equal(prompt.progress.params.host, 'jump-host-new')
+  assert.equal(prompt.fingerprint.sha256, 'SHA256:key-jump-new')
+  await service.confirmFingerprint(host.id, { accept: true, remember: true, sha256: 'SHA256:key-jump-new' })
+  await waitFor(() => ['connected', 'error'].includes(service.snapshot().hosts[0].status), {
+    label: 'reconnected after the jump edit',
+  })
+  assert.equal(
+    service.snapshot().hosts[0].status,
+    'connected',
+    `the edited jump host must not be checked against the old pin: ${JSON.stringify(calls.slice(2))}`,
+  )
+  assert.deepEqual(
+    calls.slice(2).map((call) => [call.role, call.host, call.pin]),
+    [
+      ['jump', 'jump-host-new', null],
+      ['target', '2001:db8::1', 'SHA256:target-key'],
+    ],
+    'the old jump pin may not travel to the new jump host (the target pin still applies)',
+  )
+  assert.equal(runtime.jumpFingerprint.host, 'jump-host-new')
+  assert.equal(runtime.jumpFingerprint.pinned, 'SHA256:key-jump-new')
   await service.shutdown()
 })

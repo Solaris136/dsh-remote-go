@@ -87,3 +87,105 @@ test('an idle stop with no known home skips the remote instead of shelling a til
   assert.deepEqual(stopped, [])
   await service.shutdown()
 })
+
+test('connecting again cancels the idle timer and releases the idle-kept transport', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    stopWeb: async () => {
+      stopped.push(true)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service, { keepAlive: 'idle' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  const idleSsh = runtime.ssh
+  await service.disconnect(host.id)
+  assert.ok(runtime.idleTimer !== null, 'the idle timer is armed while disconnected')
+
+  // The Client's "Connect" on a disconnected card is this call, not `reconnect`.
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected again' })
+  assert.equal(runtime.idleTimer, null, 'a new link must not keep the previous idle timer')
+  assert.notEqual(runtime.ssh, idleSsh)
+  assert.equal(idleSsh.disposed, true, 'the transport kept for the idle policy is released')
+  assert.equal(stopped.length, 0)
+
+  // Even if the old timer callback still ran, it may not touch the live link.
+  const verdict = await stopRemoteForIdle(service.ctx, runtime)
+  assert.deepEqual(verdict, { ok: false, reason: 'still-wanted' })
+  assert.equal(stopped.length, 0, 'the idle policy must not stop a host that is connected')
+  assert.equal(runtime.ssh.connected, true, 'the live transport is not released')
+  assert.equal(runtime.status, 'connected')
+  assert.notEqual(runtime.tunnel, null)
+  await service.shutdown()
+})
+
+test('an idle stop never touches a live link, whichever timer fired it', async () => {
+  const stopped = []
+  const { service } = await makeTestService({
+    stopWeb: async () => {
+      stopped.push(true)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service, { keepAlive: 'idle' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  const liveSsh = runtime.ssh
+  const verdict = await stopRemoteForIdle(service.ctx, runtime)
+  assert.deepEqual(verdict, { ok: false, reason: 'still-wanted' })
+  assert.equal(stopped.length, 0)
+  assert.equal(liveSsh.disposed, false)
+  assert.equal(runtime.ssh, liveSsh)
+  assert.equal(runtime.status, 'connected')
+  await service.shutdown()
+})
+
+test('an idle stop refuses a pid whose /proc identity no longer matches the launch', async () => {
+  const stopped = []
+  const identity = { startTime: 'start-4242' }
+  const { service } = await makeTestService({
+    processIdentity: async (_ssh, pid) => ({
+      ok: true,
+      startTime: identity.startTime,
+      command: 'node /home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web',
+      dshHome: '/home/ubuntu/.dsh',
+    }),
+    stopWeb: async () => {
+      stopped.push(true)
+      return { ok: true, output: 'STOPPED' }
+    },
+  })
+  const host = await createHost(service, { keepAlive: 'idle' })
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  await service.disconnect(host.id)
+  identity.startTime = 'start-reused'
+  const reused = await stopRemoteForIdle(service.ctx, runtime)
+  assert.equal(reused.ok, false)
+  assert.equal(reused.reason, 'pid-reused')
+  assert.equal(stopped.length, 0, 'a reused pid must never be signalled')
+
+  // Without any proof of ownership the pid is left alone too.
+  const second = await (async () => {
+    const host2 = await createHost(service, { name: 'second', address: 'second-host', keepAlive: 'idle' })
+    await service.connect(host2.id)
+    await waitFor(() => service.snapshot().hosts.find((view) => view.id === host2.id)?.status === 'connected', {
+      label: 'second connected',
+    })
+    const runtime2 = service.runtimes.get(host2.id)
+    await service.disconnect(host2.id)
+    runtime2.launched = new Map()
+    runtime2.bound = null
+    identity.startTime = 'start-4242'
+    return stopRemoteForIdle(service.ctx, runtime2)
+  })()
+  assert.equal(second.ok, false)
+  assert.equal(second.reason, 'not-owned')
+  assert.equal(stopped.length, 0)
+  await service.shutdown()
+})

@@ -39,6 +39,7 @@ export function requestHostKey(ctx, runtime, info, options = {}) {
     keyType: info.keyType,
     role,
     host: typeof options.host === 'string' && options.host !== '' ? options.host : null,
+    port: Number(options.port) || 22,
     resolve: null,
   }
   const decision = createDecision(
@@ -65,7 +66,9 @@ export function requestHostKey(ctx, runtime, info, options = {}) {
   runtime.pendingHostKey = pending
   const fingerprint = { sha256: info.sha256, keyType: info.keyType, status: 'pending', pinned: null }
   if (isJump) {
-    runtime.jumpFingerprint = fingerprint
+    // The jump pin belongs to *this* jump host: an edited `jumpHost` must not be checked
+    // against the previous machine's key (review blocker 3).
+    runtime.jumpFingerprint = { ...fingerprint, host: pending.host, port: pending.port }
     // The Client's dialog renders `HostView.fingerprint`, so the key being confirmed right now
     // has to be the one shown there - even though the pin it may produce stays separate (B1).
     runtime.fingerprint = { ...fingerprint }
@@ -127,7 +130,9 @@ export async function confirmHostKey(ctx, runtime, decision) {
     pinned: decision.remember ? pending.sha256 : null,
   }
   if (pending.role === 'jump') {
-    runtime.jumpFingerprint = fingerprint
+    // Keep the identity with the pin: the same remembered pin may only be used for the same
+    // jump host and port (review blocker 3).
+    runtime.jumpFingerprint = { ...fingerprint, host: pending.host, port: pending.port }
     // The dialog that asked about the jump host must not start describing the target as soon
     // as it is answered: keep showing what was confirmed until the target is dialled.
     runtime.fingerprint = { ...fingerprint }

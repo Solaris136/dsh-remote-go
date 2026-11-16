@@ -183,6 +183,11 @@ export function parseLaunchedPid(text) {
 /**
  * Stop a launch that failed *after* it started: the detached process must not be left
  * running on the remote just because its readiness line never parsed (M2).
+ *
+ * Only the pid this launch script printed is ours to stop. `run/web.json` may name another
+ * instance (a re-attached process, or a previous launch), so it is deliberately not used as
+ * a fallback here: killing that pid would be exactly the "a re-attached instance is not
+ * stopped" rule the connect pipeline enforces (review blocker 2).
  * @param {object} ssh - SSH transport.
  * @param {object} layout - remote layout.
  * @param {number} startedPid - the pid the launch script printed.
@@ -190,22 +195,22 @@ export function parseLaunchedPid(text) {
  * @returns {Promise<{ ok: boolean, pid: number | null, output?: string }>}
  */
 async function stopFailedLaunch(ssh, layout, startedPid, onLine) {
-  let target = 0
-  if (isPid(startedPid) && (await remotePidAlive(ssh, startedPid))) target = startedPid
-  if (!isPid(target)) {
-    // The registry the launch script wrote (or an earlier instance's record) may name the
-    // real process when the wrapper already exited: prefer that pid over signalling a
-    // possibly reused one.
-    const registry = await readRunRegistry(ssh, layout)
-    const registryPid = Number(registry?.pid ?? 0)
-    if (isPid(registryPid) && (await remotePidAlive(ssh, registryPid))) target = registryPid
+  if (!isPid(startedPid)) return { ok: false, pid: null }
+  let alive = false
+  try {
+    alive = await remotePidAlive(ssh, startedPid)
+  } catch {
+    // swallow-ok: an unreadable liveness check means "cannot prove it is ours", so no signal
+    return { ok: false, pid: null }
   }
-  if (!isPid(target)) return { ok: false, pid: null }
-  const stopped = await stopRemoteWeb(ssh, layout, { pid: target })
+  if (!alive) return { ok: false, pid: null }
+  const stopped = await stopRemoteWeb(ssh, layout, { pid: startedPid })
   onLine?.(
-    `start failed after pid ${target} was launched; ${stopped.ok === true ? 'it was stopped' : 'it could not be stopped'}`,
+    `start failed after pid ${startedPid} was launched; ${
+      stopped.ok === true ? 'it was stopped' : 'it could not be stopped'
+    }`,
   )
-  return { ok: stopped.ok === true, pid: target, output: stopped.output }
+  return { ok: stopped.ok === true, pid: startedPid, output: stopped.output }
 }
 
 export async function startRemoteWeb(ssh, options) {
@@ -290,7 +295,8 @@ export async function stopRemoteWeb(ssh, layout, options = {}) {
   if (!isPid(pid)) pid = await pidFromReadinessLine(ssh, layout)
   // The registry is removed only after the stop is confirmed: a failed stop must leave the
   // record in place, otherwise the next connect adopts nothing and a second instance starts
-  // next to the surviving one (M4).
+  // next to the surviving one (M4). It is also removed only when it names *this* pid: a
+  // record that belongs to another instance (a re-attach) is not ours to delete.
   const script = `set -u
 umask 077
 RUN=${shellQuote(layout.runFile)}
@@ -303,9 +309,14 @@ if [ "$PID" -eq 0 ]; then
   echo "NO-TARGET"
   exit 5
 fi
+drop_own_record() {
+  if [ ! -f "$RUN" ]; then return 0; fi
+  REC_PID=$(sed -n 's/.*"pid":\\([0-9][0-9]*\\).*/\\1/p' "$RUN" 2>/dev/null | head -n 1)
+  if [ "\${REC_PID:-}" = "$PID" ]; then rm -f "$RUN"; fi
+}
 if ! kill -0 "$PID" 2>/dev/null; then
   echo "GONE:$PID"
-  rm -f "$RUN"
+  drop_own_record
   exit 0
 fi
 kill -TERM "-$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null || true
@@ -328,7 +339,7 @@ if kill -0 "$PID" 2>/dev/null; then
   echo "ALIVE:$PID"
   exit 6
 fi
-rm -f "$RUN"
+drop_own_record
 echo "STOPPED:$PID"
 `
   try {
@@ -364,7 +375,9 @@ export function parseRunRegistry(text) {
     // swallow-ok: fall through to the field-by-field recovery below
   }
   const field = (name) => new RegExp(`"${name}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(raw)?.[1] ?? null
-  const number = (name) => Number(new RegExp(`"${name}"\\s*:\\s*(\\d+)`).exec(raw)?.[1] ?? 0)
+  // A number must be terminated by the next field or the record end: `{"pid":42` is a
+  // truncated record, not a pid of 42 (review: no prefix matches).
+  const number = (name) => Number(new RegExp(`"${name}"\\s*:\\s*(\\d+)\\s*[,}]`).exec(raw)?.[1] ?? 0)
   const pid = number('pid')
   if (!isPid(pid)) return null
   const port = number('port')

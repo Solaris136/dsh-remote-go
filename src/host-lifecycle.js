@@ -15,6 +15,7 @@ import { emptyRemote } from './host-runtime.js'
 import { layoutForRuntime } from './layout.js'
 import { cancelConflict, cancelHostKeyPrompt } from './prompts.js'
 import { isUiUp } from './remote-proc.js'
+import { commandMatchesProfile } from './remote-web.js'
 import { isPid, messageOf, randomDelay } from './util.js'
 
 export function cancelReconnect(runtime) {
@@ -314,14 +315,29 @@ function scheduleIdleStop(ctx, runtime) {
 /**
  * Best-effort stop of the remote web for the idle policy, then drop the transport.
  *
- * The teardown that armed this timer clears `facts` and `remote`, so the stop has to use
- * the home and pid remembered before that clearing: the old fallback built a layout with a
+ * The teardown that armed this timer clears `facts` and `remote`, so the stop has to use the
+ * home and pid remembered before that clearing: the old fallback built a layout with a
  * literal `~`, whose `kill -0` is a no-op that still reported success (H1).
+ *
+ * The timer is a *policy for an idle host*, never authority over a live link: the user may
+ * have connected again (the timer would otherwise kill the link just brought up), and a pid
+ * that answers `/proc` is not proof it is still the process this connection started
+ * (review: idle-timer zombie / pid reuse). Shutdown is the one caller that deliberately
+ * overrides the "still wanted" guard, because it is stopping the whole host process.
+ *
  * @param {object} ctx - service context.
  * @param {object} runtime - host runtime that went idle.
+ * @param {{ shutdown?: boolean }} [options]
  * @returns {Promise<{ ok: boolean, reason?: string }>} the stop verdict (best effort).
  */
-export async function stopRemoteForIdle(ctx, runtime) {
+export async function stopRemoteForIdle(ctx, runtime, options = {}) {
+  // A live link wins over the idle policy, whichever timer fired it. This is what keeps a
+  // manual reconnect from being torn down by the timer armed before it.
+  const linkLive = runtime.desired === 'connected' || runtime.status === 'connected' || runtime.tunnel !== null
+  if (linkLive && options.shutdown !== true) {
+    ctx.progress.log(runtime, 'debug', 'idle stop skipped: the host is connected again')
+    return { ok: false, reason: 'still-wanted' }
+  }
   try {
     if (runtime.ssh?.connected !== true) return { ok: false, reason: 'no-transport' }
     const home = runtime.facts?.home ?? runtime.remoteHome ?? null
@@ -329,8 +345,18 @@ export async function stopRemoteForIdle(ctx, runtime) {
       ctx.progress.log(runtime, 'warn', 'idle stop skipped: the remote home directory is unknown')
       return { ok: false, reason: 'no-home' }
     }
+    const layout = layoutForRuntime(runtime)
     const pid = Number(runtime.remote.pid ?? runtime.remotePid ?? 0)
-    const stopped = await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
+    if (isPid(pid)) {
+      // Same `/proc` identity proof the explicit stop uses: a reused pid, another DSH home or
+      // another profile is not this connection's process and must not be signalled.
+      const proof = await proveIdleStopTarget(ctx, runtime, pid, layout)
+      if (proof.ok !== true) {
+        ctx.progress.log(runtime, 'warn', `idle stop skipped: ${proof.reason}`)
+        return { ok: false, reason: proof.reason }
+      }
+    }
+    const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, {
       pid: isPid(pid) ? pid : undefined,
     })
     if (stopped?.ok !== true) {
@@ -349,8 +375,42 @@ export async function stopRemoteForIdle(ctx, runtime) {
     ctx.progress.log(runtime, 'warn', 'idle stop failed:', messageOf(error))
     return { ok: false, reason: 'error' }
   } finally {
+    // The idle host keeps no transport. This runs last so a skipped stop (a reused pid, an
+    // unknown home) still releases the SSH session.
     await disposeSsh(runtime)
   }
+}
+
+/** The `/proc` identity proof for the process the idle policy is about to stop. */
+async function proveIdleStopTarget(ctx, runtime, pid, layout) {
+  const bound = Number(runtime.bound?.pid) === pid ? runtime.bound : null
+  const launched = runtime.launched instanceof Map ? runtime.launched.get(pid) : null
+  const proof = bound ?? launched
+  if (!proof) return { ok: false, reason: 'not-owned' }
+  let identity = null
+  try {
+    identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  } catch {
+    // swallow-ok: an unreadable identity means "cannot prove it is ours", so no signal
+    return { ok: false, reason: 'identity-unreadable' }
+  }
+  if (identity?.ok !== true) {
+    return {
+      ok: false,
+      reason: identity?.reason === 'missing' ? 'identity-missing' : `identity-${identity?.reason ?? 'unknown'}`,
+    }
+  }
+  if (typeof proof.startTime === 'string' && proof.startTime !== '' && identity.startTime !== proof.startTime) {
+    return { ok: false, reason: 'pid-reused' }
+  }
+  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
+    return { ok: false, reason: 'dsh-home-mismatch' }
+  }
+  const profile = runtime.remote.profile ?? runtime.remoteProfile ?? null
+  if (typeof profile === 'string' && profile !== '' && !commandMatchesProfile(identity.command, profile)) {
+    return { ok: false, reason: 'profile-mismatch' }
+  }
+  return { ok: true }
 }
 
 export async function closeTunnel(runtime) {
@@ -438,15 +498,20 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
   if (typeof runtime.facts?.home === 'string' && runtime.facts.home.trim() !== '') {
     runtime.remoteHome = runtime.facts.home
   }
+  if (typeof runtime.remote.profile === 'string' && runtime.remote.profile !== '') {
+    runtime.remoteProfile = runtime.remote.profile
+  }
   const boundPid = Number(runtime.remote.pid ?? 0)
   if (isPid(boundPid)) runtime.remotePid = boundPid
   let remoteStopped = false
   if (options.stopRemote && runtime.ssh?.connected) {
     try {
-      await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
+      const result = await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
         pid: runtime.remote.pid ?? undefined,
       })
-      remoteStopped = true
+      // Only a confirmed stop means the pid is gone; a refusal keeps the memory so a later
+      // stop can try again instead of reporting a process that never stopped.
+      remoteStopped = result?.ok === true
     } catch (error) {
       ctx.progress.log(runtime, 'warn', 'stop remote failed:', messageOf(error))
     }
@@ -515,7 +580,7 @@ export async function shutdownAll(ctx) {
     await settleTunnelRepair(ctx, runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
-        await stopRemoteForIdle(ctx, runtime)
+        await stopRemoteForIdle(ctx, runtime, { shutdown: true })
       } else {
         await closeTunnel(runtime)
         await disposeSsh(runtime)

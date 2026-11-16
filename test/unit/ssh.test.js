@@ -494,7 +494,7 @@ test('saveRemoteTree leaves Windows metadata and shell shortcut files out', asyn
     },
   )
   const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-junk-')), 'mixed')
-  const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target)
+  const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target, { ignoreWindowsNames: true })
   assert.equal(result.totalFiles, 1)
   assert.deepEqual((await readdir(target)).sort(), ['notes', 'readme.txt'])
   assert.deepEqual(result.ignoredNames.sort(), ['Thumbs.db', 'desktop.ini', 'docs.url', 'setup.lnk'])
@@ -519,4 +519,53 @@ test('readKey skips a huge file and a non-regular file at the configured key pat
   await mkdir(dirPath)
   const fromDir = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: dirPath }, home: dir })
   assert.deepEqual(await fromDir.resolveAuthCandidates(), [], 'a directory is not a private key')
+})
+
+test('the Windows-only name filter can be turned off (other platforms keep those files)', async () => {
+  const { ssh } = sshWithSftp(
+    {
+      '/home/ubuntu/posix/desktop.ini': { bytes: Buffer.from('a') },
+      '/home/ubuntu/posix/setup.lnk': { bytes: Buffer.from('b') },
+      '/home/ubuntu/posix/readme.txt': { bytes: Buffer.from('c') },
+    },
+    {
+      '/home/ubuntu/posix': [
+        { filename: 'desktop.ini', attrs: { isFile: () => true, size: 1 } },
+        { filename: 'readme.txt', attrs: { isFile: () => true, size: 1 } },
+        { filename: 'setup.lnk', attrs: { isFile: () => true, size: 1 } },
+      ],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-posix-')), 'posix')
+  const kept = await ssh.saveRemoteTree('/home/ubuntu/posix', target, {
+    ignoreWindowsNames: false,
+    caseInsensitive: false,
+  })
+  assert.equal(kept.totalFiles, 3)
+  assert.deepEqual(kept.ignoredNames, [])
+  assert.deepEqual((await readdir(target)).sort(), ['desktop.ini', 'readme.txt', 'setup.lnk'])
+})
+
+test('a handshake-time close is observable and rejects the connect instead of hanging', async () => {
+  class FakeClient extends EventEmitter {
+    connect() {
+      // The transport dies before `ready`: exactly the window a host-key prompt sits in.
+      queueMicrotask(() => this.emit('close'))
+    }
+    end() {}
+  }
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new FakeClient(),
+  })
+  const closes = []
+  ssh.on('close', () => closes.push('close'))
+  await assert.rejects(
+    () => ssh.connect(),
+    (error) => error.code === 'network' && /closed during the SSH handshake/.test(error.detail.en),
+  )
+  assert.deepEqual(closes, ['close'], 'the pipeline needs the close to cancel its parked prompt')
+  assert.equal(ssh.connected, false)
 })

@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { FakeSsh, FakeTunnel, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import {
+  FakeSsh,
+  FakeTunnel,
+  createHost,
+  makeFacts,
+  makeTestService,
+  managedNodeFixture,
+  waitFor,
+} from '../helpers/fake-remote.js'
 import { errors } from '../../src/errors.js'
 
 function webInfo() {
@@ -215,56 +223,73 @@ test('a transport that closes while a host-key prompt is open is a dropped link 
 
 const STAGES = ['probe', 'bootstrap', 'start', 'tunnel', 'verifying']
 
+/** The dependencies a connect runs *after* each stage, in pipeline order. */
+const STAGE_CHAIN = {
+  probe: ['ensureNode', 'preflight', 'startWeb', 'tunnel', 'waitUi', 'exchange'],
+  bootstrap: ['startWeb', 'tunnel', 'waitUi', 'exchange'],
+  start: ['tunnel', 'waitUi', 'exchange'],
+  tunnel: ['waitUi', 'exchange'],
+  verifying: ['exchange'],
+}
+
+/**
+ * The dependency overrides of one H4 case. Every *downstream* dependency is counted so a
+ * cancelled connect that kept going past the user's action is caught as a side effect, not
+ * only as a state frame (the catch's cancellation fallback would hide that).
+ */
 function stageOverrides(stage, state) {
   const facts = makeFacts()
-  switch (stage) {
-    case 'probe':
-      return {
-        probe: async () => {
-          await state.act()
-          return facts
-        },
-      }
-    case 'bootstrap':
-      return {
-        preflight: async () => {
-          await state.act()
-          return '0.2.2-rc.1'
-        },
-      }
-    case 'start':
-      return {
-        startWeb: async () => {
-          await state.act()
-          return webInfo()
-        },
-      }
-    case 'tunnel':
-      return {
-        tunnelFactory: async () => {
-          await state.act()
-          const tunnel = new FakeTunnel(45124)
-          state.tunnels.push(tunnel)
-          return tunnel
-        },
-      }
-    case 'verifying':
-      return {
-        waitUi: async () => {
-          await state.act()
-          return { ok: true, status: 200 }
-        },
-      }
-    default:
-      throw new Error(`unknown stage ${stage}`)
+  const overrides = {
+    probe: async () => {
+      if (stage === 'probe') await state.act()
+      state.calls.probe += 1
+      return facts
+    },
+    ensureNode: async () => {
+      state.calls.ensureNode += 1
+      return managedNodeFixture()
+    },
+    preflight: async () => {
+      if (stage === 'bootstrap') await state.act()
+      state.calls.preflight += 1
+      return '0.2.2-rc.1'
+    },
+    startWeb: async () => {
+      if (stage === 'start') await state.act()
+      state.calls.startWeb += 1
+      return webInfo()
+    },
+    tunnelFactory: async () => {
+      if (stage === 'tunnel') await state.act()
+      state.calls.tunnel += 1
+      const tunnel = new FakeTunnel(45124)
+      state.tunnels.push(tunnel)
+      return tunnel
+    },
+    waitUi: async () => {
+      if (stage === 'verifying') await state.act()
+      state.calls.waitUi += 1
+      return { ok: true, status: 200 }
+    },
+    exchange: async () => {
+      state.calls.exchange += 1
+      return { ok: true, firstStatus: 302, location: './', status: 200, title: 'DSH', csp: null, bodyLength: 1 }
+    },
   }
+  return overrides
 }
 
 for (const action of ['disconnect', 'removeHost']) {
-  test(`${action} during any connect step never publishes a connected state`, async (t) => {
+  test(`${action} during any connect step stops the pipeline there`, async (t) => {
     for (const stage of STAGES) {
       await t.test(stage, async () => {
-        const state = { service: null, host: null, tunnels: [], act: null }
+        const state = {
+          service: null,
+          host: null,
+          tunnels: [],
+          act: null,
+          calls: { probe: 0, ensureNode: 0, preflight: 0, startWeb: 0, tunnel: 0, waitUi: 0, exchange: 0 },
+        }
         const { service } = await makeTestService(stageOverrides(stage, state))
         state.service = service
         const host = await createHost(service)
@@ -278,6 +303,11 @@ for (const action of ['disconnect', 'removeHost']) {
         await service.connect(host.id)
         await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: `${stage} settled` })
 
+        // The pipeline must stop where the user stopped wanting it: no step after the acted
+        // stage may run (a start after a disconnect would leave a remote process behind).
+        for (const dependency of STAGE_CHAIN[stage]) {
+          assert.equal(state.calls[dependency], 0, `${dependency} ran after the ${action} during ${stage}`)
+        }
         const hostFrames = frames.flatMap((frame) => frame.hosts.filter((view) => view.id === host.id))
         assert.equal(
           hostFrames.some((view) => view.status === 'connected'),
@@ -294,7 +324,9 @@ for (const action of ['disconnect', 'removeHost']) {
           assert.equal(runtime.status, 'disconnected')
           assert.equal(runtime.error, null)
           assert.equal(runtime.tunnel, null)
+          assert.equal(service.ctx.state.runtimes.has(host.id), true)
         } else {
+          assert.equal(service.ctx.state.runtimes.has(host.id), false)
           assert.equal(service.snapshot().hosts.length, 0)
           assert.equal(service.snapshot().activeHostId, null)
         }
