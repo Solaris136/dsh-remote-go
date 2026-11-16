@@ -55,7 +55,7 @@ const REQUIRED_FILES = `README.md LICENSE CHANGELOG.md
 .github/workflows/ci.yml .github/workflows/codeql.yml .github/workflows/release.yml
 docs/design.md docs/implementation.md docs/api.md docs/publish.md
 market/index.json market/plugin-entry.json
-vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md`.split(/\s+/)
+vendor/ssh2-entry.mjs vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md`.split(/\s+/)
 
 for (const file of REQUIRED_FILES) check(exists(file), `missing required file: ${file}`)
 
@@ -94,20 +94,22 @@ if (pkg === null) {
   check(semver, `package.json: "version" must be an exact SemVer version (found ${JSON.stringify(pkg.version)})`)
 
   const shipped = Array.isArray(pkg.files) ? pkg.files : []
+  // A directory entry (`src`) covers its files; an explicit file stays exact. Tarball-wise
+  // `vendor/ssh2-entry.mjs` is a build input, so only the bundle and notices must ship.
+  const ships = (needed) =>
+    shipped.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
   for (const needed of [
     'index.js',
     'client.js',
     'src',
     'locale',
     'cordis.patch.yml',
-    'vendor',
+    'vendor/ssh2.bundle.cjs',
+    'vendor/THIRD_PARTY_NOTICES.md',
     'README.md',
     'LICENSE',
   ]) {
-    const covered = shipped.some(
-      (entry) => entry === needed || (typeof entry === 'string' && entry.startsWith(`${needed}/`)),
-    )
-    check(covered, `package.json: "files" must ship ${needed}`)
+    check(ships(needed), `package.json: "files" must ship ${needed}`)
   }
 
   check(pkg.private !== true, 'package.json: "private" must not be true (npm publish would be refused)')
@@ -168,7 +170,9 @@ if (pkg === null) {
     const constants = await readText('src/constants.js')
     if (constants === null) fail('src/constants.js: missing or unreadable (PLUGIN_VERSION cannot be verified)')
     else {
-      const declared = /PLUGIN_VERSION\s*=\s*['"]([^'"]+)['"]/.exec(constants)?.[1] ?? null
+      // Anchored to a real top-level declaration: a commented-out or doc mention of
+      // PLUGIN_VERSION must not satisfy (or break) the version-parity check.
+      const declared = /^\s*export\s+const\s+PLUGIN_VERSION\s*=\s*(['"])([^'"]+)\1\s*$/m.exec(constants)?.[2] ?? null
       check(
         declared === version,
         `src/constants.js: PLUGIN_VERSION is ${JSON.stringify(declared)}, expected ${JSON.stringify(version)} from package.json; set PLUGIN_VERSION in src/constants.js to ${JSON.stringify(version)}`,

@@ -105,22 +105,20 @@ jobs:
       - name: Unit tests with coverage floors
         run: pnpm run test:coverage
 
-      # The simulated remote and the restart E2E need no external harness or browser.
-      - name: Integration tests (no external harness)
-        run: node --test --test-concurrency=1 test/integration/sim.test.js test/integration/remote-restart.test.js
+      # Simulated remote, restart and stop-remote: real SSH in-process, no external
+      # harness or browser. The explicit lists live in package.json so CI and release
+      # cannot drift apart (a missing suite used to silently fall out of the gate).
+      - name: Integration tests (no external harness, strict)
+        run: pnpm run test:integration:local
 
-      # Same-origin proxy, real `dsh web`, real Chromium and the browser/desktop carriers:
-      # strict mode turns a missing prerequisite into a failure, so this leg cannot no-op.
+      # Same-origin proxy, real `dsh web`, real Chromium, the browser/desktop carriers and
+      # stop-remote's browser flow: strict mode turns a missing prerequisite into a
+      # failure, so this leg cannot no-op.
       - name: Browser and harness E2E (strict)
         env:
           DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
-        run: |
-          node --test --test-concurrency=1 \
-            test/integration/remote-proxy.test.js \
-            test/integration/web.e2e.js \
-            test/integration/browser-carrier.test.js \
-            test/integration/guest-tools.e2e.js
+        run: pnpm run test:integration:external
 
       - name: Validate bundle metadata and market index entry
         run: pnpm run market:check
@@ -185,5 +183,8 @@ jobs:
       - name: Unit tests
         run: pnpm run test:unit
 
-      - name: Integration tests (no external harness)
-        run: node --test --test-concurrency=1 test/integration/sim.test.js test/integration/remote-restart.test.js
+      # The browser/harness group is not run here: this runner has no DSH harness or
+      # Chromium, and desktop E2E needs the real Electron app (acceptance.yml). It runs
+      # strict on the Ubuntu leg, so the PR still cannot merge a suite that only skips.
+      - name: Integration tests (no external harness, strict)
+        run: pnpm run test:integration:local

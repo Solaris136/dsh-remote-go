@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { resolveBrowser, skipOrFail } from './harness-support.js'
 
@@ -209,7 +210,13 @@ window.ReactDOM = { createRoot }`,
   const browser = await puppeteer.launch({
     executablePath: browserPath,
     headless: 'new',
-    args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
+    args: [
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-gpu',
+      // Hosted Ubuntu runners restrict unprivileged user namespaces (see web.e2e.js).
+      ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
+    ],
   })
   const page = await browser.newPage()
   const errors = []

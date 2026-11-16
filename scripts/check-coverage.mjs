@@ -73,6 +73,16 @@ function parseCoverage(output) {
 
 const failures = []
 
+// A nonzero test run can mean two very different things: the thresholds rejected the
+// percentages, or the unit tests themselves failed. Node prints "does not meet threshold"
+// only for the former, so the report must not blame coverage when a test is broken.
+const THRESHOLD_FAILURE = /does not meet threshold/
+function classifyRun(result, label) {
+  if (result.status === 0) return null
+  if (THRESHOLD_FAILURE.test(result.output)) return `${label}: coverage floors were not met (see the report above)`
+  return `${label}: the unit tests failed (process exited ${result.status}); coverage floors were not evaluated`
+}
+
 const sourceRun = runCoverage('runtime sources (aggregate floors 85 / 70 / 80)', [
   '--test-coverage-exclude=vendor/**',
   '--test-coverage-exclude=test/**',
@@ -80,28 +90,37 @@ const sourceRun = runCoverage('runtime sources (aggregate floors 85 / 70 / 80)',
   ...GLOBAL_FLOORS,
   'test/unit/*.test.js',
 ])
-if (sourceRun.status !== 0) failures.push('the runtime-source coverage run did not meet the aggregate floors')
+const sourceFailure = classifyRun(sourceRun, 'runtime-source pass')
+if (sourceFailure) failures.push(sourceFailure)
+// If the tests failed, the second pass would fail the same way; report the test failure
+// once and skip the extra run instead of emitting a misleading coverage verdict.
+const testsFailed = sourceRun.status !== 0 && !THRESHOLD_FAILURE.test(sourceRun.output)
 const sourcePercentages = parseCoverage(sourceRun.output)
 for (const [file, floor] of PER_FILE_FLOORS) {
   const actual = sourcePercentages.get(file)
   if (actual === undefined) {
-    failures.push(`${file}: not present in the coverage report (per-file floor ${floor}% cannot be enforced)`)
+    if (!testsFailed)
+      failures.push(`${file}: not present in the coverage report (per-file floor ${floor}% cannot be enforced)`)
   } else if (actual < floor) {
     failures.push(`${file}: ${actual.toFixed(2)}% line coverage is below the per-file floor of ${floor}%`)
   }
 }
 
-const clientRun = runCoverage('client.js (per-file floor)', [
-  '--test-coverage-include=client.js',
-  `--test-coverage-lines=${CLIENT_FLOOR}`,
-  '--test-coverage-branches=60',
-  '--test-coverage-functions=55',
-  'test/unit/*.test.js',
-])
-if (clientRun.status !== 0) failures.push(`client.js did not meet its coverage floor (${CLIENT_FLOOR}% lines)`)
-const clientPercentages = parseCoverage(clientRun.output)
-if (!clientPercentages.has('client.js')) {
-  failures.push('client.js: not present in the coverage report (the vm context must load it by absolute path)')
+let clientPercentages = new Map()
+if (!testsFailed) {
+  const clientRun = runCoverage('client.js (per-file floor)', [
+    '--test-coverage-include=client.js',
+    `--test-coverage-lines=${CLIENT_FLOOR}`,
+    '--test-coverage-branches=60',
+    '--test-coverage-functions=55',
+    'test/unit/*.test.js',
+  ])
+  const clientFailure = classifyRun(clientRun, 'client.js pass')
+  if (clientFailure) failures.push(clientFailure)
+  clientPercentages = parseCoverage(clientRun.output)
+  if (!clientPercentages.has('client.js')) {
+    failures.push('client.js: not present in the coverage report (the vm context must load it by absolute path)')
+  }
 }
 
 if (failures.length > 0) {

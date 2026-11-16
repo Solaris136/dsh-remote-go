@@ -99,18 +99,22 @@ async function main() {
     if (!existsSync(path.join(root, file))) problems.push(`missing ${label}: ${file}`)
   }
   const files = pkg.files ?? []
+  // A directory entry (`src`) covers its files; an explicit file stays exact. This keeps
+  // the assertion working whichever style package.json uses.
+  const ships = (needed) =>
+    files.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
   for (const needed of [
     'index.js',
     'client.js',
     'src',
     'locale',
     'cordis.patch.yml',
-    'vendor',
+    'vendor/ssh2.bundle.cjs',
+    'vendor/THIRD_PARTY_NOTICES.md',
     'README.md',
     'LICENSE',
   ]) {
-    if (!files.some((entry) => entry === needed || entry.startsWith(`${needed}/`)))
-      problems.push(`package.json files[] must include ${needed}`)
+    if (!ships(needed)) problems.push(`package.json files[] must include ${needed}`)
   }
   if (problems.length > 0) fail(problems.join('\n  - '))
 
@@ -184,6 +188,11 @@ async function main() {
     const timestamp = committedEntry?.versions?.[0]?.publishTimestamp
     if (!Number.isInteger(timestamp) || timestamp <= 0)
       drift.push('market/plugin-entry.json versions[0].publishTimestamp must be a positive integer')
+    // The same field exists in the index copy; whole-object comparison strips it, so its
+    // presence and type must be asserted separately or a deleted field would pass.
+    const indexTimestamp = committedIndex?.plugins?.[0]?.versions?.[0]?.publishTimestamp
+    if (!Number.isInteger(indexTimestamp) || indexTimestamp <= 0)
+      drift.push('market/index.json plugins[0].versions[0].publishTimestamp must be a positive integer')
     if (drift.length > 0) fail(drift.join('\n  - '))
     console.log(
       `[market-entry] OK: ${pkg.name}@${pkg.version} (${REQUIRED_FILES.length + RUNTIME_SRC.length} runtime files checked, format-1 index validated, committed entries match)`,

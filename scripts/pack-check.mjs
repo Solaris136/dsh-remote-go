@@ -53,12 +53,20 @@ for (const file of mustShip) {
   if (!existsSync(path.join(root, file))) problems.push(`missing file: ${file}`)
 }
 const files = pkg.files ?? []
-if (!files.includes('src') && !files.some((entry) => entry.startsWith('src/'))) problems.push('files[] must ship src/')
-if (!files.includes('client.js')) problems.push('files[] must ship client.js')
-if (!files.includes('vendor') && !files.some((entry) => entry.startsWith('vendor/')))
-  problems.push('files[] must ship vendor/ (the runtime ssh2 bundle)')
-if (!files.includes('README.md')) problems.push('files[] must ship README.md')
-if (!files.includes('LICENSE')) problems.push('files[] must ship LICENSE')
+// A directory entry (`src`) covers its files; an explicit file stays exact.
+const ships = (needed) =>
+  files.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
+for (const needed of [
+  'index.js',
+  'client.js',
+  'src',
+  'vendor/ssh2.bundle.cjs',
+  'vendor/THIRD_PARTY_NOTICES.md',
+  'README.md',
+  'LICENSE',
+]) {
+  if (!ships(needed)) problems.push(`files[] must ship ${needed}`)
+}
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
 
 if (tarball) {
@@ -86,10 +94,14 @@ if (tarball) {
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
   if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
     problems.push('tarball does not contain src/*.js')
-  // Assert the vendor/ tree explicitly: `mustShip` covers the two files, this catches a
+  // Assert the vendor runtime explicitly: `mustShip` covers the two files, this catches a
   // `files[]` regression that drops the whole directory from the published tarball.
   if (!entries.some((file) => file.startsWith('vendor/')))
     problems.push('tarball does not contain vendor/ (the runtime ssh2 bundle)')
+  // `vendor/ssh2-entry.mjs` is the esbuild input, not runtime code: it must stay out of
+  // the published tarball even though it is versioned in the repository.
+  if (entries.includes('vendor/ssh2-entry.mjs'))
+    problems.push('tarball contains the build-only input vendor/ssh2-entry.mjs')
   console.log(`[pack-check] tarball entries: ${entries.length}`)
 }
 

@@ -8,9 +8,9 @@ name: Acceptance E2E
 # - Desktop E2E: the official Electron desktop app on Windows installs the packed
 #   plugin and renders the same section.
 #
-# Both suites drive real browsers, take minutes and are sensitive to runner load,
-# so they run nightly and on demand. A red run is a signal to investigate, not a
-# merge blocker; the PR gate is `.github/workflows/ci.yml` plus CodeQL.
+# These suites drive real browsers, take minutes and are sensitive to runner load, so they
+# run nightly and on demand. A red run is a signal to investigate, not a merge blocker; the
+# PR gate is `.github/workflows/ci.yml` plus CodeQL.
 #
 # `DSH_E2E_STRICT=1` makes a missing harness/browser/app a hard failure, so
 # provisioning drift can never silently turn a job into a no-op.

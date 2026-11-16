@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import puppeteer from 'puppeteer-core'
@@ -52,7 +53,12 @@ test('the guest download bridge queues one intent and closes the menu', async (t
   const browser = await puppeteer.launch({
     executablePath: browserPath,
     headless: true,
-    args: ['--no-sandbox', '--disable-gpu'],
+    args: [
+      '--disable-gpu',
+      // Hosted Ubuntu runners restrict unprivileged user namespaces; other platforms
+      // keep the sandbox (same policy as web.e2e / browser-carrier).
+      ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
+    ],
   })
   try {
     const page = await browser.newPage()

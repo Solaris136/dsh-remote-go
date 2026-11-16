@@ -116,13 +116,15 @@ env DSH_HOME=~/.dsh PATH=~/.dsh/remote-go/node/v<version>/bin:"$PATH" \
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts   # 不执行生命周期脚本
-pnpm run verify                                   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 单测 + 集成
+pnpm run verify                                   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 覆盖率 + 单测 + 集成
 ```
 
 | 命令 | 作用 |
 |---|---|
 | `pnpm run test:unit` | 单元测试（Host + Client + 同源远端代理），不需要网络 / SSH |
-| `pnpm run test:integration` | 模拟远端 + 隔离 `dsh web` 的同源代理端到端 + 真实浏览器载体；缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败 |
+| `pnpm run test:integration` | 全量集成 / E2E（本地开发用；缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败） |
+| `pnpm run test:integration:local` | 无外部依赖组：模拟远端、重启、关闭远端（CI / release 共用） |
+| `pnpm run test:integration:external` | 需 harness + 浏览器组：同源代理、`dsh web`、浏览器载体、guest 工具、关闭远端的浏览器流程（CI / release 共用） |
 | `pnpm run test:coverage` | 覆盖率门禁：`src/` 聚合阈值 85 / 70 / 80（不含 `vendor/` 与 `test/`），外加 `client.js` 与 `local-ssh` / `local-download` 的 per-file 下限 |
 | `pnpm run test:web` / `test:desktop` | 打包产物验收：隔离 `dsh web` / 真实桌面端安装 tarball、打开管理浮窗、浅/深色对比度与第三方主题 |
 | `pnpm run sim:remote` | 模拟远端主机自检（探针 → 隧道 → HTTP 200） |
@@ -136,10 +138,11 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 
 它用 ssh2 在本机起一个真实 SSH 端点（回环地址、默认凭据，可用 `--ssh-user` / `--ssh-password` 覆盖），并只允许转发到自己的端口。运行参数见 `e2e/sim/simulated-remote.mjs` 开头的用法说明。
 
-`test:integration` 聚合所有集成 / E2E 文件；缺 harness / 浏览器时它们默认跳过。PR 的 `ci.yml` 把它拆成两组并把
-`DSH_E2E_STRICT` 置为 `1`，所以门禁上不会静默跳过：无外部依赖组（`sim` / `remote-restart`）直接跑，外部依赖组
-（`remote-proxy` / `web` / `browser-carrier` / `guest-tools`）在安装 DSH harness 与 Chrome 后跑；桌面端 E2E 需要真实
-Electron 安装包，只在夜间 `acceptance.yml` 跑。
+`test:integration` 聚合所有集成 / E2E 文件；缺 harness / 浏览器时它们默认跳过。PR 的 `ci.yml` 与 `release.yml`
+都用 `package.json` 里的两个显式清单（`test:integration:local` / `test:integration:external`）并把
+`DSH_E2E_STRICT` 置为 `1`，所以门禁上不会静默跳过：无外部依赖组（`sim` / `remote-restart` / `stop-remote`）直接跑，
+外部依赖组（`remote-proxy` / `web` / `browser-carrier` / `guest-tools` / `stop-remote.browser`）在安装 DSH harness
+与 Chrome 后跑；桌面端 E2E 需要真实 Electron 安装包，只在夜间 `acceptance.yml` 跑。
 
 `*.md` 在 `.prettierignore` 中有意排除：文档是手工折行的，交给 Prettier 会整体重排；CI 仍校验代码、YAML 与 JSON
 的格式。提交前可启用仓库自带的 hook（运行仓库规范与格式检查）：
@@ -154,7 +157,7 @@ git config core.hooksPath .githooks
 |---|---|---|
 | `ci.yml` | push `main` / PR / 手动 | PR 门禁：`Verify`（仓库规范 + 格式 + PR 标题 + 覆盖率 + 严格模式 E2E + tarball）、`Tests`（Windows 规范/格式/语法/workflow + 单测 + 无外部依赖集成）；CodeQL 是独立必需检查（`codeql.yml`） |
 | `acceptance.yml` | 夜间定时 / 手动 | 真实浏览器验收：`dsh web`、同源 iframe / 桌面载体、真实桌面端（**非门禁**），失败上传截图与日志 |
-| `release.yml` | push `release` 分支 / 手动 | 与 PR 相同的 `verify` 门禁 → 打包 → 发布 npm → 创建 GitHub Release |
+| `release.yml` | push `release` 分支 / 手动 | 与 PR 相同的 `gate` + 严格集成两组（装 harness / Chrome）→ 打包 → 发布 npm → 创建 GitHub Release |
 
 发布前请本地跑一遍 `pnpm run verify`；完整步骤见 [docs/publish.md](docs/publish.md)。
 
