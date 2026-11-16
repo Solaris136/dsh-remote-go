@@ -12,10 +12,11 @@ import { createRemoteProxy } from './remote-proxy.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
+import { registerHostTools } from './tools.js'
 import { messageOf } from './util.js'
 
 export const name = PLUGIN_ID
-export const inject = ['webServer']
+export const inject = ['webServer', 'tools']
 
 export const optional = ['connection', 'credentials']
 
@@ -83,6 +84,21 @@ export function apply(ctx, config = {}) {
       path: proxy.routePath,
       handler: (/** @type {any} */ req, /** @type {any} */ res) => proxy.handle(req, res),
     })
+    // Model-facing tools live on the Host half only: a local LLM session can list and maintain the
+    // hosts through the same service the HTTP API drives, and the remote DSH never loads this package.
+    const disposeTools = registerHostTools(ctx, {
+      service,
+      store,
+      logger,
+      getJobs: () => {
+        try {
+          return typeof ctx.get === 'function' ? (ctx.get('jobs') ?? null) : null
+        } catch (error) {
+          logger.warn?.('[dsh-remote-go] jobs service lookup failed:', error)
+          return null
+        }
+      },
+    })
     const syncViewRoutes = () => proxy.sync(service.hostIds())
     service.on('state', syncViewRoutes)
     logger.info(`API mounted at ${API_PREFIX} (state dir ${stateDir})`)
@@ -109,6 +125,7 @@ export function apply(ctx, config = {}) {
 
     return () => {
       service.removeListener('state', syncViewRoutes)
+      disposeTools()
       proxy.dispose()
       api.dispose()
       void service.shutdown()
