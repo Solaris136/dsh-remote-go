@@ -935,6 +935,77 @@ test('host list renders the empty state and a connected card', () => {
   }
 })
 
+test('a connected host card offers a remote restart and a restarting one shows its progress', () => {
+  const noop = () => {}
+  const listOf = (host) =>
+    render(
+      React.createElement(plugin.components.HostListView, {
+        t,
+        state: stateWith({ hosts: [host] }),
+        loading: false,
+        error: null,
+        onAdd: noop,
+        onRefresh: noop,
+        onOpenHost: noop,
+        onDisconnectHost: noop,
+        onReconnectHost: noop,
+        onRestartHost: noop,
+        onEditHost: noop,
+        onDeleteHost: noop,
+        onDiagnoseHost: noop,
+      }),
+    )
+  const connected = listOf(hostView())
+  assert.match(connected, /data-testid="host-restart"/)
+  assert.match(connected, /重启远端 DSH/)
+  assert.doesNotMatch(connected, /data-progress="restarting-remote"/)
+
+  const restarting = listOf(
+    hostView({
+      status: 'connecting',
+      phase: 'start',
+      progress: { code: 'restarting-remote' },
+      remote: { ...hostView().remote, uiReady: false },
+    }),
+  )
+  assert.match(restarting, /data-progress="restarting-remote"/)
+  assert.match(restarting, /正在重启远端 DSH…/)
+  assert.match(restarting, /远端 DSH 正在重启，正在重新挂载界面…/)
+  // The card action is disabled while the restart runs.
+  const restartButton = /<button[^>]*data-testid="host-restart"[^>]*>/.exec(restarting)
+  assert.ok(restartButton, 'the restart button must stay on the card while it runs')
+  assert.match(restartButton[0], /disabled=""/)
+
+  // The retained remote-unreachable error state offers both ways back: restart and reconnect.
+  const unreachable = listOf(
+    hostView({
+      status: 'error',
+      error: {
+        code: 'remote-unreachable',
+        title: { zh: '远端 DSH 已不在运行', en: 'The remote DSH is no longer running' },
+        detail: { zh: '没有可重挂实例。', en: 'No instance to re-attach.' },
+        nextSteps: [],
+        retryable: true,
+      },
+    }),
+  )
+  assert.match(unreachable, /data-testid="host-restart"/)
+  assert.match(unreachable, /data-testid="host-reconnect"/)
+})
+
+test('api.restart posts the restart route and returns the Host answer', async () => {
+  const calls = []
+  const fetch = async (url, init) => {
+    calls.push({ url, init })
+    return { ok: true, status: 200, json: async () => ({ ok: true, accepted: true }) }
+  }
+  const withFetch = loadClientPlugin({ fetch })
+  assert.deepEqual(await withFetch.api.restart('h_1'), { ok: true, accepted: true })
+  assert.match(calls[0].url, /\/hosts\/h_1\/restart$/)
+  assert.equal(calls[0].init.method, 'POST')
+  assert.deepEqual(JSON.parse(calls[0].init.body), {})
+})
+
 function manageWindowProps(overrides = {}) {
   return {
     open: true,
@@ -1253,6 +1324,7 @@ test('progress code map covers every contract code', () => {
     'verifying',
     'ready',
     'reconnecting',
+    'restarting-remote',
     'remote-dsh-running',
   ]
   for (const code of codes) {
@@ -1377,6 +1449,41 @@ test('the warm pool keeps every opened host and the last request wins a race', a
   }
   assert.equal(doc.body.children.length, 0)
   assert.equal(released.length, 6, 'every lease is handed back, including the superseded one')
+})
+
+test('a restarted attach re-navigates the warm carrier even when the URL repeats', async () => {
+  const doc = fakeDocument()
+  const takeover = loadClientPlugin({
+    document: doc,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async () => {},
+      },
+    },
+  })
+  const url = 'http://127.0.0.1:43210/?token=one'
+  try {
+    const first = await takeover.carrier.open({ hostId: 'h_a', url, viewRev: 1 })
+    assert.equal(first.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    const loads = []
+    view.loadURL = async (next) => {
+      loads.push(next)
+    }
+    // Same URL, newer attach: a remote restart hands out the same address shape but a new
+    // session, so the warm page must be navigated again.
+    const second = await takeover.carrier.open({ hostId: 'h_a', url, viewRev: 2 })
+    assert.equal(second.reused, true)
+    assert.deepEqual(loads, [url])
+    // Same attach again: showing the warm window must not reload it.
+    await takeover.carrier.open({ hostId: 'h_a', url, viewRev: 2 })
+    assert.deepEqual(loads, [url])
+  } finally {
+    await takeover.carrier.close()
+  }
 })
 
 test('the takeover carrier hands the window to the guest and injects the switcher', async () => {
