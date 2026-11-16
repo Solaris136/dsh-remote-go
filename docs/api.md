@@ -40,6 +40,14 @@
 > `null`），`text` / `boundary` 可选：旧 Host 响应没有 `phase` 时 Client 不渲染阶段标签、
 > 按 `message` 原样显示；新 Host 响应给旧 Client 时，`message` 仍是可读的英文兜底。没有
 > 新增端点，其余字段与端点不变。
+>
+> **v2.8 鉴权注记**（同一版本内的准入收紧，端点与字段仍不变）：每条请求在进入路由前先过本机 DSH
+> 自己的准入（`ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话），拒绝为 **401**
+> （会话未认证/失效，写在 `ErrorView.code = invalid-input` 里，状态码区分）或 **403**（Host/Origin
+> 不通过、缺标识头、跨站）。`/events` 现在**需要浏览器会话凭据**（之前只校验 Origin）；`/health`
+> 只豁免会话、仍过 Host/Origin 栅栏；其余 JSON 路由与 `/dsh-remote-go/remote/<hostId>/` 代理路径
+> （含每主机一条的 `remote.mux` 升级）走同一套准入。内核没有 Connection 服务时退回本插件原来的
+> 标识头 / 同源栅栏，行为与 v2.7 一致。
 
 ## 0. 通用类型
 
