@@ -336,6 +336,34 @@ test('stop refuses a pid the run registry does not name', async () => {
   await service.shutdown()
 })
 
+test('stop never signals a pid this connection did not launch or take over', async () => {
+  const registry = registryStore(null)
+  const stopped = []
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+  })
+  const host = await createHost(service)
+  const runtime = await connectHost(service, host)
+  registry.set(registryRecord())
+  // The registry names the pid, but nothing proves this connection owns it any more.
+  runtime.launched.delete(4242)
+  runtime.bound = null
+  await assert.rejects(
+    () => service.stopRemote(host.id),
+    (error) =>
+      error.code === 'stop-unavailable' && /不是本连接启动或接管的实例/.test(error.detail.zh + error.detail.en),
+  )
+  assert.deepEqual(stopped, [], 'an unowned pid must never be signalled')
+  assert.equal(service.snapshot().hosts[0].status, 'connected')
+  assert.match(messagesOf(service, host.id), /reason=not-launched-by-this-connection/)
+  await service.shutdown()
+})
+
 test('stop never signals a pid kept alongside the managed instance', async () => {
   const registry = registryStore(null)
   const stopped = []
