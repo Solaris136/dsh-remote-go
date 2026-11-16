@@ -99,9 +99,13 @@ export async function removeHost(ctx, id) {
   await ctx.init()
   const runtime = ctx.state.runtimes.get(id)
   if (runtime) {
-    // A deleted host must not be resurrected by a timer scheduled before deletion.
+    // A deleted host must not be resurrected by a timer scheduled before deletion, and a
+    // connect pipeline still in flight must see that the user no longer wants it: it may
+    // never publish a connected state or a fresh `activeHostId` afterwards (H4).
+    runtime.desired = 'idle'
     cancelReconnect(runtime)
     cancelIdleStop(runtime)
+    if (ctx.state.activeHostId === id) ctx.state.activeHostId = null
     await teardownRuntime(ctx, runtime, { stopRemote: runtime.entry.keepAlive === 'stop' })
   }
   ctx.state.runtimes.delete(id)

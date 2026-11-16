@@ -140,6 +140,51 @@ test('exec refuses to run without an open connection', async () => {
   await assert.rejects(() => ssh.forwardOut('127.0.0.1', 80), /not open/)
 })
 
+test('a closed transport is a typed network failure, never an internal one', async () => {
+  const ssh = new SshConnection({ host: 'example.com' })
+  for (const run of [() => ssh.exec('true'), () => ssh.openSftp(), () => ssh.forwardOut('127.0.0.1', 80)]) {
+    await assert.rejects(
+      run,
+      (error) => error.code === 'network' && error.retryable === true && /ssh-closed/.test(error.technical ?? ''),
+    )
+  }
+})
+
+test('a throwing progress listener cannot abort a running command', async () => {
+  const { PassThrough } = await import('node:stream')
+  class FakeClient extends EventEmitter {
+    connect() {
+      queueMicrotask(() => this.emit('ready'))
+    }
+    end() {}
+    exec(_command, _options, callback) {
+      const stream = new PassThrough()
+      stream.stderr = new PassThrough()
+      callback(null, stream)
+      queueMicrotask(() => {
+        stream.write('remote-output')
+        stream.end()
+      })
+    }
+  }
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new FakeClient(),
+  })
+  await ssh.connect()
+  const result = await ssh.exec('true', {
+    onStdout: () => {
+      throw new Error('progress reporter blew up')
+    },
+    onStderr: () => {
+      throw new Error('progress reporter blew up')
+    },
+  })
+  assert.equal(result.stdout, 'remote-output')
+})
+
 test('late ssh2 errors after a failed auth attempt never crash the host process', async () => {
   class FakeClient extends EventEmitter {
     connect() {
@@ -404,6 +449,64 @@ test('saveRemoteTree rejects a non-directory root', async () => {
   await assert.rejects(ssh.saveRemoteTree('/home/ubuntu/a.txt', target), /remote-file-unavailable/)
 })
 
+test('saveRemoteTree keeps both files when two names differ only by case', async () => {
+  const { ssh } = sshWithSftp(
+    {
+      '/home/ubuntu/report/Report.md': { bytes: Buffer.from('upper') },
+      '/home/ubuntu/report/report.md': { bytes: Buffer.from('lower') },
+    },
+    {
+      '/home/ubuntu/report': [
+        { filename: 'Report.md', attrs: { isFile: () => true, size: 5 } },
+        { filename: 'report.md', attrs: { isFile: () => true, size: 5 } },
+      ],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-case-')), 'report')
+  // Force the case-insensitive behavior a Windows/macOS Desktop has, whatever this host is.
+  const result = await ssh.saveRemoteTree('/home/ubuntu/report', target, { caseInsensitive: true })
+  assert.equal(result.totalFiles, 2)
+  assert.equal(result.renamedFiles, 1)
+  const names = (await readdir(target)).sort()
+  assert.deepEqual(
+    names.map((name) => name.toLowerCase()),
+    ['report (2).md', 'report.md'],
+  )
+  const contents = await Promise.all(names.map((name) => readFile(path.join(target, name), 'utf8')))
+  assert.deepEqual(contents.sort(), ['lower', 'upper'], 'no remote file may be silently overwritten')
+})
+
+test('saveRemoteTree leaves Windows metadata and shell shortcut files out', async () => {
+  const { ssh } = sshWithSftp(
+    {
+      '/home/ubuntu/mixed/readme.txt': { bytes: Buffer.from('keep') },
+    },
+    {
+      '/home/ubuntu/mixed': [
+        { filename: 'readme.txt', attrs: { isFile: () => true, size: 4 } },
+        { filename: 'desktop.ini', attrs: { isFile: () => true, size: 9 } },
+        { filename: 'Thumbs.db', attrs: { isFile: () => true, size: 9 } },
+        { filename: 'setup.lnk', attrs: { isFile: () => true, size: 9 } },
+        { filename: 'docs.url', attrs: { isFile: () => true, size: 9 } },
+        { filename: 'notes', attrs: { isDirectory: () => true } },
+      ],
+      '/home/ubuntu/mixed/notes': [],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-junk-')), 'mixed')
+  const reported = []
+  const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target, {
+    ignoreWindowsNames: true,
+    onIgnored: (names) => reported.push(names),
+  })
+  assert.equal(result.totalFiles, 1)
+  assert.deepEqual((await readdir(target)).sort(), ['notes', 'readme.txt'])
+  assert.deepEqual(result.ignoredNames.sort(), ['Thumbs.db', 'desktop.ini', 'docs.url', 'setup.lnk'])
+  // The download job surfaces what was skipped instead of dropping it silently.
+  assert.equal(reported.length, 1)
+  assert.deepEqual(reported[0].sort(), ['Thumbs.db', 'desktop.ini', 'docs.url', 'setup.lnk'])
+})
+
 test('saveRemoteFile surfaces a missing SFTP session and a missing file', async () => {
   const closed = new SshConnection({ host: 'example.com' })
   const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-closed-')), 'a')
@@ -411,4 +514,92 @@ test('saveRemoteFile surfaces a missing SFTP session and a missing file', async 
   const missing = sshWithSftp({})
   const missingTarget = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-missing-')), 'missing')
   await assert.rejects(missing.ssh.saveRemoteFile('/home/ubuntu/missing', missingTarget), /No such file/)
+})
+
+test('readKey skips a huge file and a non-regular file at the configured key path', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-hugekey-'))
+  const big = path.join(dir, 'huge.key')
+  await writeFile(big, Buffer.alloc(1024 * 1024 + 1, 0x41))
+  const fromBig = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: big }, home: dir })
+  assert.deepEqual(await fromBig.resolveAuthCandidates(), [], 'a >1 MiB file is not a private key')
+  const dirPath = path.join(dir, 'keydir')
+  await mkdir(dirPath)
+  const fromDir = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: dirPath }, home: dir })
+  assert.deepEqual(await fromDir.resolveAuthCandidates(), [], 'a directory is not a private key')
+})
+
+test('the Windows-only name filter can be turned off (other platforms keep those files)', async () => {
+  const { ssh } = sshWithSftp(
+    {
+      '/home/ubuntu/posix/desktop.ini': { bytes: Buffer.from('a') },
+      '/home/ubuntu/posix/setup.lnk': { bytes: Buffer.from('b') },
+      '/home/ubuntu/posix/readme.txt': { bytes: Buffer.from('c') },
+    },
+    {
+      '/home/ubuntu/posix': [
+        { filename: 'desktop.ini', attrs: { isFile: () => true, size: 1 } },
+        { filename: 'readme.txt', attrs: { isFile: () => true, size: 1 } },
+        { filename: 'setup.lnk', attrs: { isFile: () => true, size: 1 } },
+      ],
+    },
+  )
+  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-posix-')), 'posix')
+  const kept = await ssh.saveRemoteTree('/home/ubuntu/posix', target, {
+    ignoreWindowsNames: false,
+    caseInsensitive: false,
+  })
+  assert.equal(kept.totalFiles, 3)
+  assert.deepEqual(kept.ignoredNames, [])
+  assert.deepEqual((await readdir(target)).sort(), ['desktop.ini', 'readme.txt', 'setup.lnk'])
+})
+
+test('a handshake-time close is observable and rejects the connect instead of hanging', async () => {
+  class FakeClient extends EventEmitter {
+    connect() {
+      // The transport dies before `ready`: exactly the window a host-key prompt sits in.
+      queueMicrotask(() => this.emit('close'))
+    }
+    end() {}
+  }
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new FakeClient(),
+  })
+  const closes = []
+  ssh.on('close', () => closes.push('close'))
+  await assert.rejects(
+    () => ssh.connect(),
+    (error) => error.code === 'network' && /closed during the SSH handshake/.test(error.detail.en),
+  )
+  assert.deepEqual(closes, ['close'], 'the pipeline needs the close to cancel its parked prompt')
+  assert.equal(ssh.connected, false)
+})
+
+test('a synchronous error+close during the handshake is one failure, not a dropped link', async () => {
+  class SyncFailureClient extends EventEmitter {
+    connect() {
+      // ssh2's DNS resolution failure: error then close in the same tick.
+      const error = new Error('getaddrinfo ENOTFOUND example.com')
+      error.code = 'ENOTFOUND'
+      this.emit('error', error)
+      this.emit('close')
+    }
+    end() {}
+  }
+  const ssh = new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory: () => new SyncFailureClient(),
+  })
+  const closes = []
+  ssh.on('close', () => closes.push('close'))
+  await assert.rejects(
+    () => ssh.connect(),
+    (error) => error.code === 'network',
+  )
+  assert.deepEqual(closes, [], 'the teardown of a failed attempt must not read as a lost link')
+  assert.equal(ssh.connected, false)
 })

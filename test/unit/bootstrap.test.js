@@ -130,3 +130,16 @@ test('verifyNpxVersion turns a failed npx run into remote-dsh-missing', async ()
     (error) => error.code === 'remote-dsh-missing' && error.technical.includes('404'),
   )
 })
+
+test('a preflight that runs out of time is a network failure, not a missing DSH', async () => {
+  const ssh = {
+    async exec() {
+      return { code: null, stdout: '', stderr: '', timedOut: true }
+    },
+  }
+  const plan = planNpx({ facts: makeFacts(), targetVersion: TARGET, profile: 'web' })
+  await assert.rejects(
+    () => verifyNpxVersion(ssh, plan, { timeoutMs: 90_000 }),
+    (error) => error.code === 'network' && error.retryable === true && /preflight-timeout/.test(error.technical ?? ''),
+  )
+})

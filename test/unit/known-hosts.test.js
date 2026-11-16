@@ -70,6 +70,21 @@ test('knownHostFieldMatches supports wildcards', () => {
   assert.equal(knownHostFieldMatches('*.example.com', 'example.org', 22), false)
 })
 
+test('a plain host entry never vouches for a non-default port', () => {
+  const key = makeKeyBlob()
+  // OpenSSH only accepts the bracketed form for a port other than 22.
+  assert.equal(knownHostFieldMatches('example.com', 'example.com', 2222), false)
+  assert.equal(knownHostFieldMatches('[example.com]:2222', 'example.com', 2222), true)
+  assert.equal(knownHostFieldMatches('example.com', 'example.com', 22), true)
+  assert.equal(knownHostFieldMatches('[example.com]:22', 'example.com', 22), false)
+  const parsed = parseKnownHosts(`example.com ssh-ed25519 ${base64(key)}`)
+  assert.equal(findKnownHostEntries(parsed, 'example.com', 2222).length, 0)
+  assert.equal(findKnownHostEntries(parsed, 'example.com', 22).length, 1)
+  // A wildcard on a non-default port only matches the bracketed host field too.
+  assert.equal(knownHostFieldMatches('*.example.com', 'a.example.com', 2222), false)
+  assert.equal(knownHostFieldMatches('[*.example.com]:2222', 'a.example.com', 2222), true)
+})
+
 test('summarizeKnownHosts counts and lists hosts without exposing hashes', () => {
   const key = makeKeyBlob()
   const parsed = parseKnownHosts(`a.example,b.example ssh-ed25519 ${base64(key)}\n|1|x|y ssh-rsa AAAA\n`)

@@ -141,3 +141,14 @@ test('non-absolute paths are rejected before a job is created', () => {
   assert.throws(() => jobs.start(runtime, 'relative/path'), /invalid-input/)
   assert.equal(jobs.size, 0)
 })
+
+test('a folder job surfaces the names the download deliberately skipped', async () => {
+  const { jobs } = makeJobs(async (_runtime, _path, options) => {
+    options.onIgnored(['desktop.ini', 'setup.lnk'])
+    return { kind: 'folder', name: 'project', destination: 'C:/Downloads/project', totalBytes: 6, files: 2 }
+  })
+  const started = jobs.start(runtime, '/home/ubuntu/project', { destination: 'C:/Downloads' })
+  await tick(20)
+  const ready = jobs.status(started.id)
+  assert.deepEqual(ready.ignoredNames, ['desktop.ini', 'setup.lnk'])
+})

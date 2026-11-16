@@ -61,18 +61,57 @@ export function parseKnownHosts(text) {
   return { entries, hashedCount, malformed, revoked, certAuthority }
 }
 
+/**
+ * OpenSSH `known_hosts` host-field matching: `*` matches any run of characters, `?` exactly
+ * one, everything else is literal and the comparison ignores case.
+ *
+ * Implemented without a regular expression on purpose: a host field is data, and building a
+ * `RegExp` from it invites injection and backtracking on remote-controlled text.
+ * @param {string} pattern - one host field.
+ * @param {string} value - the host field form being matched (plain or `[host]:port`).
+ * @returns {boolean} whether the pattern covers the value.
+ */
+function wildcardMatch(pattern, value) {
+  const wanted = String(pattern).toLowerCase()
+  const text = String(value).toLowerCase()
+  let patternAt = 0
+  let textAt = 0
+  let starAt = -1
+  let markAt = 0
+  while (textAt < text.length) {
+    if (patternAt < wanted.length && (wanted[patternAt] === '?' || wanted[patternAt] === text[textAt])) {
+      patternAt += 1
+      textAt += 1
+    } else if (patternAt < wanted.length && wanted[patternAt] === '*') {
+      starAt = patternAt
+      patternAt += 1
+      markAt = textAt
+    } else if (starAt >= 0) {
+      patternAt = starAt + 1
+      textAt = markAt + 1
+      markAt = textAt
+    } else {
+      return false
+    }
+  }
+  while (patternAt < wanted.length && wanted[patternAt] === '*') patternAt += 1
+  return patternAt === wanted.length
+}
+
+/**
+ * Whether one `known_hosts` host field covers `host` on `port`.
+ *
+ * OpenSSH writes a plain `host` field only for port 22 and `[host]:port` for every other
+ * port, and it matches the same way: a plain entry never vouches for a service on 2222.
+ * @param {string} pattern - one (possibly wildcarded) host field.
+ * @param {string} host - the host being dialled.
+ * @param {number | string | null | undefined} port - the port being dialled.
+ * @returns {boolean} whether the field covers that destination.
+ */
 export function knownHostFieldMatches(pattern, host, port) {
-  const portSuffix = port && port !== 22 ? `:${port}` : null
-  const candidates = portSuffix ? [`[${host}]${portSuffix}`] : []
-  // A plain `host` line also matches a non-default port only for SSH's default
-  // behavior; be conservative and require the bracketed form for non-22.
-  candidates.push(host, `[${host}]`)
-  const escaped = String(pattern)
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    .replace(/\?/g, '.')
-  const matcher = new RegExp(`^${escaped}$`, 'i')
-  return candidates.some((candidate) => matcher.test(candidate))
+  const targetPort = Number(port) || 22
+  const target = targetPort === 22 ? String(host) : `[${host}]:${targetPort}`
+  return wildcardMatch(pattern, target)
 }
 
 export function findKnownHostEntries(parsed, host, port) {

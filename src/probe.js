@@ -78,7 +78,19 @@ export function toProbeFacts(values) {
 
 export async function probeRemote(ssh, options = {}) {
   const script = buildProbeScript()
-  const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 60_000 })
+  const timeoutMs = options.timeoutMs ?? 60_000
+  const result = await ssh.exec(script, { timeoutMs })
+  // A probe that ran out of time says nothing about the remote's DSH: report a timeout
+  // (retryable network), not a missing remote runtime (L).
+  if (result.timedOut === true) {
+    throw errors.network(
+      {
+        zh: `远端环境探测超过 ${Math.round(timeoutMs / 1000)} 秒没有完成，可能是链路很慢或远端负载过高。`,
+        en: `The remote environment probe did not finish within ${Math.round(timeoutMs / 1000)}s; the link may be slow or the remote overloaded.`,
+      },
+      { technical: `reason=probe-timeout timeoutMs=${timeoutMs}` },
+    )
+  }
   if (result.code !== 0) {
     throw errors.remoteDshMissing({
       zh: `远端环境探测失败（退出码 ${result.code}）：${headTail(result.stderr || result.stdout, 400)}`,

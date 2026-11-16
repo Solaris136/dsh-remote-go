@@ -207,12 +207,30 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 - 已记录指纹：匹配放行；变化 → `host-key-changed` 阻塞。未记录且 known_hosts 有该主机条目：任意一条匹配即放行（等价 OpenSSH），无匹配 → `host-key-changed`。
 - 首次使用且无记录：`fingerprint-pending`，等待 `POST /hosts/:id/fingerprint`；超时按拒绝处理。
 - `strict` 策略直接拒绝未知指纹，不弹窗。
+- **跳板机与目标各有自己的 host-key 上下文**：目标的策略与 `pinnedFingerprint` 只描述目标；跳板只受**全局** `hostKeyPolicy` 约束，
+  它的 pin 只记在本次会话的 `runtime.jumpFingerprint`（带 `host`/`port`），**绝不写进**目标的 `pinnedFingerprint`。因此：
+  - 跳板确认的 remember 是「本会话记住」：插件重启后会重新询问跳板指纹（store 的 `pinnedFingerprint` 属于目标，无字段可存跳板 pin；
+    这是存储契约的既有边界，不为此改 `settings.js`/`store.js`）。
+  - 改了主机的 `jumpHost`（或端口）后，旧跳板 pin 因 `host`/`port` 不匹配被丢弃并重新询问，不会把新跳板报成 `host-key-changed`。
+  - **已知限制**：Client 的指纹对话框不区分跳板 / 目标，也复用「确认后会记住」的固定文案；Host 侧保证对话框里显示的**密钥**是当前被确认的那一把
+    （跳板确认期间 `HostView.fingerprint` 是跳板密钥，拨号目标前清空），但文案无法按角色改写（`client.js` 不在本改动的范围内）。
+- **known_hosts 的已知限制**：只按主机字段（`host` / `*` / `?`，非 22 端口只认 `[host]:port`）匹配，不支持 `|1|` 哈希行
+  （只统计数量，不猜测明文）与 `!host` 否定行。注意否定行**不是**「更严格」而是**更宽松**：本实现忽略 `!`
+  前缀，把 `!bad.example` 当成普通模式，因此 `*.corp.example,!bad.corp.example` 里只要有一行非否定模式匹配
+  就放行——OpenSSH 会排除 `bad.corp.example`，本实现会信任它。同一 `known_hosts` 里多条同主机条目时，任一
+  非否定指纹匹配即放行（与 OpenSSH 的「任一匹配即放行」一致，但少了否定排除）。
 
 ### 5.4 断线、重连与退出
 - SSH 连接 `close` 且用户期望保持连接时：状态转 `disconnected`，按设置做指数退避重连（`autoReconnect.maxAttempts`）。
+  预算只在**成功**（`markConnected`）与**用户手动连接**（`startConnect`）时归零；失败继续排下一次，用户在提示框点「取消 / 拒绝」或提示超时则不自动重试。
+  连接期间（含 `[probe]` / `[bootstrap]` / 指纹提示）的断线同样按 `network`（`reason=ssh-closed`）处理并进入重连。
 - 手动断开：关隧道；`keepAlive=stop` 同时停远端，`idle` 延迟停止，`keep` 保留远端。
-- 删除主机：先取消重连 / 空闲计时器，再 teardown，最后删记录；远端按该主机的存活策略处理。
-- 本地 DSH 退出：`shutdown()` 对每台主机执行同样的 teardown。
+- **空闲计时器只是「空闲主机」的策略**：任何一次新的连接（`startConnect`）与每次成功挂载（`markConnected`）都会取消它；计时器触发时若
+  `desired==='connected'` / `status==='connected'` / 仍有隧道，直接返回 `still-wanted` 且**不释放** SSH（旧实现会把用户刚接回来的链路杀掉并留下
+  「状态 connected 但 ssh/隧道已空」的僵尸态）。空闲停止还要求 `/proc` 身份证明（starttime、DSH home、profile 与记录一致）通过，
+  pid 复用 / 不属于本连接时不发信号；idle 保留的旧 SSH 在下一次连接开始时先释放，不再被覆盖后泄漏。
+- 删除主机：先取消重连 / 空闲计时器、置 `desired=idle` 并清 `activeHostId`，再 teardown，最后删记录；远端按该主机的存活策略处理。
+- 本地 DSH 退出：`shutdown()` 先对每台主机置关闭标志，再执行同样的 teardown。
 
 ### 5.5 本地主动重启远端
 `POST /hosts/:id/restart`，仅 `connected` 可用；`remote-unreachable` 错误状态（§5.6 有意保留了 SSH 会话）也允许用它恢复。响应先 `accepted`，进度走 `/state`。它**不重跑** `[ssh]` / `[probe]` / `[bootstrap]`，因此不会再次索要密码或主机指纹：

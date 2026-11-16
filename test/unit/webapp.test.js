@@ -18,7 +18,9 @@ import {
   parseForeignDshOutput,
   parseListenPorts,
   parseProcessIdentity,
+  parseRunRegistry,
   parseWebLine,
+  readRunRegistry,
   readWebLineFromLog,
   remoteDshVersion,
   remoteListenPorts,
@@ -199,6 +201,50 @@ test('startRemoteWeb refuses a non-loopback advertised URL', async () => {
   )
 })
 
+test('startRemoteWeb stops the process it already launched when the start fails', async () => {
+  /** A transport that answers by command shape, so the stop path can be observed. */
+  const routed = (startReply) => {
+    const calls = []
+    return {
+      calls,
+      async exec(command) {
+        calls.push(command)
+        if (command.includes('--dump-config')) return { code: 0, stdout: 'CLEAR\n', stderr: '' }
+        if (command.includes('setsid nohup')) return startReply
+        if (command.startsWith('kill -0 4242') || command.startsWith('kill -0 777')) {
+          return { code: 0, stdout: 'alive\n', stderr: '' }
+        }
+        if (command.includes('kill -TERM')) return { code: 0, stdout: 'STOPPED:4242\n', stderr: '' }
+        if (command.startsWith('cat ')) return { code: 1, stdout: '', stderr: '' }
+        return { code: 0, stdout: '', stderr: '' }
+      },
+    }
+  }
+  // A readiness line that names another host: the launch already happened and must be undone.
+  const nonLoopback = routed({
+    code: 0,
+    stdout: 'PID:4242\nLINE:dsh web: http://10.0.0.5:80/?token=x\nDONE:4242:80\n',
+    stderr: '',
+  })
+  await assert.rejects(
+    () => startRemoteWeb(nonLoopback, { plan: npxPlan(), layout: LAYOUT }),
+    (error) => error.code === 'remote-ui-unreachable',
+  )
+  const stop = nonLoopback.calls.find((command) => command.includes('kill -TERM'))
+  assert.ok(stop, 'the launched process must be stopped before the error surfaces')
+  assert.match(stop, /PID=4242/)
+
+  // The wait itself failed: the pid is still known from the `PID:` line, so it is stopped too.
+  const timedOut = routed({ code: 4, stdout: 'PID:777\nTIMEOUT\n---LOG---\n', stderr: '' })
+  await assert.rejects(
+    () => startRemoteWeb(timedOut, { plan: npxPlan(), layout: LAYOUT }),
+    (error) => error.code === 'remote-dsh-start-failed',
+  )
+  const timedOutStop = timedOut.calls.find((command) => command.includes('kill -TERM'))
+  assert.ok(timedOutStop, 'a start that timed out after launching must stop what it started')
+  assert.match(timedOutStop, /PID=777/)
+})
+
 test('stopRemoteWeb and remoteHttpStatus use tightly scoped shell commands', async () => {
   const calls = []
   const ssh = {
@@ -266,6 +312,22 @@ test('adoptRemoteWeb requires the same dshHome/profile, a live pid, a logged URL
     },
   }
   assert.equal(await adoptRemoteWeb(dead, LAYOUT, { profile: 'web' }), null)
+})
+
+test('adoptRemoteWeb refuses an instance that advertises a non-loopback host', async () => {
+  const responses = [
+    { code: 0, stdout: `${REGISTRY_JSON}\n`, stderr: '' },
+    { code: 0, stdout: 'alive', stderr: '' },
+    // The token would be usable, but the advertised host is not the loopback the tunnel serves.
+    { code: 0, stdout: 'dsh web: http://10.0.0.5:38123/?token=adopted\n', stderr: '' },
+    { code: 0, stdout: '200', stderr: '' },
+  ]
+  const ssh = {
+    async exec() {
+      return responses.shift() ?? { code: 1, stdout: '', stderr: '' }
+    },
+  }
+  assert.equal(await adoptRemoteWeb(ssh, LAYOUT, { profile: 'web' }), null)
 })
 
 test('adoptRemoteWeb refuses a registry from another home/profile or an older launch path', async () => {
@@ -697,4 +759,144 @@ test('exchangeTokenOverTunnel reports a failed handshake without throwing', asyn
   } finally {
     server.close()
   }
+})
+
+test('stopRemoteWeb reports no-target when neither a pid nor a registry names the process', async () => {
+  const calls = []
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      return { code: 0, stdout: 'NO-TARGET\n', stderr: '' }
+    },
+  }
+  const result = await stopRemoteWeb(ssh, LAYOUT, {})
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'no-target')
+  const stopScript = calls.find((command) => command.includes('NO-TARGET'))
+  assert.ok(stopScript, 'the stop script must run and report the missing target')
+  assert.ok(stopScript.indexOf('NO-TARGET') < stopScript.indexOf('kill -TERM'), stopScript)
+})
+
+test('stopRemoteWeb keeps the run registry when the process does not confirm its stop', async () => {
+  const calls = []
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      if (command.includes('kill -TERM')) return { code: 6, stdout: 'ALIVE:4242\n', stderr: '' }
+      if (command.startsWith('cat ')) return { code: 0, stdout: '', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    },
+  }
+  const result = await stopRemoteWeb(ssh, LAYOUT, { pid: 4242 })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'alive')
+  const script = calls.find((command) => command.includes('kill -TERM'))
+  // The registry may only be removed after the process is confirmed gone (M4), and only when
+  // it names *this* pid: a record that belongs to another instance is not ours to delete.
+  assert.equal((script.match(/rm -f "\$RUN"/g) ?? []).length, 1, script)
+  assert.ok(script.indexOf('drop_own_record()') < script.indexOf('rm -f "$RUN"'), script)
+  assert.ok(script.indexOf('"${REC_PID:-}" = "$PID"') < script.indexOf('rm -f "$RUN"'), script)
+  // The ALIVE branch exits before the confirmed-path call, so an unconfirmed stop keeps it.
+  assert.ok(script.indexOf('echo "ALIVE:$PID"') < script.lastIndexOf('drop_own_record'), script)
+  assert.equal(script.indexOf('ALIVE:'), script.lastIndexOf('ALIVE:'))
+})
+
+test('a run registry that does not parse still yields the pid it names', async () => {
+  const truncated =
+    '{"pid":4242,"port":38123,"startedAt":"2026-11-16T00:00:00.000Z","profile":"web","dshHome":"/home/ubuntu/.dsh"'
+  const registry = parseRunRegistry(truncated)
+  assert.equal(registry.pid, 4242)
+  assert.equal(registry.port, 38123)
+  assert.equal(registry.dshHome, '/home/ubuntu/.dsh')
+  // A JSON record without a usable pid is still "a record" (the callers check `isPid`);
+  // only text that names no pid at all is "no record".
+  assert.equal(parseRunRegistry('{"pid":0,"port":1}').pid, 0)
+  assert.equal(parseRunRegistry('complete garbage'), null)
+  assert.equal(parseRunRegistry(''), null)
+  const ssh = {
+    async exec() {
+      return { code: 0, stdout: truncated, stderr: '' }
+    },
+  }
+  const read = await readRunRegistry(ssh, LAYOUT)
+  assert.equal(read.pid, 4242)
+})
+
+test('the run registry is written through a temp file and renamed', async () => {
+  const calls = []
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      return { code: 0, stdout: 'REGISTRY-WRITTEN\n', stderr: '' }
+    },
+  }
+  const written = await writeRunRegistry(ssh, LAYOUT, {
+    pid: 4242,
+    port: 38123,
+    profile: 'web',
+    dshHome: '/home/ubuntu/.dsh',
+  })
+  assert.equal(written.ok, true)
+  const script = calls[0]
+  assert.match(script, /TMP="\$RUN\.tmp\.\$\$"/)
+  assert.ok(script.indexOf('TMP=') < script.indexOf('mv -f "$TMP"'), script)
+  assert.ok(script.indexOf('mv -f "$TMP" "$RUN"') < script.indexOf('REGISTRY-WRITTEN'), script)
+})
+
+test('the launch script keeps its private files private and writes the registry atomically', () => {
+  const start = buildStartScript('env A=1 /bin/true', LAYOUT, { version: '0.2.2-rc.1', profile: 'web' })
+  assert.ok(start.indexOf('umask 077') < start.indexOf('mkdir -p'), start)
+  assert.ok(start.indexOf('umask 077') < start.indexOf(': > "$LOG"'), start)
+  assert.match(start, /chmod 600 "\$LOG"/)
+  assert.match(start, /TMP="\$RUN\.tmp\.\$\$"/)
+  assert.ok(start.indexOf('> "$TMP"') < start.indexOf('mv -f "$TMP" "$RUN"'), start)
+  const probe = buildBrowserCarrierProbe(npxPlan(), LAYOUT, 'web')
+  assert.match(probe, /umask 077/)
+  assert.match(probe, /rm -f "\$DUMP"/)
+  // Both the failure path and the success path remove the profile dump.
+  assert.ok(probe.indexOf('DUMP-FAILED') < probe.indexOf('rm -f "$DUMP"'), probe)
+  assert.ok(probe.lastIndexOf('echo "CLEAR"') < probe.lastIndexOf('rm -f "$DUMP"'), probe)
+})
+
+test('startRemoteWeb never stops a pid it did not launch, even when the registry names one', async () => {
+  const calls = []
+  const registry = JSON.stringify({
+    pid: 9999,
+    port: 38123,
+    profile: 'web',
+    dshHome: '/home/ubuntu/.dsh',
+    launch: LAUNCH_MARKER,
+    origin: 'reattach',
+  })
+  const ssh = {
+    async exec(command) {
+      calls.push(command)
+      if (command.includes('--dump-config')) return { code: 0, stdout: 'CLEAR\n', stderr: '' }
+      if (command.includes('setsid nohup')) {
+        // The wrapper printed its pid and then died: nothing of this launch is left alive.
+        return { code: 4, stdout: 'PID:1234\nTIMEOUT\n---LOG---\n', stderr: '' }
+      }
+      if (command.startsWith('kill -0 1234')) return { code: 0, stdout: '', stderr: '' }
+      if (command.startsWith('kill -0 9999')) return { code: 0, stdout: 'alive\n', stderr: '' }
+      if (command.startsWith('cat ')) return { code: 0, stdout: `${registry}\n`, stderr: '' }
+      if (command.includes('kill -TERM')) return { code: 0, stdout: 'STOPPED:9999\n', stderr: '' }
+      return { code: 0, stdout: '', stderr: '' }
+    },
+  }
+  await assert.rejects(
+    () => startRemoteWeb(ssh, { plan: npxPlan(), layout: LAYOUT }),
+    (error) => error.code === 'remote-dsh-start-failed',
+  )
+  assert.equal(
+    calls.some((command) => command.includes('kill -TERM')),
+    false,
+    'a re-attached instance named by the registry must never be signalled',
+  )
+})
+
+test('a truncated registry that names no complete pid yields no record', () => {
+  assert.equal(parseRunRegistry('{"pid":42'), null)
+  assert.equal(parseRunRegistry('{"pid":4242'), null)
+  assert.equal(parseRunRegistry('garbage {"pid":4242'), null)
+  assert.equal(parseRunRegistry('{"pid":4242,"port":38123}').pid, 4242)
 })

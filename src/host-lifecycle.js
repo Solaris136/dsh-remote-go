@@ -12,10 +12,11 @@ import {
 } from './constants.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'
-import { remoteLayout } from './layout.js'
-import { cancelConflict } from './prompts.js'
+import { layoutForRuntime } from './layout.js'
+import { cancelConflict, cancelHostKeyPrompt } from './prompts.js'
 import { isUiUp } from './remote-proc.js'
-import { messageOf, randomDelay } from './util.js'
+import { commandMatchesProfile } from './remote-web.js'
+import { isPid, messageOf, randomDelay } from './util.js'
 
 export function cancelReconnect(runtime) {
   if (runtime.reconnectTimer) {
@@ -257,6 +258,12 @@ export function noteRemoteUnreachable(ctx, runtime, source) {
  */
 export function scheduleReconnect(ctx, runtime, onDue) {
   cancelReconnect(runtime)
+  // A retry only makes sense while the user still wants the link: a disconnect, a host
+  // removal or a shutdown that raced the timer must not resurrect the connection.
+  if (ctx.state.disposed === true || runtime.desired !== 'connected') {
+    ctx.progress.set(runtime, { status: 'disconnected' })
+    return
+  }
   const settings = ctx.settings()
   if (!runtime.entry.autoReconnect || !settings.autoReconnect.enabled) {
     ctx.progress.set(runtime, { status: 'disconnected' })
@@ -291,6 +298,8 @@ export function scheduleReconnect(ctx, runtime, onDue) {
     runtime.reconnectTimer = null
     onDue()
   }, delay)
+  // A pending retry must never keep the host process alive on its own.
+  runtime.reconnectTimer.unref?.()
 }
 
 function scheduleIdleStop(ctx, runtime) {
@@ -298,23 +307,123 @@ function scheduleIdleStop(ctx, runtime) {
   const minutes = Math.max(1, runtime.entry.idleMinutes ?? DEFAULT_IDLE_MINUTES)
   runtime.idleTimer = setTimeout(() => {
     runtime.idleTimer = null
-    void stopRemoteQuietly(ctx, runtime)
+    void stopRemoteForIdle(ctx, runtime)
   }, minutes * 60_000)
+  runtime.idleTimer.unref?.()
 }
 
-/** Best-effort stop of the remote web for the idle policy, then drop the transport. */
-async function stopRemoteQuietly(ctx, runtime) {
-  try {
-    if (runtime.ssh?.connected) {
-      await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
-        pid: runtime.remote.pid ?? undefined,
-      })
-    }
-  } catch (error) {
-    ctx.progress.log(runtime, 'warn', 'idle stop failed:', messageOf(error))
-  } finally {
-    await disposeSsh(runtime)
+/**
+ * Best-effort stop of the remote web for the idle policy, then drop the transport.
+ *
+ * The teardown that armed this timer clears `facts` and `remote`, so the stop has to use the
+ * home and pid remembered before that clearing: the old fallback built a layout with a
+ * literal `~`, whose `kill -0` is a no-op that still reported success (H1).
+ *
+ * The timer is a *policy for an idle host*, never authority over a live link: the user may
+ * have connected again (the timer would otherwise kill the link just brought up), and a pid
+ * that answers `/proc` is not proof it is still the process this connection started
+ * (review: idle-timer zombie / pid reuse). Shutdown is the one caller that deliberately
+ * overrides the "still wanted" guard, because it is stopping the whole host process.
+ *
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime that went idle.
+ * @param {{ shutdown?: boolean }} [options]
+ * @returns {Promise<{ ok: boolean, reason?: string }>} the stop verdict (best effort).
+ */
+export async function stopRemoteForIdle(ctx, runtime, options = {}) {
+  // A live link wins over the idle policy, whichever timer fired it. This is what keeps a
+  // manual reconnect from being torn down by the timer armed before it.
+  const linkLive = runtime.desired === 'connected' || runtime.status === 'connected' || runtime.tunnel !== null
+  if (linkLive && options.shutdown !== true) {
+    ctx.progress.log(runtime, 'debug', 'idle stop skipped: the host is connected again')
+    return { ok: false, reason: 'still-wanted' }
   }
+  // The transport this call owns: the identity proof below awaits, and the user may connect
+  // in that window. Only this session may be released afterwards, never the new one.
+  const capturedSsh = runtime.ssh
+  let released = false
+  const stillWanted = () =>
+    runtime.ssh !== capturedSsh ||
+    runtime.desired === 'connected' ||
+    runtime.status === 'connected' ||
+    runtime.tunnel !== null
+  try {
+    if (capturedSsh?.connected !== true) return { ok: false, reason: 'no-transport' }
+    const home = runtime.facts?.home ?? runtime.remoteHome ?? null
+    if (typeof home !== 'string' || home.trim() === '') {
+      ctx.progress.log(runtime, 'warn', 'idle stop skipped: the remote home directory is unknown')
+      return { ok: false, reason: 'no-home' }
+    }
+    const layout = layoutForRuntime(runtime)
+    const pid = Number(runtime.remote.pid ?? runtime.remotePid ?? 0)
+    // Without a pid there is nothing this policy may signal: `stopRemoteWeb` would fall back
+    // to the run registry and could stop an instance this connection did not launch.
+    if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
+    // Same `/proc` identity proof the explicit stop uses: a reused pid, another DSH home or
+    // another profile is not this connection's process and must not be signalled.
+    const proof = await proveIdleStopTarget(ctx, runtime, pid, layout)
+    if (proof.ok !== true) {
+      ctx.progress.log(runtime, 'warn', `idle stop skipped: ${proof.reason}`)
+      return { ok: false, reason: proof.reason }
+    }
+    // The user may have connected while the identity was read: the link wins again.
+    if (options.shutdown !== true && stillWanted()) {
+      ctx.progress.log(runtime, 'debug', 'idle stop skipped: the host is connected again')
+      return { ok: false, reason: 'still-wanted' }
+    }
+    const stopped = await ctx.deps.stopWeb(capturedSsh, layout, { pid })
+    if (stopped?.ok !== true) {
+      ctx.progress.log(
+        runtime,
+        'warn',
+        `idle stop did not confirm (${stopped?.reason ?? 'unknown'}); the remote may still be running`,
+      )
+      return { ok: false, reason: stopped?.reason ?? 'not-confirmed' }
+    }
+    runtime.remotePid = null
+    return { ok: true }
+  } catch (error) {
+    // swallow-ok: the idle stop is best effort; its failure is only a warning and the timer
+    // is already gone, so the host stays idle either way
+    ctx.progress.log(runtime, 'warn', 'idle stop failed:', messageOf(error))
+    return { ok: false, reason: 'error' }
+  } finally {
+    // Release only the transport this call captured: when a new connection owns the link by
+    // now, its session is not ours to dispose.
+    if (runtime.ssh === capturedSsh) await disposeSsh(runtime)
+  }
+}
+
+/** The `/proc` identity proof for the process the idle policy is about to stop. */
+async function proveIdleStopTarget(ctx, runtime, pid, layout) {
+  const bound = Number(runtime.bound?.pid) === pid ? runtime.bound : null
+  const launched = runtime.launched instanceof Map ? runtime.launched.get(pid) : null
+  const proof = bound ?? launched
+  if (!proof) return { ok: false, reason: 'not-owned' }
+  let identity = null
+  try {
+    identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  } catch {
+    // swallow-ok: an unreadable identity means "cannot prove it is ours", so no signal
+    return { ok: false, reason: 'identity-unreadable' }
+  }
+  if (identity?.ok !== true) {
+    return {
+      ok: false,
+      reason: identity?.reason === 'missing' ? 'identity-missing' : `identity-${identity?.reason ?? 'unknown'}`,
+    }
+  }
+  if (typeof proof.startTime === 'string' && proof.startTime !== '' && identity.startTime !== proof.startTime) {
+    return { ok: false, reason: 'pid-reused' }
+  }
+  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
+    return { ok: false, reason: 'dsh-home-mismatch' }
+  }
+  const profile = runtime.remote.profile ?? runtime.remoteProfile ?? null
+  if (typeof profile === 'string' && profile !== '' && !commandMatchesProfile(identity.command, profile)) {
+    return { ok: false, reason: 'profile-mismatch' }
+  }
+  return { ok: true }
 }
 
 export async function closeTunnel(runtime) {
@@ -387,6 +496,9 @@ async function settleTunnelRepair(ctx, runtime) {
 
 export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelConflict(runtime)
+  // A prompt parked on the transport that is about to go away can never be answered: settle
+  // it now instead of letting the connect promise wait for its 120s timeout (M1).
+  cancelHostKeyPrompt(runtime)
   cancelLinkWork(runtime)
   stopRemoteHeartbeat(runtime)
   runtime.closing = true
@@ -394,15 +506,30 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
   // A tunnel rebuild owns a listener it may be creating right now. Cancel it (above), then
   // wait for it to clean up: otherwise the listener would be assigned after this teardown.
   await settleTunnelRepair(ctx, runtime)
+  // Remember where the remote lives before the facts below are cleared: the idle policy and
+  // a later stop still need the real home, never a literal `~` (H1).
+  if (typeof runtime.facts?.home === 'string' && runtime.facts.home.trim() !== '') {
+    runtime.remoteHome = runtime.facts.home
+  }
+  if (typeof runtime.remote.profile === 'string' && runtime.remote.profile !== '') {
+    runtime.remoteProfile = runtime.remote.profile
+  }
+  const boundPid = Number(runtime.remote.pid ?? 0)
+  if (isPid(boundPid)) runtime.remotePid = boundPid
+  let remoteStopped = false
   if (options.stopRemote && runtime.ssh?.connected) {
     try {
-      await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
+      const result = await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
         pid: runtime.remote.pid ?? undefined,
       })
+      // Only a confirmed stop means the pid is gone; a refusal keeps the memory so a later
+      // stop can try again instead of reporting a process that never stopped.
+      remoteStopped = result?.ok === true
     } catch (error) {
       ctx.progress.log(runtime, 'warn', 'stop remote failed:', messageOf(error))
     }
   }
+  if (remoteStopped) runtime.remotePid = null
   await closeTunnel(runtime)
   if (!options.keepSshForIdle) await disposeSsh(runtime)
   if (!options.keepRemote) {
@@ -453,14 +580,20 @@ export async function disconnectHost(ctx, runtime, options = {}) {
  */
 export async function shutdownAll(ctx) {
   for (const runtime of ctx.state.runtimes.values()) {
+    // Mark the link dead before the first await: a dependent action must not start (or
+    // retry) while shutdown is still walking the list (L).
+    runtime.closing = true
+    runtime.desired = 'idle'
     cancelReconnect(runtime)
     cancelIdleStop(runtime)
     cancelLinkWork(runtime)
+    cancelHostKeyPrompt(runtime)
+    cancelConflict(runtime)
     stopRemoteHeartbeat(runtime)
     await settleTunnelRepair(ctx, runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
-        await stopRemoteQuietly(ctx, runtime)
+        await stopRemoteForIdle(ctx, runtime, { shutdown: true })
       } else {
         await closeTunnel(runtime)
         await disposeSsh(runtime)
