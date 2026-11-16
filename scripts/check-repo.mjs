@@ -4,8 +4,11 @@ import { existsSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
+// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 
 const problems = []
 const warnings = []
@@ -51,7 +54,8 @@ const REQUIRED_FILES = `README.md LICENSE CHANGELOG.md
 .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml
 .github/workflows/ci.yml .github/workflows/codeql.yml .github/workflows/release.yml
 docs/design.md docs/implementation.md docs/api.md docs/publish.md
-market/index.json market/plugin-entry.json`.split(/\s+/)
+market/index.json market/plugin-entry.json
+vendor/ssh2-entry.mjs vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md`.split(/\s+/)
 
 for (const file of REQUIRED_FILES) check(exists(file), `missing required file: ${file}`)
 
@@ -90,11 +94,22 @@ if (pkg === null) {
   check(semver, `package.json: "version" must be an exact SemVer version (found ${JSON.stringify(pkg.version)})`)
 
   const shipped = Array.isArray(pkg.files) ? pkg.files : []
-  for (const needed of ['index.js', 'client.js', 'src', 'locale', 'cordis.patch.yml']) {
-    const covered = shipped.some(
-      (entry) => entry === needed || (typeof entry === 'string' && entry.startsWith(`${needed}/`)),
-    )
-    check(covered, `package.json: "files" must ship ${needed}`)
+  // A directory entry (`src`) covers its files; an explicit file stays exact. Tarball-wise
+  // `vendor/ssh2-entry.mjs` is a build input, so only the bundle and notices must ship.
+  const ships = (needed) =>
+    shipped.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
+  for (const needed of [
+    'index.js',
+    'client.js',
+    'src',
+    'locale',
+    'cordis.patch.yml',
+    'vendor/ssh2.bundle.cjs',
+    'vendor/THIRD_PARTY_NOTICES.md',
+    'README.md',
+    'LICENSE',
+  ]) {
+    check(ships(needed), `package.json: "files" must ship ${needed}`)
   }
 
   check(pkg.private !== true, 'package.json: "private" must not be true (npm publish would be refused)')
@@ -115,6 +130,35 @@ if (pkg === null) {
     check(
       pkg.license === 'MIT',
       `package.json: "license" must be "MIT" to match LICENSE (found ${JSON.stringify(pkg.license)})`,
+    )
+  }
+
+  // 2b. Integration suite classification. The PR/release gate runs explicit lists because
+  // strict-mode coverage must differ per suite; a suite nobody lists silently stops running.
+  // Every test suite must therefore be in one of the shared group scripts, or explicitly
+  // owned by acceptance.yml.
+  const ACCEPTANCE_ONLY_SUITES = new Set(['test/integration/desktop.e2e.js'])
+  const GROUP_SCRIPTS = ['test:integration:local', 'test:integration:external']
+  const groupCommands = GROUP_SCRIPTS.map((name) => pkg.scripts?.[name])
+  for (const [index, name] of GROUP_SCRIPTS.entries()) {
+    check(
+      typeof groupCommands[index] === 'string' && groupCommands[index].trim() !== '',
+      `package.json: missing "${name}" script (CI and release share these suite lists)`,
+    )
+  }
+  const suiteText = groupCommands.filter((command) => typeof command === 'string').join('\n')
+  const suiteFiles = (await readdir(abs('test/integration'), { withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isFile() && /\.(?:test|e2e)\.js$/.test(entry.name))
+    .map((entry) => `test/integration/${entry.name}`)
+    .sort()
+  for (const file of suiteFiles) {
+    if (ACCEPTANCE_ONLY_SUITES.has(file)) {
+      pass()
+      continue
+    }
+    check(
+      suiteText.includes(file),
+      `${file}: no integration group runs this suite; add it to "test:integration:local" (no external harness) or "test:integration:external" (harness/browser) in package.json, or to ACCEPTANCE_ONLY_SUITES when acceptance.yml owns it`,
     )
   }
 
@@ -149,12 +193,28 @@ if (pkg === null) {
         `CHANGELOG.md: no "## [${version}]" heading for the released version`,
       )
     }
+
+    // The version the Host half reports at runtime has a second source in
+    // src/constants.js, with nothing but this check binding it to package.json.
+    const constants = await readText('src/constants.js')
+    if (constants === null) fail('src/constants.js: missing or unreadable (PLUGIN_VERSION cannot be verified)')
+    else {
+      // Anchored to a real top-level declaration: a commented-out or doc mention of
+      // PLUGIN_VERSION must not satisfy (or break) the version-parity check. A trailing
+      // `// comment` on the declaration line is allowed.
+      const declared =
+        /^\s*export\s+const\s+PLUGIN_VERSION\s*=\s*(['"])([^'"]+)\1(?:\s*\/\/.*)?\s*$/m.exec(constants)?.[2] ?? null
+      check(
+        declared === version,
+        `src/constants.js: PLUGIN_VERSION is ${JSON.stringify(declared)}, expected ${JSON.stringify(version)} from package.json; set PLUGIN_VERSION in src/constants.js to ${JSON.stringify(version)}`,
+      )
+    }
   }
 }
 
 // 4. Line hygiene
 const MAX_TEXT_BYTES = 1024 * 1024
-const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store'])
+const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store', 'artifacts'])
 const SKIPPED_PREFIXES = ['e2e/artifacts/', 'node_modules/', 'vendor/']
 const ROOT_DOTFILES =
   '.editorconfig .gitattributes .gitignore .nvmrc .node-version package.json index.js client.js'.split(' ')
@@ -244,16 +304,19 @@ for (const rel of [...hygieneFiles].sort()) {
 }
 for (const failure of hygieneFailures) fail(failure)
 
-// 5. Secret hygiene
+// 5. Secret hygiene. vendor/ stays out of scope: the vendored ssh2 bundle embeds a
+// test key literal that would otherwise be reported on every run.
 const SECRET_PATTERNS = [
-  ['private key block', /-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----/],
   ['GitHub token', /\bgh[pousr]_[A-Za-z0-9]{20,}/],
   ['npm token', /\bnpm_[A-Za-z0-9]{30,}/],
   ['AWS access key id', /\bAKIA[0-9A-Z]{16}\b/],
 ]
+// A bare PEM header is a fixture in the redaction/key-parsing tests; a real leaked key
+// carries a base64 body. Requiring a plausible body lets docs/ and test/ be scanned.
+const PRIVATE_KEY_BLOCK = /-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----[\s\S]{0,200}?[A-Za-z0-9+/]{40,}/
 
 const secretFiles = new Set(['client.js', 'index.js'])
-for (const dir of ['src', 'scripts', '.github']) {
+for (const dir of ['src', 'scripts', '.github', 'docs', 'test', 'e2e']) {
   for (const rel of await walk(dir, () => true)) secretFiles.add(rel)
 }
 
@@ -270,6 +333,12 @@ for (const rel of [...secretFiles].sort()) {
       hit = true
     })
     if (!hit) pass()
+  }
+  const key = PRIVATE_KEY_BLOCK.exec(text)
+  if (key === null) pass()
+  else {
+    const line = text.slice(0, key.index).split('\n').length
+    fail(`${rel}:${line}: possible private key block; remove the credential and rotate it`)
   }
 }
 

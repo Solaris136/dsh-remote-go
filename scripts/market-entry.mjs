@@ -3,20 +3,35 @@
 //   node scripts/market-entry.mjs --check   # validate only (CI / prepack gate)
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
+// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
+// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const checkOnly = process.argv.includes('--check')
 const INDEX_URL = process.env.DSH_REMOTE_GO_INDEX_URL || 'https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json'
 
-const REQUIRED_FILES = ['index.js', 'client.js', 'cordis.patch.yml', 'locale/en.json', 'locale/zh.json']
-const RUNTIME_SRC = `index api service ssh ssh-config known-hosts bootstrap node-runtime webapp probe tunnel
-store settings errors version util redact atomic-json layout constants local-version local-ssh host-runtime
-host-view diagnostics remote-proxy tools`
-  .split(/\s+/)
-  .map((name) => `src/${name}.js`)
+const REQUIRED_FILES = [
+  'index.js',
+  'client.js',
+  'cordis.patch.yml',
+  'locale/en.json',
+  'locale/zh.json',
+  'vendor/ssh2.bundle.cjs',
+  'vendor/THIRD_PARTY_NOTICES.md',
+  'README.md',
+  'LICENSE',
+]
+// Every src/*.js is runtime code that ships; discovering the directory keeps this gate
+// from silently skipping a module added after the last manual list edit (tools.js
+// arrived this way, as will the next module).
+const RUNTIME_SRC = (await readdir(path.join(root, 'src')))
+  .filter((name) => name.endsWith('.js'))
+  .sort()
+  .map((name) => `src/${name}`)
 
 function fail(message) {
   console.error(`[market-entry] ${message}`)
@@ -42,6 +57,11 @@ async function readJson(file) {
   return JSON.parse(await readFile(path.join(root, file), 'utf8'))
 }
 
+/**
+ * The market entry's publishTimestamp is the generation time (the current HEAD commit
+ * time), so it is reproducible only for a given commit; it is not a release-artifact
+ * constant. Regenerate the entry right before publishing.
+ */
 function commitTimestamp() {
   try {
     const out = execFileSync('git', ['log', '-1', '--format=%ct'], {
@@ -79,9 +99,22 @@ async function main() {
     if (!existsSync(path.join(root, file))) problems.push(`missing ${label}: ${file}`)
   }
   const files = pkg.files ?? []
-  for (const needed of ['index.js', 'client.js', 'src', 'locale', 'cordis.patch.yml']) {
-    if (!files.some((entry) => entry === needed || entry.startsWith(`${needed}/`)))
-      problems.push(`package.json files[] must include ${needed}`)
+  // A directory entry (`src`) covers its files; an explicit file stays exact. This keeps
+  // the assertion working whichever style package.json uses.
+  const ships = (needed) =>
+    files.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
+  for (const needed of [
+    'index.js',
+    'client.js',
+    'src',
+    'locale',
+    'cordis.patch.yml',
+    'vendor/ssh2.bundle.cjs',
+    'vendor/THIRD_PARTY_NOTICES.md',
+    'README.md',
+    'LICENSE',
+  ]) {
+    if (!ships(needed)) problems.push(`package.json files[] must include ${needed}`)
   }
   if (problems.length > 0) fail(problems.join('\n  - '))
 
@@ -133,28 +166,33 @@ async function main() {
     } catch (error) {
       fail(`official market-index validator rejected the entry: ${error.message}`)
     }
-    // The committed files are what a registry PR copies, so they are compared with
-    // the generated ones field by field: a stale listing fails here, not at publish.
+    // The committed files are what a registry PR copies, so the whole generated object is
+    // compared rather than a hand-picked field list: a stale listing fails here, not at
+    // publish. publishTimestamp is the generation-time commit stamp, so it is exempt from
+    // the object comparison (regenerating it before a release must not fail the gate); it
+    // is still required to be a plausible Unix timestamp.
     const drift = []
     const committedEntry = await readJson('market/plugin-entry.json')
     const committedIndex = await readJson('market/index.json')
     if (committedEntry === null) drift.push('market/plugin-entry.json is missing')
     if (committedIndex === null) drift.push('market/index.json is missing')
+    const withoutTimestamp = (value) =>
+      JSON.parse(JSON.stringify(value, (key, field) => (key === 'publishTimestamp' ? undefined : field)))
     const compare = (label, actual, expected) => {
       if (JSON.stringify(actual) !== JSON.stringify(expected))
-        drift.push(`${label} differs from locale/*.json (run: node scripts/market-entry.mjs)`)
+        drift.push(`${label} differs from the generated entry (run: node scripts/market-entry.mjs)`)
     }
-    if (committedEntry !== null) {
-      compare('market/plugin-entry.json title', committedEntry.title, entry.title)
-      compare('market/plugin-entry.json description', committedEntry.description, entry.description)
-      compare('market/plugin-entry.json name', committedEntry.name, entry.name)
-      compare('market/plugin-entry.json version', committedEntry.versions?.[0]?.version, pkg.version)
-      compare('market/plugin-entry.json engines.dsh', committedEntry.versions?.[0]?.engines?.dsh, pkg.engines.dsh)
-    }
-    if (committedIndex !== null) {
-      compare('market/index.json version', committedIndex.plugins?.[0]?.versions?.[0]?.version, pkg.version)
-      compare('market/index.json description', committedIndex.plugins?.[0]?.description, entry.description)
-    }
+    if (committedEntry !== null)
+      compare('market/plugin-entry.json', withoutTimestamp(committedEntry), withoutTimestamp(entry))
+    if (committedIndex !== null) compare('market/index.json', withoutTimestamp(committedIndex), withoutTimestamp(index))
+    const timestamp = committedEntry?.versions?.[0]?.publishTimestamp
+    if (!Number.isInteger(timestamp) || timestamp <= 0)
+      drift.push('market/plugin-entry.json versions[0].publishTimestamp must be a positive integer')
+    // The same field exists in the index copy; whole-object comparison strips it, so its
+    // presence and type must be asserted separately or a deleted field would pass.
+    const indexTimestamp = committedIndex?.plugins?.[0]?.versions?.[0]?.publishTimestamp
+    if (!Number.isInteger(indexTimestamp) || indexTimestamp <= 0)
+      drift.push('market/index.json plugins[0].versions[0].publishTimestamp must be a positive integer')
     if (drift.length > 0) fail(drift.join('\n  - '))
     console.log(
       `[market-entry] OK: ${pkg.name}@${pkg.version} (${REQUIRED_FILES.length + RUNTIME_SRC.length} runtime files checked, format-1 index validated, committed entries match)`,

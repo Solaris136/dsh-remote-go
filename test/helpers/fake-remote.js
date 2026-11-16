@@ -1,11 +1,35 @@
 import { EventEmitter } from 'node:events'
 import { Duplex } from 'node:stream'
 import { mkdtemp } from 'node:fs/promises'
+import { rm, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore } from '../../src/store.js'
 import { RemoteGoService } from '../../src/service.js'
-import { errors } from '../../src/errors.js'
+
+/**
+ * Temporary service directories created by `makeTestService`. `node --test` runs every
+ * file in its own child process, so one exit hook covers every suite: without it each
+ * unit-test run leaked a `dsh-remote-go-test-*` directory (and its hosts.json) into the
+ * OS temp directory.
+ */
+const tempDirs = new Set()
+
+process.once('exit', () => {
+  for (const dir of tempDirs) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3 })
+    } catch {}
+  }
+  tempDirs.clear()
+})
+
+/** Remove one service directory eagerly; also exported for tests that assert cleanup. */
+export async function cleanupTestService(result) {
+  if (!result?.dir || !tempDirs.has(result.dir)) return
+  tempDirs.delete(result.dir)
+  await rm(result.dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+}
 
 export function makeFacts(overrides = {}) {
   return {
@@ -54,23 +78,6 @@ export class FakeSsh extends EventEmitter {
     this.calls.push({ command, options })
     return this.execImpl(command, options)
   }
-  async readRemoteFile(remotePath, options = {}) {
-    const maxBytes = options.maxBytes ?? 64 * 1024 * 1024
-    const content = this.files instanceof Map ? this.files.get(remotePath) : this.files[remotePath]
-    if (content === undefined) {
-      const error = new Error('No such file')
-      error.code = 2
-      throw error
-    }
-    if (Buffer.isBuffer(content) ? content.length > maxBytes : String(content).length > maxBytes) {
-      throw errors.remoteFileUnavailable({
-        zh: '模拟文件超过下载上限。',
-        en: 'The fixture file exceeds the download limit.',
-      })
-    }
-    const data = Buffer.isBuffer(content) ? Buffer.from(content) : Buffer.from(String(content), 'utf8')
-    return { data, size: data.length }
-  }
   async forwardOut() {
     return new Duplex({
       read() {},
@@ -115,6 +122,7 @@ export function managedNodeFixture(version = '24.9.0') {
 
 export async function makeTestService(overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-'))
+  tempDirs.add(dir)
   const store = new HostStore({ dir, logger: { warn() {}, info() {}, debug() {}, error() {} } })
   const events = []
   const facts = overrides.facts ?? makeFacts()
@@ -201,7 +209,9 @@ export async function makeTestService(overrides = {}) {
     tunnelRepairSettleMs: overrides.tunnelRepairSettleMs ?? 1000,
   })
   await service.init()
-  return { service, store, dir, events, facts }
+  const result = { service, store, dir, events, facts }
+  result.cleanup = () => cleanupTestService(result)
+  return result
 }
 
 export async function waitFor(predicate, options = {}) {

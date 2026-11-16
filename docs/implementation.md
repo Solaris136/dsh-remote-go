@@ -7,7 +7,7 @@ dsh-remote-go
 ├─ index.js                 包入口：再导出 src/index.js
 ├─ client.js                浏览器半端（单文件、无构建、window.__ModuleLoader__ 注册）
 ├─ cordis.patch.yml         bundle 的 profile patch
-├─ vendor/                  ssh2 与 js-yaml 的单文件 bundle（运行时零依赖）
+├─ vendor/                  ssh2 的单文件 bundle（运行时零依赖；js-yaml 只是 devDependency）
 ├─ package.json             dsh.bundle.patch + dsh.client（web / immediately / inject）
 ├─ src/
 │  ├─ index.js              Host 插件入口：挂 API 与同源远端代理、注册模型工具、初始化 service、探测本机版本
@@ -228,12 +228,14 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | 代理端到端 | `test/integration/remote-proxy.test.js` | 隔离 `dsh web` 实例 → 同源代理 → 真实首页 / 插件资源 / WebSocket 升级 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` / `browser-carrier.test.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 主题；浏览器载体 → 真实远端页面 + 注入主机条 + 本地意图 + 能力桥（真实点击链接触发顶层新标签、frame 内复制写入真实剪贴板并回执、按 hostId 分区的 localStorage） |
 
-四条结构性约定（全部由 `test/unit/guards.test.js` 扫描源码强制）：
+五条结构性约定（全部由 `test/unit/guards.test.js` 扫描源码强制；浏览器半端的行为用例在
+`test/unit/client.test.js`，两个测试文件共同守住 `client.js`）：
 
 1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.js`。
 2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，条目失效判失败。
 3. `e2e-child-process`：所有测试/脚本子进程必须 `windowsHide`。
 4. `client-styles`：样式注释必须闭合、界面选择器必须有生效声明块；禁止 `--drg-*` 自有 token 与颜色字面量（含 `var()` 兜底）；对话框 / 菜单 / 输入框必须用宿主 Dialog / MenuSurface / 字段的 token 组合；引用的 `--dsw-*` 必须在白名单里。
+5. `client-compat`：`client.js` 只 `require('react')`、不 import Host 半端、不碰 Electron 专属能力；开新窗口只有一个能力桥调用点（先把 URL 收窄成 http(s)），剪贴板写入必须能力检测。
 
 ## 9. 维护约定
 - 文档引用**符号**，不写行号；重构后跑 `pnpm run verify` 发现断链。

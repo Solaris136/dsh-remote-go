@@ -13,6 +13,16 @@ export function skipOrFail(t, reason) {
   t.skip(reason)
 }
 
+// Puppeteer's waitForFunction polls with requestAnimationFrame by default, and Chromium
+// pauses rAF for background pages: a guest that had already booted could sit out the whole
+// timeout. Timer polling is throttled in the background but never stopped, so every E2E
+// readiness check goes through this helper instead of rAF.
+export const POLLING_MS = 250
+
+export function waitFor(page, predicate, options = {}, ...args) {
+  return page.waitForFunction(predicate, { polling: POLLING_MS, ...options }, ...args)
+}
+
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }

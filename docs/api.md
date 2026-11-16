@@ -21,13 +21,13 @@
 > 供远端文件树的“下载”菜单使用（桌面 guest 会话禁止 Chromium 自带下载）。
 > 只接受绝对 POSIX 路径，错误码 `remote-file-unavailable`。
 >
-> **v2.6 变更**：下载统一改为 Host 流式写入本地目录，不再提供二进制下载端点
-> `GET /hosts/:id/file` 与 `GET /downloads/:id`；`POST /downloads` 对文件和文件夹都要求
-> `destination`，并直接返回实际写入路径。单文件与文件夹都不设大小/数量上限。
->
 > **v2.5 变更**：新增下载任务 `POST /downloads`、`GET /downloads/:id/status`、
 > `DELETE /downloads/:id`；SSE 增加 `download` 事件。`GET /hosts/:id/file` 与
 > `GET /downloads/:id` 只存在于 v2.5，已在 v2.6 移除。
+>
+> **v2.6 变更**：下载统一改为 Host 流式写入本地目录，不再提供二进制下载端点
+> `GET /hosts/:id/file` 与 `GET /downloads/:id`；`POST /downloads` 对文件和文件夹都要求
+> `destination`，并直接返回实际写入路径。单文件与文件夹都不设大小/数量上限。
 >
 > **v2.7 变更**：`GET /hosts/:id/open` 增加同源 `webUrl`，供浏览器半端在
 > `/dsh-remote-go/remote/<hostId>/` 承载远端界面；新增该前缀下的同源反向代理（含

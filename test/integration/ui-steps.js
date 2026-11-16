@@ -1,3 +1,5 @@
+import { waitFor } from './harness-support.js'
+
 const SELECTOR_TIMEOUT_MS = 60_000
 
 export async function waitForSelector(page, selector, timeout = SELECTOR_TIMEOUT_MS) {
@@ -31,8 +33,7 @@ export async function clickInDialog(page, target) {
 export async function dismissOpenDialog(page, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10_000
   const dialogGone = async () =>
-    await page
-      .waitForFunction(() => document.querySelector('[role="dialog"]') === null, { timeout: timeoutMs })
+    await waitFor(page, () => document.querySelector('[role="dialog"]') === null, { timeout: timeoutMs })
       .then(() => true)
       .catch(() => false)
   if (!(await page.$('[role="dialog"]'))) return true
@@ -70,7 +71,7 @@ export async function closeManageWindow(page) {
     const close = win ? win.querySelector('.drg-modal-head button') : null
     if (close) close.click()
   })
-  await page.waitForFunction(() => !document.querySelector('[data-testid="manage-window"]'), { timeout: 20_000 })
+  await waitFor(page, () => !document.querySelector('[data-testid="manage-window"]'), { timeout: 20_000 })
 }
 
 const reducedMotionPages = new WeakSet()
@@ -85,18 +86,13 @@ export async function applyColorScheme(page, scheme, previousBodyBackground) {
   const features = [{ name: 'prefers-color-scheme', value: scheme }]
   if (reducedMotionPages.has(page)) features.push({ name: 'prefers-reduced-motion', value: 'reduce' })
   await page.emulateMediaFeatures(features)
-  await page.waitForFunction(
-    (value) => matchMedia(`(prefers-color-scheme: ${value})`).matches,
-    { timeout: 20_000 },
-    scheme,
-  )
+  await waitFor(page, (value) => matchMedia(`(prefers-color-scheme: ${value})`).matches, { timeout: 20_000 }, scheme)
   if (previousBodyBackground) {
-    await page
-      .waitForFunction(
-        (previous) => getComputedStyle(document.body).backgroundColor !== previous,
-        { timeout: 20_000 },
-        previousBodyBackground,
-      )
-      .catch(() => {})
+    await waitFor(
+      page,
+      (previous) => getComputedStyle(document.body).backgroundColor !== previous,
+      { timeout: 20_000 },
+      previousBodyBackground,
+    ).catch(() => {})
   }
 }

@@ -6,7 +6,7 @@
 发布前在干净工作区跑与 CI 相同的门禁：
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 单测 + 集成
+pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 覆盖率 + 单测 + 集成
 ```
 端到端（非必需门禁，需要本机浏览器/桌面端）：`pnpm run test:web` / `pnpm run test:desktop`。
 
@@ -18,7 +18,7 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 | `dsh.bundle.patch` | 作为 DSH bundle 被安装/启用的入口 |
 | `dsh.client` | 浏览器半端声明（platform: web） |
 | `engines.dsh` / `engines.node` | 兼容区间；安装与启动都用运行版本校验 |
-| `files[]` | 必须含 `index.js`、`client.js`、`src`、`locale`、`cordis.patch.yml` |
+| `files[]` | 必须含 `index.js`、`client.js`、`src`、`locale`、`cordis.patch.yml`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、`README.md`、`LICENSE` |
 | `license` / `repository` / `homepage` / `bugs` / `keywords` | 市场展示、收录与问题反馈入口 |
 | `packageManager` | 固定 pnpm 版本，CI 与本地一致 |
 
@@ -26,7 +26,9 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 1. 确认 `main` 最新且 CI 全绿。
 2. 按 SemVer 更新 `package.json` 的 `version`（预发布可用 `-rc.N`）。
 3. 把 `CHANGELOG.md` 中 `## [Unreleased]` 的内容整理进新的 `## [x.y.z] - YYYY-MM-DD` 小节，并更新文件末尾的链接引用。
-4. 重新生成市场条目（发布时间取自最近一次 git commit，结果可复现）：`pnpm run market:entry`（写 `market/plugin-entry.json` 与 `market/index.json`）与 `pnpm run market:check`（校验；prepack 也会跑）。
+4. 重新生成市场条目：`pnpm run market:entry`（写 `market/plugin-entry.json` 与 `market/index.json`）。
+   `publishTimestamp` 是**生成时刻**（当前 HEAD 的提交时间），只对同一提交可复现，所以发布前必须重跑；
+   `pnpm run market:check`（prepack 也会跑）对整个条目逐字段比对，只豁免这个时间戳。
 5. 提交并推送：`chore(release): v<x.y.z>`。
 6. 推送到 `release` 分支：`git push origin release`（或把 `main` 合并/快进到 `release` 后再推送）。
 
@@ -34,7 +36,10 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 
 ## 2. 通过 GitHub Actions 发布（推荐）
 推送到 `release` 分支后，[`release.yml`](../.github/workflows/release.yml) 依次：
-1. 检出代码、安装依赖（`--frozen-lockfile --ignore-scripts`），跑发布门禁（`lint` / `check:syntax` / `check:workflows` / `market:check` / `pack:check` / `test:unit`）。
+1. 检出代码、安装依赖（`--frozen-lockfile --ignore-scripts`），用 `pnpm run build:vendor` + `git diff --exit-code -- vendor/`
+   确认提交的 vendor 产物可从锁定的 ssh2 重建；安装按 `engines.dsh` 解析出的 DSH harness 与 Chrome，然后跑与 PR
+   完全相同的门禁：`pnpm run gate`（仓库规范 / 格式 / 语法 / workflow / 市场条目 / 打包 / 覆盖率）+ 无外部依赖组
+   `pnpm run test:integration:local` + 严格模式（`DSH_E2E_STRICT=1`）的 `pnpm run test:integration:external`。
 2. 从 `package.json` 读取版本；`npm view <name>@<version>` 已存在则跳过发布（只补 tag / Release）。
 3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）。
 4. `npm publish --access public`：npm CLI 用工作流的 OIDC 身份完成认证（`id-token: write`），provenance 自动生成，**不需要任何 token**。
@@ -92,7 +97,9 @@ PR 条目的中英标题与描述**不要手抄**：它们由 `locale/zh.json` /
 > 本仓库是插件本身，不是市场应用；不要向市场应用仓库提插件条目。
 
 ## 5. 发布物内容与安全性
-- tarball 只含运行时文件（`index.js`、`client.js`、`src/`、`vendor/`、`locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、研究资料（`scripts/pack-check.mjs` 校验）。
+- tarball 只含运行时文件（`index.js`、`client.js`、`src/`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、
+  `locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、构建输入（`vendor/ssh2-entry.mjs`）与研究资料
+  （`scripts/pack-check.mjs` 校验）。
 - 运行时依赖为空（`dependencies: {}`）；`ssh2` 以 vendored bundle 随包发布，安装不拉取任何依赖。
 - 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；令牌/密码/私钥绝不落盘（详见 README 安全节）。
 

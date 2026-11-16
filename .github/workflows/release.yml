@@ -21,6 +21,9 @@ permissions:
 
 env:
   PACKAGE_NAME: dsh-remote-go
+  # Same rule as the PR gate: a missing browser/harness fails the release, it does not skip
+  # the E2E suites the PR was required to pass.
+  DSH_E2E_STRICT: '1'
 
 jobs:
   release:
@@ -48,23 +51,49 @@ jobs:
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Lint repository conventions
-        run: pnpm run lint
+      - name: Rebuild vendored ssh2 bundle and require a clean tree
+        run: |
+          pnpm run build:vendor
+          git diff --exit-code -- vendor/
 
-      - name: Syntax check
-        run: pnpm run check:syntax
+      - name: Resolve the DSH harness version
+        id: harness-version
+        # engines.dsh is the compatibility floor; the release verifies against exactly the
+        # harness the PR gate and acceptance install.
+        run: |
+          version="$(node scripts/harness-version.mjs)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Validate workflow YAML
-        run: pnpm run check:workflows
+      # Same harness install as the PR gate: npm, because the harness needs its native
+      # addon built and npm runs install scripts without pnpm's build-approval gate.
+      - name: Install the DSH harness
+        env:
+          DSH_HARNESS_VERSION: ${{ steps.harness-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/harness"
+          cd "$RUNNER_TEMP/harness"
+          npm init -y >/dev/null
+          npm install --no-fund --no-audit --loglevel=error "@deepseek-ai/dsh@$DSH_HARNESS_VERSION"
+          node node_modules/@deepseek-ai/dsh/lib/bin.js --version
 
-      - name: Validate bundle metadata and market index entry
-        run: pnpm run market:check
+      - name: Setup Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
 
-      - name: Check file coverage
-        run: pnpm run pack:check
+      # The release gate is identical to the PR `Verify` job: the repository/coverage
+      # checks, then both strict integration groups. It used to run only the unit tests.
+      - name: Repository gate (same checks as the PR)
+        run: pnpm run gate
 
-      - name: Unit tests (Host + Client)
-        run: pnpm run test:unit
+      - name: Integration tests (no external harness, strict)
+        run: pnpm run test:integration:local
+
+      - name: Browser and harness E2E (strict)
+        env:
+          DSH_CLI_JS: ${{ runner.temp }}/harness/node_modules/@deepseek-ai/dsh/lib/bin.js
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: pnpm run test:integration:external
 
       - name: Read the version to release
         id: version

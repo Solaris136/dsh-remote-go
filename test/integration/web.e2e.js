@@ -22,6 +22,7 @@ import {
   skipOrFail,
   stopChild,
   tail,
+  waitFor,
   writeFailureArtifacts,
 } from './harness-support.js'
 import { dismissOpenDialog, openManageWindow } from './ui-steps.js'
@@ -193,9 +194,10 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
     await page.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
     await t.test('the app shell loads and the launch token becomes a clean URL', async () => {
-      await page.waitForFunction(() => !location.search.includes('token='), { timeout: 60_000 })
+      await waitFor(page, () => !location.search.includes('token='), { timeout: 60_000 })
       assert.equal(new URL(page.url()).search, '')
-      await page.waitForFunction(
+      await waitFor(
+        page,
         () => document.querySelector('[aria-label="账号菜单"], [aria-label="Account menu"]') !== null,
         { timeout: 60_000 },
       )
@@ -356,7 +358,8 @@ test('dsh web renders the host-management window with legible buttons', { timeou
           for (const name of names) document.body.style.removeProperty(name)
         }, Object.keys(overrides))
       }
-      await page.waitForFunction(
+      await waitFor(
+        page,
         (previous) => {
           const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
           return dialog !== null && getComputedStyle(dialog).backgroundColor === previous
