@@ -32,6 +32,7 @@ function loadClientPlugin(options = {}) {
     fetch: options.fetch,
     dshDesktop: options.desktop,
     document: options.document,
+    open: options.open,
     innerHeight: 800,
     __ModuleLoader__: {
       load(declaration) {
@@ -117,6 +118,7 @@ function fakeDocument(options = {}) {
       get firstChild() {
         return this.children.length > 0 ? this.children[0] : null
       },
+      select() {},
     }
     return node
   }
@@ -129,6 +131,7 @@ function fakeDocument(options = {}) {
     listeners: {},
     createElement: create,
     createElementNS: (namespace, tag) => create(tag),
+    execCommand: options.execCommand,
     addEventListener(type, handler) {
       this.listeners[type] = handler
     },
@@ -142,8 +145,94 @@ function fire(node, type, event) {
   for (const handler of node.listeners[type] || []) handler(event)
 }
 
+/** A click target for the capability bridge: an anchor, or the plugin's own download item. */
+function fakeLinkTarget(anchor, options = {}) {
+  const element = {
+    closest(selector) {
+      if (selector === '[data-drg-dir-download]') return options.ownDownload === true ? element : null
+      if (selector === 'a[href]') return anchor
+      return null
+    },
+  }
+  return element
+}
+
+function fakeAnchor(attributes) {
+  return {
+    attributes,
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null
+    },
+    hasAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name)
+    },
+  }
+}
+
+/** A click as the browser reports it: primary button, no modifiers unless overridden. */
+function fakeClick(target, overrides = {}) {
+  const event = {
+    target,
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    defaultPrevented: false,
+    prevented: false,
+    stopped: false,
+    preventDefault() {
+      this.defaultPrevented = true
+      this.prevented = true
+    },
+    stopPropagation() {
+      this.stopped = true
+    },
+    ...overrides,
+  }
+  return event
+}
+
+/** One origin's `localStorage`, shared by two framed pages the way a real same-origin frame is. */
+function fakeStorage() {
+  const map = new Map()
+  return {
+    map,
+    get length() {
+      return map.size
+    },
+    key(index) {
+      const keys = [...map.keys()]
+      return index >= 0 && index < keys.length ? keys[index] : null
+    },
+    getItem(key) {
+      const name = String(key)
+      return map.has(name) ? map.get(name) : null
+    },
+    setItem(key, value) {
+      map.set(String(key), String(value))
+    },
+    removeItem(key) {
+      map.delete(String(key))
+    },
+  }
+}
+
+/** A guest window with a recording `addEventListener`, for the storage partition. */
+function fakeGuestWindow(storage) {
+  const win = {
+    localStorage: storage,
+    listeners: {},
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    },
+  }
+  return win
+}
+
 /** The framed page's own document: enough shape for the injected row and file bridge. */
-function fakeFrameDocument() {
+function fakeFrameDocument(options = {}) {
   const create = (tag) => {
     const node = {
       tagName: String(tag).toUpperCase(),
@@ -191,6 +280,7 @@ function fakeFrameDocument() {
       get firstChild() {
         return this.children.length > 0 ? this.children[0] : null
       },
+      select() {},
     }
     return node
   }
@@ -199,11 +289,17 @@ function fakeFrameDocument() {
   return {
     head,
     body,
+    baseURI: options.baseURI || 'http://127.0.0.1:1/dsh-remote-go/remote/h_a/',
     documentElement: create('html'),
     createElement: create,
     createElementNS: (_namespace, tag) => create(tag),
+    execCommand: options.execCommand,
     querySelectorAll: () => [],
-    addEventListener() {},
+    listeners: {},
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    },
     removeEventListener() {},
   }
 }
@@ -705,11 +801,17 @@ test('client code never logs and never persists remote URLs / tokens', () => {
   assert.match(SOURCE, /url\.startsWith\(LOOPBACK_PREFIX\)/)
 })
 
-test('the client embeds the remote page only in the browser carrier and opens no extra window', () => {
+test('the client embeds the remote page only in the browser carrier and opens no window of its own', () => {
   // The desktop path still hands the remote page to the shell guest: no React iframe, no sandbox.
   assert.doesNotMatch(SOURCE, /h\(\s*'iframe'/, 'no iframe element may be rendered by React')
   assert.doesNotMatch(SOURCE, /IFRAME_SANDBOX/)
-  assert.doesNotMatch(SOURCE, /window\.open\s*\(/, 'the client must not open an external window')
+  assert.doesNotMatch(SOURCE, /window\.open\s*\(/, 'the global window.open must never be called')
+  // The one new-window call site is the capability bridge's: a link the user clicked inside the
+  // framed page, after `externalUrlOf` reduced it to an http(s) URL with a host and no credentials.
+  assert.equal((SOURCE.match(/_blank/g) ?? []).length, 1, 'exactly one new-window call site')
+  assert.match(SOURCE, /win\.open\(url, '_blank', 'noopener,noreferrer'\)/)
+  assert.match(SOURCE, /function externalUrlOf\(value\)/)
+  assert.match(SOURCE, /function openExternalUrl\(value\)/)
   assert.doesNotMatch(SOURCE, /sandbox:?\s*['"]allow-scripts/, 'no iframe sandbox attribute may remain')
   assert.doesNotMatch(SOURCE, /RemoteViewport/, 'the embedded viewport component must be gone')
   // The browser carrier is the only frame seat, and it is fed a checked same-origin view path.
@@ -1780,6 +1882,259 @@ test('the browser carrier frames the proxied view and injects the switcher there
   } finally {
     await local.carrier.close()
   }
+})
+
+/**
+ * A live browser carrier with the capability bridge installed into a framed page. `execCommand`
+ * is this (top-level) document's clipboard fallback; `frameExecCommand` is the frame's own.
+ */
+async function framedCarrier(options = {}) {
+  const execCalls = []
+  const doc = fakeDocument({
+    execCommand:
+      options.execCommand === undefined
+        ? () => {
+            execCalls.push('copy')
+            return true
+          }
+        : options.execCommand,
+  })
+  const opened = []
+  const local = loadClientPlugin({
+    document: doc,
+    URL,
+    open:
+      options.open === undefined
+        ? (...args) => {
+            opened.push(args)
+            return { closed: false }
+          }
+        : options.open,
+  })
+  const { calls } = runApply(local)
+  const face = calls.registers.find((entry) => entry.options.name === 'shell.overlay').options.inject()
+  const hostId = options.hostId === undefined ? 'h_a' : options.hostId
+  await local.carrier.open({ hostId, url: `/dsh-remote-go/remote/${hostId}/?token=abc` })
+  const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-' + hostId)
+  const frame = root.children.find((node) => node.tagName === 'IFRAME')
+  const frameNative = []
+  const frameWindow = {
+    document: fakeFrameDocument({ execCommand: options.frameExecCommand }),
+    innerWidth: 1200,
+    innerHeight: 800,
+    URL,
+    location: {
+      origin: 'http://127.0.0.1:1',
+      href: `/dsh-remote-go/remote/${hostId}/`,
+    },
+    navigator: {
+      clipboard: {
+        writeText: async (text) => {
+          frameNative.push(text)
+          throw new Error('Document is not focused.')
+        },
+      },
+    },
+    open: (...args) => {
+      frameNative.push(args)
+      return { native: true }
+    },
+  }
+  frame.contentWindow = frameWindow
+  fire(frame, 'load', {})
+  return { local, face, doc, frame, frameWindow, opened, execCalls, frameNative }
+}
+
+test('the capability bridge opens external links from the frame at the top level', async () => {
+  const { frame, frameWindow, opened, face } = await framedCarrier()
+  assert.equal(frameWindow.__drgCapabilityBridge, true, 'the bridge must be installed with the frame')
+  // `allow` can only narrow, but it still has to name what the remote page may legitimately use.
+  for (const token of ['clipboard-read', 'clipboard-write', 'microphone', 'fullscreen', 'popups']) {
+    assert.match(frame.attributes.allow, new RegExp(`\\b${token}\\b`), `the frame must declare ${token}`)
+  }
+
+  const external = fakeClick(fakeLinkTarget(fakeAnchor({ href: 'https://example.com/report' })))
+  fire(frameWindow.document, 'click', external)
+  assert.equal(external.prevented, true, 'the frame cannot navigate itself to an external page')
+  assert.equal(external.stopped, true, 'the page’s own handler must not open a nested browser tab instead')
+  assert.deepEqual(opened.at(-1), ['https://example.com/report', '_blank', 'noopener,noreferrer'])
+
+  // Only a web URL leaves the frame: a script/data URL, a relative path and a same-origin link
+  // are the framed application's own business.
+  const javascriptUrl = fakeClick(fakeLinkTarget(fakeAnchor({ href: 'javascript:alert(1)' })))
+  fire(frameWindow.document, 'click', javascriptUrl)
+  assert.equal(javascriptUrl.prevented, false)
+  const relative = fakeClick(fakeLinkTarget(fakeAnchor({ href: '/sessions/current' })))
+  fire(frameWindow.document, 'click', relative)
+  assert.equal(relative.prevented, false)
+  const sameOrigin = fakeClick(
+    fakeLinkTarget(fakeAnchor({ href: 'http://127.0.0.1:1/dsh-remote-go/remote/h_a/settings' })),
+  )
+  fire(frameWindow.document, 'click', sameOrigin)
+  assert.equal(sameOrigin.prevented, false, 'the framed app keeps its own same-origin navigation')
+  // The plugin's own file-menu entry is not a navigation.
+  const ownItem = fakeClick(fakeLinkTarget(fakeAnchor({ href: 'https://example.com/x' }), { ownDownload: true }))
+  fire(frameWindow.document, 'click', ownItem)
+  assert.equal(ownItem.prevented, false, 'the download entry the plugin injected must keep working')
+
+  // A modified or non-primary click is the user asking for the browser's own behaviour
+  // (background tab, new window, middle-click): the bridge must leave it alone.
+  const narrowed = opened.length
+  for (const gesture of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+    const modified = fakeClick(fakeLinkTarget(fakeAnchor({ href: 'https://example.com/modified' })), gesture)
+    fire(frameWindow.document, 'click', modified)
+    assert.equal(modified.prevented, false, `a ${JSON.stringify(gesture)} click keeps the browser default`)
+  }
+  assert.equal(opened.length, narrowed, 'no modified or middle click may become a bridge intent')
+
+  // `window.open` in the frame turns into the same intent and returns no window.
+  assert.equal(frameWindow.open('https://example.com/tab'), null)
+  assert.deepEqual(opened.at(-1), ['https://example.com/tab', '_blank', 'noopener,noreferrer'])
+  // `about:blank` is the account login's popup skeleton: it has no URL to hand over.
+  const blank = frameWindow.open('about:blank')
+  assert.equal(blank.native, true, 'a blank popup still goes to the browser')
+
+  // A sink call is the trust boundary: an unsafe URL is refused and said out loud, not opened.
+  const before = opened.length
+  frameWindow.__drgBridgeSink({ action: 'open-external', url: 'javascript:alert(1)' })
+  assert.equal(opened.length, before, 'no external window may be opened for a non-web URL')
+  assert.deepEqual(
+    { ...face.toolStore.take() },
+    {
+      kind: 'notice',
+      tone: 'error',
+      text: '无法打开这个链接：只支持 http 或 https 外链。',
+    },
+  )
+})
+
+test('the capability bridge performs the clipboard write at the top level and answers the frame', async () => {
+  const success = await framedCarrier()
+  const copied = await success.frameWindow.navigator.clipboard.writeText('code block text')
+  assert.equal(copied, undefined, 'a successful write resolves the page’s `writeText`')
+  assert.deepEqual(success.execCalls, ['copy'], 'the top-level document is the one that writes')
+  assert.deepEqual(success.frameNative, [], 'the frame’s own refused clipboard API is not used')
+
+  // The top-level write fails: the frame's own legacy copy is the next resort…
+  const legacy = await framedCarrier({ execCommand: () => false, frameExecCommand: () => true })
+  assert.equal(await legacy.frameWindow.navigator.clipboard.writeText('fallback'), undefined)
+
+  // …and when that fails too the page learns it, and so does the user.
+  const refused = await framedCarrier({ execCommand: () => false, frameExecCommand: () => false })
+  await assert.rejects(refused.frameWindow.navigator.clipboard.writeText('nope'), /clipboard-write-failed/)
+  assert.deepEqual(
+    { ...refused.face.toolStore.take() },
+    {
+      kind: 'notice',
+      tone: 'error',
+      text: '复制失败：远端界面没能写入剪贴板。',
+    },
+  )
+})
+
+test('the notify intent reuses the shell toast channel', async () => {
+  const { frameWindow, face } = await framedCarrier()
+  frameWindow.__drgBridgeSink({ action: 'notify', tone: 'error', code: 'clipboard-failed' })
+  assert.deepEqual(
+    { ...face.toolStore.take() },
+    {
+      kind: 'notice',
+      tone: 'error',
+      text: '复制失败：远端界面没能写入剪贴板。',
+    },
+  )
+  // A tone that is not a toast tone is shown as information, not as a second error style.
+  // Free text is the framed page's own message, so it always names its origin.
+  frameWindow.__drgBridgeSink({ action: 'notify', text: '远端页面自己的一句话' })
+  assert.deepEqual(
+    { ...face.toolStore.take() },
+    {
+      kind: 'notice',
+      tone: 'info',
+      text: '远端界面：远端页面自己的一句话',
+    },
+  )
+})
+
+test('the desktop guest runs the same bridge script through the queue and the reply slot', async () => {
+  const local = loadClientPlugin({ document: fakeDocument() })
+  const factory = new Function('window', 'return ' + local.carrier.capabilities())
+  const guestWindow = {
+    document: fakeFrameDocument(),
+    innerHeight: 800,
+    URL,
+    location: { origin: 'http://127.0.0.1:2', href: 'http://127.0.0.1:2/' },
+    navigator: { clipboard: { writeText: async () => undefined } },
+    open: (...args) => ({ native: true, args }),
+  }
+  assert.equal(factory(guestWindow), 'installed')
+  assert.equal(factory(guestWindow), 'already', 'a second load stop must not stack another bridge')
+
+  assert.equal(guestWindow.open('https://example.com/queued'), null)
+  assert.deepEqual(
+    guestWindow.__drgBridgeQueue.map((intent) => intent.action),
+    ['open-external'],
+  )
+  assert.equal(guestWindow.__drgBridgeQueue[0].url, 'https://example.com/queued')
+  assert.equal(guestWindow.open('about:blank').native, true)
+
+  // The desktop carrier cannot call into the guest: it answers through `__drgCapabilityReply`.
+  const pending = guestWindow.navigator.clipboard.writeText('desktop text')
+  const intent = guestWindow.__drgBridgeQueue.find((entry) => entry.action === 'clipboard-write')
+  assert.ok(intent && typeof intent.id === 'string' && intent.id !== '')
+  assert.equal(intent.text, 'desktop text')
+  assert.equal(guestWindow.__drgCapabilityReply({ id: intent.id, ok: true }), true)
+  assert.equal(await pending, undefined)
+  assert.equal(guestWindow.__drgCapabilityReply({ id: intent.id, ok: true }), false, 'a receipt is one-shot')
+})
+
+test('the frame gets its own localStorage namespace per host', async () => {
+  const local = loadClientPlugin({ document: fakeDocument() })
+  const raw = fakeStorage()
+  const first = fakeGuestWindow(raw)
+  const second = fakeGuestWindow(raw)
+  assert.equal(local.carrier.partition(first, 'h_a'), 'installed')
+  assert.equal(local.carrier.partition(second, 'h_b'), 'installed')
+  assert.equal(local.carrier.partition(first, 'h_a'), 'already')
+  assert.equal(local.carrier.partition({ localStorage: raw }, 'bad id'), 'bad-id')
+
+  first.localStorage.setItem('dsh.keybindings.v1', 'remote')
+  second.localStorage.setItem('dsh.keybindings.v1', 'other')
+  assert.equal(first.localStorage.getItem('dsh.keybindings.v1'), 'remote')
+  assert.equal(second.localStorage.getItem('dsh.keybindings.v1'), 'other', 'two hosts never share a key')
+  assert.equal(raw.getItem('dsh.keybindings.v1'), null, 'the local page keeps its own key untouched')
+  assert.equal(raw.getItem('drg:h_a:dsh.keybindings.v1'), 'remote')
+  assert.equal(raw.getItem('drg:h_b:dsh.keybindings.v1'), 'other')
+  assert.equal(first.localStorage.length, 1)
+  assert.equal(first.localStorage.key(0), 'dsh.keybindings.v1')
+  assert.equal(first.localStorage.key(1), null)
+
+  // Clearing one host's namespace must not clear the origin.
+  raw.setItem('local-only', 'keep')
+  first.localStorage.clear()
+  assert.equal(first.localStorage.getItem('dsh.keybindings.v1'), null)
+  assert.equal(second.localStorage.getItem('dsh.keybindings.v1'), 'other')
+  assert.equal(raw.getItem('local-only'), 'keep')
+
+  // A live `storage` event raised by the local page must not drive the remote UI.
+  const foreign = {
+    key: 'dsh.keybindings.v1',
+    stopped: false,
+    stopImmediatePropagation() {
+      this.stopped = true
+    },
+  }
+  for (const handler of first.listeners.storage || []) handler(foreign)
+  assert.equal(foreign.stopped, true)
+  const own = {
+    key: 'drg:h_a:dsh.keybindings.v1',
+    stopped: false,
+    stopImmediatePropagation() {
+      this.stopped = true
+    },
+  }
+  for (const handler of first.listeners.storage || []) handler(own)
+  assert.equal(own.stopped, false, 'this host’s own updates must still reach the page')
 })
 
 test('the disconnect handover reads the live window target, not the mount-time one', () => {

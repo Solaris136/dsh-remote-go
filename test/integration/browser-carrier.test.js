@@ -343,6 +343,11 @@ window.ReactDOM = { createRoot }`,
         headless: 'new',
         args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
       })
+      // The carrier test reads the clipboard back to prove the write landed; headless Chromium
+      // grants that only through an explicit permission override.
+      await browser
+        .defaultBrowserContext()
+        .overridePermissions(`http://127.0.0.1:${localPort}`, ['clipboard-read', 'clipboard-write'])
       const page = await browser.newPage()
       const errors = []
       page.on('console', (message) => {
@@ -408,6 +413,133 @@ window.ReactDOM = { createRoot }`,
       assert.match(frameState.base, /\/dsh-remote-go\/remote\/h_a\/$/)
       assert.ok(frameState.rootChildren > 0, 'the real remote app must render')
       assert.equal(frameState.rowName, 'Test remote')
+
+      // --- capability bridge, in a real browser against the real framed remote UI -------------
+      // The frame declares what the remote page may use itself, and the injected bridge put the
+      // capability shims and the per-host store in place.
+      const capabilities = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const win = frame.contentWindow
+        // The bridge opens its links on this document; record them instead of opening a tab.
+        window.__opened = []
+        window.__nativeOpen = window.open
+        window.open = (...args) => {
+          window.__opened.push(args)
+          return { closed: false }
+        }
+        const doc = win.document
+        const link = doc.createElement('a')
+        link.id = 'drg-e2e-link'
+        link.href = 'https://example.com/from-frame'
+        link.textContent = 'external link'
+        link.style.cssText =
+          'position:fixed;left:12px;top:12px;z-index:2147483647;padding:10px;background:#fff;color:#000'
+        doc.body.appendChild(link)
+        const scriptLink = doc.createElement('a')
+        scriptLink.id = 'drg-e2e-script-link'
+        scriptLink.href = 'javascript:void 0'
+        scriptLink.textContent = 'not a web link'
+        scriptLink.style.cssText =
+          'position:fixed;left:12px;top:60px;z-index:2147483647;padding:10px;background:#fff;color:#000'
+        doc.body.appendChild(scriptLink)
+        const copy = doc.createElement('button')
+        copy.id = 'drg-e2e-copy'
+        copy.textContent = 'copy'
+        copy.style.cssText =
+          'position:fixed;left:12px;top:108px;z-index:2147483647;padding:10px;background:#fff;color:#000'
+        doc.body.appendChild(copy)
+        window.__frameCopy = null
+        // Exactly the call `writeClipboard` makes when the code block's copy button is pressed.
+        copy.addEventListener('click', () => {
+          window.__frameCopy = win.navigator.clipboard.writeText('drg-e2e-clipboard').then(
+            () => 'ok',
+            (error) => 'failed: ' + String(error && error.message ? error.message : error),
+          )
+        })
+        // The page's own store must be its own: writing one key here must not touch ours.
+        win.localStorage.setItem('drg-e2e-preference', 'remote')
+        return {
+          allow: frame.getAttribute('allow') ?? '',
+          partitioned: win.__drgStoragePartition,
+          bridge: win.__drgCapabilityBridge,
+          frameRead: win.localStorage.getItem('drg-e2e-preference'),
+          localRead: localStorage.getItem('drg-e2e-preference'),
+          prefixed: localStorage.getItem('drg:h_a:drg-e2e-preference'),
+          // `window.open` from inside the frame returns no window and leaves one intent.
+          openReturn: win.open('https://example.com/from-open'),
+          openedAfterOpen: window.__opened.length,
+        }
+      })
+      for (const token of ['clipboard-read', 'clipboard-write', 'microphone', 'fullscreen', 'popups']) {
+        assert.match(capabilities.allow, new RegExp(`\\b${token}\\b`), `the frame must declare ${token}`)
+      }
+      assert.equal(capabilities.bridge, true, 'the capability bridge must be installed in the frame')
+      assert.equal(capabilities.partitioned, 'h_a', 'the frame must get this host’s key space')
+      assert.equal(capabilities.frameRead, 'remote')
+      assert.equal(capabilities.localRead, null, 'a remote preference must not land in the local page')
+      assert.equal(capabilities.prefixed, 'remote', 'the remote value lives under its own prefix')
+      assert.equal(capabilities.openReturn, null, 'the frame gets no window of its own')
+      assert.equal(capabilities.openedAfterOpen, 1, 'the intent reached the top-level document')
+
+      // A real click inside the frame on an http(s) link opens at the top level, not inside it.
+      const linkPoint = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const rect = frame.contentDocument.getElementById('drg-e2e-link').getBoundingClientRect()
+        const base = frame.getBoundingClientRect()
+        return { x: base.left + rect.left + rect.width / 2, y: base.top + rect.top + rect.height / 2 }
+      })
+      await page.mouse.click(linkPoint.x, linkPoint.y)
+      const afterLinkClick = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        return {
+          opened: window.__opened.map((args) => args.slice(0, 3)),
+          href: frame.contentWindow.location.href,
+        }
+      })
+      assert.deepEqual(afterLinkClick.opened.at(-1), [
+        'https://example.com/from-frame',
+        '_blank',
+        'noopener,noreferrer',
+      ])
+      assert.match(afterLinkClick.href, /\/dsh-remote-go\/remote\/h_a\//, 'the frame must not navigate away')
+
+      // A modified click belongs to the browser (background tab / new window): it must keep its
+      // default and never become a bridge intent.
+      const modifiedClick = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const link = frame.contentDocument.getElementById('drg-e2e-link')
+        const before = window.__opened.length
+        const event = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true, button: 0 })
+        link.dispatchEvent(event)
+        return { before, after: window.__opened.length, prevented: event.defaultPrevented }
+      })
+      assert.equal(modifiedClick.after, modifiedClick.before, 'a ctrl+click must not go through the bridge')
+      assert.equal(modifiedClick.prevented, false, 'a ctrl+click keeps the browser’s own behaviour')
+
+      // A non-web href is left to the page: the bridge never opens it.
+      const scriptLink = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const before = window.__opened.length
+        frame.contentDocument.getElementById('drg-e2e-script-link').click()
+        return { before, after: window.__opened.length }
+      })
+      assert.equal(scriptLink.after, scriptLink.before, 'javascript: must not reach the top-level window')
+
+      // A real click on the frame's copy button writes the clipboard through the top document.
+      const copyPoint = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const rect = frame.contentDocument.getElementById('drg-e2e-copy').getBoundingClientRect()
+        const base = frame.getBoundingClientRect()
+        return { x: base.left + rect.left + rect.width / 2, y: base.top + rect.top + rect.height / 2 }
+      })
+      await page.mouse.click(copyPoint.x, copyPoint.y)
+      await page.waitForFunction(() => window.__frameCopy !== null, { timeout: 10_000 })
+      assert.equal(await page.evaluate(() => window.__frameCopy), 'ok', 'the bridge must report a real write')
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'drg-e2e-clipboard')
+      await page.evaluate(() => {
+        window.open = window.__nativeOpen
+        window.__nativeOpen = null
+      })
 
       // The injected row's "Local" entry goes through the module's own intent channel.
       await page.evaluate(() => {
