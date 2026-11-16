@@ -62,6 +62,43 @@ export function parseKnownHosts(text) {
 }
 
 /**
+ * OpenSSH `known_hosts` host-field matching: `*` matches any run of characters, `?` exactly
+ * one, everything else is literal and the comparison ignores case.
+ *
+ * Implemented without a regular expression on purpose: a host field is data, and building a
+ * `RegExp` from it invites injection and backtracking on remote-controlled text.
+ * @param {string} pattern - one host field.
+ * @param {string} value - the host field form being matched (plain or `[host]:port`).
+ * @returns {boolean} whether the pattern covers the value.
+ */
+function wildcardMatch(pattern, value) {
+  const wanted = String(pattern).toLowerCase()
+  const text = String(value).toLowerCase()
+  let patternAt = 0
+  let textAt = 0
+  let starAt = -1
+  let markAt = 0
+  while (textAt < text.length) {
+    if (patternAt < wanted.length && (wanted[patternAt] === '?' || wanted[patternAt] === text[textAt])) {
+      patternAt += 1
+      textAt += 1
+    } else if (patternAt < wanted.length && wanted[patternAt] === '*') {
+      starAt = patternAt
+      patternAt += 1
+      markAt = textAt
+    } else if (starAt >= 0) {
+      patternAt = starAt + 1
+      textAt = markAt + 1
+      markAt = textAt
+    } else {
+      return false
+    }
+  }
+  while (patternAt < wanted.length && wanted[patternAt] === '*') patternAt += 1
+  return patternAt === wanted.length
+}
+
+/**
  * Whether one `known_hosts` host field covers `host` on `port`.
  *
  * OpenSSH writes a plain `host` field only for port 22 and `[host]:port` for every other
@@ -74,11 +111,7 @@ export function parseKnownHosts(text) {
 export function knownHostFieldMatches(pattern, host, port) {
   const targetPort = Number(port) || 22
   const target = targetPort === 22 ? String(host) : `[${host}]:${targetPort}`
-  const escaped = String(pattern)
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
-    .replace(/\?/g, '.')
-  return new RegExp(`^${escaped}$`, 'i').test(target)
+  return wildcardMatch(pattern, target)
 }
 
 export function findKnownHostEntries(parsed, host, port) {

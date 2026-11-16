@@ -2,8 +2,8 @@
  * Promise wrapper over `ssh2`: host-key policy/confirmation, auth fallback, one-shot `exec` with streamed output, and TCP forwarding for the loopback tunnel.
  */
 import { EventEmitter } from 'node:events'
-import { createWriteStream, existsSync } from 'node:fs'
-import { mkdir, readFile, rm, stat } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { mkdir, open, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -574,15 +574,19 @@ export class SshConnection extends EventEmitter {
 const MAX_KEY_BYTES = 1024 * 1024
 
 async function readKey(keyPath) {
+  let handle = null
   try {
-    if (!existsSync(keyPath)) return null
-    const stats = await stat(keyPath)
-    // Read the file only when it can plausibly be a key: a huge or non-regular file at the
-    // configured path would otherwise be slurped into memory before ssh2 rejects it (L).
+    // Measure and read through the *same* handle: a stat followed by a path-based read is a
+    // race (the file could be swapped in between), and a non-regular file has no place here.
+    handle = await open(keyPath, 'r')
+    const stats = await handle.stat()
+    if (stats.isFile?.() !== true) return null
     if (typeof stats.size === 'number' && stats.size > MAX_KEY_BYTES) return null
-    return await readFile(keyPath)
+    return await handle.readFile()
   } catch {
     return null
+  } finally {
+    await handle?.close().catch(() => {})
   }
 }
 

@@ -508,3 +508,15 @@ test('saveRemoteFile surfaces a missing SFTP session and a missing file', async 
   const missingTarget = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-missing-')), 'missing')
   await assert.rejects(missing.ssh.saveRemoteFile('/home/ubuntu/missing', missingTarget), /No such file/)
 })
+
+test('readKey skips a huge file and a non-regular file at the configured key path', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-hugekey-'))
+  const big = path.join(dir, 'huge.key')
+  await writeFile(big, Buffer.alloc(1024 * 1024 + 1, 0x41))
+  const fromBig = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: big }, home: dir })
+  assert.deepEqual(await fromBig.resolveAuthCandidates(), [], 'a >1 MiB file is not a private key')
+  const dirPath = path.join(dir, 'keydir')
+  await mkdir(dirPath)
+  const fromDir = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: dirPath }, home: dir })
+  assert.deepEqual(await fromDir.resolveAuthCandidates(), [], 'a directory is not a private key')
+})
