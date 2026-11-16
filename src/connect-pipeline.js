@@ -1356,7 +1356,10 @@ async function runRestart(ctx, runtime, token) {
       resumeConnected(ctx, runtime)
       return
     }
-    const view = toErrorView(error)
+    const view =
+      error instanceof LinkCancelled
+        ? toErrorView(errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed during restart' }))
+        : toErrorView(error)
     // Phase is cleared with the status; capture it first so the log says where it stopped.
     const failedPhase = runtime.phase
     runtime.error = view
@@ -1803,7 +1806,10 @@ async function runReattach(ctx, runtime, info, token) {
       log('debug', 're-attach aborted: the link was replaced by a disconnect or reconnect')
       return
     }
-    const view = toErrorView(error)
+    const view =
+      error instanceof LinkCancelled
+        ? toErrorView(errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed during re-attach' }))
+        : toErrorView(error)
     // Phase is cleared with the status; capture it first so the log says where it stopped.
     const failedPhase = runtime.phase
     runtime.error = view
