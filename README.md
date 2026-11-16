@@ -123,7 +123,7 @@ pnpm run verify                                   # 仓库规范 + 格式 + 语�
 |---|---|
 | `pnpm run test:unit` | 单元测试（Host + Client + 同源远端代理），不需要网络 / SSH |
 | `pnpm run test:integration` | 模拟远端 + 隔离 `dsh web` 的同源代理端到端 + 真实浏览器载体；缺 harness 时跳过，`DSH_E2E_STRICT=1` 下改为失败 |
-| `pnpm run test:coverage` | 覆盖率门禁（阈值 85 / 70 / 80，不含 `vendor/` 与 `test/`） |
+| `pnpm run test:coverage` | 覆盖率门禁：`src/` 聚合阈值 85 / 70 / 80（不含 `vendor/` 与 `test/`），外加 `client.js` 与 `local-ssh` / `local-download` 的 per-file 下限 |
 | `pnpm run test:web` / `test:desktop` | 打包产物验收：隔离 `dsh web` / 真实桌面端安装 tarball、打开管理浮窗、浅/深色对比度与第三方主题 |
 | `pnpm run sim:remote` | 模拟远端主机自检（探针 → 隧道 → HTTP 200） |
 
@@ -136,13 +136,25 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 
 它用 ssh2 在本机起一个真实 SSH 端点（回环地址、默认凭据，可用 `--ssh-user` / `--ssh-password` 覆盖），并只允许转发到自己的端口。运行参数见 `e2e/sim/simulated-remote.mjs` 开头的用法说明。
 
+`test:integration` 聚合所有集成 / E2E 文件；缺 harness / 浏览器时它们默认跳过。PR 的 `ci.yml` 把它拆成两组并把
+`DSH_E2E_STRICT` 置为 `1`，所以门禁上不会静默跳过：无外部依赖组（`sim` / `remote-restart`）直接跑，外部依赖组
+（`remote-proxy` / `web` / `browser-carrier` / `guest-tools`）在安装 DSH harness 与 Chrome 后跑；桌面端 E2E 需要真实
+Electron 安装包，只在夜间 `acceptance.yml` 跑。
+
+`*.md` 在 `.prettierignore` 中有意排除：文档是手工折行的，交给 Prettier 会整体重排；CI 仍校验代码、YAML 与 JSON
+的格式。提交前可启用仓库自带的 hook（运行仓库规范与格式检查）：
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ## CI 与发布
 
 | 工作流 | 触发 | 内容 |
 |---|---|---|
-| `ci.yml` | push `main` / PR / 手动 | PR 门禁：`Verify`（仓库规范 + 格式 + PR 标题 + 覆盖率 + 集成 + tarball）、`Tests`（Windows 单测 + 集成）；CodeQL 是独立必需检查（`codeql.yml`） |
-| `acceptance.yml` | 夜间定时 / 手动 | 真实浏览器与桌面端验收（**非门禁**），失败上传截图与日志 |
-| `release.yml` | `v*` 标签 / 手动 | 校验版本 → 跑门禁 → 打包 → 发布 npm → 创建 GitHub Release |
+| `ci.yml` | push `main` / PR / 手动 | PR 门禁：`Verify`（仓库规范 + 格式 + PR 标题 + 覆盖率 + 严格模式 E2E + tarball）、`Tests`（Windows 规范/格式/语法/workflow + 单测 + 无外部依赖集成）；CodeQL 是独立必需检查（`codeql.yml`） |
+| `acceptance.yml` | 夜间定时 / 手动 | 真实浏览器验收：`dsh web`、同源 iframe / 桌面载体、真实桌面端（**非门禁**），失败上传截图与日志 |
+| `release.yml` | push `release` 分支 / 手动 | 与 PR 相同的 `verify` 门禁 → 打包 → 发布 npm → 创建 GitHub Release |
 
 发布前请本地跑一遍 `pnpm run verify`；完整步骤见 [docs/publish.md](docs/publish.md)。
 
@@ -150,7 +162,7 @@ node e2e/sim/simulated-remote.mjs --serve --state-file <file>
 
 - 不做沉浸模式、本机通知、多窗口分屏、远端设置 diff / 备份管理。
 - AI 工具只有**只读的主机列表**：增删改、连接 / 断开、重启或关闭远端 DSH 都要用户在界面里操作。
-- 不写远端 `~/.dsh`：插件、配置、凭据与会话都由远端自己维护，本插件只负责连接与呈现。
+- 不修改远端 DSH 的配置、插件、凭据与会话：它们都由远端自己维护，本插件只负责连接与呈现；插件自己的运行文件固定在远端的 `~/.dsh/remote-go/`（日志、run registry、托管 Node、下载暂存），不复制、不隔离远端 DSH 的数据目录。
 - 远端仅支持 Linux，首次连接需要能访问 nodejs.org（或 npmmirror.com）与 npm registry，**没有离线包**；官方 Node 构建要求 glibc ≥ 2.28，musl（如 Alpine）会明确失败。
 - 托管 Node 是唯一运行时：系统 Node 永远不参与，装不上时连接明确失败、不会降级；远端 DSH 版本恒等于本机版本（本机版本必须已发布到 npm）。
 - 不迁移旧版的独立状态目录（`~/.dsh-remote-go`）：升级后插件文件固定在 `~/.dsh/remote-go`。插件只收养自己启动的远端实例；远端已有手工启动的 DSH 时连接会暂停并列出这些进程，由你选择「停止它并启动受管实例」「保留它，另起一个」或「取消连接」。

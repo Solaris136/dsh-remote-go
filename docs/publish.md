@@ -6,7 +6,7 @@
 发布前在干净工作区跑与 CI 相同的门禁：
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 单测 + 集成
+pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + 打包 + 覆盖率 + 单测 + 集成
 ```
 端到端（非必需门禁，需要本机浏览器/桌面端）：`pnpm run test:web` / `pnpm run test:desktop`。
 
@@ -26,7 +26,9 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 1. 确认 `main` 最新且 CI 全绿。
 2. 按 SemVer 更新 `package.json` 的 `version`（预发布可用 `-rc.N`）。
 3. 把 `CHANGELOG.md` 中 `## [Unreleased]` 的内容整理进新的 `## [x.y.z] - YYYY-MM-DD` 小节，并更新文件末尾的链接引用。
-4. 重新生成市场条目（发布时间取自最近一次 git commit，结果可复现）：`pnpm run market:entry`（写 `market/plugin-entry.json` 与 `market/index.json`）与 `pnpm run market:check`（校验；prepack 也会跑）。
+4. 重新生成市场条目：`pnpm run market:entry`（写 `market/plugin-entry.json` 与 `market/index.json`）。
+   `publishTimestamp` 是**生成时刻**（当前 HEAD 的提交时间），只对同一提交可复现，所以发布前必须重跑；
+   `pnpm run market:check`（prepack 也会跑）对整个条目逐字段比对，只豁免这个时间戳。
 5. 提交并推送：`chore(release): v<x.y.z>`。
 6. 推送到 `release` 分支：`git push origin release`（或把 `main` 合并/快进到 `release` 后再推送）。
 
@@ -34,7 +36,9 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 市场条目 + �
 
 ## 2. 通过 GitHub Actions 发布（推荐）
 推送到 `release` 分支后，[`release.yml`](../.github/workflows/release.yml) 依次：
-1. 检出代码、安装依赖（`--frozen-lockfile --ignore-scripts`），跑发布门禁（`lint` / `check:syntax` / `check:workflows` / `market:check` / `pack:check` / `test:unit`）。
+1. 检出代码、安装依赖（`--frozen-lockfile --ignore-scripts`），用 `pnpm run build:vendor` + `git diff --exit-code -- vendor/`
+   确认提交的 vendor 产物可从锁定的 ssh2 重建；然后跑与 PR 相同的 `pnpm run verify` 门禁
+   （仓库规范 / 格式 / 语法 / workflow / 市场条目 / 打包 / 覆盖率 / 单测 / 集成）。
 2. 从 `package.json` 读取版本；`npm view <name>@<version>` 已存在则跳过发布（只补 tag / Release）。
 3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）。
 4. `npm publish --access public`：npm CLI 用工作流的 OIDC 身份完成认证（`id-token: write`），provenance 自动生成，**不需要任何 token**。

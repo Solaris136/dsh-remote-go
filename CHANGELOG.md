@@ -104,6 +104,27 @@
   展开与收起两种状态下的顶部间距都与本地窗口一致；切换瞬间（最多一个 400ms 轮询周期）仍会短暂
   重叠一下再归位。
 
+### 构建 / CI
+
+- **PR 上的端到端测试不再静默跳过**：`ci.yml` 把集成测试拆成「无外部依赖」（模拟远端、重启）与
+  「需 harness / 浏览器」（同源代理、`dsh web`、浏览器载体、guest 工具）两组，后者安装按
+  `engines.dsh` 解析出的 DSH harness 与 Chrome，并在 `DSH_E2E_STRICT=1` 下运行；桌面端 E2E 需要真实
+  Electron 安装包，仍在夜间 `acceptance.yml` 运行，该任务同时补跑浏览器载体套件。Windows 任务补上
+  规范 / 格式 / 语法 / workflow 检查，`release.yml` 改为跑与 PR 相同的 `pnpm run verify`。
+- **发布门禁补上 vendor 与版本一致性**：`pack:check` / `check-repo` / `market:check` 把
+  `vendor/ssh2.bundle.cjs` 与 `vendor/THIRD_PARTY_NOTICES.md`（以及 tarball 里的 `vendor/`）列为必需项；
+  CI、release 与 `prepack` 用 `pnpm run build:vendor` + `git diff --exit-code -- vendor/` 确认重建
+  字节一致；`check-repo` 校验 `src/constants.js#PLUGIN_VERSION` 与 `package.json#version` 相等；
+  `acceptance.yml` 的 harness 版本改为从 `engines.dsh` 读取（不低于 `0.2.2-rc.3`）。
+- **覆盖率不再有盲区**：`client.js` 以绝对文件名载入 vm，从而进入覆盖率报告（此前完全不计入）；
+  `test:coverage` 改为 `scripts/check-coverage.mjs`，保留 `src/` 聚合阈值并为 `client.js`、
+  `src/local-ssh.js`、`src/local-download.js` 设 per-file 下限；补 `local-ssh` / `local-download` 单测。
+- **仓库卫生**：脚本的仓库根改用 `fileURLToPath`（含空格的路径不再算错）；单测不再泄漏临时目录；
+  语法检查覆盖 `e2e/`，workflow 检查自动发现全部 YAML，秘密扫描扩到 `docs/` / `test/` / `e2e/`；
+  市场条目改为整对象比对（仅豁免生成时刻的 `publishTimestamp`）；fake-remote 删掉已不存在的
+  `readRemoteFile` 并加「fake 方法集 ⊆ real 方法集」守卫；CI job 加 30 分钟超时；补提交可选的
+  `.githooks/pre-commit`。
+
 ## [0.1.0] - 2026-11-16
 
 首个版本：在本地 DSH 里通过 SSH 使用远端 DSH，整窗呈现远端界面，本地只负责连接与状态。
