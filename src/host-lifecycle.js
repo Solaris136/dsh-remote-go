@@ -390,10 +390,7 @@ export async function stopRemoteForIdle(ctx, runtime, options = {}) {
   } finally {
     // Release only the transport this call captured: when a new connection owns the link by
     // now, its session is not ours to dispose.
-    if (!released && runtime.ssh === capturedSsh) {
-      released = true
-      await disposeSsh(runtime)
-    }
+    if (runtime.ssh === capturedSsh) await disposeSsh(runtime)
   }
 }
 
