@@ -267,8 +267,9 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
   │   任一不满足 → 不 kill，409 + 可读原因；连接保持原样（不会半停）
   ├─ pid 已消失 → 不 kill，只清 run/web.json（clearRunRegistry，绝不按残留 pid 发信号）
   ├─ 否则 stopRemoteWeb(pid)：SIGTERM → 等待 → SIGKILL，并删 run/web.json
-  └─ 复用 disconnectHost(..., {stopped:true})：desired=idle、取消重连 / 空闲计时器 / 心跳、关隧道、
-     释放 SSH、status=disconnected、progress=null；主机条目、凭据与 keepAlive 不变
+  └─ 复用 disconnectHost(..., {stopped:true})：抑制存活策略自己的停止（不再发第二次信号）与空闲停止；
+     desired=idle、取消重连 / 空闲计时器 / 心跳、关隧道、释放 SSH、status=disconnected、progress=null；
+     主机条目、凭据与 keepAlive 不变
 ```
 
 - 为什么需要一个新端点而不是 `disconnect {stopRemote:true}`：后者是策略收尾（`keep` / `idle` / `stop`），停止
@@ -278,9 +279,13 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
 - 停掉后不触发自动重连（`desired = idle`），卡片回到「断线」，点「重连」重新走完整连接管线起一个新实例；
   因为 `run/web.json` 随停止被删除，下一次 connect 不会把死 pid 当残留实例、也不会弹「远端已有手工启动的
   DSH」冲突（§6.3）。
-- 重挂接管的实例（`origin: "reattach"`）**重启永远不会杀**（§5.5），但用户显式关闭时可以关掉绑定的那一个
-  进程：`bound` 记录的是接管时 `/proc` 证明过的 starttime，关闭前再核对一次，pid 复用即拒绝。`alongside`
-  保留的进程任何路径都不杀。
+- `disconnectHost(..., {stopped:true})` 同时抑制存活策略自己的停止（`keepAlive: "stop"` 平时会在 teardown 再
+  发一次 stop）与空闲停止：那次信号的 pid 是几条 SSH 命令之前记录的，动作刚证明它该停（或已消失）之后再来
+  一次，正常时是冗余、pid 复用窗口内就是误杀；这也与本端点「pid 已消失绝不发信号」的契约一致。
+- 重挂接管的实例（`origin: "reattach"`）**不会被自动或静默停止**：显式关闭走本端点，`bound` 记录的是接管时
+  `/proc` 证明过的 starttime，关闭前再核对一次，pid 复用即拒绝；重启（§5.5）遇到这类实例时把它并入冲突提示，
+  由用户选择「停止它」（那条路径走既有的 `stopForeign`，与本端点的 `/proc` 授权互不替代）。`alongside` 保留的
+  进程任何路径都不杀。
 
 ## 6. 远端运行时
 ### 6.1 托管 Node + npx

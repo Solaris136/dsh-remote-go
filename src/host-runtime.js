@@ -52,7 +52,7 @@ export function createHostRuntime(host) {
     reconnectTimer: null,
     idleTimer: null,
     connectPromise: null,
-    /** One-shot link actions (local restart / remote re-attach) and the token that owns them. */
+    /** One-shot link actions (local restart / remote re-attach / listener repair / stop) and their token. */
     linkBusy: null,
     linkToken: 0,
     restartPromise: null,

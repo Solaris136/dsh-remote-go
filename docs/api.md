@@ -342,12 +342,15 @@ data: {}
 - 授权（与 `restart` 同一套 `/proc` 身份证明）：pid 必须就是本连接绑定的那个；本连接必须记录过它（自己启动的，
   或重挂接管的）；远端 `run/web.json` 必须仍命名它且 dshHome / profile 一致；`/proc/<pid>` 的 starttime、
   cmdline 与 `DSH_HOME` 必须仍证明是同一进程。`alongside` 保留的 pid、pid 复用、归属证明不了的一律**不 kill**
-  （409 `stop-unavailable`，连接保持原样）。重挂接管的实例（`origin: "reattach"`）只有在用户显式调用本端点时
-  才可关闭，且只关那一个 pid。
+  （409 `stop-unavailable`，连接保持原样）。重挂接管的实例（`origin: "reattach"`）**不会被自动或静默停止**：
+  显式关闭走本端点（关闭前按 `/proc` 复验身份）；`POST /hosts/:id/restart` 遇到它时会并入冲突提示，由用户选择
+  是否停止（那条路径走既有的 `stopForeign`，与本端点的授权是两条独立路径）。
 - 执行期间 `/events` 推送 `status: "connecting"` + 进度码 `stopping-remote`（`pid` / `port`），客户端据此禁用
   卡片按钮并显示「正在关闭远端 DSH…」；结束后状态帧直接是 `disconnected`。
 - 响应：`{ "ok": true, "pid": 4242 }`（进程在动作前已消失时为 `pid` 仍为该绑定值、实际只清理了 registry）。
-  失败（远端没有报告干净停止）返回 409 `stop-unavailable`，连接保持原样以便重试或「重连」。
+  失败返回 409 `stop-unavailable`，连接保持原样以便重试或「重连」。这里的「失败」只表示 `stopRemoteWeb` 的 SSH
+  退出码非 0（脚本内部 `kill||true` + `echo STOPPED`，D 状态进程等真正没死的情况仍会假成功；`kill -0` 复核是
+  后续项）。
 
 ### `POST /hosts/:id/reconnect`
 等价于 disconnect（不停远端）+ connect。响应 `{ "ok": true }`。

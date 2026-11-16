@@ -36,7 +36,7 @@ export function cancelIdleStop(runtime) {
  * token so a disconnect, a dropped transport or a newer action can invalidate an older one:
  * an action must never write state on top of whatever replaced it.
  * @param {object} runtime - host runtime.
- * @param {string} kind - `restart`, `reattach` or `repair`.
+ * @param {string} kind - `restart`, `reattach`, `repair` or `stop`.
  * @returns {number} the token that owns the action.
  */
 export function beginLinkWork(runtime, kind) {
