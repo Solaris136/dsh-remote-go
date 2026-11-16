@@ -175,12 +175,18 @@ test('GET /state returns the contract shape', async () => {
     assert.equal(result.status, 200)
     assert.equal(result.json.ok, true)
     const state = result.json.state
+    assert.equal(typeof state.rev, 'number', 'every snapshot carries its monotonic revision')
     assert.equal(state.hostVersion, '0.2.2-rc.1')
     assert.equal(state.hosts.length, 1)
     assert.equal(state.firstRun, false)
     assert.ok(state.settings && typeof state.settings.defaultPort === 'number')
     assert.equal(state.hosts[0].status, 'unconfigured')
     assert.equal(state.hosts[0].error, null)
+    // The plain connection fields are part of the contract; the editor must not parse the
+    // masked display string back (v2.10).
+    assert.equal(state.hosts[0].username, 'ubuntu')
+    assert.equal(state.hosts[0].port, 22)
+    assert.equal(state.hosts[0].addressMasked, 'ubuntu@test-host')
   } finally {
     await api.close()
     await service.shutdown()
@@ -849,7 +855,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.9')
+    assert.equal(result.json.apiVersion, '2.10')
   } finally {
     await api.close()
     await service.shutdown()

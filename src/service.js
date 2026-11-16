@@ -81,6 +81,8 @@ export class RemoteGoService extends EventEmitter {
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.conflictConfirmTimeoutMs = options.conflictConfirmTimeoutMs ?? REMOTE_CONFLICT_TIMEOUT_MS
     this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
+    /** Monotonic revision of the published `/state` snapshot (StateView.rev). */
+    this.stateRev = 0
 
     const deps = {
       sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
@@ -179,6 +181,10 @@ export class RemoteGoService extends EventEmitter {
 
   emitState() {
     try {
+      // Every emitted frame gets its own monotonic revision. The Client drops a frame whose
+      // `rev` is not newer than the one on screen, so an out-of-order SSE delivery or a slow
+      // `GET /state` can no longer repaint the panel backwards (docs/api.md StateView.rev).
+      this.stateRev += 1
       this.emit('state', this.snapshot())
     } catch (error) {
       this.logger.warn?.('[dsh-remote-go] state listener failed:', error)
@@ -231,7 +237,7 @@ export class RemoteGoService extends EventEmitter {
 
   /** Build the client-facing state snapshot (contract: docs/api.md). */
   snapshot() {
-    return snapshot(this.ctx)
+    return { ...snapshot(this.ctx), rev: this.stateRev }
   }
 
   userHome() {

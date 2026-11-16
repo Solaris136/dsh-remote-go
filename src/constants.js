@@ -30,7 +30,7 @@ export const PLUGIN_VERSION = '0.1.0'
 export const MIN_DSH_VERSION = '0.2.2-rc.3'
 
 /** Host↔Client contract version served by `GET /version` (docs/api.md v2.9). */
-export const API_VERSION = '2.9'
+export const API_VERSION = '2.10'
 
 export const DEFAULT_KEY_PATH = '~/.ssh/id_rsa'
 
