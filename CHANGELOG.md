@@ -9,6 +9,37 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **对话框：一次 Escape 只关栈顶**。所有对话框改走单一「模态栈」：一个 document 级监听按栈顶分发
+  Escape 与 Tab，不再每个 `Modal` 各自挂监听（旧实现依赖每次渲染都变的 `onClose`，重挂监听时一次按键
+  会先关掉下层）。同时补上初始焦点、Tab 循环、卸载还原焦点、`overflow:hidden` 滚动锁、仅栈顶
+  `aria-modal`、下层 `inert`、标题 `aria-labelledby`；输入框恢复 `:focus-visible` 外环。动作进行中的
+  对话框不可被 Escape/遮罩关闭。
+- **编辑主机不再静默改端口 / 把 IPv6 读成端口 1**。`HostView` 新增非敏感的 `port` / `username`，编辑
+  表单直接读取；`addressMasked` 只用于展示（端口 22 省略、IPv6 加方括号）并补跨端一致性测试。
+- **`/state` 增加单调 `rev`，旧帧不再回退界面**。Host 每次发布状态时自增 `rev`；Client 只接受更新的帧，
+  迟到的 `GET /state` 响应低于当前 revision 即丢弃。契约升到 **2.10**（只增字段，向后兼容）。
+- **SSE 断开后自动重连并明确降级**。状态流按指数退避重建 EventSource（成功收帧后复位），期间以 3s 轮询
+  兜底；主机清单页脚显示「实时连接已断开，正在轮询」与「重新连接」，轮询期间继续补下载任务状态。
+- **密码流程**：编辑密码主机而没改认证方式时不再要求输入密码（文案说明连接时会再询问）；`passwordSaved`
+  为真时先尝试无密码连接、失败再弹窗；密码框在请求进行中禁用输入与回车，避免一次 Enter 发两次
+  `POST /connect`。
+- **表单校验落到字段**：校验返回 `{field, code}`，`Field` 显示字段错误并设置 `aria-invalid` /
+  `aria-describedby`，焦点移到第一个错误字段，字段一改即清除；前端与 Host 使用同一组范围（端口、连接
+  超时、idle 分钟、重试次数/间隔、profile），`profile: desktop` 在前端直接拒绝。
+- **401/403 不再显示「插件内部错误」**：DSH 准入返回的非 JSON 401/403 分别映射为「会话已失效，请刷新」
+  与「被安全策略拒绝（Host/Origin）」，`retryable:false`。
+- **管理界面**：正在连接的主机不进清单（重启/关闭这类一次性动作的卡片保留，但连接中禁用编辑/删除）；
+  删除连接中的主机需二次确认；卡片与连接窗口渲染 `warning` 与版本差异提示；下载卡改为不含按钮的
+  live region，进度条带 `aria-label` / `aria-valuetext`；toast 支持 `warn`/`info` 强调色、队列与
+  `aria-live`。
+- **载体交互**：浏览器载体的下载桥统一补上 carrier 的 `hostId`（guest 自带 hostId 不能伪造），guest
+  intent 在收口处做 action 白名单与 hostId 强制覆盖；失败层增加「返回本地」按钮与 `role="alert"`，浏览器
+  载体检测到「文档不是 DSH」时显示该层；主机条支持键盘（Tab/Enter/Space/方向键/Escape/roving tabindex）；
+  `wanted` 竞态在所有分支统一检查；主机条注入失败按 1.5s 起退避重试；`executeJavaScript` 失败与 intent
+  drain 超时不再静默卡死；`localStorage` 分区不可被 `delete` 绕过；`findSlot`、重装幂等、`readStart`
+  单位、`disposeCarrier` 清理 launch URL 等低危项一并修正。审计来源见 PR #63。
 ### 安全
 
 - **`ErrorView` 统一脱敏并限长**（独立安全审计 A）。失败连接会把远端进程输出塞进 `ErrorView.technical`，
