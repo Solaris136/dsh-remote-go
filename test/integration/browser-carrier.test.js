@@ -175,6 +175,108 @@ function overlayHarness(openWebUrl) {
 </html>`
 }
 
+/**
+ * A page that stands in for the desktop shell's window, so the **desktop** carrier runs in a real
+ * browser: the caption band and its menubar (the preload's fixed host reading
+ * `--dsh-windows-menu-start`), the `window.dshDesktop` guest bridge, and a `<webview>` seat. The
+ * seat is an iframe whose `executeJavaScript` evaluates in the guest, which is the one call the
+ * plugin makes on it; events the plugin listens for are dispatched like the shell's own.
+ */
+function desktopHarness(guestUrl) {
+  return `<!doctype html>
+<html lang="zh" data-windows-titlebar style="--dsh-windows-titlebar-height:40px">
+  <head>
+    <meta charset="utf-8" /><title>desktop harness</title>
+    <style>
+      /* The shell's caption menubar: a fixed host at --dsh-windows-menu-start (default 48px),
+         which DSH's sidebar raises to 84px from its own collapsed rule. */
+      #caption-menubar { position: fixed; top: 0; left: var(--dsh-windows-menu-start, 48px); z-index: 1100;
+        height: var(--dsh-windows-titlebar-height); display: flex; align-items: center; gap: 2px; }
+      #caption-menubar button { height: 28px; padding: 0 10px; border: 0; border-radius: 6px;
+        background: transparent; font: 14px sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="caption-menubar" data-windows-menu><button type="button">应用</button><button type="button">编辑</button></div>
+    <div id="local-shell" style="font:14px sans-serif;padding:64px 16px 16px">local shell</div>
+    <script>
+      window.dshDesktop = {
+        protocolVersion: 1,
+        browser: {
+          async acquire() {
+            return { lease: 'lease-test', partition: 'persist:dsh-remote-go:test' }
+          },
+          async release() {},
+        },
+      }
+      const nativeCreate = document.createElement.bind(document)
+      document.createElement = (tag, options) => {
+        if (String(tag).toLowerCase() !== 'webview') return nativeCreate(tag, options)
+        const seat = nativeCreate('iframe')
+        seat.dataset.guestSeat = '1'
+        seat.addEventListener('load', () => {
+          seat.dispatchEvent(new Event('dom-ready'))
+          if (seat.__remote === true) seat.dispatchEvent(new Event('did-stop-loading'))
+        })
+        seat.loadURL = (url) => {
+          seat.__remote = true
+          seat.src = url
+          return new Promise((resolve) => seat.addEventListener('load', () => resolve(true), { once: true }))
+        }
+        seat.executeJavaScript = (code) => {
+          try {
+            return Promise.resolve(seat.contentWindow.eval(code))
+          } catch (error) {
+            return Promise.reject(error)
+          }
+        }
+        seat.reload = () => {
+          seat.src = seat.src
+        }
+        // A webview fires dom-ready for its initial empty document too; an iframe does not fire
+        // load for about:blank, so the harness reports that first document itself.
+        setTimeout(() => seat.dispatchEvent(new Event('dom-ready')), 0)
+        return seat
+      }
+    </script>
+    <script>window.__ModuleLoader__ = { load(declaration) { window.__declaration = declaration } }</script>
+    <script src="/client.js"></script>
+    <script>
+      (() => {
+        const noop = () => {}
+        const React = {
+          createElement: noop,
+          Fragment: 'fragment',
+          useState: (value) => [value, noop],
+          useEffect: noop,
+          useLayoutEffect: noop,
+          useRef: (value) => ({ current: value }),
+          useCallback: (fn) => fn,
+          useMemo: (fn) => fn(),
+        }
+        const plugin = window.__declaration.factory(() => React)
+        const ctx = {
+          locale: { register() {}, bind() { return (key) => key } },
+          effect(fn) {
+            const dispose = fn()
+            if (typeof dispose === 'function') ctx.disposers.push(dispose)
+            return () => {}
+          },
+          slots: { inject() {}, register() { return () => {} } },
+          get() {
+            return undefined
+          },
+          disposers: [],
+        }
+        plugin.apply(ctx)
+        window.__harness = { plugin }
+      })()
+    </script>
+    <script>window.__guestUrl = ${JSON.stringify(guestUrl)}</script>
+  </body>
+</html>`
+}
+
 function listen(server) {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -234,8 +336,8 @@ async function startDshWeb(cli, home) {
 }
 
 test(
-  'the browser carrier frames a real remote DSH UI and its injected switcher works',
-  { timeout: 180_000 },
+  'the carriers frame a real remote DSH UI, its switcher works and the caption follows the rail',
+  { timeout: 240_000 },
   async (t) => {
     const cli = resolveDshCli()
     const browserPath = resolveBrowser()
@@ -278,6 +380,7 @@ window.ReactDOM = { createRoot }`,
       ).outputFiles[0].text
       const webServer = fakeWebServer()
       const upstream = { localPort: dsh.port, remotePort: dsh.port }
+      let localPort = 0
       server = http.createServer((req, res) => {
         if (proxy === null) {
           res.writeHead(503)
@@ -293,6 +396,13 @@ window.ReactDOM = { createRoot }`,
         if (pathname === '/overlay') {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
           res.end(overlayHarness(viewPath))
+          return
+        }
+        if (pathname === '/desktop') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          // The desktop guest only accepts a loopback URL: the proxy path is served by this same
+          // origin, so the seat gets one and the remote UI still comes from the tunnel.
+          res.end(desktopHarness(`http://127.0.0.1:${localPort}${viewPath}`))
           return
         }
         if (pathname === '/react.js') {
@@ -327,7 +437,7 @@ window.ReactDOM = { createRoot }`,
         }
         route.handler(req, socket, head)
       })
-      const localPort = await listen(server)
+      localPort = await listen(server)
       proxy = createRemoteProxy({
         webServer,
         getOrigin: () => `http://127.0.0.1:${localPort}`,
@@ -622,6 +732,175 @@ window.ReactDOM = { createRoot }`,
       const overlayErrorsFiltered = overlayErrors.filter((text) => !/Failed to load resource/.test(text))
       assert.deepEqual(overlayErrorsFiltered, [], `overlay page errors: ${overlayErrorsFiltered.join(' | ')}`)
       await overlayPage.close()
+
+      // Desktop guest (#63): the caption band belongs to the remote page, whose collapsed rail puts
+      // the new-session control at 48px — exactly where the shell's caption menubar starts unless
+      // the local page mirrors that state. A real remote UI, a real caption band, a seat that
+      // answers `executeJavaScript`; only the Electron <webview> is stood in for by an iframe.
+      const desktopPage = await browser.newPage()
+      // Wide enough that the remote UI opens with its sidebar expanded (it auto-collapses under
+      // 1024px), which is the state the caption band starts from.
+      await desktopPage.setViewport({ width: 1440, height: 900 })
+      const desktopErrors = []
+      desktopPage.on('console', (message) => {
+        if (message.type() === 'error') desktopErrors.push(message.text())
+      })
+      desktopPage.on('pageerror', (error) => desktopErrors.push(String(error?.message ?? error)))
+      await desktopPage.goto(`http://127.0.0.1:${localPort}/desktop`, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30_000,
+      })
+      await desktopPage.waitForFunction(() => Boolean(window.__harness), { timeout: 15_000 })
+      assert.equal(
+        await desktopPage.evaluate(() => window.__harness.plugin.carrier.surface()),
+        'desktop',
+        'the page with the shell bridge must use the desktop guest',
+      )
+      const desktopOpened = await desktopPage.evaluate(() =>
+        window.__harness.plugin.carrier.open({ hostId: 'h_a', url: window.__guestUrl }),
+      )
+      assert.equal(desktopOpened.ok, true)
+      // The guest committed the remote document, the plugin taught it the desktop grid, and the
+      // remote sidebar rendered (the toggle survives the collapse this test drives).
+      try {
+        await desktopPage.waitForFunction(
+          () => {
+            const seat = document.querySelector('[data-guest-seat]')
+            const guest = seat && seat.contentDocument
+            return Boolean(
+              guest &&
+              guest.documentElement.hasAttribute('data-windows-titlebar') &&
+              guest.querySelector('[data-sidebar-toggle]'),
+            )
+          },
+          { timeout: 60_000 },
+        )
+      } catch (error) {
+        const state = await desktopPage.evaluate(() => {
+          const seat = document.querySelector('[data-guest-seat]')
+          const guest = seat && seat.contentDocument
+          return {
+            src: seat ? seat.getAttribute('src') : '',
+            title: guest ? guest.title : '',
+            marker: guest ? guest.documentElement.hasAttribute('data-windows-titlebar') : null,
+            root: guest && guest.querySelector('#root') ? guest.querySelector('#root').children.length : -1,
+            toggle: guest ? Boolean(guest.querySelector('[data-sidebar-toggle]')) : null,
+          }
+        })
+        throw new Error(`the desktop guest did not boot: ${JSON.stringify(state)} (${error.message})`)
+      }
+      // Whatever layout the remote UI persisted, start from the expanded rail this page is about.
+      await desktopPage.evaluate(() => {
+        const guest = document.querySelector('[data-guest-seat]').contentDocument
+        if (guest.querySelector('[data-sidebar-collapsed]') !== null)
+          guest.querySelector('[data-sidebar-toggle]').click()
+      })
+      await desktopPage.waitForFunction(
+        () => {
+          const guest = document.querySelector('[data-guest-seat]').contentDocument
+          return (
+            guest.querySelector('[data-sidebar-collapsed]') === null &&
+            Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left) === 48
+          )
+        },
+        { timeout: 10_000 },
+      )
+      const expanded = await desktopPage.evaluate(() => {
+        const guest = document.querySelector('[data-guest-seat]').contentDocument
+        const button = [...guest.querySelectorAll('button')].find((node) =>
+          String(node.className).includes('newSession'),
+        )
+        return {
+          menuLeft: Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left),
+          captureLive: document.documentElement.classList.contains('drg-caption-live'),
+          newSessionPosition: button === null ? '' : guest.defaultView.getComputedStyle(button).position,
+          menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+        }
+      })
+      assert.equal(expanded.captureLive, true, 'the guest owns the caption band')
+      assert.equal(expanded.menuLeft, 48, 'an expanded rail leaves the shell default where it is')
+      assert.equal(expanded.menuStart, '48px', 'and the mirror says so')
+      assert.notEqual(
+        expanded.newSessionPosition,
+        'fixed',
+        'an expanded rail keeps new-session inside the sidebar, out of the caption band',
+      )
+
+      // Collapse the remote sidebar in the guest, exactly as the user does on the toggle: the
+      // new-session control now sits at 48px in the caption band, where the shell's default starts.
+      await desktopPage.evaluate(() => {
+        const guest = document.querySelector('[data-guest-seat]').contentDocument
+        guest.querySelector('[data-sidebar-toggle]').click()
+      })
+      await desktopPage.waitForFunction(
+        () =>
+          document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') !==
+          null,
+        { timeout: 10_000 },
+      )
+      // The guest reports through the row's 400ms poll; a couple of rounds, then measure.
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      const collapsed = await desktopPage.evaluate(() => {
+        const guest = document.querySelector('[data-guest-seat]').contentDocument
+        const menu = document.querySelector('#caption-menubar').getBoundingClientRect()
+        const button = [...guest.querySelectorAll('button')].find((node) =>
+          String(node.className).includes('newSession'),
+        )
+        const rect = button ? button.getBoundingClientRect() : null
+        return {
+          railCollapsed: guest.querySelector('[data-sidebar-collapsed]') !== null,
+          menuLeft: Math.round(menu.left),
+          menuRight: Math.round(menu.right),
+          newSession: rect === null ? null : { left: Math.round(rect.left), right: Math.round(rect.right) },
+          newSessionPosition: button === null ? '' : guest.defaultView.getComputedStyle(button).position,
+          menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+        }
+      })
+      assert.equal(collapsed.railCollapsed, true, 'the remote rail is collapsed')
+      assert.equal(collapsed.newSessionPosition, 'fixed', 'a collapsed rail lifts new-session into the band')
+      assert.equal(collapsed.newSession.left, 48, 'the caption controls still start after the toggle')
+      assert.equal(
+        collapsed.menuStart,
+        '84px',
+        'the local menubar inset follows the guest rail (the shell default 48px would sit on it)',
+      )
+      assert.equal(collapsed.menuLeft, 84, 'the caption menubar moved with it')
+      assert.ok(
+        collapsed.menuLeft >= collapsed.newSession.right,
+        `the caption menus overlap new-session (${collapsed.menuLeft} < ${collapsed.newSession.right})`,
+      )
+
+      // Expanding the rail again hands the 48px start back; leaving the guest returns the band to
+      // the local page, whose own sidebar rule takes the inset over again.
+      await desktopPage.evaluate(() => {
+        const guest = document.querySelector('[data-guest-seat]').contentDocument
+        guest.querySelector('[data-sidebar-toggle]').click()
+      })
+      await desktopPage.waitForFunction(
+        () =>
+          document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') ===
+          null,
+        { timeout: 10_000 },
+      )
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      const reExpanded = await desktopPage.evaluate(() => ({
+        menuLeft: Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left),
+        menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+      }))
+      assert.equal(reExpanded.menuStart, '48px', 'an expanded rail brings the shell default back')
+      assert.equal(reExpanded.menuLeft, 48, 'and the caption menubar with it')
+      await desktopPage.evaluate(() => window.__harness.plugin.carrier.hide())
+      const afterLocal = await desktopPage.evaluate(() => ({
+        menuLeft: Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left),
+        menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+        captureLive: document.documentElement.classList.contains('drg-caption-live'),
+      }))
+      assert.equal(afterLocal.captureLive, false, 'the local page owns the band again')
+      assert.equal(afterLocal.menuStart, '', 'the inline override is gone, so the local rule decides')
+      assert.equal(afterLocal.menuLeft, 48, 'with no local sidebar to collapse, that rule is the default')
+      const desktopErrorsFiltered = desktopErrors.filter((text) => !/Failed to load resource/.test(text))
+      assert.deepEqual(desktopErrorsFiltered, [], `desktop page errors: ${desktopErrorsFiltered.join(' | ')}`)
+      await desktopPage.close()
     } finally {
       if (browser !== null) await browser.close()
       proxy?.dispose()

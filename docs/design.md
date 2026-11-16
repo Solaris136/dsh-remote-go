@@ -53,7 +53,8 @@
 1. 用 `GET /hosts/:id/open` 取一次性 token 的本地回环 URL 并校验 `http://127.0.0.1:` 前缀；URL 与主机绑定，只会交给它自己的窗口。
 2. 经桌面桥 `window.dshDesktop.browser.acquire` 取 guest lease，创建 Chromium guest（`<webview>`）**铺满整个窗口**。guest 是 Web 构建、没有 preload，每次加载后都要注入桌面窗口标记（`<html data-windows-titlebar>` + `--dsh-windows-titlebar-height`，高度读本地页面；全屏标记 `data-fullscreen`）：页面自己让出标题栏那一条，两边才是**同一套栅格**（侧边栏行高、入口页留白、居中浮层与 `position:fixed` 元素对齐；不注入时差 10–40px）。注入失败或窗口本没有这条带（macOS、Web 构建）时退回「guest 整体下移一条」——**任何时候都只有一条标题栏**。
 3. guest 盖住标题栏那一条后，拖拽与本地菜单要补回来：carrier 在标题栏区域放一条 `-webkit-app-region: drag` 拖拽条（guest 自己固定控件只占左侧 84px），并在 `<html>` 上加 `drg-caption-live` 把宿主标题栏菜单抬到 guest 之上；回本地页时一起撤掉。
-4. guest 每次 `did-stop-loading` 后，先补标题栏标记，再注入同一条主机条脚本；列表与状态经 `update(<payload>)` 推送，点击经 `window.__drgBridgeQueue` 队列轮询取回。顺序不能反（主机条按桌面栅格量到的品牌行定位）。
+4. 标题栏菜单的位置由**当前画这条带的那一页**决定：壳的 preload 把「应用 / 编辑」挂在 `left: var(--dsh-windows-menu-start, 48px)`，DSH 自己的规则只在本地侧边栏折叠时把它抬到 84px。远端 rail 收起后，它自己的「新建会话」也固定在带上 48px（和本地一样），所以本地页必须跟着远端 rail 的状态走：guest 经同一条队列上报 `[data-sidebar-collapsed]`（装载时一次、之后每次变化一次），宿主把 `--dsh-windows-menu-start`（84px 收起 / 48px 展开）写成 `<html>` 内联变量盖过 DSH 的规则，回本地页时删掉，规则重新归本地页。否则收起后「新建会话」正好压在 48px 起的「应用」上（#63）。
+5. guest 每次 `did-stop-loading` 后，先补标题栏标记，再问一次 rail 状态、注入同一条主机条脚本；列表与状态经 `update(<payload>)` 推送，点击经 `window.__drgBridgeQueue` 队列轮询取回。顺序不能反（主机条按桌面栅格量到的品牌行定位）。
 
 **浏览器端（同源 frame + 反向代理）**：浏览器没有 guest 能力，直接内嵌回环地址又会变成跨源页面（本地 cookie
 会被远端覆盖，HTTPS 页面还会被混合内容拦截），所以由 Host 侧在本机 DSH 的 Web 服务上挂一条只在

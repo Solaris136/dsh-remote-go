@@ -30,7 +30,24 @@ window.__ModuleLoader__.load({
     const CAPTION_FALLBACK_HEIGHT = 40
     const CAPTION_MARKER = 'data-windows-titlebar'
     const CAPTION_LIVE_CLASS = 'drg-caption-live'
-    const CAPTION_GRIP_LEFT = 84
+    /**
+     * Where the caption band's own controls end: the sidebar toggle sits at 12px, a collapsed rail
+     * pins the new-session control at 48px (both are DSH's, see SidebarRoot.module.css), 28px wide,
+     * plus 8px of air. The window drag strip starts here, and so does the caption menubar while the
+     * guest's rail is collapsed.
+     */
+    const CAPTION_CONTROLS_END = 84
+    const CAPTION_GRIP_LEFT = CAPTION_CONTROLS_END
+    /**
+     * Where DSH mounts the Windows caption menubar (应用 / 编辑): a fixed host that reads
+     * `--dsh-windows-menu-start` (default 48px), which DSH's sidebar raises to 84px from its own
+     * collapsed rule. While a guest owns the band, its rail has to drive that inset instead.
+     */
+    const CAPTION_MENU_VAR = '--dsh-windows-menu-start'
+    const CAPTION_MENU_START = 48
+    const CAPTION_MENU_START_COLLAPSED = CAPTION_CONTROLS_END
+    /** A guest reports its rail state through the same queue its row clicks use (mountSidebarMirror). */
+    const CAPTION_SIDEBAR_INTENT = 'caption-sidebar'
     /** Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /**
@@ -3321,6 +3338,12 @@ window.__ModuleLoader__.load({
               // ignore a guest that navigated away mid-poll
             }
             for (const intent of value) {
+              // A rail report is news about the band, not a click: it moves this page's caption
+              // menubar and must never reach the intent dispatch.
+              if (isCaptionSidebarIntent(intent)) {
+                applyGuestSidebar(entry, intent.collapsed === true)
+                continue
+              }
               // File intents belong to the host whose guest queued them; row intents
               // keep their own hostId (a disconnect can target another host).
               const answer = dispatchSwitcherIntent(
@@ -3376,6 +3399,114 @@ window.__ModuleLoader__.load({
         }
       }
       return { height }
+    }
+
+    /** The caption menubar's inset for a band whose sidebar is collapsed or expanded. */
+    function captionMenuStart(collapsed) {
+      return collapsed === true ? CAPTION_MENU_START_COLLAPSED : CAPTION_MENU_START
+    }
+
+    /**
+     * Publish where the caption menubar starts. The band normally belongs to the local page, whose
+     * own `html[data-windows-titlebar]:has([data-sidebar-collapsed])` rule (and the preload's 48px
+     * default behind it) decides the inset, so this only writes while a guest owns the band — inline,
+     * which wins over that stylesheet without touching it — and removes the override again when the
+     * local page takes the band back, leaving DSH's own rule in charge.
+     */
+    function setCaptionMenuStart(collapsed, root = null) {
+      let target = root
+      if (target === null && typeof document !== 'undefined' && document.documentElement) {
+        target = document.documentElement
+      }
+      if (target === null || !target.style || typeof target.style.setProperty !== 'function') return false
+      if (collapsed === null || collapsed === undefined) {
+        if (typeof target.style.removeProperty === 'function') target.style.removeProperty(CAPTION_MENU_VAR)
+        return true
+      }
+      target.style.setProperty(CAPTION_MENU_VAR, captionMenuStart(collapsed) + 'px')
+      return true
+    }
+
+    /**
+     * The band's controls belong to the band's owner (issue #63): the collapsed rail puts the
+     * new-session control in the band at 48px, which is exactly where the local page's caption
+     * menubar starts until the local sidebar collapses as well. A guest that reserves the band
+     * therefore decides that inset, the same way the local sidebar's rule does when it owns it.
+     */
+    function applyGuestSidebar(entry, collapsed) {
+      if (entry === null || entry === undefined) return
+      entry.sidebarCollapsed = collapsed === true
+      if (carrierPool.current !== entry.hostId || entry.captionApplied !== true) return
+      setCaptionMenuStart(entry.sidebarCollapsed)
+    }
+
+    /** True when an intent is the guest's rail report rather than a click on the switcher row. */
+    function isCaptionSidebarIntent(intent) {
+      return intent !== null && typeof intent === 'object' && intent.action === CAPTION_SIDEBAR_INTENT
+    }
+
+    /**
+     * Guest half: report the remote sidebar's rail state. It changes long after the document loaded,
+     * and `executeJavaScript` is the desktop guest's only channel back, so the watcher leaves one
+     * intent in the bridge queue the row and the file bridge already use. Returns the state at
+     * install time, which the host adopts before waiting for the next drain.
+     */
+    function mountSidebarMirror(win) {
+      try {
+        var doc = win.document
+        if (!doc || !doc.documentElement) return 'no-document'
+        if (win.__drgSidebarMirror === true) return 'already'
+        win.__drgSidebarMirror = true
+        // The frame DSH collapses carries the mark its own caption rule keys on. Presence is the
+        // signal (a rail is collapsed or it is not); only an explicit "false" says otherwise.
+        var read = function () {
+          var frame = doc.querySelector('[data-sidebar-collapsed]')
+          return frame !== null && frame.getAttribute('data-sidebar-collapsed') !== 'false'
+        }
+        var last = null
+        var report = function () {
+          var collapsed = read()
+          if (collapsed === last) return
+          last = collapsed
+          // Read the queue fresh: the host replaces the array after every drain. The action name
+          // has to match CAPTION_SIDEBAR_INTENT (a stringified guest cannot close over it).
+          var queue = win.__drgBridgeQueue
+          if (!queue || typeof queue.push !== 'function') queue = []
+          queue.push({ action: 'caption-sidebar', collapsed: collapsed })
+          win.__drgBridgeQueue = queue
+        }
+        if (typeof win.MutationObserver === 'function') {
+          new win.MutationObserver(report).observe(doc.documentElement, {
+            attributes: true,
+            attributeFilter: ['data-sidebar-collapsed'],
+            subtree: true,
+          })
+        }
+        report()
+        return read() ? 'collapsed' : 'expanded'
+      } catch (_error) {
+        return 'error'
+      }
+    }
+
+    const SIDEBAR_MIRROR_SCRIPT = '(' + mountSidebarMirror.toString() + ')(window)'
+
+    /**
+     * Install the rail watcher in the shown guest and adopt what it reports right away; the row's
+     * intent poll only carries the changes that follow.
+     */
+    async function installSidebarMirror(entry) {
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return false
+      let state = ''
+      try {
+        state = await view.executeJavaScript(SIDEBAR_MIRROR_SCRIPT)
+      } catch (_error) {
+        state = ''
+      }
+      if (state !== 'collapsed' && state !== 'expanded') return false
+      applyGuestSidebar(entry, state === 'collapsed')
+      return true
     }
 
     async function applyGuestCaption(entry) {
@@ -3435,13 +3566,24 @@ window.__ModuleLoader__.load({
       if (entry.grip !== null && entry.grip !== undefined) {
         entry.grip.style.display = entry.captionApplied ? '' : 'none'
       }
-      if (carrierPool.current === entry.hostId) setCaptionLive(entry.captionApplied)
+      if (carrierPool.current === entry.hostId) ownCaptionBand(entry, entry.captionApplied === true)
     }
 
     function setCaptionLive(live) {
       if (typeof document === 'undefined' || !document.documentElement) return
       if (live === true) document.documentElement.classList.add(CAPTION_LIVE_CLASS)
       else document.documentElement.classList.remove(CAPTION_LIVE_CLASS)
+    }
+
+    /**
+     * The band changed hands. A guest that reserves it gets the marks this page needs while it is
+     * in front — the shell's caption menus above the guest, and the menubar inset from the guest's
+     * own rail — and the local page takes both back when no guest owns the band.
+     */
+    function ownCaptionBand(entry, owned) {
+      const mine = owned === true && entry !== null && entry !== undefined
+      setCaptionLive(mine)
+      setCaptionMenuStart(mine ? entry.sidebarCollapsed === true : null)
     }
 
     async function createDesktopCarrier(hostId, url, message) {
@@ -3524,6 +3666,8 @@ window.__ModuleLoader__.load({
         caption,
         /** Set once the guest page carries the desktop marker (never in a band-less window). */
         captionApplied: false,
+        /** The guest's rail state as it last reported it; null until the mirror says. */
+        sidebarCollapsed: null,
         url,
         rowInstalled: false,
         failed: false,
@@ -3562,9 +3706,13 @@ window.__ModuleLoader__.load({
         // would leave the window without any control. Both scripts are idempotent inside the page, and the caption has
         // to land before the row measures the sidebar it is placed into.
         applyGuestCaption(entry)
-          .then((applied) => {
+          .then(async (applied) => {
             if (entry.view !== view) return false
             syncCarrierCaption(entry, applied)
+            // A guest that reserved the band also owns the caption menubar's inset: learn its rail
+            // state before the row measures the sidebar it is placed into.
+            await installSidebarMirror(entry)
+            if (entry.view !== view) return false
             return installHostRow(entry)
           })
           .then(async (live) => {
@@ -3946,7 +4094,7 @@ window.__ModuleLoader__.load({
       }
       // The band belongs to this guest now: keep the shell's caption menus above it, but
       // only when the guest actually reserved the band (otherwise the local band is intact).
-      setCaptionLive(entry.captionApplied === true)
+      ownCaptionBand(entry, entry.captionApplied === true)
       updateSwitcher({ current: hostId })
       if (entry.rowInstalled === true) {
         pushGuestHostRow(switcherPayload())
@@ -3962,7 +4110,7 @@ window.__ModuleLoader__.load({
       for (const entry of carrierPool.entries) entry.root.style.display = 'none'
       carrierPool.current = null
       // The local band is back: its menus belong to the page again, not above a guest.
-      setCaptionLive(false)
+      ownCaptionBand(null, false)
     }
 
     /** Tear one carrier down. Safe for one that never entered the pool. */
@@ -3976,7 +4124,7 @@ window.__ModuleLoader__.load({
       const wasShown = carrierPool.current === entry.hostId
       if (wasShown) {
         carrierPool.current = null
-        setCaptionLive(false)
+        ownCaptionBand(null, false)
       }
       await entry.backend.dispose(entry)
       if (wasShown) updateSwitcher({ current: 'local' })
@@ -4012,7 +4160,7 @@ window.__ModuleLoader__.load({
       stopHostRowPoll()
       const hosts = carrierPool.entries.map((entry) => entry.hostId)
       carrierPool.current = null
-      setCaptionLive(false)
+      ownCaptionBand(null, false)
       if (captionStateWatcher !== null) {
         captionStateWatcher.disconnect()
         captionStateWatcher = null
@@ -6751,6 +6899,9 @@ window.__ModuleLoader__.load({
         bridge: (win) => mountCapabilityBridge(win),
         /** Install the per-host `localStorage` partition into one framed page. */
         partition: (win, hostId) => mountGuestStorage(win, hostId),
+        /** Guest-side rail watcher and the caption menubar inset it maps to (issue #63). */
+        sidebarMirror: () => SIDEBAR_MIRROR_SCRIPT,
+        captionMenuStart: (collapsed) => captionMenuStart(collapsed),
       },
     }
   },

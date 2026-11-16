@@ -56,6 +56,22 @@ function loadClientPlugin(options = {}) {
 }
 
 function fakeDocument(options = {}) {
+  // A style object that carries custom properties the way the DOM does, plus the plain
+  // properties (cssText, top, display) the client writes directly.
+  const style = () => {
+    const values = {}
+    return {
+      setProperty(name, value) {
+        values[name] = String(value)
+      },
+      getPropertyValue(name) {
+        return Object.prototype.hasOwnProperty.call(values, name) ? values[name] : ''
+      },
+      removeProperty(name) {
+        delete values[name]
+      },
+    }
+  }
   const create = (tag) => {
     const node = {
       tagName: String(tag).toUpperCase(),
@@ -68,7 +84,7 @@ function fakeDocument(options = {}) {
       id: '',
       type: '',
       parentNode: null,
-      style: {},
+      style: style(),
       setAttribute(name, value) {
         this.attributes[name] = String(value)
       },
@@ -1539,6 +1555,122 @@ test('a guest that refuses the caption script stays below the local band', async
   } finally {
     await takeover.carrier.close()
   }
+})
+
+test('the guest mirror reports the remote rail state on the bridge queue', () => {
+  const local = loadClientPlugin({ document: fakeDocument() })
+  // 84px is where the collapsed rail's caption controls end (toggle at 12px, new-session at 48px),
+  // the same inset the window drag strip leaves; 48px is the shell preload's own default.
+  assert.equal(local.carrier.captionMenuStart(true), 84, 'a collapsed rail ends its controls at 84px')
+  assert.equal(local.carrier.captionMenuStart(false), 48, 'an expanded sidebar leaves the preload default')
+  const script = local.carrier.sidebarMirror()
+  assert.match(script, /^\(function mountSidebarMirror\(win\)/)
+  const observers = []
+  class FakeObserver {
+    constructor(callback) {
+      this.callback = callback
+      observers.push(this)
+    }
+    observe() {}
+    disconnect() {}
+  }
+  let rail = false
+  const guestDom = {
+    documentElement: {},
+    querySelector(selector) {
+      if (selector !== '[data-sidebar-collapsed]') return null
+      return rail ? { getAttribute: () => 'true' } : null
+    },
+  }
+  const guestWindow = { document: guestDom, MutationObserver: FakeObserver }
+  const install = new Function('window', 'return ' + script)
+  assert.equal(install(guestWindow), 'expanded', 'the state at install time tells the host where to start')
+  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false }])
+  // The remote UI marks the frame it collapsed; that is the whole signal.
+  rail = true
+  observers[0].callback()
+  assert.deepEqual(guestWindow.__drgBridgeQueue.at(-1), { action: 'caption-sidebar', collapsed: true })
+  observers[0].callback()
+  assert.equal(guestWindow.__drgBridgeQueue.length, 2, 'a state that did not change is not reported again')
+  // The host replaces the queue after every drain, so a report must never cache the old array.
+  guestWindow.__drgBridgeQueue = []
+  rail = false
+  observers[0].callback()
+  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false }])
+  assert.equal(install(guestWindow), 'already', 'a second install into the same document is a no-op')
+})
+
+test('a collapsed guest rail moves the local caption menubar with it', async () => {
+  const doc = fakeDocument({ captionHeight: '40px' })
+  const released = []
+  const takeover = loadClientPlugin({
+    document: doc,
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+    }),
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async (lease) => released.push(lease),
+      },
+    },
+  })
+  const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const menuStart = () => doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start')
+  try {
+    const opened = await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    assert.equal(opened.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    view.loadURL = () => Promise.resolve()
+    // The guest answers in the order the carrier asks: caption, rail state, row, then the queue.
+    let drained = false
+    view.executeJavaScript = (code) => {
+      if (code.includes('mountSidebarMirror')) return Promise.resolve('collapsed')
+      if (code.includes('mountHostRow')) return Promise.resolve('installed')
+      if (code === 'window.__drgBridgeQueue || []') {
+        const pending = drained ? [] : [{ action: 'caption-sidebar', collapsed: false }]
+        drained = true
+        return Promise.resolve(pending)
+      }
+      return Promise.resolve('ok')
+    }
+    fire(view, 'dom-ready')
+    await settle()
+    assert.equal(
+      menuStart(),
+      '48px',
+      'a guest that owns the band starts from the shell default until its rail is known',
+    )
+    fire(view, 'did-stop-loading')
+    await settle()
+    assert.equal(menuStart(), '84px', 'the collapsed rail leaves the band to the new-session control first')
+    // The rail reports its later expansion through the same queue the row's clicks use.
+    await settle(520)
+    assert.equal(menuStart(), '48px', 'an expanded rail hands the 48px start back')
+    takeover.carrier.hide()
+    assert.equal(menuStart(), '', 'the local page takes the band and its own sidebar rule back')
+  } finally {
+    await takeover.carrier.close()
+  }
+  assert.deepEqual(released, ['lease-1'])
+})
+
+test('the browser carrier leaves the caption menubar to the local page', async () => {
+  const doc = fakeDocument()
+  const local = loadClientPlugin({ document: doc })
+  const opened = await local.carrier.open({ hostId: 'h_a', url: '/dsh-remote-go/remote/h_a/?token=abc' })
+  assert.equal(opened.ok, true)
+  assert.equal(local.carrier.shown(), 'h_a')
+  assert.equal(
+    doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start'),
+    '',
+    'the browser build has no caption band of its own: the local page keeps its rule',
+  )
+  local.carrier.hide()
+  assert.equal(doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start'), '')
+  await local.carrier.close()
 })
 
 test('a carrier is revealed only after its guest has painted', async () => {
