@@ -571,6 +571,9 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.equal(events.filter((event) => event.type === 'ssh').length, 1)
+  const frames = []
+  const onState = (state) => frames.push(state)
+  service.on('state', onState)
   events[0].ssh.simulateClose()
   await waitFor(
     () => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting',
@@ -579,7 +582,22 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
     },
   )
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { timeoutMs: 8000, label: 'reconnected' })
+  service.off('state', onState)
   assert.ok(events.filter((event) => event.type === 'ssh').length >= 2)
+  // The retry is a new connection (#62): its first `connecting` frame carries only its own
+  // boundary line, so the panel never shows the log of the link that just dropped.
+  const firstConnecting = frames.find((state) => state.hosts[0]?.status === 'connecting')
+  assert.ok(firstConnecting, 'the retry must publish a connecting frame')
+  const retryLog = firstConnecting.hosts[0].logs
+  assert.equal(retryLog.length, 1, 'the retry starts on an empty log plus its boundary line')
+  assert.equal(retryLog[0].seq, 1, 'the retry restarts the sequence')
+  assert.equal(retryLog[0].boundary, true)
+  assert.match(retryLog[0].text.zh, /^— 第 2 次连接 · /)
+  assert.doesNotMatch(
+    JSON.stringify(retryLog),
+    /第 1 次连接|link lost/,
+    'no line of the dropped connection may survive into the retry',
+  )
   await service.shutdown()
 })
 

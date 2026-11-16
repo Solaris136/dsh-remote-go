@@ -1045,6 +1045,13 @@ test('the connect log shows the phase of every line and the Host’s bilingual f
       text: { zh: '原因：启动失败。', en: 'Reason: startup failed.' },
     },
     { seq: 5, at: '2026-11-16T02:30:16.000Z', level: 'error', phase: 'custom', message: 'unknown phase line' },
+    {
+      seq: 6,
+      at: '2026-11-16T02:30:17.000Z',
+      level: 'info',
+      phase: 'ready',
+      message: 'connected: remote DSH on 127.0.0.1:45123',
+    },
   ]
   const zhHtml = render(
     React.createElement(plugin.components.ConnectLog, { t, host: hostView({ status: 'error', logs }) }),
@@ -1055,14 +1062,20 @@ test('the connect log shows the phase of every line and the Host’s bilingual f
   assert.match(zhHtml, /data-phase="start"/)
   assert.match(zhHtml, />SSH</, 'the ssh phase has its localized chip')
   assert.match(zhHtml, />启动远端</, 'the start phase chip is localized')
+  assert.match(zhHtml, />就绪</, 'the ready phase chip is localized too')
   assert.match(zhHtml, />custom</, 'an unknown phase prints as its own id')
   assert.match(zhHtml, /连接失败于 start 阶段：remote-dsh-start-failed/)
   assert.match(zhHtml, /原因：启动失败。/)
   assert.equal((zhHtml.match(/data-level="error"/g) ?? []).length, 3, 'failure lines render at error level')
   assert.doesNotMatch(zhHtml, /— Connection 2 · 2026-11-16 10:30:12 —/, 'the zh UI shows the zh line')
-  const order = ['第 2 次连接', 'SSH connected', '连接失败于 start 阶段', '原因：启动失败。', 'unknown phase line'].map(
-    (needle) => zhHtml.indexOf(needle),
-  )
+  const order = [
+    '第 2 次连接',
+    'SSH connected',
+    '连接失败于 start 阶段',
+    '原因：启动失败。',
+    'unknown phase line',
+    'connected: remote DSH on 127.0.0.1:45123',
+  ].map((needle) => zhHtml.indexOf(needle))
   assert.deepEqual(
     order,
     [...order].sort((left, right) => left - right),
@@ -1078,6 +1091,7 @@ test('the connect log shows the phase of every line and the Host’s bilingual f
   )
   assert.match(enHtml, /— Connection 2 · 2026-11-16 10:30:12 —/)
   assert.match(enHtml, />Start</)
+  assert.match(enHtml, />Ready</)
   assert.match(enHtml, /Connect failed in phase start: remote-dsh-start-failed/)
   assert.match(enHtml, /Reason: startup failed\./)
   assert.doesNotMatch(enHtml, /第 2 次连接/, 'the en UI resolves the same line in English')

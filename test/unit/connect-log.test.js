@@ -4,6 +4,7 @@ import {
   CONNECT_LOG_STATUSES,
   LOG_RING_LIMIT,
   LOG_TAIL_LIMIT,
+  LOG_TAIL_LINES,
   LOG_TECHNICAL_LIMIT,
   appendConnectLog,
   beginConnectLog,
@@ -270,4 +271,50 @@ test('a single huge remote-log line is clamped to the per-line budget', () => {
     technical: 'E'.repeat(5000),
   })
   for (const line of lines.slice(3)) assert.ok(line.message.length <= 500, 'a log line must stay readable')
+})
+
+test('a private key spanning the truncation point never reaches the log', () => {
+  // Redaction has to run before `headTail`: the private-key pattern needs both markers, and a
+  // block that spans the cut point would lose its END marker to the elided middle if the order
+  // were reversed. The sizes below put BEGIN (with part of the body) in the retained head and
+  // END in the elided middle, while the redacted text still fits inside the budget uncut.
+  const half = LOG_TECHNICAL_LIMIT / 2
+  const body = 'A'.repeat(200)
+  const key = `-----BEGIN RSA PRIVATE KEY-----\n${body}\n-----END RSA PRIVATE KEY-----`
+  const technical = `${'x'.repeat(half - 100)}\n${key}\n${'y'.repeat(half + 20)}`
+  assert.ok(technical.length > LOG_TECHNICAL_LIMIT, 'the raw detail must be truncated if it is not redacted first')
+  const lines = connectFailureLines({
+    code: 'internal',
+    title: { zh: '插件内部错误', en: 'Internal plugin error' },
+    detail: { zh: '出错了。', en: 'Something broke.' },
+    technical,
+  })
+  const printed = lines.map((line) => line.message).join('\n')
+  assert.doesNotMatch(printed, /BEGIN RSA PRIVATE KEY/, 'the key header must be redacted, not truncated around')
+  assert.doesNotMatch(printed, /A{20}/, 'no body of the private key may reach the log')
+  assert.match(printed, /-----BEGIN PRIVATE KEY-----<redacted>-----END PRIVATE KEY-----/)
+})
+
+test('a chatty remote log is capped at LOG_TAIL_LINES, whatever the log length', () => {
+  // A fixed 200 lines, independent of the constant: raising the cap must fail this test.
+  const total = 200
+  // Short lines on purpose: this test is about the line cap, not the byte budget.
+  const technical = Array.from({ length: total }, (_, index) => `r${index + 1}`).join('\n')
+  const lines = connectFailureLines({
+    code: 'remote-dsh-start-failed',
+    title: { zh: '远端 DSH 启动失败', en: 'The remote DSH failed to start' },
+    detail: { zh: '启动失败。', en: 'The start failed.' },
+    nextSteps: [],
+    technical,
+  })
+  const printed = lines.slice(3)
+  assert.equal(printed.length, LOG_TAIL_LINES, 'the header is separate; exactly LOG_TAIL_LINES tail lines print')
+  assert.ok(printed.length <= 60, 'a failed start must never print more than 60 tail lines')
+  assert.equal(printed[0].message, 'r1')
+  assert.equal(printed[printed.length - 1].message, `r${LOG_TAIL_LINES}`)
+  assert.equal(
+    printed.some((line) => line.message === `r${LOG_TAIL_LINES + 1}`),
+    false,
+    'the lines past the cap stay out of the log',
+  )
 })

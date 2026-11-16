@@ -176,6 +176,7 @@ window.__ModuleLoader__.load({
       'connectLogPhase.start': ['启动远端', 'Start'],
       'connectLogPhase.tunnel': ['隧道', 'Tunnel'],
       'connectLogPhase.verifying': ['校验界面', 'Verify'],
+      'connectLogPhase.ready': ['就绪', 'Ready'],
       switcherLocal: ['本地', 'Local'],
       switcherAddHost: ['添加主机', 'Add host'],
       switcherManage: ['管理界面', 'Manage hosts'],
@@ -1948,7 +1949,7 @@ window.__ModuleLoader__.load({
     }
 
     /** The connect phases that own a log line; an unknown id prints as itself. */
-    const CONNECT_LOG_PHASES = new Set(['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying'])
+    const CONNECT_LOG_PHASES = new Set(['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready'])
 
     /** A line's text: the Host's bilingual line when present, otherwise the raw message. */
     function connectLogText(entry, locale) {

@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.7）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.8）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -29,6 +29,13 @@
 > **v2.7 变更**：`GET /hosts/:id/open` 增加同源 `webUrl`，供浏览器半端在
 > `/dsh-remote-go/remote/<hostId>/` 承载远端界面；新增该前缀下的同源反向代理（含
 > WebSocket 升级）。桌面 half 继续使用 `url` 的回环地址，接口向后兼容。
+>
+> **v2.8 变更**：`ConnectLogEntry` 增加 `phase`（写下该行时所在的连接阶段）、可选 `text`
+> （双语行：边界行与失败原因 / 建议）与可选 `boundary`（本次连接第一行）；`HostView.logs`
+> 的语义变为**每次连接开始时重置**（手动连接 / 重连 / 自动重连），第一行是带次数与时间的
+> 边界行，失败被写成多行 `error` 级日志。三个新字段全部可选：旧 Host 响应没有它们时，Client
+> 不渲染阶段标签、按 `message` 原样显示；新 Host 响应给旧 Client 时，`message` 仍是可读的
+> 英文兜底。没有新增端点，其余字段与端点不变。
 
 ## 0. 通用类型
 
@@ -224,7 +231,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.7", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.8", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`

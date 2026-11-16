@@ -406,7 +406,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.7')
+    assert.equal(result.json.apiVersion, '2.8')
   } finally {
     await api.close()
     await service.shutdown()
