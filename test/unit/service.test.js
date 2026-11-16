@@ -196,6 +196,104 @@ test('the connect log is capped while the ring keeps the newest lines', async ()
   assert.match(failed.error.code, /node-install-failed/)
   await service.shutdown()
 })
+
+/** The log as a user reads it in the panel: localized text first, the raw line otherwise. */
+function logTextOf(view) {
+  return (view.logs ?? []).map((entry) => entry.text?.zh ?? entry.message).join('\n')
+}
+
+test('a new connection replaces the previous attempt’s log instead of appending to it', async () => {
+  let attempts = 0
+  const { service } = await makeTestService({
+    ensureNode: async () => {
+      attempts += 1
+      throw errors.nodeInstallFailed({ zh: `下载失败 ${attempts}`, en: `download failed ${attempts}` })
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'first failure' })
+  const first = service.snapshot().hosts[0]
+  assert.match(logTextOf(first), /^— 第 1 次连接 · /m)
+  assert.match(logTextOf(first), /下载失败 1/)
+  assert.equal(first.logs[0].seq, 1)
+
+  // Reconnect without cleaning anything: attempt 2 must open on a clean log.
+  await service.connect(host.id)
+  const failedAgain = () =>
+    service.snapshot().hosts[0].status === 'error' && /下载失败 2/.test(logTextOf(service.snapshot().hosts[0]))
+  await waitFor(failedAgain, { label: 'second failure' })
+  const second = service.snapshot().hosts[0]
+  assert.equal(second.logs[0].boundary, true, 'the new connection opens with its boundary line')
+  assert.equal(second.logs[0].seq, 1, 'the second connection starts its own sequence')
+  assert.match(second.logs[0].text.zh, /^— 第 2 次连接 · /)
+  assert.doesNotMatch(
+    logTextOf(second),
+    /第 1 次连接|下载失败 1/,
+    'no line from the previous attempt may survive into this connection',
+  )
+  assert.match(logTextOf(second), /下载失败 2/)
+  await service.shutdown()
+})
+
+test('a failed connection’s log explains itself: phase, code, reason and hints at error level', async () => {
+  const { service } = await makeTestService({ waitUi: async () => ({ ok: false, status: 502 }) })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
+  const view = service.snapshot().hosts[0]
+  assert.equal(view.error.code, 'remote-ui-unreachable')
+  const text = logTextOf(view)
+  assert.match(text, /连接失败于 verifying 阶段：remote-ui-unreachable/)
+  assert.match(text, /原因：远端 DSH 的本地 127\.0\.0\.1:38123 没有响应/)
+  assert.match(text, /建议：点「重连」重试一次/)
+  assert.match(text, /建议：查看诊断中的隧道与界面可达性检查/)
+  const failures = view.logs.filter((entry) => entry.level === 'error')
+  assert.ok(failures.length >= 4, 'the failure is written as several error lines, not one')
+  assert.ok(
+    failures.every((entry) => entry.phase === 'verifying'),
+    'every failure line names the phase it failed in',
+  )
+  const phases = new Set(view.logs.map((entry) => entry.phase))
+  for (const phase of ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying']) {
+    assert.ok(phases.has(phase), `the log must show the ${phase} phase ran`)
+  }
+  assert.equal(
+    view.logs.every((entry) => 'phase' in entry),
+    true,
+    'every /state log line carries its phase',
+  )
+  await service.shutdown()
+})
+
+test('a failed remote start prints the remote log tail line by line', async () => {
+  const { service } = await makeTestService({
+    startWeb: async () => {
+      throw errors.remoteDshStartFailed(
+        'EXITED:4242\n---LOG---\nError: Cannot find module @deepseek-ai/dsh\n  at Module._resolveFilename',
+      )
+    },
+  })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
+  const view = service.snapshot().hosts[0]
+  const text = logTextOf(view)
+  assert.match(text, /连接失败于 start 阶段：remote-dsh-start-failed/)
+  assert.match(text, /远端日志尾部：/)
+  const header = view.logs.findIndex((entry) => entry.text?.zh === '远端日志尾部：')
+  assert.ok(header >= 0, 'the tail needs its own header line')
+  assert.deepEqual(
+    view.logs.slice(header + 1).map((entry) => entry.message),
+    ['EXITED:4242', '---LOG---', 'Error: Cannot find module @deepseek-ai/dsh', '  at Module._resolveFilename'],
+    'each remote log line is its own log line',
+  )
+  assert.equal(
+    view.logs.slice(header + 1).every((entry) => entry.level === 'error' && entry.phase === 'start'),
+    true,
+  )
+  await service.shutdown()
+})
 test('the npx preflight reports npm output as connect progress', async () => {
   const { service } = await makeTestService({
     preflight: async (_ssh, _plan, options) => {
@@ -473,6 +571,9 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.equal(events.filter((event) => event.type === 'ssh').length, 1)
+  const frames = []
+  const onState = (state) => frames.push(state)
+  service.on('state', onState)
   events[0].ssh.simulateClose()
   await waitFor(
     () => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting',
@@ -481,7 +582,22 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
     },
   )
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { timeoutMs: 8000, label: 'reconnected' })
+  service.off('state', onState)
   assert.ok(events.filter((event) => event.type === 'ssh').length >= 2)
+  // The retry is a new connection (#62): its first `connecting` frame carries only its own
+  // boundary line, so the panel never shows the log of the link that just dropped.
+  const firstConnecting = frames.find((state) => state.hosts[0]?.status === 'connecting')
+  assert.ok(firstConnecting, 'the retry must publish a connecting frame')
+  const retryLog = firstConnecting.hosts[0].logs
+  assert.equal(retryLog.length, 1, 'the retry starts on an empty log plus its boundary line')
+  assert.equal(retryLog[0].seq, 1, 'the retry restarts the sequence')
+  assert.equal(retryLog[0].boundary, true)
+  assert.match(retryLog[0].text.zh, /^— 第 2 次连接 · /)
+  assert.doesNotMatch(
+    JSON.stringify(retryLog),
+    /第 1 次连接|link lost/,
+    'no line of the dropped connection may survive into the retry',
+  )
   await service.shutdown()
 })
 

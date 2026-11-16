@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.7）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.8）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -29,6 +29,14 @@
 > **v2.7 变更**：`GET /hosts/:id/open` 增加同源 `webUrl`，供浏览器半端在
 > `/dsh-remote-go/remote/<hostId>/` 承载远端界面；新增该前缀下的同源反向代理（含
 > WebSocket 升级）。桌面 half 继续使用 `url` 的回环地址，接口向后兼容。
+>
+> **v2.8 变更**：`ConnectLogEntry` 增加 `phase`（写下该行时所在的连接阶段）、可选 `text`
+> （双语行：边界行与失败原因 / 建议）与可选 `boundary`（本次连接第一行）；`HostView.logs`
+> 的语义变为**每次连接开始时重置**（手动连接 / 重连 / 自动重连），第一行是带次数与时间的
+> 边界行，失败被写成多行 `error` 级日志。`phase` 恒下发（边界行与首个阶段前的输出为
+> `null`），`text` / `boundary` 可选：旧 Host 响应没有 `phase` 时 Client 不渲染阶段标签、
+> 按 `message` 原样显示；新 Host 响应给旧 Client 时，`message` 仍是可读的英文兜底。没有
+> 新增端点，其余字段与端点不变。
 
 ## 0. 通用类型
 
@@ -66,10 +74,13 @@ interface FingerprintView {
 }
 
 interface ConnectLogEntry {
-  seq: number                 // 每台主机内单调递增，用于稳定渲染与去重
+  seq: number                 // 本次连接内从 1 单调递增（每次连接重置），用于稳定渲染与去重
   at: string                  // ISO 时间戳
   level: 'debug' | 'info' | 'warn' | 'error'
-  message: string             // 原始一行（SSH / npx / 远端 stdout / 连接步骤）
+  phase: ConnectPhase | null  // 写下这一行时所在的连接阶段；边界行与首个阶段前的输出为 null
+  message: string             // 原始一行（英文兜底：SSH / npx / 远端 stdout / 连接步骤 / 失败行）
+  text?: I18nText             // 双语行（连接边界行、失败原因与建议），Client 按 locale 渲染，缺省回退 message
+  boundary?: true             // 本次连接的第一行：第 N 次连接 + 时刻
 }
 
 interface RemoteView {
@@ -107,9 +118,11 @@ interface HostView {
     processes: { pid: number; command: string }[]
   } | null
   /**
-   * 连接窗口的日志尾（Client 原样打印）。仅当 status 是 `connecting` / `fingerprint-pending` /
+   * 连接窗口的日志尾（Client 按 locale 渲染）。仅当 status 是 `connecting` / `fingerprint-pending` /
    * `error` 时非空——也就是屏幕上确实有连接窗口的时候；其余状态为 `[]`，避免每帧携带历史日志。
-   * 最多 120 条，旧的先掉；每条是 Host 写下的原始一行（本机内容，不加前缀、不改写、不脱敏）。
+   * **每次连接开始时重置**（手动连接 / 重连 / 自动重连都会），因此这里只有本次连接的行，第一行是带
+   * 次数与时间的边界行；最多 120 条，旧的先掉。失败会被写成多行：阶段与错误码、双语原因、每条建议、
+   * 脱敏并 `headTail` 截断的技术细节（`remote-dsh-start-failed` 为远端日志尾部逐行）。
    */
   logs: ConnectLogEntry[]
   remote: RemoteView
@@ -219,7 +232,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.7", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.8", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`

@@ -12,7 +12,7 @@
 
 ## 文档
 
-设计 [docs/design.md](docs/design.md)（职责边界、界面、连接生命周期、运行时与安全）· 代码地图 [docs/implementation.md](docs/implementation.md) · API 契约 [docs/api.md](docs/api.md)（v2.5）· 发布流程 [docs/publish.md](docs/publish.md) · 远端测试环境 [e2e/remote/README.md](e2e/remote/README.md) · 变更记录 [CHANGELOG.md](CHANGELOG.md)
+设计 [docs/design.md](docs/design.md)（职责边界、界面、连接生命周期、运行时与安全）· 代码地图 [docs/implementation.md](docs/implementation.md) · API 契约 [docs/api.md](docs/api.md)（v2.8）· 发布流程 [docs/publish.md](docs/publish.md) · 远端测试环境 [e2e/remote/README.md](e2e/remote/README.md) · 变更记录 [CHANGELOG.md](CHANGELOG.md)
 
 ## 它是什么
 

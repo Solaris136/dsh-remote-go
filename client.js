@@ -170,6 +170,13 @@ window.__ModuleLoader__.load({
       connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
       connectLogCount: ['{count} 行', '{count} lines'],
       connectLogEmpty: ['等待日志输出…', 'Waiting for log output…'],
+      'connectLogPhase.ssh': ['SSH', 'SSH'],
+      'connectLogPhase.probe': ['探测', 'Probe'],
+      'connectLogPhase.bootstrap': ['准备运行时', 'Runtime'],
+      'connectLogPhase.start': ['启动远端', 'Start'],
+      'connectLogPhase.tunnel': ['隧道', 'Tunnel'],
+      'connectLogPhase.verifying': ['校验界面', 'Verify'],
+      'connectLogPhase.ready': ['就绪', 'Ready'],
       switcherLocal: ['本地', 'Local'],
       switcherAddHost: ['添加主机', 'Add host'],
       switcherManage: ['管理界面', 'Manage hosts'],
@@ -1941,8 +1948,22 @@ window.__ModuleLoader__.load({
       return pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' + pad(when.getSeconds())
     }
 
+    /** The connect phases that own a log line; an unknown id prints as itself. */
+    const CONNECT_LOG_PHASES = new Set(['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready'])
+
+    /** A line's text: the Host's bilingual line when present, otherwise the raw message. */
+    function connectLogText(entry, locale) {
+      const localized = resolveText(entry.text, locale)
+      return localized !== '' ? localized : String(entry.message ?? '')
+    }
+
+    function connectLogPhaseLabel(t, phase) {
+      return CONNECT_LOG_PHASES.has(phase) ? t('connectLogPhase.' + phase) : String(phase)
+    }
+
     function ConnectLog(props) {
       const t = translatorOf(props)
+      const locale = localeOf(props)
       const host = props.host || {}
       const entries = Array.isArray(host.logs) ? host.logs : []
       const bodyRef = useRef(null)
@@ -1982,19 +2003,24 @@ window.__ModuleLoader__.load({
           },
           entries.length === 0
             ? h('p', { className: 'drg-connect-log-empty', 'data-testid': 'connect-log-empty' }, t('connectLogEmpty'))
-            : entries.map((entry) =>
-                h(
+            : entries.map((entry) => {
+                const phase = typeof entry.phase === 'string' ? entry.phase : ''
+                return h(
                   'div',
                   {
                     key: String(entry.seq),
                     className: 'drg-connect-log-line',
                     'data-level': entry.level || 'info',
+                    'data-phase': phase === '' ? undefined : phase,
+                    'data-boundary': entry.boundary === true ? 'true' : undefined,
                     'data-testid': 'connect-log-line',
                   },
                   h('span', { className: 'drg-connect-log-time', 'aria-hidden': 'true' }, logClock(entry.at)),
-                  box('span', 'drg-connect-log-text', String(entry.message ?? '')),
-                ),
-              ),
+                  // The phase each line was written in: scrolling back shows where it stopped.
+                  phase === '' ? null : box('span', 'drg-connect-log-phase', connectLogPhaseLabel(t, phase)),
+                  box('span', 'drg-connect-log-text', connectLogText(entry, locale)),
+                )
+              }),
         ),
       )
     }
@@ -5844,7 +5870,17 @@ window.__ModuleLoader__.load({
     .drg-connect-log-body:focus-visible, .drg-keyfile-row:focus-visible { outline-offset: -2px; }
     .drg-connect-log-line { display: flex; align-items: baseline; gap: 10px; }
     .drg-connect-log-time { flex: none; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
+    /* The phase a line was written in, so a long log can be read step by step. */
+    .drg-connect-log-phase {
+      flex: none; align-self: baseline; height: 18px; padding: 0 6px; border-radius: 999px;
+      background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary);
+      font-family: var(--dsw-font-family); font-size: 10.5px; line-height: 18px;
+    }
     .drg-connect-log-text { min-width: 0; white-space: pre-wrap; }
+    /* Each connection's first line: the boundary that says which attempt this log belongs to. */
+    .drg-connect-log-line[data-boundary="true"] .drg-connect-log-text {
+      color: var(--dsw-alias-label-secondary); font-weight: 500;
+    }
     .drg-connect-log-line[data-level="debug"] .drg-connect-log-text { color: var(--dsw-alias-label-secondary); }
     .drg-connect-log-line[data-level="warn"] .drg-connect-log-text { color: var(--dsw-alias-state-warn-primary); }
     .drg-connect-log-line[data-level="error"] .drg-connect-log-text { color: var(--dsw-alias-state-error-primary); }
