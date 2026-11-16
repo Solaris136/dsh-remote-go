@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, rmSync } from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
+import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { makeTempRoot, resolveBrowser, skipOrFail } from './harness-support.js'
 
@@ -287,7 +288,14 @@ window.ReactDOM = { createRoot }`,
         executablePath: browserPath,
         headless: 'new',
         userDataDir: path.join(tempRoot, 'profile'),
-        args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
+        args: [
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-gpu',
+          // Hosted Ubuntu runners restrict unprivileged user namespaces: Chromium aborts with
+          // "No usable sandbox!" without this (same as the other browser suites).
+          ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
+        ],
       })
       const page = await browser.newPage()
       const errors = []
