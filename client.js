@@ -166,6 +166,14 @@ window.__ModuleLoader__.load({
         '当前窗口没有可用的远端承载方式，无法打开远端界面。',
         'This window has no seat for the remote UI, so it cannot be opened here.',
       ],
+      externalLinkBlocked: [
+        '无法打开这个链接：只支持 http 或 https 外链。',
+        'Cannot open that link: only http or https links are allowed.',
+      ],
+      clipboardWriteFailed: [
+        '复制失败：远端界面没能写入剪贴板。',
+        'Copy failed: the remote view could not write the clipboard.',
+      ],
       connectLogTitle: ['连接日志', 'Connect log'],
       connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
       connectLogCount: ['{count} 行', '{count} lines'],
@@ -642,7 +650,8 @@ window.__ModuleLoader__.load({
 
     /**
      * Command queue from the injected guest page (or the switcher row) to the
-     * overlay: currently "download this remote file". Consumed in order.
+     * overlay: currently "download this remote file" plus the capability bridge's
+     * toast requests. Consumed in order.
      */
     function createToolRequestStore() {
       let pending = []
@@ -658,6 +667,17 @@ window.__ModuleLoader__.load({
             path: request.path,
             name: typeof request.name === 'string' ? request.name : '',
           })
+          store.emit()
+        },
+        /** A visible line for the shell's toast: the bridge's only channel for "this failed". */
+        requestNotice(request) {
+          if (!request || typeof request !== 'object') return
+          if (typeof request.text !== 'string') return
+          const text = request.text.trim().slice(0, 200)
+          if (text === '') return
+          const tone =
+            request.tone === 'error' || request.tone === 'success' || request.tone === 'warn' ? request.tone : 'info'
+          pending.push({ kind: 'notice', text, tone })
           store.emit()
         },
         take() {
@@ -2157,8 +2177,53 @@ window.__ModuleLoader__.load({
     }
 
     function dispatchSwitcherIntent(intent) {
-      if (!intent || typeof intent !== 'object') return
-      if (typeof switcher.dispatch === 'function') switcher.dispatch(intent)
+      if (!intent || typeof intent !== 'object') return undefined
+      if (typeof switcher.dispatch === 'function') return switcher.dispatch(intent)
+      return undefined
+    }
+
+    // The capability bridge's local half: link validation and the one new-window call site.
+    /**
+     * The only URL shape this page will hand to a browser tab or to the OS: an absolute http(s)
+     * address with a host and no credentials. `javascript:`, `data:`, `file:` and `blob:` are the
+     * obvious ways a framed page could escalate, and they all end here.
+     */
+    function externalUrlOf(value) {
+      if (typeof value !== 'string' || value === '' || value.length > 8192) return null
+      let url
+      try {
+        url = new URL(value)
+      } catch (_error) {
+        return null
+      }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+      if (url.hostname === '') return null
+      if (url.username !== '' || url.password !== '') return null
+      return url.href
+    }
+
+    /**
+     * Open one user-picked link in this page. The framed page cannot do it: a subdocument's
+     * `window.open` needs `allow-popups`, a gesture of its own and a place to show the tab, so the
+     * request travels here and this document performs it.
+     *
+     * `noopener,noreferrer` is not negotiable — the opened site must not reach this page's
+     * `window.opener`, and the Referer must not carry this page's URL (it holds the local launch
+     * token). Those features also make a *successful* open return `null`, so the return value says
+     * nothing about whether the browser's popup blocker refused the tab; the click that started it
+     * is a real gesture, which is what the blocker actually checks.
+     */
+    function openExternalUrl(value) {
+      const url = externalUrlOf(value)
+      if (url === null) return 'blocked'
+      const win = localWindow()
+      if (win === null || typeof win.open !== 'function') return 'unavailable'
+      try {
+        win.open(url, '_blank', 'noopener,noreferrer')
+      } catch (_error) {
+        return 'unavailable'
+      }
+      return 'opened'
     }
 
     /**
@@ -2752,6 +2817,331 @@ window.__ModuleLoader__.load({
     const GUEST_TOOLS_SCRIPT = '(' + mountGuestTools.toString() + ')(window)'
 
     /**
+     * The guest half of the capability bridge. A same-origin subdocument keeps this origin's DOM
+     * access but not the browser capabilities a top-level document owns: clipboard writes are
+     * refused (`Document is not focused` / `Write permission denied`) and a popup has no handler,
+     * so a copy button and a link silently do nothing. This script turns those three requests into
+     * intents on the channel the switcher row already uses — `__drgBridgeSink` when the carrier can
+     * call back directly, the `__drgBridgeQueue` the desktop carrier drains otherwise — and answers
+     * the clipboard one through `__drgCapabilityReply`, so the page can show ✓ or fail visibly.
+     * It only touches `win` and its own locals (the script is stringified into the guest).
+     */
+    function mountCapabilityBridge(win) {
+      try {
+        var doc = win.document
+        if (!doc || !doc.documentElement) return 'no-document'
+        if (win.__drgCapabilityBridge === true) return 'already'
+        win.__drgCapabilityBridge = true
+        var PromiseCtor = typeof win.Promise === 'function' ? win.Promise : Promise
+        var emit =
+          typeof win.__drgBridgeSink === 'function'
+            ? win.__drgBridgeSink
+            : function (intent) {
+                var queue = win.__drgBridgeQueue
+                if (!queue || typeof queue.push !== 'function') queue = []
+                queue.push(intent)
+                win.__drgBridgeQueue = queue
+                return null
+              }
+        var UrlCtor = typeof win.URL === 'function' ? win.URL : URL
+        // A URL that may leave the frame: absolute http(s), a host, no credentials. Anything else
+        // (javascript:, data:, blob:, a relative path) stays inside the framed page.
+        var externalUrl = function (value) {
+          if (typeof value !== 'string' || value === '' || value.length > 8192) return null
+          var url = null
+          try {
+            url = new UrlCtor(value)
+          } catch (_error) {
+            return null
+          }
+          if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+          if (!url.hostname) return null
+          if (url.username !== '' || url.password !== '') return null
+          return url.href
+        }
+        var originOf = function () {
+          try {
+            return win.location && win.location.origin ? win.location.origin : null
+          } catch (_error) {
+            return null
+          }
+        }
+
+        // --- clipboard: the top half performs the write, this half reports the answer ----------
+        var pending = {}
+        var sequence = 0
+        var settle = function (id, result) {
+          var entry = pending[id]
+          if (!entry) return false
+          delete pending[id]
+          if (entry.timer !== null && typeof win.clearTimeout === 'function') win.clearTimeout(entry.timer)
+          if (result && result.ok === true) entry.resolve(true)
+          else entry.reject(new Error((result && typeof result.reason === 'string' && result.reason) || 'bridge'))
+          return true
+        }
+        // The desktop carrier cannot reach into the guest, so it answers through this slot.
+        win.__drgCapabilityReply = function (payload) {
+          if (!payload || typeof payload !== 'object') return false
+          return settle(String(payload.id === undefined || payload.id === null ? '' : payload.id), payload)
+        }
+        var ask = function (intent, timeoutMs) {
+          return new PromiseCtor(function (resolve, reject) {
+            sequence += 1
+            var id = 'drg' + String(sequence)
+            intent.id = id
+            pending[id] = { resolve: resolve, reject: reject, timer: null }
+            if (typeof win.setTimeout === 'function') {
+              pending[id].timer = win.setTimeout(function () {
+                settle(id, { ok: false, reason: 'timeout' })
+              }, timeoutMs)
+            }
+            var answer = null
+            try {
+              answer = emit(intent)
+            } catch (_error) {
+              answer = null
+            }
+            // The browser carrier calls this module directly and answers with the write's promise.
+            if (answer && typeof answer.then === 'function') {
+              answer.then(
+                function (result) {
+                  settle(id, result)
+                },
+                function () {
+                  settle(id, { ok: false })
+                },
+              )
+            }
+          })
+        }
+        // The frame is the document the user just clicked in, so the legacy path can still land
+        // the text when the top half reports a refusal.
+        var legacyCopy = function (text) {
+          try {
+            if (!doc.body || typeof doc.execCommand !== 'function') return false
+            var area = doc.createElement('textarea')
+            area.value = text
+            area.setAttribute('readonly', '')
+            area.style.position = 'fixed'
+            area.style.top = '-1000px'
+            area.style.opacity = '0'
+            doc.body.appendChild(area)
+            area.select()
+            var ok = doc.execCommand('copy')
+            doc.body.removeChild(area)
+            return ok === true
+          } catch (_error) {
+            return false
+          }
+        }
+        var clipboard = null
+        try {
+          clipboard = win.navigator && win.navigator.clipboard ? win.navigator.clipboard : null
+        } catch (_error) {
+          clipboard = null
+        }
+        if (clipboard !== null && typeof clipboard.writeText === 'function') {
+          var bridgeWriteText = function (text) {
+            var value = text === undefined || text === null ? '' : String(text)
+            return ask({ action: 'clipboard-write', text: value }, 4000).then(
+              function () {
+                return undefined
+              },
+              function () {
+                if (legacyCopy(value)) return undefined
+                try {
+                  emit({ action: 'notify', tone: 'error', code: 'clipboard-failed' })
+                } catch (_error) {
+                  /* the local half may be gone */
+                }
+                throw new Error('clipboard-write-failed')
+              },
+            )
+          }
+          try {
+            Object.defineProperty(clipboard, 'writeText', {
+              configurable: true,
+              writable: true,
+              value: bridgeWriteText,
+            })
+          } catch (_error) {
+            try {
+              clipboard.writeText = bridgeWriteText
+            } catch (_error2) {
+              /* a browser that freezes the Clipboard object keeps its own writeText */
+            }
+          }
+        }
+
+        // --- links: capture a real external click before the page's own handler swallows it ------
+        var onLinkClick = function (event) {
+          if (!event || event.defaultPrevented === true) return
+          var target = event.target
+          if (!target || typeof target.closest !== 'function') return
+          // The file menu's download entry is this plugin's own control, never a navigation.
+          if (target.closest('[data-drg-dir-download]')) return
+          var anchor = target.closest('a[href]')
+          if (!anchor || typeof anchor.getAttribute !== 'function') return
+          // A `download` anchor keeps its native behaviour: a blob: URL is already refused below.
+          if (typeof anchor.hasAttribute === 'function' && anchor.hasAttribute('download')) return
+          var raw = anchor.getAttribute('href')
+          if (typeof raw !== 'string' || raw === '') return
+          var resolved = null
+          try {
+            resolved = new UrlCtor(raw, doc.baseURI || originOf() + '/')
+          } catch (_error) {
+            return
+          }
+          var url = externalUrl(resolved.href)
+          if (url === null) return
+          // A same-origin link is part of the framed application (the DSH router): leave it alone,
+          // a new tab would open the remote UI without its host row.
+          var origin = originOf()
+          if (origin !== null && resolved.origin === origin) return
+          event.preventDefault()
+          if (typeof event.stopPropagation === 'function') event.stopPropagation()
+          try {
+            emit({ action: 'open-external', url: url })
+          } catch (_error) {
+            /* the local half may be gone */
+          }
+        }
+        doc.addEventListener('click', onLinkClick, true)
+
+        // --- window.open: a resolved web URL belongs to the top-level document --------------------
+        var nativeOpen = typeof win.open === 'function' ? win.open : null
+        try {
+          win.open = function (url, name, features) {
+            var raw = typeof url === 'string' ? url : url === undefined || url === null ? '' : String(url)
+            var target = externalUrl(raw)
+            if (target === null) {
+              // `about:blank` is the account login's popup skeleton: it has no URL to hand over,
+              // so it keeps the native call (the frame now declares `allow-popups` for it).
+              if (nativeOpen === null) return null
+              try {
+                return nativeOpen.call(win, url, name, features)
+              } catch (_error) {
+                return null
+              }
+            }
+            try {
+              emit({ action: 'open-external', url: target })
+            } catch (_error) {
+              /* the local half may be gone */
+            }
+            return null
+          }
+        } catch (_error) {
+          /* a browser that freezes `window.open` keeps the native one */
+        }
+        return 'installed'
+      } catch (_error) {
+        return 'error'
+      }
+    }
+
+    const CAPABILITY_BRIDGE_SCRIPT = '(' + mountCapabilityBridge.toString() + ')(window)'
+
+    /**
+     * A same-origin frame shares this origin's `localStorage`, so the remote UI and this page would
+     * keep their preferences in one place and overwrite each other. Give the frame a private key
+     * space: `localStorage` becomes a Storage-shaped view whose keys carry a `drg:<hostId>:`
+     * prefix. Writes from the frame can no longer touch a local preference, and its own values
+     * survive a local edit because they live under different keys.
+     *
+     * Boundaries (documented in docs/design.md): values the page read before this injection came
+     * from the shared store; `sessionStorage`, cookies and IndexedDB are untouched; a `storage`
+     * event from another same-origin document is dropped while it is not this host's key, but only
+     * for listeners registered after this script — a listener the page installed at boot already
+     * ran.
+     */
+    function mountGuestStorage(win, hostId) {
+      try {
+        if (typeof hostId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(hostId)) return 'bad-id'
+        if (!win || typeof win !== 'object') return 'no-window'
+        if (win.__drgStoragePartition === hostId) return 'already'
+        var raw = null
+        try {
+          raw = win.localStorage
+        } catch (_error) {
+          return 'no-storage'
+        }
+        if (!raw || typeof raw.getItem !== 'function' || typeof raw.setItem !== 'function') return 'no-storage'
+        var prefix = 'drg:' + hostId + ':'
+        var prefixed = function (key) {
+          return prefix + String(key)
+        }
+        var ownKeys = function () {
+          var keys = []
+          try {
+            for (var index = 0; index < raw.length; index += 1) {
+              var key = raw.key(index)
+              if (typeof key === 'string' && key.indexOf(prefix) === 0) keys.push(key.slice(prefix.length))
+            }
+          } catch (_error) {
+            return []
+          }
+          return keys
+        }
+        var view = {
+          get length() {
+            return ownKeys().length
+          },
+          key: function (index) {
+            var keys = ownKeys()
+            var at = Number(index)
+            return at >= 0 && at < keys.length && Math.floor(at) === at ? keys[at] : null
+          },
+          getItem: function (key) {
+            return raw.getItem(prefixed(key))
+          },
+          setItem: function (key, value) {
+            raw.setItem(prefixed(key), String(value))
+          },
+          removeItem: function (key) {
+            raw.removeItem(prefixed(key))
+          },
+          clear: function () {
+            var keys = ownKeys()
+            for (var index = 0; index < keys.length; index += 1) raw.removeItem(prefixed(keys[index]))
+          },
+        }
+        try {
+          Object.defineProperty(win, 'localStorage', {
+            configurable: true,
+            enumerable: true,
+            get: function () {
+              return view
+            },
+          })
+        } catch (_error) {
+          return 'blocked'
+        }
+        win.__drgStoragePartition = hostId
+        // Another document on this origin writing a preference raises `storage` here; the remote
+        // UI must not follow the local page. Only keys outside this host's namespace are dropped.
+        if (typeof win.addEventListener === 'function') {
+          try {
+            win.addEventListener(
+              'storage',
+              function (event) {
+                var key = event && typeof event.key === 'string' ? event.key : null
+                if (key === null || key.indexOf(prefix) === 0) return
+                if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()
+              },
+              true,
+            )
+          } catch (_error) {
+            /* a window without events still gets the partitioned store */
+          }
+        }
+        return 'installed'
+      } catch (_error) {
+        return 'error'
+      }
+    }
+
+    /**
      * The live guests, most recently shown first. A guest is hidden, never reloaded — that is what
      * makes switching instant — and is dropped only when its host goes away.
      */
@@ -2869,6 +3259,33 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** The capability bridge's guest copy: same channel as the download bridge, one per load stop. */
+    async function installCapabilityBridge(entry) {
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return false
+      try {
+        const status = await view.executeJavaScript(CAPABILITY_BRIDGE_SCRIPT)
+        return typeof status === 'string' && status !== 'error' && status !== 'no-document'
+      } catch (_error) {
+        return false
+      }
+    }
+
+    /** Hand one bridge answer back to the guest; the desktop carrier has no direct callback. */
+    function replyToGuest(entry, id, result) {
+      const view = entry && entry.view
+      if (!view || typeof view.executeJavaScript !== 'function') return
+      const payload = JSON.stringify({ id: String(id), ok: Boolean(result && result.ok === true) })
+      try {
+        const answer = view.executeJavaScript(
+          'window.__drgCapabilityReply && window.__drgCapabilityReply(' + payload + ')',
+        )
+        if (answer && typeof answer.catch === 'function') answer.catch(() => {})
+      } catch (_error) {
+        // the guest may have navigated away before the write finished
+      }
+    }
+
     function startHostRowPoll(entry) {
       stopHostRowPoll()
       const view = entry && entry.view
@@ -2898,9 +3315,21 @@ window.__ModuleLoader__.load({
             for (const intent of value) {
               // File intents belong to the host whose guest queued them; row intents
               // keep their own hostId (a disconnect can target another host).
-              dispatchSwitcherIntent(
+              const answer = dispatchSwitcherIntent(
                 intent && intent.action === 'download-file' ? { ...intent, hostId: entry.hostId } : intent,
               )
+              // A capability intent carries the id its guest is waiting on; answer it even when
+              // the dispatch refused it (`ok:false`) so the page can fail instead of hanging.
+              if (intent && typeof intent.id === 'string' && intent.id !== '') {
+                if (answer && typeof answer.then === 'function') {
+                  answer.then(
+                    (result) => replyToGuest(entry, intent.id, result),
+                    () => replyToGuest(entry, intent.id, { ok: false }),
+                  )
+                } else {
+                  replyToGuest(entry, intent.id, { ok: answer === true })
+                }
+              }
             }
           })
           .catch(() => {})
@@ -3136,7 +3565,11 @@ window.__ModuleLoader__.load({
             // when the sidebar is collapsed and the row had nowhere to land yet.
             const tools = await installGuestTools(entry)
             if (entry.view !== view) return
-            if (!live && !tools) return
+            // Same channel, its own install: a collapsed sidebar must not cost the guest its
+            // links and clipboard any more than it costs it the file bridge.
+            const capabilities = await installCapabilityBridge(entry)
+            if (entry.view !== view) return
+            if (!live && !tools && !capabilities) return
             if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
           })
       })
@@ -3193,7 +3626,12 @@ window.__ModuleLoader__.load({
       frame.setAttribute('title', 'Remote DSH')
       // No sandbox: it would sever the same-origin access this backend depends on. The URL is
       // re-checked against the view prefix before it is assigned (see acceptsCarrierUrl).
-      frame.setAttribute('allow', 'clipboard-read; clipboard-write')
+      // `allow` can only narrow what the browser grants a subdocument, so it is not the fix for a
+      // capability the frame cannot hold (see the capability bridge): it names the ones the remote
+      // page may legitimately use — clipboard, the voice input's microphone, fullscreen, and the
+      // account login's `about:blank` popup. No `allow-popups-to-escape-sandbox`: the frame is not
+      // sandboxed, so a popup already escapes into this origin.
+      frame.setAttribute('allow', 'clipboard-read; clipboard-write; microphone; fullscreen; popups')
       frame.setAttribute('referrerpolicy', 'no-referrer')
       const entry = {
         kind: 'web',
@@ -3276,6 +3714,19 @@ window.__ModuleLoader__.load({
         mountGuestTools(win)
       } catch (_error) {
         // the download bridge is optional; the remote window itself still works
+      }
+      // Links, clipboard writes and notices cross the same channel; each install is independent,
+      // so a page that refuses one of them still gets the others.
+      try {
+        mountCapabilityBridge(win)
+      } catch (_error) {
+        // the capability bridge is best effort: the framed page keeps its own behaviour
+      }
+      try {
+        // The frame shares this origin's store; give it the host's own key space.
+        mountGuestStorage(win, entry.hostId)
+      } catch (_error) {
+        // an unpartitioned frame is the old behaviour, not a broken window
       }
       return live
     }
@@ -5258,6 +5709,9 @@ window.__ModuleLoader__.load({
             const request = typeof store.take === 'function' ? store.take() : null
             if (!request) return
             if (request.kind === 'download') downloadFromHost(request)
+            // The capability bridge has no toast of its own: a refused copy is reported here,
+            // where the shell already owns one.
+            else if (request.kind === 'notice') notify(request.text, request.tone)
           }
         }
         consume()
@@ -6171,6 +6625,37 @@ window.__ModuleLoader__.load({
           })
           return
         }
+        // --- capability bridge: this document is the one that may hold these capabilities -----
+        if (intent.action === 'open-external') {
+          const outcome = openExternalUrl(intent.url)
+          // A URL the bridge refuses is the only failure it can prove: `noopener,noreferrer`
+          // makes a successful open return null as well, so a popup-blocker refusal is invisible
+          // here and must not be guessed at.
+          if (outcome === 'blocked') {
+            toolStore.requestNotice({ tone: 'error', text: t('externalLinkBlocked') })
+          }
+          return
+        }
+        if (intent.action === 'clipboard-write') {
+          // The write itself happens in this document: the framed page cannot hold the clipboard
+          // permission. The promise is the receipt the guest's `writeText` resolves on.
+          const text = typeof intent.text === 'string' ? intent.text : ''
+          return copyText(text).then(
+            (ok) => ({ ok: ok === true }),
+            () => ({ ok: false }),
+          )
+        }
+        if (intent.action === 'notify') {
+          // The bridge's only "say something" verb. Codes stay localized here; free text is a
+          // fallback for a page that already renders its own messages.
+          const code = typeof intent.code === 'string' ? intent.code : ''
+          const known = code === 'clipboard-failed' ? t('clipboardWriteFailed') : ''
+          const text = known !== '' ? known : typeof intent.text === 'string' ? intent.text : ''
+          if (text !== '') {
+            toolStore.requestNotice({ tone: intent.tone === 'error' ? 'error' : 'info', text })
+          }
+          return
+        }
         if (intent.action === 'add') {
           // The wizard floats over whatever is on screen — including a remote window.
           openWizard({ mode: 'add', host: null })
@@ -6249,6 +6734,11 @@ window.__ModuleLoader__.load({
         update: updateSwitcher,
         script: () => HOST_ROW_SCRIPT,
         guestTools: () => GUEST_TOOLS_SCRIPT,
+        /** The capability bridge's guest script (desktop carrier) and installer (browser frame). */
+        capabilities: () => CAPABILITY_BRIDGE_SCRIPT,
+        bridge: (win) => mountCapabilityBridge(win),
+        /** Install the per-host `localStorage` partition into one framed page. */
+        partition: (win, hostId) => mountGuestStorage(win, hostId),
       },
     }
   },

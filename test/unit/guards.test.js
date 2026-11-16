@@ -663,10 +663,25 @@ describe('client-compat', () => {
       'clipboard writes must be guarded by a capability check',
     )
   })
-  test('the client never opens an external window', async () => {
+  test('the client opens an external window only through the capability bridge', async () => {
     const source = await clientSource()
-    assert.doesNotMatch(source, /window\.open\s*\(/, 'the client must not open an external window')
-    assert.doesNotMatch(source, /_blank['"]\s*,\s*'noopener/, 'no new-window target may remain')
+    // An external window is a user-visible action the user asked for inside the framed page, so
+    // exactly one call site exists and it is the bridge's — never the global `window.open`.
+    assert.doesNotMatch(source, /window\.open\s*\(/, 'the global window.open must never be called')
+    assert.equal((source.match(/_blank/g) ?? []).length, 1, 'exactly one new-window call site')
+    assert.match(source, /win\.open\(url, '_blank', 'noopener,noreferrer'\)/)
+    const start = source.indexOf('function openExternalUrl(')
+    const gate = source.indexOf("if (url === null) return 'blocked'", start)
+    const call = source.indexOf("win.open(url, '_blank'", start)
+    assert.ok(start > 0, 'the bridge must be a named function')
+    assert.ok(gate > start && call > gate, 'the bridge must reduce the URL before it opens one')
+  })
+  test('the capability bridge only forwards http(s)', async () => {
+    const source = await clientSource()
+    assert.match(source, /url\.protocol !== 'http:' && url\.protocol !== 'https:'/)
+    assert.match(source, /url\.username !== '' \|\| url\.password !== ''/)
+    // The guest copy applies the same rule before it asks the top-level document for anything.
+    assert.match(source, /var externalUrl = function \(value\)/)
   })
   test('the client half ships no host-only import', async () => {
     const source = await clientSource()
