@@ -537,7 +537,9 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 
 ## 2. 进度 code
 
-- `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`）、`auth-checking`、`probing`
+- `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`；跳板机的确认额外带
+  `role: "jump"` 与跳板机地址 `host`，这是「等待确认的是哪台机器」的唯一信号——目标机的帧形状不变）
+- `auth-checking`、`probing`
 - `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
