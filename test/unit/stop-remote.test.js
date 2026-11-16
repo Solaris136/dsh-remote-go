@@ -187,6 +187,74 @@ test('stop the launched instance: the pid is signalled and the host is kept disc
   await service.shutdown()
 })
 
+test('stop with keepAlive "stop" sends exactly one stop signal and arms no idle stop', async () => {
+  const registry = registryStore(null)
+  const stopped = []
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      registry.clear()
+      return { ok: true, output: 'STOPPED' }
+    },
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+  })
+  // The `stop` policy normally stops the remote web itself when the link is torn down; the
+  // explicit action already did that, so teardown must not signal the pid a second time.
+  const host = await createHost(service, { keepAlive: 'stop' })
+  await connectHost(service, host)
+  registry.set(registryRecord())
+  const runtime = service.runtimes.get(host.id)
+  assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
+  assert.deepEqual(stopped, [4242], 'the managed pid is signalled once, by the explicit action')
+  assert.equal(runtime.idleTimer, null)
+  assert.equal(runtime.ssh, null)
+  assert.equal(service.snapshot().hosts[0].status, 'disconnected')
+  assert.equal(service.snapshot().hosts[0].keepAlive, 'stop')
+  await service.shutdown()
+})
+
+test('stop with keepAlive "stop" and an already-gone pid signals nothing', async () => {
+  const registry = registryStore(null)
+  const stopped = []
+  const cleared = []
+  let identityGone = false
+  const { service } = await makeTestService({
+    readRegistry: registry.read,
+    stopWeb: async (_ssh, _layout, options) => {
+      stopped.push(options?.pid)
+      return { ok: true, output: 'STOPPED' }
+    },
+    clearRegistry: async (_ssh, layout) => {
+      cleared.push(layout)
+      registry.clear()
+      return { ok: true, output: '' }
+    },
+    processIdentity: async (_ssh, pid) =>
+      identityGone && pid === 4242
+        ? { ok: false, reason: 'missing' }
+        : {
+            ok: true,
+            startTime: `start-${pid}`,
+            command: 'node /opt/dsh/bin.js web --profile web --no-open',
+            dshHome: LAYOUT_HOME,
+          },
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+  })
+  const host = await createHost(service, { keepAlive: 'stop' })
+  await connectHost(service, host)
+  registry.set(registryRecord())
+  identityGone = true
+  assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
+  // The pid was proven missing: the action only clears its registry, and the `stop` policy's
+  // teardown must not send the signal the action deliberately did not send.
+  assert.deepEqual(stopped, [], 'a pid proven gone must never be signalled by the teardown either')
+  assert.equal(cleared.length, 1)
+  assert.equal(service.runtimes.get(host.id).idleTimer, null)
+  assert.equal(service.snapshot().hosts[0].status, 'disconnected')
+  await service.shutdown()
+})
+
 test('a stopped host never reconnects on its own', async () => {
   const registry = registryStore(null)
   let starts = 0

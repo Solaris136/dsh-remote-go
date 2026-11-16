@@ -417,7 +417,11 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
  * Tear one host down and leave it idle: the keep-alive policy decides whether the
  * remote web is stopped and whether the transport survives for a fast resume.
  * `stopped` says the caller already stopped the remote web itself (the explicit
- * "stop remote DSH" action), so the idle policy must not arm a second stop later.
+ * "stop remote DSH" action): the policy must then neither arm an idle stop nor send
+ * a second stop signal. That second signal would be based on a pid captured several
+ * SSH round-trips earlier - a pid the action just proved is the right one (or that
+ * it is already gone), so re-signalling it is at best redundant and at worst kills
+ * an unrelated process after a pid reuse.
  */
 export async function disconnectHost(ctx, runtime, options = {}) {
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
@@ -426,10 +430,8 @@ export async function disconnectHost(ctx, runtime, options = {}) {
   cancelLinkWork(runtime)
   stopRemoteHeartbeat(runtime)
   const policy = runtime.entry.keepAlive
-  const stopRemote = options.stopRemote === true || policy === 'stop'
-  // A caller that already stopped the remote web leaves nothing to resume: releasing the
-  // transport is what "close the remote DSH" means, and there is no idle stop to arm.
   const alreadyStopped = options.stopped === true
+  const stopRemote = alreadyStopped !== true && (options.stopRemote === true || policy === 'stop')
   await teardownRuntime(ctx, runtime, {
     stopRemote,
     keepSshForIdle: policy === 'idle' && !stopRemote && !alreadyStopped,
