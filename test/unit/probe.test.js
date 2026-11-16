@@ -93,3 +93,15 @@ test('probeRemote parses a successful exec and throws on failure', async () => {
     (error) => error.code === 'remote-dsh-missing',
   )
 })
+
+test('a probe that runs out of time is a network failure, not a missing DSH', async () => {
+  const ssh = {
+    async exec() {
+      return { code: null, stdout: '', stderr: '', timedOut: true }
+    },
+  }
+  await assert.rejects(
+    () => probeRemote(ssh, { timeoutMs: 1_500 }),
+    (error) => error.code === 'network' && error.retryable === true && /probe-timeout/.test(error.technical ?? ''),
+  )
+})

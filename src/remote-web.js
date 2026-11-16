@@ -70,11 +70,15 @@ export function buildBrowserCarrierProbe(plan, layout, profile) {
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
   const dumpFile = shellQuote(`${layout.root}/profile-dump.yml`)
   const patchFile = shellQuote(`${layout.root}/${BROWSER_CARRIER_PATCH_FILE}`)
+  // The dump contains the profile's effective configuration: it is created 0600 and removed
+  // again before this script returns, on both the success and the failure path (M3).
   return `set -u
+umask 077
 mkdir -p ${shellQuote(layout.root)}
 DUMP=${dumpFile}
 if ! env DSH_HOME=${shellQuote(layout.dshHome)} ${pathPrefix}${shellQuote(plan.start.npxPath ?? 'npx')} -y @deepseek-ai/dsh@${normalizeVersion(plan.start.targetVersion)} --profile ${shellQuote(profile)} --dump-config > "$DUMP" 2>/dev/null; then
   echo "DUMP-FAILED"
+  rm -f "$DUMP"
   exit 0
 fi
 if grep -A6 'id: api-remotes' "$DUMP" | grep -q 'disabled: true'; then
@@ -84,7 +88,8 @@ DSH_REMOTE_GO_PATCH
   echo "PATCH"
 else
   echo "CLEAR"
-fi`
+fi
+rm -f "$DUMP"`
 }
 
 export async function ensureBrowserCarrier(ssh, options) {
@@ -121,10 +126,16 @@ export function buildStartScript(startCommand, layout, options = {}) {
   const logFile = shellQuote(layout.logFile)
   const runFile = shellQuote(layout.runFile)
   const startedAtPlaceholder = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+  // `umask 077` keeps the log (and the launch's state directory) private: the log carries the
+  // launch URL with its token, and the default umask used to leave it world-readable (M3).
+  // The run registry is written to a temp file and renamed, so a reader never sees a
+  // half-written record (M4).
   return `set -eu
+umask 077
 mkdir -p ${shellQuote(layout.logsDir)} ${shellQuote(layout.runDir)} ${shellQuote(layout.stateHome)}
 LOG=${logFile}
 : > "$LOG"
+chmod 600 "$LOG" 2>/dev/null || true
 cd "$HOME"
 setsid nohup bash -lc ${shellQuote(startCommand)} >> "$LOG" 2>&1 < /dev/null &
 PID=$!
@@ -151,13 +162,54 @@ fi
 echo "LINE:$LINE"
 PORT=$(printf '%s' "$LINE" | sed -n 's#.*127\\.0\\.0\\.1:\\([0-9][0-9]*\\)/.*#\\1#p')
 if [ -z "$PORT" ]; then PORT=$(printf '%s' "$LINE" | sed -n 's#.*:\\([0-9][0-9]*\\)/.*#\\1#p'); fi
-printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":%s,"version":%s,"dshHome":%s,"launch":"${LAUNCH_MARKER}"}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${shellQuote(JSON.stringify(profile))} ${shellQuote(JSON.stringify(version))} ${shellQuote(JSON.stringify(layout.dshHome))} > ${runFile}
+RUN=${runFile}
+TMP="$RUN.tmp.$$"
+printf '{"pid":%s,"port":%s,"startedAt":"%s","profile":%s,"version":%s,"dshHome":%s,"launch":"${LAUNCH_MARKER}"}\\n' "$PID" "\${PORT:-0}" "${startedAtPlaceholder}" ${shellQuote(JSON.stringify(profile))} ${shellQuote(JSON.stringify(version))} ${shellQuote(JSON.stringify(layout.dshHome))} > "$TMP"
+mv -f "$TMP" "$RUN"
 echo "DONE:$PID:$PORT"
 `
 }
 
+/** The pid the launch script announced, from `DONE:` or the earlier `PID:` line. */
+export function parseLaunchedPid(text) {
+  const combined = String(text ?? '')
+  const done = /DONE:(\d+):(\d+)/.exec(combined)
+  if (done) return { pid: Number(done[1]), port: Number(done[2]) }
+  const started = /(?:^|\n)PID:(\d+)\s*(?:\n|$)/.exec(combined)
+  if (started) return { pid: Number(started[1]), port: 0 }
+  return { pid: 0, port: 0 }
+}
+
+/**
+ * Stop a launch that failed *after* it started: the detached process must not be left
+ * running on the remote just because its readiness line never parsed (M2).
+ * @param {object} ssh - SSH transport.
+ * @param {object} layout - remote layout.
+ * @param {number} startedPid - the pid the launch script printed.
+ * @param {(line: string) => void} [onLine] - progress sink.
+ * @returns {Promise<{ ok: boolean, pid: number | null, output?: string }>}
+ */
+async function stopFailedLaunch(ssh, layout, startedPid, onLine) {
+  let target = 0
+  if (isPid(startedPid) && (await remotePidAlive(ssh, startedPid))) target = startedPid
+  if (!isPid(target)) {
+    // The registry the launch script wrote (or an earlier instance's record) may name the
+    // real process when the wrapper already exited: prefer that pid over signalling a
+    // possibly reused one.
+    const registry = await readRunRegistry(ssh, layout)
+    const registryPid = Number(registry?.pid ?? 0)
+    if (isPid(registryPid) && (await remotePidAlive(ssh, registryPid))) target = registryPid
+  }
+  if (!isPid(target)) return { ok: false, pid: null }
+  const stopped = await stopRemoteWeb(ssh, layout, { pid: target })
+  onLine?.(
+    `start failed after pid ${target} was launched; ${stopped.ok === true ? 'it was stopped' : 'it could not be stopped'}`,
+  )
+  return { ok: stopped.ok === true, pid: target, output: stopped.output }
+}
+
 export async function startRemoteWeb(ssh, options) {
-  const layout = options.layout ?? remoteLayout(options.home ?? null)
+  const layout = options.layout ?? remoteLayout(options.home)
   const profile = options.profile ?? options.plan.profile ?? DEFAULT_REMOTE_PROFILE
   const carrier = await ensureBrowserCarrier(ssh, { plan: options.plan, layout, profile, onLine: options.onLine })
   const startCommand = buildStartCommand(options.plan, layout, { profile, patchPath: carrier.patchPath })
@@ -180,19 +232,27 @@ export async function startRemoteWeb(ssh, options) {
     },
   })
   const combined = `${result.stdout}\n${result.stderr}`
+  // The launch script prints its pid before it waits for the readiness line: keep it even
+  // when the wait itself fails, so a failure can stop what it started (M2).
+  const launched = parseLaunchedPid(combined)
+  const failed = async (error) => {
+    await stopFailedLaunch(ssh, layout, launched.pid, options.onLine)
+    return error
+  }
   if (result.code !== 0) {
-    throw errors.remoteDshStartFailed(headTail(combined, 1500))
+    throw await failed(errors.remoteDshStartFailed(headTail(combined, 1500)))
   }
   const parsed = parseWebLine(combined)
-  if (!parsed) throw errors.remoteDshStartFailed(headTail(combined, 1500))
+  if (!parsed) throw await failed(errors.remoteDshStartFailed(headTail(combined, 1500)))
   if (!isLoopbackHost(parsed.host)) {
-    throw errors.remoteUiUnreachable({
-      zh: `远端 DSH 宣布的地址不是回环地址（${parsed.host}），无法安全地经 SSH 隧道访问。`,
-      en: `The remote DSH advertised a non-loopback host (${parsed.host}); it cannot be reached safely through the SSH tunnel.`,
-    })
+    throw await failed(
+      errors.remoteUiUnreachable({
+        zh: `远端 DSH 宣布的地址不是回环地址（${parsed.host}），无法安全地经 SSH 隧道访问。`,
+        en: `The remote DSH advertised a non-loopback host (${parsed.host}); it cannot be reached safely through the SSH tunnel.`,
+      }),
+    )
   }
-  const pidMatch = /DONE:(\d+):(\d+)/.exec(combined)
-  const pid = pidMatch ? Number(pidMatch[1]) : 0
+  const pid = launched.pid
   const startedAt = new Date().toISOString()
   return {
     pid,
@@ -208,31 +268,115 @@ export async function startRemoteWeb(ssh, options) {
   }
 }
 
+/**
+ * The pid a readiness line in the log belongs to, as a last resort for a stop whose pid is
+ * unknown. The log only names the port; `/proc` proves which process listens on it (M4).
+ */
+async function pidFromReadinessLine(ssh, layout) {
+  const line = await readWebLineFromLog(ssh, layout)
+  if (!line || !isPid(line.port)) return 0
+  const owner = await remotePortOwnerPid(ssh, line.port)
+  return isPid(Number(owner)) ? Number(owner) : 0
+}
+
 export async function stopRemoteWeb(ssh, layout, options = {}) {
-  const pid = Number(options.pid ?? 0)
+  let pid = Number(options.pid ?? 0)
+  if (!isPid(pid)) {
+    // The run registry is the primary record; a partially written one still names a pid, and
+    // the readiness line's port owner is the last resort (M4).
+    const registry = await readRunRegistry(ssh, layout)
+    pid = Number(registry?.pid ?? 0)
+  }
+  if (!isPid(pid)) pid = await pidFromReadinessLine(ssh, layout)
+  // The registry is removed only after the stop is confirmed: a failed stop must leave the
+  // record in place, otherwise the next connect adopts nothing and a second instance starts
+  // next to the surviving one (M4).
   const script = `set -u
+umask 077
+RUN=${shellQuote(layout.runFile)}
 PID=${isPid(pid) ? pid : 0}
-if [ "$PID" -eq 0 ] && [ -f ${shellQuote(layout.runFile)} ]; then
-  PID=$(sed -n 's/.*"pid":\\([0-9][0-9]*\\).*/\\1/p' ${shellQuote(layout.runFile)} | head -n 1)
+if [ "$PID" -eq 0 ] && [ -f "$RUN" ]; then
+  PID=$(sed -n 's/.*"pid":\\([0-9][0-9]*\\).*/\\1/p' "$RUN" | head -n 1)
 fi
-if [ -n "\${PID:-}" ] && [ "$PID" -ne 0 ]; then
-  kill -TERM "-$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null || true
+PID="\${PID:-0}"
+if [ "$PID" -eq 0 ]; then
+  echo "NO-TARGET"
+  exit 5
+fi
+if ! kill -0 "$PID" 2>/dev/null; then
+  echo "GONE:$PID"
+  rm -f "$RUN"
+  exit 0
+fi
+kill -TERM "-$PID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null || true
+n=0
+while [ "$n" -lt 20 ]; do
+  kill -0 "$PID" 2>/dev/null || break
+  n=$((n+1))
+  sleep 0.5
+done
+if kill -0 "$PID" 2>/dev/null; then
+  kill -KILL "-$PID" 2>/dev/null || kill -KILL "$PID" 2>/dev/null || true
   n=0
-  while [ "$n" -lt 20 ]; do
+  while [ "$n" -lt 10 ]; do
     kill -0 "$PID" 2>/dev/null || break
     n=$((n+1))
     sleep 0.5
   done
-  kill -KILL "-$PID" 2>/dev/null || kill -KILL "$PID" 2>/dev/null || true
 fi
-rm -f ${shellQuote(layout.runFile)}
-echo "STOPPED"
+if kill -0 "$PID" 2>/dev/null; then
+  echo "ALIVE:$PID"
+  exit 6
+fi
+rm -f "$RUN"
+echo "STOPPED:$PID"
 `
   try {
-    const result = await ssh.exec(script, { timeoutMs: 30_000 })
-    return { ok: result.code === 0, output: result.stdout.trim() }
+    const result = await ssh.exec(script, { timeoutMs: 40_000 })
+    const output = result.stdout.trim()
+    // An explicit pid that is already gone means the same thing as no target at all: there
+    // is nothing left to signal (the caller can clear the stale registry).
+    if (output.includes('NO-TARGET')) return { ok: false, reason: 'no-target', output }
+    if (output.includes('ALIVE:')) return { ok: false, reason: 'alive', output }
+    if (result.code !== 0) return { ok: false, reason: 'not-confirmed', output }
+    return { ok: true, output }
   } catch (error) {
-    return { ok: false, output: messageOf(error) }
+    // swallow-ok: a throw here is a transport failure, reported as an unconfirmed stop so the
+    // caller keeps the run registry instead of adopting nothing on the next connect
+    return { ok: false, reason: 'error', output: messageOf(error) }
+  }
+}
+
+/**
+ * Read `run/web.json`. The record is written atomically (temp + rename), but a record from an
+ * older launch path or a truncated file still names the process: parse what is there instead
+ * of reporting "no record" and losing the only pid (M4).
+ * @param {string} text - the raw file content.
+ * @returns {object | null} the parsed record, or null when it names no pid.
+ */
+export function parseRunRegistry(text) {
+  const raw = String(text ?? '').trim()
+  if (raw === '') return null
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    // swallow-ok: fall through to the field-by-field recovery below
+  }
+  const field = (name) => new RegExp(`"${name}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(raw)?.[1] ?? null
+  const number = (name) => Number(new RegExp(`"${name}"\\s*:\\s*(\\d+)`).exec(raw)?.[1] ?? 0)
+  const pid = number('pid')
+  if (!isPid(pid)) return null
+  const port = number('port')
+  return {
+    pid,
+    port: isPid(port) ? port : 0,
+    startedAt: field('startedAt'),
+    profile: field('profile'),
+    version: field('version'),
+    dshHome: field('dshHome'),
+    launch: field('launch'),
+    origin: field('origin'),
   }
 }
 
@@ -240,8 +384,7 @@ export async function readRunRegistry(ssh, layout) {
   try {
     const result = await ssh.exec(`cat ${shellQuote(layout.runFile)} 2>/dev/null || true`, { timeoutMs: 10_000 })
     if (result.code !== 0 || result.stdout.trim() === '') return null
-    const parsed = JSON.parse(result.stdout.trim())
-    return parsed && typeof parsed === 'object' ? parsed : null
+    return parseRunRegistry(result.stdout)
   } catch {
     return null
   }
@@ -290,6 +433,10 @@ export async function adoptRemoteWeb(ssh, layout, options = {}) {
   if (!(await remotePidAlive(ssh, pid))) return null
   const line = await readWebLineFromLog(ssh, layout)
   if (!line || line.token === '') return null
+  // An adopted instance is reached through the loopback tunnel only: a process that
+  // advertises another host cannot be served safely and must not be adopted (adopt parity
+  // with a fresh launch, which refuses a non-loopback URL).
+  if (!isLoopbackHost(line.host)) return null
   const status = await remoteHttpStatus(ssh, line.port)
   if (!isUiUp(status)) return null
   const version =
@@ -369,9 +516,15 @@ export async function clearRunRegistry(ssh, layout) {
  */
 export async function writeRunRegistry(ssh, layout, record) {
   const payload = JSON.stringify(record)
+  // Temp file + rename: a concurrent reader (`cat run/web.json`) sees the old record or the
+  // new one, never a truncated line that makes the adopt step misread the pid (M4).
   const script = `set -eu
+umask 077
 mkdir -p ${shellQuote(layout.runDir)}
-printf '%s\\n' ${shellQuote(payload)} > ${shellQuote(layout.runFile)}
+RUN=${shellQuote(layout.runFile)}
+TMP="$RUN.tmp.$$"
+printf '%s\\n' ${shellQuote(payload)} > "$TMP"
+mv -f "$TMP" "$RUN"
 echo "REGISTRY-WRITTEN"
 `
   try {

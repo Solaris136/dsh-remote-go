@@ -73,12 +73,25 @@ ${pathPrefix}npm_config_loglevel=http ${shellQuote(plan.start.npxPath)} -y @deep
 }
 
 export async function verifyNpxVersion(ssh, plan, options = {}) {
+  const timeoutMs = options.timeoutMs ?? 0
   const result = await ssh.exec(buildPreflightCommand(plan), {
-    timeoutMs: options.timeoutMs ?? 0,
+    timeoutMs,
     maxBytes: options.maxBytes ?? 4 * 1024 * 1024,
     onStdout: options.onStdout,
     onStderr: options.onStderr,
   })
+  // `timeoutMs: 0` means "no timeout" (a cold npx download is unbounded by design); only a
+  // caller-supplied deadline can time out, and that is a network condition, not a missing
+  // remote runtime (L).
+  if (result.timedOut === true) {
+    throw errors.network(
+      {
+        zh: `远端 npx 预检超过 ${Math.round(timeoutMs / 1000)} 秒没有完成，可能是下载很慢或远端负载过高。`,
+        en: `The remote npx preflight did not finish within ${Math.round(timeoutMs / 1000)}s; the download may be slow or the remote overloaded.`,
+      },
+      { technical: `reason=preflight-timeout timeoutMs=${timeoutMs}` },
+    )
+  }
   const combined = `${result.stdout}\n${result.stderr}`
   if (result.code !== 0) {
     const failure = errors.remoteDshMissing({

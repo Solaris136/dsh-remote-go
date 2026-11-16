@@ -41,6 +41,9 @@ export async function createTunnel(options) {
   const remoteHost = options.remoteHost ?? '127.0.0.1'
   const listenHost = options.listenHost ?? '127.0.0.1'
   const sockets = new Set()
+  // The forwarded SSH channels this listener opened: a closed listener must destroy them too,
+  // otherwise an established pipe keeps the (already released) SSH transport busy.
+  const streams = new Set()
   let closed = false
 
   const server = net.createServer((socket) => {
@@ -69,6 +72,12 @@ export async function createTunnel(options) {
           socket.destroy()
           return
         }
+        streams.add(stream)
+        const forget = () => {
+          streams.delete(stream)
+        }
+        stream.once('close', forget)
+        stream.once('error', forget)
         socket.pipe(stream).pipe(socket)
         stream.once('close', () => {
           if (!socket.destroyed) socket.end()
@@ -108,6 +117,15 @@ export async function createTunnel(options) {
       closed = true
       for (const socket of sockets) socket.destroy()
       sockets.clear()
+      // Destroy the forwarded channels as well: the SSH session may already be disposed.
+      for (const stream of streams) {
+        try {
+          stream.destroy()
+        } catch {
+          /* the channel may already be gone */
+        }
+      }
+      streams.clear()
       await new Promise((resolve) => server.close(() => resolve(undefined)))
     },
   }

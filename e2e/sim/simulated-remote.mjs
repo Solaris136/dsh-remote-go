@@ -568,7 +568,9 @@ async function respond(command, sim) {
   }
 
   // 2c. Run registry rewrite after a restart / re-attach (src/webapp.js writeRunRegistry).
-  if (cmd.startsWith('set -eu\nmkdir -p ') && cmd.includes('REGISTRY-WRITTEN')) {
+  //     The script creates its directories under `umask 077` and renames a temp file into
+  //     place, so match it structurally instead of by its first line.
+  if (cmd.startsWith('set -eu\n') && cmd.includes('REGISTRY-WRITTEN') && cmd.includes('mv -f "$TMP" "$RUN"')) {
     const payload = /printf '%s\\n' '(\{[^\n]*\})' >/.exec(cmd)
     if (!payload) return { code: 1, stdout: '', stderr: 'simulated-remote: unreadable registry payload' }
     try {
@@ -612,20 +614,26 @@ async function respond(command, sim) {
 
   // 3. Remote web stop (src/webapp.js stopRemoteWeb). The simulated process really goes away:
   //    its listener is closed, its pid stops answering and run/web.json is left empty, which is
-  //    what a stopped remote DSH looks like to the next connect.
-  if (cmd.startsWith('set -u\nPID=') && cmd.includes('STOPPED')) {
+  //    what a stopped remote DSH looks like to the next connect. The script also reports
+  //    NO-TARGET / GONE / ALIVE, so match it structurally and mirror those branches.
+  if (cmd.startsWith('set -u\n') && cmd.includes('kill -TERM') && cmd.includes('echo "STOPPED:$PID"')) {
+    const requested = Number(/^PID=(\d+)$/m.exec(cmd)?.[1] ?? 0)
+    if (!sim.started || (requested !== 0 && requested !== sim.pid)) {
+      return ok(`GONE:${requested || sim.pid}\n`)
+    }
+    const previous = sim.remoteServer
+    const stoppedPid = sim.pid
     sim.stops = (sim.stops ?? 0) + 1
     sim.started = false
     sim.pid = 0
     sim.token = ''
-    const previous = sim.remoteServer
     sim.remoteServer = null
     if (previous) {
       previous.closeAllConnections?.()
       await closeServer(previous)
     }
     publishState(sim)
-    return ok('STOPPED\n')
+    return ok(`STOPPED:${stoppedPid}\n`)
   }
 
   // 4. Workspace registry read (src/workspaces.js readRemoteWorkspaces).

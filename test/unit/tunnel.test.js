@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
+import { Duplex } from 'node:stream'
 import { createTunnel } from '../../src/tunnel.js'
 
 function fakeSshTo(port) {
@@ -71,5 +72,29 @@ test('createTunnel cleans up active sockets on close', async () => {
   assert.ok(tunnel.connections >= 1)
   await tunnel.close()
   assert.equal(tunnel.connections, 0)
+  client.destroy()
+})
+
+test('createTunnel destroys the forwarded SSH channels on close', async () => {
+  const streams = []
+  const ssh = {
+    async forwardOut() {
+      const stream = new Duplex({
+        read() {},
+        write(_chunk, _encoding, callback) {
+          callback()
+        },
+      })
+      streams.push(stream)
+      return stream
+    },
+  }
+  const tunnel = await createTunnel({ ssh, remotePort: 1234 })
+  const client = net.connect(tunnel.localPort, '127.0.0.1')
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(streams.length, 1)
+  assert.equal(streams[0].destroyed, false)
+  await tunnel.close()
+  assert.equal(streams[0].destroyed, true, 'a closed listener must not keep an SSH channel open')
   client.destroy()
 })

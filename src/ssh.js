@@ -3,7 +3,7 @@
  */
 import { EventEmitter } from 'node:events'
 import { createWriteStream, existsSync } from 'node:fs'
-import { mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import { pipeline } from 'node:stream/promises'
@@ -11,7 +11,7 @@ import ssh2 from '../vendor/ssh2.bundle.cjs'
 import { fingerprintFromBlob } from './known-hosts.js'
 import { expandHome, headTail } from './util.js'
 import { errors, RemoteGoError } from './errors.js'
-import { safeLocalSegment } from './remote-path.js'
+import { isIgnoredLocalName, localPathKey, safeLocalSegment, uniqueLocalPath } from './remote-path.js'
 
 const { Client } = ssh2
 
@@ -37,6 +37,17 @@ export function parseSshKeyType(blob) {
   } catch {
     return 'unknown'
   }
+}
+
+/** The typed "the transport is gone" failure: retryable network, never a bare internal error. */
+function closedError() {
+  return errors.network(
+    {
+      zh: 'SSH 连接已断开，本次操作没有完成；如果主机仍在线，重连即可继续。',
+      en: 'SSH connection is not open; the transport closed before this step finished.',
+    },
+    { technical: 'reason=ssh-closed' },
+  )
 }
 
 export class SshConnection extends EventEmitter {
@@ -220,7 +231,7 @@ export class SshConnection extends EventEmitter {
     const maxBytes = options.maxBytes ?? 2 * 1024 * 1024
     return new Promise((resolve, reject) => {
       if (!this.client || this.closed) {
-        reject(new Error('SSH connection is not open'))
+        reject(closedError())
         return
       }
       let timedOut = false
@@ -259,14 +270,23 @@ export class SshConnection extends EventEmitter {
           const text = data.toString('utf8')
           if (chunks.stdout.length < maxBytes) {
             chunks.stdout += text
-            options.onStdout?.(text)
+            // The consumer is a progress reporter: its failure must not abort the command.
+            try {
+              options.onStdout?.(text)
+            } catch {
+              /* stdout listeners must not break the command */
+            }
           }
         })
         stream.stderr.on('data', (/** @type {Buffer} */ data) => {
           const text = data.toString('utf8')
           if (chunks.stderr.length < maxBytes) {
             chunks.stderr += text
-            options.onStderr?.(text)
+            try {
+              options.onStderr?.(text)
+            } catch {
+              /* stderr listeners must not break the command */
+            }
           }
         })
         stream.on('close', (/** @type {number | null} */ code, /** @type {string | null} */ signal) => {
@@ -290,7 +310,7 @@ export class SshConnection extends EventEmitter {
   openSftp() {
     return new Promise((resolve, reject) => {
       if (!this.client || this.closed) {
-        reject(new Error('SSH connection is not open'))
+        reject(closedError())
         return
       }
       this.client.sftp((error, sftp) => {
@@ -374,9 +394,10 @@ export class SshConnection extends EventEmitter {
    * @param {string} targetRoot - absolute local directory that receives the tree.
    * @param {{ onInventory?: (info: { totalBytes: number, totalFiles: number }) => void,
    *   onProgress?: (info: { doneBytes: number, totalBytes: number, doneFiles: number,
-   *     totalFiles: number }) => void, isCancelled?: () => boolean }} [options]
+   *     totalFiles: number }) => void, isCancelled?: () => boolean,
+   *   caseInsensitive?: boolean }} [options]
    * @returns {Promise<{ destination: string, totalBytes: number, totalFiles: number,
-   *   cancelled?: boolean }>}
+   *   renamedFiles?: number, ignoredNames?: string[], cancelled?: boolean }>}
    */
   async saveRemoteTree(remotePath, targetRoot, options = {}) {
     const sftp = await this.openSftp()
@@ -391,9 +412,12 @@ export class SshConnection extends EventEmitter {
         })
       }
       const localRoot = path.resolve(targetRoot)
-      const localPathFor = (relative) => {
-        const segments = String(relative).split('/').filter(Boolean).map(safeLocalSegment)
-        const resolved = path.resolve(localRoot, ...segments)
+      // Case-insensitive local filesystems map `Report.md` and `report.md` to one file: the
+      // download would silently lose one of them. The default follows the platform; tests
+      // can force it to prove the behavior on a case-preserving machine too.
+      const caseInsensitive = options.caseInsensitive ?? process.platform === 'win32'
+      const insideRoot = (candidate) => {
+        const resolved = path.resolve(candidate)
         if (resolved !== localRoot && !resolved.startsWith(localRoot + path.sep)) {
           throw errors.remoteFileUnavailable({
             zh: '远端文件名无法安全映射到本地目录。',
@@ -403,34 +427,47 @@ export class SshConnection extends EventEmitter {
         return resolved
       }
       const members = []
+      const ignoredNames = []
       let totalBytes = 0
       let totalFiles = 0
-      const walk = async (directory, relative) => {
+      let renamedFiles = 0
+      const walk = async (directory, relative, localDir) => {
         const listing = await new Promise((resolve, reject) => {
           sftp.readdir(directory, (error, value) => (error ? reject(error) : resolve(value)))
         })
         const items = Array.isArray(listing) ? listing.slice() : []
         items.sort((left, right) => String(left?.filename ?? '').localeCompare(String(right?.filename ?? '')))
+        // Names are claimed per directory, so a renamed member keeps its own children.
+        const used = new Set()
         for (const item of items) {
           const filename = String(item?.filename ?? '')
           if (filename === '' || filename === '.' || filename === '..') continue
           const attrs = item?.attrs ?? {}
           if (attrs.isSymbolicLink?.() === true) continue
+          // Windows metadata and shell entries are never planted in a local download (M6).
+          if (isIgnoredLocalName(filename)) {
+            ignoredNames.push(relative === '' ? filename : `${relative}/${filename}`)
+            continue
+          }
           const childRelative = relative === '' ? filename : relative + '/' + filename
           const childPath = path.posix.join(directory, filename)
+          const desired = insideRoot(path.join(localDir, safeLocalSegment(filename)))
+          const localPath = insideRoot(uniqueLocalPath(desired, used, { caseInsensitive }))
+          used.add(localPathKey(localPath, { caseInsensitive }))
           if (attrs.isDirectory?.() === true) {
-            members.push({ relative: childRelative, isDirectory: true })
-            await walk(childPath, childRelative)
+            members.push({ relative: childRelative, isDirectory: true, localPath })
+            await walk(childPath, childRelative, localPath)
           } else if (attrs.isFile?.() === true) {
             const size = Number(attrs.size ?? 0)
             if (!Number.isFinite(size) || size < 0) continue
+            if (localPath !== desired) renamedFiles += 1
             totalFiles += 1
             totalBytes += size
-            members.push({ relative: childRelative, remotePath: childPath, size })
+            members.push({ relative: childRelative, remotePath: childPath, size, localPath })
           }
         }
       }
-      await walk(remotePath, '')
+      await walk(remotePath, '', localRoot)
       if (typeof options.onInventory === 'function') {
         try {
           options.onInventory({ totalBytes, totalFiles })
@@ -440,7 +477,7 @@ export class SshConnection extends EventEmitter {
       }
       await mkdir(localRoot, { recursive: true })
       for (const member of members) {
-        if (member.isDirectory) await mkdir(localPathFor(member.relative), { recursive: true })
+        if (member.isDirectory) await mkdir(member.localPath, { recursive: true })
       }
       let doneBytes = 0
       let doneFiles = 0
@@ -458,13 +495,12 @@ export class SshConnection extends EventEmitter {
           await rm(localRoot, { recursive: true, force: true }).catch(() => {})
           return { destination: localRoot, totalBytes, totalFiles, cancelled: true }
         }
-        const localPath = localPathFor(member.relative)
-        await mkdir(path.dirname(localPath), { recursive: true })
+        await mkdir(path.dirname(member.localPath), { recursive: true })
         try {
           await copySftpFileToLocal(
             sftp,
             member.remotePath,
-            localPath,
+            member.localPath,
             (bytes) => {
               doneBytes += bytes
               report()
@@ -481,7 +517,7 @@ export class SshConnection extends EventEmitter {
         doneFiles += 1
         report()
       }
-      return { destination: localRoot, totalBytes, totalFiles }
+      return { destination: localRoot, totalBytes, totalFiles, renamedFiles, ignoredNames }
     } finally {
       endSftp(sftp)
     }
@@ -490,7 +526,7 @@ export class SshConnection extends EventEmitter {
   forwardOut(destHost, destPort, srcHost = '127.0.0.1', srcPort = 0) {
     return new Promise((resolve, reject) => {
       if (!this.client || this.closed) {
-        reject(new Error('SSH connection is not open'))
+        reject(closedError())
         return
       }
       this.client.forwardOut(srcHost, srcPort, destHost, destPort, (error, stream) => {
@@ -534,9 +570,16 @@ export class SshConnection extends EventEmitter {
   }
 }
 
+/** A private key is a few kilobytes; anything larger is not one and must not be read. */
+const MAX_KEY_BYTES = 1024 * 1024
+
 async function readKey(keyPath) {
   try {
     if (!existsSync(keyPath)) return null
+    const stats = await stat(keyPath)
+    // Read the file only when it can plausibly be a key: a huge or non-regular file at the
+    // configured path would otherwise be slurped into memory before ssh2 rejects it (L).
+    if (typeof stats.size === 'number' && stats.size > MAX_KEY_BYTES) return null
     return await readFile(keyPath)
   } catch {
     return null

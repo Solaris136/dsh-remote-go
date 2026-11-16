@@ -71,3 +71,67 @@ export function safeLocalSegment(value) {
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(text)) text = '_' + text
   return text
 }
+
+/**
+ * Windows treats these names as its own metadata or as shell entries: writing them into
+ * a download either corrupts a folder view (`desktop.ini`, `thumbs.db`) or leaves a file
+ * that a double click executes instead of showing (`.lnk`, `.url`). A remote host never
+ * gets to plant one in a local download.
+ */
+const IGNORED_LOCAL_NAMES = new Set(['desktop.ini', 'thumbs.db', 'ehthumbs.db', '.ds_store'])
+const IGNORED_LOCAL_SUFFIXES = ['.lnk', '.url']
+
+/**
+ * Whether a remote name must be left out of a local folder download.
+ * @param {unknown} value - one remote path segment (file or directory name).
+ * @returns {boolean}
+ */
+export function isIgnoredLocalName(value) {
+  const name = String(value ?? '')
+    .trim()
+    .toLowerCase()
+  if (name === '') return false
+  if (IGNORED_LOCAL_NAMES.has(name)) return true
+  return IGNORED_LOCAL_SUFFIXES.some((suffix) => name.endsWith(suffix))
+}
+
+/**
+ * Pick a local path that no earlier member of the same download already claimed.
+ *
+ * A case-insensitive filesystem (the Windows/macOS defaults) maps `Report.md` and
+ * `report.md` to one file: keeping both names would silently drop one of the two remote
+ * files. The later one is renamed `report (2).md` instead, so the file count on disk
+ * matches the inventory.
+ *
+ * @param {string} desired - absolute local path the member maps to.
+ * @param {Set<string>} taken - keys of the paths already claimed (use {@link localPathKey}).
+ * @param {{ caseInsensitive?: boolean }} [options]
+ * @returns {string} the chosen path (equal to `desired` when it is free).
+ */
+export function uniqueLocalPath(desired, taken, options = {}) {
+  const key = (value) => localPathKey(value, options)
+  if (!taken.has(key(desired))) return desired
+  const directory = path.dirname(desired)
+  const extension = path.extname(desired)
+  const base = path.basename(desired, extension)
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = path.join(directory, `${base} (${index})${extension}`)
+    if (!taken.has(key(candidate))) return candidate
+  }
+  throw errors.remoteFileUnavailable({
+    zh: '远端有太多文件映射到同一个本地文件名，无法安全保存。',
+    en: 'Too many remote files map to the same local file name to save them safely.',
+  })
+}
+
+/**
+ * The collision key of a local path: separator-normalized, and lowercased when the local
+ * filesystem ignores case.
+ * @param {string} value - absolute or relative local path.
+ * @param {{ caseInsensitive?: boolean }} [options]
+ * @returns {string}
+ */
+export function localPathKey(value, options = {}) {
+  const text = String(value ?? '').replace(/\\/g, '/')
+  return options.caseInsensitive === true ? text.toLowerCase() : text
+}
