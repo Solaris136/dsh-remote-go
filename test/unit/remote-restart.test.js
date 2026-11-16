@@ -222,6 +222,10 @@ test('restart failure lands in a coded error and tears the half-built link down'
   assert.equal(tunnels[0].tunnel.closed, true)
   const runtime = service.runtimes.get(host.id)
   assert.equal(runtime.ssh, null, 'a failed restart tears the transport down like a failed connect')
+  // #68: the connect log explains the failure on its own instead of one code+message line.
+  const logs = runtime.logs.map((entry) => entry.message).join('\n')
+  assert.match(logs, /Connect failed in phase start: remote-dsh-start-failed/)
+  assert.match(logs, /Remote log tail:\nboom: the remote exited/)
   await service.shutdown()
 })
 
@@ -521,7 +525,10 @@ test('a missing remote instance ends in remote-unreachable and keeps the host an
   // The transport is kept so the user can decide between restart and reconnect.
   assert.notEqual(service.runtimes.get(host.id).ssh, null)
   const messages = messagesOf(service, host.id).join('\n')
-  assert.match(messages, /re-attach failed: remote-unreachable/)
+  // #68: the re-attach failure is explained as a connection failure (phase + code + reason + details).
+  assert.match(messages, /Connect failed in phase start: remote-unreachable/)
+  assert.match(messages, /No re-attachable remote DSH instance was found/)
+  assert.match(messages, /reason=no-running-web/)
   await service.shutdown()
 })
 

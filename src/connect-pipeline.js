@@ -890,13 +890,16 @@ async function runRestart(ctx, runtime, token) {
       return
     }
     const view = toErrorView(error)
+    // Phase is cleared with the status; capture it first so the log says where it stopped.
+    const failedPhase = runtime.phase
     runtime.error = view
     runtime.status = 'error'
     runtime.phase = null
     runtime.progress = null
     runtime.remote.uiReady = false
     runtime.remote.localPort = null
-    log('warn', `restart failed: ${view.code}`, messageOf(error))
+    // #68: a failed restart explains itself (phase, code, reason, hints, redacted details).
+    ctx.progress.logFailure(runtime, view, { phase: failedPhase })
     await teardownRuntime(ctx, runtime, { stopRemote: started && runtime.entry.keepAlive === 'stop' })
     ctx.emitState()
   } finally {
@@ -1067,6 +1070,8 @@ async function runReattach(ctx, runtime, info, token) {
       return
     }
     const view = toErrorView(error)
+    // Phase is cleared with the status; capture it first so the log says where it stopped.
+    const failedPhase = runtime.phase
     runtime.error = view
     runtime.status = 'error'
     runtime.phase = null
@@ -1075,7 +1080,8 @@ async function runReattach(ctx, runtime, info, token) {
     runtime.remote.localPort = null
     await closeTunnel(runtime)
     stopRemoteHeartbeat(runtime)
-    log('warn', `re-attach failed: ${view.code}`, messageOf(error))
+    // #68: a failed re-attach explains itself (phase, code, reason, hints, redacted details).
+    ctx.progress.logFailure(runtime, view, { phase: failedPhase })
     ctx.emitState()
   } finally {
     // A listener this action created must never outlive the action (see runRestart).
