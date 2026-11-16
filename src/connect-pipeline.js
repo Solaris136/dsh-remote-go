@@ -11,7 +11,7 @@ import {
   TUNNEL_PROBE_TIMEOUT_MS,
 } from './constants.js'
 import { beginConnectLog } from './connect-log.js'
-import { errors, toErrorView } from './errors.js'
+import { errors, RemoteGoError, toErrorView } from './errors.js'
 import { runtimeOf } from './host-registry.js'
 import {
   beginLinkWork,
@@ -29,9 +29,9 @@ import {
   teardownRuntime,
 } from './host-lifecycle.js'
 import { findKnownHostEntries, parseKnownHosts } from './known-hosts.js'
-import { remoteLayout } from './layout.js'
+import { layoutForRuntime } from './layout.js'
 import { applyManagedNodeFacts, managedNodeVersionFromEngine } from './node-runtime.js'
-import { askConflict, requestHostKey } from './prompts.js'
+import { askConflict, cancelConflict, cancelHostKeyPrompt, requestHostKey } from './prompts.js'
 import { buildRunRegistryRecord, commandMatchesProfile } from './remote-web.js'
 import { resolveDestination } from './ssh-config.js'
 import { isPid, messageOf, nowIso, sleep } from './util.js'
@@ -41,6 +41,88 @@ function describeTarget(entry) {
   const user = entry.username ? `${entry.username}@` : ''
   const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   return `${user}${entry.address || '?'}${port}`
+}
+
+/** The bilingual detail of "the transport this step needed is gone". */
+const SSH_CLOSED_DETAIL = {
+  zh: 'SSH 连接已断开，本次操作没有完成；如果主机仍在线，重连即可继续。',
+  en: 'SSH connection is not open; the transport closed before this step finished. Reconnect to continue.',
+}
+
+/**
+ * Internal marker: a pipeline step ran after the user (or the host process) took the link
+ * away. It is not a connection failure, so it never reaches the Client as an error.
+ */
+class LinkCancelled extends Error {
+  constructor(reason) {
+    super(`connect aborted: ${reason}`)
+    this.name = 'LinkCancelled'
+    this.code = 'link-cancelled'
+  }
+}
+
+/** Whether the link is no longer wanted: disconnect, host removal, teardown or shutdown. */
+function linkTaken(ctx, runtime) {
+  return (
+    ctx.state.disposed === true ||
+    runtime.closing === true ||
+    runtime.desired !== 'connected' ||
+    !ctx.state.runtimes.has(runtime.id)
+  )
+}
+
+/** Throw unless this attempt may still write state (H4). */
+function assertStillWanted(ctx, runtime) {
+  if (linkTaken(ctx, runtime)) throw new LinkCancelled('the link is no longer wanted')
+}
+
+/** Throw a typed transport error unless the SSH transport is still open (H3). */
+function assertTransportOpen(runtime) {
+  if (runtime.ssh?.connected !== true) {
+    throw errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed' })
+  }
+}
+
+/**
+ * Classify a pipeline failure. A step that raced the transport going away must read as a
+ * dropped connection (`network`, retryable), never as a bare `internal` error or as a key
+ * decision the user never made (H3).
+ * @param {object} runtime - host runtime.
+ * @param {unknown} error - the thrown value.
+ * @returns {object} the Client-facing error view.
+ */
+function normalizeConnectFailure(runtime, error) {
+  const view = toErrorView(error)
+  if (runtime.transportLost === true && runtime.ssh?.connected !== true) {
+    // A prompt parked on the transport was resolved by the close itself: the user made no
+    // decision, so this must not read as "confirm the host key" / "a manual DSH is running".
+    if (view.code === 'host-key-unknown' || view.code === 'remote-dsh-running') {
+      return toErrorView(
+        errors.network(SSH_CLOSED_DETAIL, {
+          technical: `reason=ssh-closed phase-code=${view.code}`,
+        }),
+      )
+    }
+  }
+  if (runtime.ssh?.connected === true) {
+    if (
+      !(error instanceof RemoteGoError) &&
+      /\b(?:not open|closed|ECONNRESET|EPIPE|Channel closed)\b/i.test(String(error?.message ?? ''))
+    ) {
+      return toErrorView(
+        errors.network(SSH_CLOSED_DETAIL, { technical: `reason=ssh-closed cause=${error?.message ?? error}` }),
+      )
+    }
+    return view
+  }
+  if (view.code === 'internal' || view.code === 'remote-dsh-missing' || view.code === 'remote-node-install-failed') {
+    return toErrorView(
+      errors.network(SSH_CLOSED_DETAIL, {
+        technical: `reason=ssh-closed phase-code=${view.code} cause=${error instanceof Error ? error.message : String(error ?? '')}`,
+      }),
+    )
+  }
+  return view
 }
 
 /**
@@ -65,6 +147,10 @@ export async function startConnect(ctx, id, options = {}) {
   }
   runtime.desired = 'connected'
   cancelReconnect(runtime)
+  // A user-initiated connect gets a fresh retry budget and a fresh prompt history; a retry
+  // that the pipeline schedules itself must keep the budget it already spent (H2).
+  runtime.reconnectAttempts = 0
+  runtime.connectCancelled = false
   // This connection starts its own log: the previous attempt's lines are gone before the
   // first line of this one, so the panel and a copied log only ever show the live attempt.
   beginConnectLog(runtime)
@@ -75,10 +161,25 @@ export async function startConnect(ctx, id, options = {}) {
       runtime.entry.jumpHost ? `, jump=${runtime.entry.jumpHost}` : ''
     })`,
   )
-  runtime.connectPromise = connectPipeline(ctx, runtime).finally(() => {
-    runtime.connectPromise = null
-  })
+  startConnectPromise(ctx, runtime)
   return { accepted: true }
+}
+
+/**
+ * Start the pipeline in the background and make sure its promise never rejects: a listener
+ * or a step outside the pipeline's own error handling must not become an unhandled
+ * rejection that Node reports as a process-level failure (L).
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime.
+ */
+function startConnectPromise(ctx, runtime) {
+  const run = connectPipeline(ctx, runtime).catch((error) => {
+    ctx.progress.log(runtime, 'debug', 'connect pipeline stopped outside its error path:', messageOf(error))
+  })
+  runtime.connectPromise = run
+  void run.finally(() => {
+    if (runtime.connectPromise === run) runtime.connectPromise = null
+  })
 }
 
 /** Drop the current link and connect again from scratch (the "Reconnect" button). */
@@ -105,30 +206,69 @@ async function reconnectNow(ctx, runtime) {
   await disposeSsh(runtime)
   // A dropped link's retry is a new connection too: start from a clean log.
   beginConnectLog(runtime)
-  runtime.connectPromise = connectPipeline(ctx, runtime).finally(() => {
-    runtime.connectPromise = null
+  startConnectPromise(ctx, runtime)
+}
+
+/** A timer callback that starts a retry: report a throw instead of leaving it unhandled (L). */
+function retryNow(ctx, runtime) {
+  void reconnectNow(ctx, runtime).catch((error) => {
+    ctx.progress.log(runtime, 'warn', 'the automatic retry could not start:', messageOf(error))
   })
 }
 
+/**
+ * Watch a transport that is still being dialled. A close during the handshake must settle a
+ * parked host-key prompt immediately (instead of waiting for its timeout) and marks the loss
+ * so the pipeline classifies the failure as a dropped link, not a key decision (H3/M1).
+ * @param {object} runtime - host runtime.
+ * @param {object} ssh - the transport that was just created.
+ */
+function watchHandshakeTransport(runtime, ssh) {
+  if (!ssh || typeof ssh.on !== 'function') return
+  ssh.on('close', () => {
+    if (runtime.closing || runtime.desired !== 'connected') return
+    runtime.transportLost = true
+    cancelHostKeyPrompt(runtime)
+  })
+}
+
+/**
+ * Watch the transport that carries this connection. Attached as soon as the SSH session is
+ * open (not only when the remote UI is ready): a drop during probe/bootstrap is still a
+ * lost link and must be retried like any other (H3).
+ */
 function attachDisconnectHandler(ctx, runtime) {
   const ssh = runtime.ssh
   if (!ssh) return
   ssh.on('close', () => {
     if (runtime.closing || runtime.desired !== 'connected') return
+    // A newer transport already owns the link; this one is the previous attempt's.
+    if (runtime.ssh !== ssh) return
+    runtime.transportLost = true
     // A one-shot link action rides the same transport: losing it is the same event as a
     // dropped connection, and the action that was in flight must not write state any more.
-    const active = runtime.status === 'connected' || runtime.linkBusy !== null
-    if (!active) return
+    const live = runtime.status === 'connected' || runtime.linkBusy !== null
+    const inFlight = runtime.connectPromise !== null
+    if (!live && !inFlight) return
     cancelLinkWork(runtime)
     stopRemoteHeartbeat(runtime)
-    runtime.status = 'disconnected'
-    runtime.phase = null
-    runtime.remote.uiReady = false
-    runtime.remote.localPort = null
-    runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts + 1 } }
-    ctx.emitState()
-    void closeTunnel(runtime)
-    scheduleReconnect(ctx, runtime, () => void reconnectNow(ctx, runtime))
+    // A prompt parked on this transport can never be answered: resolve it now.
+    cancelHostKeyPrompt(runtime)
+    cancelConflict(runtime)
+    if (live) {
+      runtime.status = 'disconnected'
+      runtime.phase = null
+      runtime.remote.uiReady = false
+      runtime.remote.localPort = null
+      runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts + 1 } }
+      ctx.emitState()
+      void closeTunnel(runtime)
+      scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))
+      return
+    }
+    // The pipeline that owns the in-flight connect reports the drop as `network` and
+    // schedules the retry from one place, so it is not counted twice here (H2/H3).
+    ctx.progress.log(runtime, 'warn', 'the SSH transport closed while the connection was being set up')
   })
 }
 
@@ -155,32 +295,49 @@ async function resolveTargetForRuntime(ctx, runtime) {
   }
 }
 
-/** Open the transport: direct, or through a jump host with a forwarded stream. */
+/**
+ * Open the transport: direct, or through a jump host with a forwarded stream.
+ *
+ * The jump host and the target are separate security contexts. Each one gets its own
+ * options — its own policy, its own pin and its own `onHostKey` role — so a key confirmed
+ * for one can never be checked against, or written into, the other (B1).
+ */
 async function openTransport(ctx, runtime, target) {
   const settings = ctx.settings()
-  const buildOptions = (resolved, sock) => ({
-    host: resolved.host,
-    port: resolved.port ?? 22,
-    username: resolved.username ?? resolved.user ?? null,
-    // The key path expands against the *user* home (`~/.ssh/...`), never against
-    // DSH_HOME, so the SSH layer needs to know which one that is.
-    home: ctx.userHome(),
-    auth: {
-      type: runtime.entry.auth?.type ?? 'key',
-      keyPath: runtime.entry.auth?.keyPath ?? null,
-      password: runtime.password ?? null,
-    },
-    identityFiles: resolved.identityFiles ?? [],
-    hostKeyPolicy: runtime.entry.hostKeyPolicy ?? settings.hostKeyPolicy,
-    pinnedFingerprint: runtime.entry.pinnedFingerprint ?? null,
-    knownHostFingerprints: resolved.knownFingerprints ?? [],
-    acceptUnknownHostKey: false,
-    readyTimeoutMs: settings.connectTimeoutSec * 1000 || SSH_READY_TIMEOUT_MS,
-    ...(sock ? { sock } : {}),
-    onHostKey: (info) => requestHostKey(ctx, runtime, info),
+  const auth = () => ({
+    type: runtime.entry.auth?.type ?? 'key',
+    keyPath: runtime.entry.auth?.keyPath ?? null,
+    password: runtime.password ?? null,
   })
+  const buildOptions = (resolved, role, sock) => {
+    const isJump = role === 'jump'
+    // A per-host policy and pin describe the saved target. A jump host only obeys the
+    // global policy and, at most, a pin remembered for this session (it is not persisted).
+    const hostKeyPolicy = isJump ? settings.hostKeyPolicy : (runtime.entry.hostKeyPolicy ?? settings.hostKeyPolicy)
+    const pinnedFingerprint = isJump
+      ? (runtime.jumpFingerprint?.pinned ?? null)
+      : (runtime.entry.pinnedFingerprint ?? null)
+    return {
+      host: resolved.host,
+      port: resolved.port ?? 22,
+      username: resolved.username ?? resolved.user ?? null,
+      // The key path expands against the *user* home (`~/.ssh/...`), never against
+      // DSH_HOME, so the SSH layer needs to know which one that is.
+      home: ctx.userHome(),
+      auth: auth(),
+      identityFiles: resolved.identityFiles ?? [],
+      hostKeyPolicy,
+      pinnedFingerprint,
+      knownHostFingerprints: resolved.knownFingerprints ?? [],
+      acceptUnknownHostKey: false,
+      readyTimeoutMs: settings.connectTimeoutSec * 1000 || SSH_READY_TIMEOUT_MS,
+      ...(sock ? { sock } : {}),
+      onHostKey: (info) => requestHostKey(ctx, runtime, info, { role, host: resolved.host }),
+    }
+  }
   if (!target.jumpHost) {
-    runtime.ssh = ctx.deps.sshFactory(buildOptions(target))
+    runtime.ssh = ctx.deps.sshFactory(buildOptions(target, 'target'))
+    watchHandshakeTransport(runtime, runtime.ssh)
     ctx.progress.phase(runtime, 'ssh', 'ssh-connecting', { host: target.host })
     captureFingerprint(ctx, runtime, await runtime.ssh.connect())
     return
@@ -195,11 +352,16 @@ async function openTransport(ctx, runtime, target) {
       target.jumpHost.port ?? 22,
     ).map((item) => item.fingerprint),
   }
-  runtime.jumpSsh = ctx.deps.sshFactory(buildOptions(jumpTarget))
+  runtime.jumpSsh = ctx.deps.sshFactory(buildOptions(jumpTarget, 'jump'))
+  watchHandshakeTransport(runtime, runtime.jumpSsh)
   await runtime.jumpSsh.connect()
+  // The jump host's key is settled (its own context above); from here the fingerprint the host
+  // card describes is the target's, which `captureFingerprint` fills once it answers.
+  runtime.fingerprint = null
   ctx.progress.phase(runtime, 'ssh', 'ssh-connecting', { host: target.host, via: target.jumpHost.host })
   const stream = await runtime.jumpSsh.forwardOut(target.host, target.port ?? 22)
-  runtime.ssh = ctx.deps.sshFactory(buildOptions(target, stream))
+  runtime.ssh = ctx.deps.sshFactory(buildOptions(target, 'target', stream))
+  watchHandshakeTransport(runtime, runtime.ssh)
   captureFingerprint(ctx, runtime, await runtime.ssh.connect())
 }
 
@@ -276,7 +438,11 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
   )
 
   const decision = await askConflict(ctx, runtime, processes)
-  if (decision.action === 'cancel') throw errors.remoteDshRunning()
+  if (decision.action === 'cancel') {
+    // The user said no: retrying would ask the same question again.
+    runtime.connectCancelled = true
+    throw errors.remoteDshRunning()
+  }
   if (decision.action === 'alongside') {
     runtime.alongsidePids = processes.map((entry) => entry.pid).filter((pid) => isPid(pid))
     runtime.warning = {
@@ -308,16 +474,32 @@ async function openTunnelFor(ctx, runtime, remotePort) {
   // Never hand the tunnel factory a missing transport: a listener created with no SSH channel
   // would crash the host process on the first connection (see tunnel.js's own guard).
   if (runtime.ssh?.connected !== true) {
-    throw errors.internal(new Error('the SSH transport is gone before the tunnel could be opened'))
+    throw errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed-before-tunnel' })
   }
   if (!isPid(remotePort) || remotePort > 65535) {
     throw errors.internal(new Error(`invalid remote port for the tunnel: ${remotePort}`))
   }
   const onError = () => ctx.noteRemoteUnreachable?.(runtime, 'tunnel')
-  runtime.tunnel = await ctx.deps.tunnelFactory({ ssh: runtime.ssh, remotePort, onError })
-  runtime.remote.localPort = runtime.tunnel.localPort
-  ctx.progress.log(runtime, 'info', `tunnel open: 127.0.0.1:${runtime.tunnel.localPort} -> 127.0.0.1:${remotePort}`)
-  return runtime.tunnel
+  const tunnel = await ctx.deps.tunnelFactory({ ssh: runtime.ssh, remotePort, onError })
+  const localPort = Number(tunnel?.localPort)
+  if (!Number.isInteger(localPort) || !isPid(localPort) || localPort > 65535) {
+    try {
+      await tunnel?.close?.()
+    } catch {}
+    throw errors.internal(new Error(`the tunnel factory returned no usable local port (${tunnel?.localPort})`))
+  }
+  // The listener was created while the caller awaited the factory: a disconnect or a host
+  // removal in that window must close it instead of publishing it (H4).
+  if (linkTaken(ctx, runtime) || runtime.ssh?.connected !== true) {
+    try {
+      await tunnel.close()
+    } catch {}
+    throw new LinkCancelled('the link went away while the tunnel was opening')
+  }
+  runtime.tunnel = tunnel
+  runtime.remote.localPort = localPort
+  ctx.progress.log(runtime, 'info', `tunnel open: 127.0.0.1:${localPort} -> 127.0.0.1:${remotePort}`)
+  return tunnel
 }
 
 /**
@@ -466,10 +648,14 @@ export async function repairTunnel(ctx, runtime) {
         onError: () => ctx.noteRemoteUnreachable?.(runtime, 'tunnel'),
       })
       created = next
+      const nextPort = Number(next?.localPort)
+      if (!Number.isInteger(nextPort) || !isPid(nextPort) || nextPort > 65535) {
+        throw errors.internal(new Error(`the rebuilt tunnel has no usable local port (${next?.localPort})`))
+      }
       if (!stillCurrent()) return { ok: false, reason: 'cancelled' }
       // Publish the replacement before closing the old listener: no no-listener window.
       runtime.tunnel = next
-      runtime.remote.localPort = next.localPort
+      runtime.remote.localPort = nextPort
       try {
         await previous.close()
       } catch {
@@ -481,7 +667,7 @@ export async function repairTunnel(ctx, runtime) {
       ctx.progress.log(
         runtime,
         'info',
-        `tunnel rebuilt after a failed request (remote port ${port}, local port ${previous.localPort} -> ${next.localPort})`,
+        `tunnel rebuilt after a failed request (remote port ${port}, local port ${previous.localPort} -> ${nextPort})`,
       )
       runtime.tunnelRepairFailures = 0
       runtime.nextTunnelRepairAt = 0
@@ -521,8 +707,12 @@ export async function repairTunnel(ctx, runtime) {
 }
 
 /** Prove the remote UI answers through the new tunnel and exchange this launch's token. */
-async function verifyRemoteUi(ctx, runtime, port, token) {
-  ctx.progress.log(runtime, 'debug', `verifying the remote UI on 127.0.0.1:${port}`)
+async function verifyRemoteUi(ctx, runtime, port, token, localPort) {
+  const tunnelPort = Number(localPort)
+  if (!Number.isInteger(tunnelPort) || !isPid(tunnelPort) || tunnelPort > 65535) {
+    throw errors.internal(new Error(`the tunnel has no local port to verify (${localPort ?? 'none'})`))
+  }
+  ctx.progress.log(runtime, 'debug', `verifying the remote UI on 127.0.0.1:${tunnelPort}`)
   const ui = await ctx.deps.waitUi(runtime.ssh, port, { attempts: 20, intervalMs: 500 })
   if (!ui.ok) {
     throw errors.remoteUiUnreachable({
@@ -531,7 +721,7 @@ async function verifyRemoteUi(ctx, runtime, port, token) {
     })
   }
   ctx.progress.log(runtime, 'debug', `remote UI answered HTTP ${ui.status}; exchanging the launch token`)
-  const exchange = await ctx.deps.exchange(runtime.tunnel.localPort, token, {
+  const exchange = await ctx.deps.exchange(tunnelPort, token, {
     timeoutMs: TUNNEL_PROBE_TIMEOUT_MS,
   })
   runtime.exchange = exchange
@@ -546,6 +736,9 @@ async function verifyRemoteUi(ctx, runtime, port, token) {
 
 /** Publish the connected state and start watching the remote for its own restarts. */
 function markConnected(ctx, runtime) {
+  // Only a success resets the retry budget: a failed attempt must spend it (H2).
+  runtime.reconnectAttempts = 0
+  runtime.connectCancelled = false
   runtime.status = 'connected'
   runtime.phase = 'ready'
   runtime.progress = { code: 'ready' }
@@ -577,7 +770,10 @@ async function connectPipeline(ctx, runtime) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   runtime.closing = false
-  runtime.reconnectAttempts = 0
+  // NOTE: `reconnectAttempts` is deliberately NOT reset here. A retry re-enters this function
+  // and must keep spending the budget `scheduleReconnect` counts; only a user-initiated
+  // connect (startConnect) and a successful attach reset it (H2).
+  runtime.transportLost = false
   runtime.alongsidePids = []
   // Kill rights belong to this connection: a fresh connect starts with no launched pids.
   runtime.launched = new Map()
@@ -587,8 +783,13 @@ async function connectPipeline(ctx, runtime) {
   stopRemoteHeartbeat(runtime)
   ctx.progress.set(runtime, { status: 'connecting', error: null, warning: null })
   let remoteStarted = false
+  let layout = null
+  // Whether the SSH transport ever came up during this attempt: a link that was up and then
+  // dropped is a connection event and is retried like one (H3).
+  let transportUp = false
   try {
     const target = await resolveTargetForRuntime(ctx, runtime)
+    assertStillWanted(ctx, runtime)
     const viaJump = target.jumpHost ? ` via ${target.jumpHost.host}` : ''
     log('debug', `target resolved: ${target.username ?? '(default)'}@${target.host}:${target.port}${viaJump}`)
     // A password-auth host may have one remembered: load it before the transport
@@ -599,9 +800,16 @@ async function connectPipeline(ctx, runtime) {
         runtime.password = remembered
         runtime.passwordSaved = true
       }
+      assertStillWanted(ctx, runtime)
     }
     phase('ssh', 'ssh-connecting', { host: runtime.entry.name })
     await openTransport(ctx, runtime, target)
+    // The transport is the link from here on: a drop during probe/bootstrap is a lost
+    // connection too, so the close handler is attached before the remaining steps (H3).
+    attachDisconnectHandler(ctx, runtime)
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
+    transportUp = true
     log(
       'info',
       `SSH connected to ${target.host}:${target.port} as ${target.username ?? '(default)'} (fingerprint ${
@@ -611,6 +819,8 @@ async function connectPipeline(ctx, runtime) {
 
     phase('probe', 'probing')
     let facts = await ctx.deps.probe(runtime.ssh)
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     const freeGb = Math.round(Number(facts.diskFreeKb ?? 0) / 1_048_576)
     log(
       'debug',
@@ -624,7 +834,9 @@ async function connectPipeline(ctx, runtime) {
     // There is no system fallback on purpose, so this failure is the connection's.
     const profile = ctx.settings().bootstrap.profile
     const managedVersion = managedNodeVersionFromEngine(ctx.engineNodeRange())
-    const nodeLayout = remoteLayout(facts.home)
+    // A probe that did not report $HOME cannot address the remote layout: `remoteLayout`
+    // throws instead of building a literal-tilde path (H1).
+    const nodeLayout = layoutForRuntime({ facts })
     log('info', `managed Node: expecting v${managedVersion} in ${nodeLayout.nodeDir}`)
     const managed = await ctx.deps.ensureNode(runtime.ssh, {
       facts,
@@ -632,6 +844,8 @@ async function connectPipeline(ctx, runtime) {
       version: managedVersion,
       onProgress: (event) => ctx.progress.nodeProgress(runtime, event),
     })
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     facts = applyManagedNodeFacts(facts, managed)
     log(
       'info',
@@ -649,7 +863,7 @@ async function connectPipeline(ctx, runtime) {
     log('info', `runtime plan ${plan.level}: ${plan.reason.en}`)
 
     phase('start', 'starting-remote', { level: plan.level })
-    const layout = remoteLayout(runtime.facts?.home ?? null)
+    layout = layoutForRuntime(runtime)
     let webInfo = null
     // Adopt an instance left running by a previous local process (keep-alive).
     // Checked before the npx preflight: an adoptable instance should not require
@@ -688,12 +902,15 @@ async function connectPipeline(ctx, runtime) {
     } catch (error) {
       log('debug', 'adopt check failed:', messageOf(error))
     }
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     if (!webInfo) {
       // The registry row we refused to adopt (stale launch marker, unresponsive
       // HTTP, ...) still names a process on this ~/.dsh profile. Starting a second
       // one would let two clients write the same session files. A record written by a
       // re-attach names a process this plugin did not launch, so it is never stopped here.
       const leftover = await ctx.deps.readRegistry(runtime.ssh, layout)
+      assertStillWanted(ctx, runtime)
       const leftoverPid = Number(leftover?.pid ?? 0)
       if (leftover?.origin === 'reattach') {
         log('info', `leaving a re-attached remote web instance alone (pid ${leftoverPid || 'unknown'})`)
@@ -706,6 +923,8 @@ async function connectPipeline(ctx, runtime) {
         }
       }
       await resolveForeignConflict(ctx, runtime, layout, profile)
+      assertStillWanted(ctx, runtime)
+      assertTransportOpen(runtime)
       phase('bootstrap', 'bootstrapping', { level: plan.level })
       // Resolve the exact package in the foreground first: a cold npx download
       // belongs in the connect error, not in a detached process that only leaves a
@@ -714,6 +933,8 @@ async function connectPipeline(ctx, runtime) {
       const onStdout = ctx.progress.bootstrapReporter(runtime, plan.start.targetVersion)
       const onStderr = ctx.progress.bootstrapReporter(runtime, plan.start.targetVersion)
       await ctx.deps.preflight(runtime.ssh, plan, { onStdout, onStderr })
+      assertStillWanted(ctx, runtime)
+      assertTransportOpen(runtime)
       log('info', `npx preflight ready: @deepseek-ai/dsh@${plan.start.targetVersion}`)
       phase('start', 'starting-remote', { level: plan.level })
       webInfo = await ctx.deps.startWeb(runtime.ssh, {
@@ -725,6 +946,8 @@ async function connectPipeline(ctx, runtime) {
       })
       log('info', `remote DSH started: pid ${webInfo.pid ?? '?'}, port ${webInfo.port}`)
     }
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     if (webInfo.browserCarrier === 'patched') {
       log(
         'info',
@@ -735,6 +958,7 @@ async function connectPipeline(ctx, runtime) {
     // Only the instance launched by this connection's start script may be stopped later;
     // an adopted one was already recorded above only when its record proves a launch.
     if (webInfo.adopted !== true) await rememberLaunched(ctx, runtime, webInfo.pid, layout, profile)
+    assertStillWanted(ctx, runtime)
     runtime.token = webInfo.token
     runtime.remote = {
       version: targetVersion,
@@ -752,38 +976,57 @@ async function connectPipeline(ctx, runtime) {
     }
 
     phase('tunnel', 'tunneling')
-    await openTunnelFor(ctx, runtime, webInfo.port)
+    const tunnel = await openTunnelFor(ctx, runtime, webInfo.port)
+    assertStillWanted(ctx, runtime)
 
     phase('verifying', 'verifying')
-    await verifyRemoteUi(ctx, runtime, webInfo.port, webInfo.token)
+    await verifyRemoteUi(ctx, runtime, webInfo.port, webInfo.token, tunnel.localPort)
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     // The remote UI is reachable both ways: the desktop half hands the loopback origin to a
     // Chromium guest, and the browser half frames it through the same-origin proxy (which strips
     // any X-Frame-Options). Either way this exchange proves the launch token works.
     runtime.remote.uiReady = true
     await ctx.store.patchHost(runtime.id, { lastOpenedAt: nowIso() })
+    // The store write is an await: the user may have disconnected or deleted the host while
+    // it was in flight, and a late write must not resurrect the link (H4).
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     runtime.entry = ctx.store.getHost(runtime.id) ?? runtime.entry
-    if (ctx.settings().saveTokens) await ctx.store.saveToken(runtime.id, webInfo.token)
+    if (ctx.settings().saveTokens) {
+      await ctx.store.saveToken(runtime.id, webInfo.token)
+      assertStillWanted(ctx, runtime)
+    }
     // Remember the password now that it is proven, if the user asked for that.
     if (runtime.savePassword === true && typeof runtime.password === 'string' && ctx.secrets) {
       runtime.passwordSaved = await ctx.secrets.set(runtime.id, runtime.password)
+      assertStillWanted(ctx, runtime)
     }
+    // Last gate before publishing: never report a connected host that the user just removed
+    // or disconnected (H4), and never dereference a tunnel this pipeline no longer owns.
+    assertStillWanted(ctx, runtime)
+    assertTransportOpen(runtime)
     ctx.state.activeHostId = runtime.id
-    attachDisconnectHandler(ctx, runtime)
     markConnected(ctx, runtime)
-    log('info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${runtime.tunnel.localPort}`)
+    const localPort = runtime.tunnel?.localPort ?? runtime.remote.localPort ?? '?'
+    log('info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${localPort}`)
   } catch (error) {
-    const view = toErrorView(error)
     // Phase is cleared with the status; capture it first so the log says where it stopped.
     const failedPhase = runtime.phase
-    if (runtime.desired !== 'connected') {
-      // A user-initiated disconnect/teardown resolved a pending prompt (or closed
-      // the window) while the pipeline was in flight: this is not a failure.
+    // The transport was up earlier in this attempt and is gone now: the link dropped, which
+    // is what the retry policy exists for, even while the remote was still being set up (H3).
+    const droppedTransport = runtime.transportLost === true || (transportUp === true && runtime.ssh?.connected !== true)
+    const cancelled = error instanceof LinkCancelled || linkTaken(ctx, runtime)
+    if (cancelled) {
+      // A user-initiated disconnect/teardown (or a host removal) resolved a pending prompt or
+      // cancelled the link while the pipeline was in flight: this is not a failure.
       runtime.error = null
       runtime.status = 'disconnected'
       runtime.phase = null
       runtime.progress = null
       log('info', 'connect cancelled by disconnect')
     } else {
+      const view = normalizeConnectFailure(runtime, error)
       runtime.error = view
       runtime.status = 'error'
       runtime.phase = null
@@ -798,10 +1041,31 @@ async function connectPipeline(ctx, runtime) {
       stopRemote: remoteStarted && runtime.entry.keepAlive === 'stop',
       keepRemote: remoteStarted && runtime.entry.keepAlive !== 'stop',
     })
+    // One place decides whether a failed attempt is retried, and the budget lives in
+    // `scheduleReconnect` (H2). A user's "no" (host-key/conflict prompt) is final, and a
+    // first manual connect that never reached the remote is reported instead of looping.
+    if (!cancelled) {
+      const retryable = runtime.error?.retryable !== false && runtime.connectCancelled !== true
+      const repairAttempt = (Number(runtime.reconnectAttempts) || 0) > 0
+      runtime.connectCancelled = false
+      if (retryable && (repairAttempt || droppedTransport)) scheduleConnectRetry(ctx, runtime)
+    }
     ctx.emitState()
   } finally {
     runtime.connectPromise = null
   }
+}
+
+/**
+ * Arm the next automatic attempt after a failed connect/reconnect; `scheduleReconnect`
+ * owns the settings gate and the attempt budget, so a spent budget is reported once.
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime.
+ */
+function scheduleConnectRetry(ctx, runtime) {
+  if (ctx.state.disposed === true || runtime.desired !== 'connected') return
+  if (!runtime.entry.autoReconnect || !ctx.settings().autoReconnect.enabled) return
+  scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))
 }
 
 async function readRegistryQuietly(ctx, runtime, layout) {
@@ -885,7 +1149,7 @@ export async function restartHost(ctx, runtime) {
 async function runRestart(ctx, runtime, token) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
-  const layout = remoteLayout(runtime.facts?.home ?? null)
+  const layout = layoutForRuntime(runtime)
   const profile = runtime.remote.profile ?? ctx.settings().bootstrap.profile
   const previousPort = runtime.remote.port
   // Restarting from the remote-unreachable error state has no tunnel to keep.
@@ -1060,12 +1324,12 @@ async function runRestart(ctx, runtime, token) {
       nodeSource: 'managed',
       startedAt: webInfo.startedAt ?? nowIso(),
     }
-    await openTunnelFor(ctx, runtime, webInfo.port)
+    const tunnel = await openTunnelFor(ctx, runtime, webInfo.port)
     tunnelCreated = true
     if (!isLinkWorkCurrent(runtime, token)) return
 
     phase('verifying', 'verifying')
-    await verifyRemoteUi(ctx, runtime, webInfo.port, webInfo.token)
+    await verifyRemoteUi(ctx, runtime, webInfo.port, webInfo.token, tunnel.localPort)
     if (!isLinkWorkCurrent(runtime, token)) return
     if (ctx.settings().saveTokens) await ctx.store.saveToken(runtime.id, webInfo.token)
     if (!isLinkWorkCurrent(runtime, token)) return
@@ -1078,7 +1342,7 @@ async function runRestart(ctx, runtime, token) {
     markConnected(ctx, runtime)
     log(
       'info',
-      `restart: connected again on 127.0.0.1:${runtime.tunnel.localPort} (remote port ${previousPort} -> ${webInfo.port})`,
+      `restart: connected again on 127.0.0.1:${runtime.tunnel?.localPort ?? tunnel.localPort} (remote port ${previousPort} -> ${webInfo.port})`,
     )
   } catch (error) {
     if (!isLinkWorkCurrent(runtime, token)) {
@@ -1306,7 +1570,7 @@ function restoreStopState(ctx, runtime, previous) {
 async function runStopRemote(ctx, runtime, token) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
-  const layout = remoteLayout(runtime.facts?.home ?? null)
+  const layout = layoutForRuntime(runtime)
   const profile = runtime.remote.profile ?? ctx.settings().bootstrap.profile
   const pid = Number(runtime.remote.pid ?? 0)
   const port = Number(runtime.remote.port ?? 0)
@@ -1397,7 +1661,7 @@ export async function reattachHost(ctx, runtime, info = {}) {
 async function runReattach(ctx, runtime, info, token) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
-  const layout = remoteLayout(runtime.facts?.home ?? null)
+  const layout = layoutForRuntime(runtime)
   const profile = runtime.remote.profile ?? ctx.settings().bootstrap.profile
   const fromPort = runtime.remote.port
   const reason = typeof info?.reason === 'string' && info.reason !== '' ? info.reason : 'remote-unreachable'
@@ -1506,12 +1770,12 @@ async function runReattach(ctx, runtime, info, token) {
       profile: resolved.profile ?? profile,
       startedAt: nowIso(),
     }
-    await openTunnelFor(ctx, runtime, resolved.port)
+    const tunnel = await openTunnelFor(ctx, runtime, resolved.port)
     tunnelCreated = true
     if (!isLinkWorkCurrent(runtime, token)) return
 
     phase('verifying', 'verifying')
-    await verifyRemoteUi(ctx, runtime, resolved.port, resolved.token)
+    await verifyRemoteUi(ctx, runtime, resolved.port, resolved.token, tunnel.localPort)
     if (!isLinkWorkCurrent(runtime, token)) return
     if (ctx.settings().saveTokens) await ctx.store.saveToken(runtime.id, resolved.token)
     if (!isLinkWorkCurrent(runtime, token)) return
@@ -1531,7 +1795,7 @@ async function runReattach(ctx, runtime, info, token) {
     log(
       'info',
       `re-attached: remote ${runtime.remote.version ?? 'version unknown'} on 127.0.0.1:${
-        runtime.tunnel.localPort
+        runtime.tunnel?.localPort ?? tunnel.localPort
       } (remote port ${fromPort} -> ${resolved.port})`,
     )
   } catch (error) {

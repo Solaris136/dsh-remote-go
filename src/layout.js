@@ -2,9 +2,28 @@
  * Remote directory layout: everything the plugin writes lives under `$DSH_HOME/remote-go`, so a host only gets `~/.dsh` plus that one subdirectory.
  */
 import { REMOTE_DSH_DIR, REMOTE_STATE_DIR } from './constants.js'
+import { errors } from './errors.js'
 
-export function remoteLayout(home = null) {
-  const dshHome = expandRemoteTilde(`~/${REMOTE_DSH_DIR}`, home).replace(/\/+$/, '')
+/**
+ * Build the remote layout for a known home directory.
+ *
+ * The home has to be a real absolute path: an unexpanded `~` is not expanded by a
+ * non-interactive shell, so a layout built without it would silently address a literal
+ * `~` directory (`kill -0` a `~`-path pid is a no-op that still exits 0). Refusing here
+ * keeps every caller honest instead of pretending such a command worked.
+ *
+ * @param {string} home - the remote user's absolute home directory.
+ * @returns {{ root: string, stateHome: string, dshHome: string, nodeDir: string,
+ *   downloadDir: string, logsDir: string, logFile: string, runDir: string, runFile: string }}
+ */
+export function remoteLayout(home) {
+  const base = typeof home === 'string' ? home.trim().replace(/\/+$/, '') : ''
+  if (!base.startsWith('/')) {
+    throw errors.internal(
+      new Error(`the remote home directory is unknown (${JSON.stringify(home)}); refusing to build a "~" layout`),
+    )
+  }
+  const dshHome = `${base}/${REMOTE_DSH_DIR}`
   const root = `${dshHome}/${REMOTE_STATE_DIR}`
   return {
     root,
@@ -23,13 +42,12 @@ export function remoteLayout(home = null) {
 }
 
 /**
- * Expand a leading `~` (or `~/`) with a known remote home. When `home` is not
- * known yet the tilde is preserved; callers must expand before shell use.
+ * The layout a host runtime describes: the facts its live connection probed, or the home
+ * it remembered before those facts were cleared (keep-alive / idle policy).
+ * @param {{ facts?: { home?: string } | null, remoteHome?: string | null }} runtime
+ * @returns {ReturnType<typeof remoteLayout>}
  */
-function expandRemoteTilde(value, home) {
-  const text = String(value ?? '')
-  if (!home) return text
-  if (text === '~') return home
-  if (text.startsWith('~/')) return `${home.replace(/\/+$/, '')}/${text.slice(2)}`
-  return text
+export function layoutForRuntime(runtime) {
+  const home = runtime?.facts?.home ?? runtime?.remoteHome ?? null
+  return remoteLayout(home)
 }

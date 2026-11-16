@@ -12,10 +12,10 @@ import {
 } from './constants.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'
-import { remoteLayout } from './layout.js'
-import { cancelConflict } from './prompts.js'
+import { layoutForRuntime } from './layout.js'
+import { cancelConflict, cancelHostKeyPrompt } from './prompts.js'
 import { isUiUp } from './remote-proc.js'
-import { messageOf, randomDelay } from './util.js'
+import { isPid, messageOf, randomDelay } from './util.js'
 
 export function cancelReconnect(runtime) {
   if (runtime.reconnectTimer) {
@@ -257,6 +257,12 @@ export function noteRemoteUnreachable(ctx, runtime, source) {
  */
 export function scheduleReconnect(ctx, runtime, onDue) {
   cancelReconnect(runtime)
+  // A retry only makes sense while the user still wants the link: a disconnect, a host
+  // removal or a shutdown that raced the timer must not resurrect the connection.
+  if (ctx.state.disposed === true || runtime.desired !== 'connected') {
+    ctx.progress.set(runtime, { status: 'disconnected' })
+    return
+  }
   const settings = ctx.settings()
   if (!runtime.entry.autoReconnect || !settings.autoReconnect.enabled) {
     ctx.progress.set(runtime, { status: 'disconnected' })
@@ -291,6 +297,8 @@ export function scheduleReconnect(ctx, runtime, onDue) {
     runtime.reconnectTimer = null
     onDue()
   }, delay)
+  // A pending retry must never keep the host process alive on its own.
+  runtime.reconnectTimer.unref?.()
 }
 
 function scheduleIdleStop(ctx, runtime) {
@@ -298,20 +306,48 @@ function scheduleIdleStop(ctx, runtime) {
   const minutes = Math.max(1, runtime.entry.idleMinutes ?? DEFAULT_IDLE_MINUTES)
   runtime.idleTimer = setTimeout(() => {
     runtime.idleTimer = null
-    void stopRemoteQuietly(ctx, runtime)
+    void stopRemoteForIdle(ctx, runtime)
   }, minutes * 60_000)
+  runtime.idleTimer.unref?.()
 }
 
-/** Best-effort stop of the remote web for the idle policy, then drop the transport. */
-async function stopRemoteQuietly(ctx, runtime) {
+/**
+ * Best-effort stop of the remote web for the idle policy, then drop the transport.
+ *
+ * The teardown that armed this timer clears `facts` and `remote`, so the stop has to use
+ * the home and pid remembered before that clearing: the old fallback built a layout with a
+ * literal `~`, whose `kill -0` is a no-op that still reported success (H1).
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime that went idle.
+ * @returns {Promise<{ ok: boolean, reason?: string }>} the stop verdict (best effort).
+ */
+export async function stopRemoteForIdle(ctx, runtime) {
   try {
-    if (runtime.ssh?.connected) {
-      await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
-        pid: runtime.remote.pid ?? undefined,
-      })
+    if (runtime.ssh?.connected !== true) return { ok: false, reason: 'no-transport' }
+    const home = runtime.facts?.home ?? runtime.remoteHome ?? null
+    if (typeof home !== 'string' || home.trim() === '') {
+      ctx.progress.log(runtime, 'warn', 'idle stop skipped: the remote home directory is unknown')
+      return { ok: false, reason: 'no-home' }
     }
+    const pid = Number(runtime.remote.pid ?? runtime.remotePid ?? 0)
+    const stopped = await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
+      pid: isPid(pid) ? pid : undefined,
+    })
+    if (stopped?.ok !== true) {
+      ctx.progress.log(
+        runtime,
+        'warn',
+        `idle stop did not confirm (${stopped?.reason ?? 'unknown'}); the remote may still be running`,
+      )
+      return { ok: false, reason: stopped?.reason ?? 'not-confirmed' }
+    }
+    runtime.remotePid = null
+    return { ok: true }
   } catch (error) {
+    // swallow-ok: the idle stop is best effort; its failure is only a warning and the timer
+    // is already gone, so the host stays idle either way
     ctx.progress.log(runtime, 'warn', 'idle stop failed:', messageOf(error))
+    return { ok: false, reason: 'error' }
   } finally {
     await disposeSsh(runtime)
   }
@@ -387,6 +423,9 @@ async function settleTunnelRepair(ctx, runtime) {
 
 export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelConflict(runtime)
+  // A prompt parked on the transport that is about to go away can never be answered: settle
+  // it now instead of letting the connect promise wait for its 120s timeout (M1).
+  cancelHostKeyPrompt(runtime)
   cancelLinkWork(runtime)
   stopRemoteHeartbeat(runtime)
   runtime.closing = true
@@ -394,15 +433,25 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
   // A tunnel rebuild owns a listener it may be creating right now. Cancel it (above), then
   // wait for it to clean up: otherwise the listener would be assigned after this teardown.
   await settleTunnelRepair(ctx, runtime)
+  // Remember where the remote lives before the facts below are cleared: the idle policy and
+  // a later stop still need the real home, never a literal `~` (H1).
+  if (typeof runtime.facts?.home === 'string' && runtime.facts.home.trim() !== '') {
+    runtime.remoteHome = runtime.facts.home
+  }
+  const boundPid = Number(runtime.remote.pid ?? 0)
+  if (isPid(boundPid)) runtime.remotePid = boundPid
+  let remoteStopped = false
   if (options.stopRemote && runtime.ssh?.connected) {
     try {
-      await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
+      await ctx.deps.stopWeb(runtime.ssh, layoutForRuntime(runtime), {
         pid: runtime.remote.pid ?? undefined,
       })
+      remoteStopped = true
     } catch (error) {
       ctx.progress.log(runtime, 'warn', 'stop remote failed:', messageOf(error))
     }
   }
+  if (remoteStopped) runtime.remotePid = null
   await closeTunnel(runtime)
   if (!options.keepSshForIdle) await disposeSsh(runtime)
   if (!options.keepRemote) {
@@ -453,14 +502,20 @@ export async function disconnectHost(ctx, runtime, options = {}) {
  */
 export async function shutdownAll(ctx) {
   for (const runtime of ctx.state.runtimes.values()) {
+    // Mark the link dead before the first await: a dependent action must not start (or
+    // retry) while shutdown is still walking the list (L).
+    runtime.closing = true
+    runtime.desired = 'idle'
     cancelReconnect(runtime)
     cancelIdleStop(runtime)
     cancelLinkWork(runtime)
+    cancelHostKeyPrompt(runtime)
+    cancelConflict(runtime)
     stopRemoteHeartbeat(runtime)
     await settleTunnelRepair(ctx, runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
-        await stopRemoteQuietly(ctx, runtime)
+        await stopRemoteForIdle(ctx, runtime)
       } else {
         await closeTunnel(runtime)
         await disposeSsh(runtime)

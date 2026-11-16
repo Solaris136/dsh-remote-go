@@ -36,6 +36,12 @@ export function createHostRuntime(host) {
     fingerprint: host.pinnedFingerprint
       ? { sha256: host.pinnedFingerprint, keyType: 'pinned', status: 'pinned', pinned: host.pinnedFingerprint }
       : null,
+    /**
+     * The jump host's own host key context: `{ sha256, keyType, status, pinned }`. Kept apart
+     * from `fingerprint` (the target) so a jump-host confirmation can never pin the target
+     * and a target pin can never be checked against the jump host (B1).
+     */
+    jumpFingerprint: null,
     remote: emptyRemote(),
     ssh: null,
     jumpSsh: null,
@@ -43,11 +49,29 @@ export function createHostRuntime(host) {
     token: null,
     password: null,
     facts: null,
+    /**
+     * The last known remote home and managed web pid. `facts`/`remote` are cleared by every
+     * teardown, but the idle policy still has to stop the right process on the right host
+     * path afterwards (H1).
+     */
+    remoteHome: null,
+    remotePid: null,
     exchange: null,
     pendingHostKey: null,
     pendingConflict: null,
     conflict: null,
     desired: 'idle',
+    /**
+     * The user answered a prompt with "no" (or let it time out): the connection attempt must
+     * not be retried automatically, because a retry would ask the same question again (H2).
+     */
+    connectCancelled: false,
+    /**
+     * The transport this attempt was dialling closed under the pipeline (including while the
+     * handshake was still waiting for a host-key answer). Such a failure is a dropped link,
+     * not an auth/key decision (H3).
+     */
+    transportLost: false,
     reconnectAttempts: 0,
     reconnectTimer: null,
     idleTimer: null,

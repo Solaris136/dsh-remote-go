@@ -198,7 +198,7 @@ test('ensureRemoteNode refuses an unusable remote before any download', async ()
     const ssh = fakeNodeSsh()
     const facts = item.facts.home === '' ? makeFacts({ home: '' }) : makeFacts(item.facts)
     await assert.rejects(
-      () => ensureRemoteNode(ssh, { facts, layout: item.facts.home === '' ? remoteLayout(null) : LAYOUT }),
+      () => ensureRemoteNode(ssh, { facts, layout: LAYOUT }),
       (error) => error.code === item.code,
       JSON.stringify(item.facts),
     )
