@@ -7,9 +7,7 @@ import {
   REMOTE_HEARTBEAT_DEFAULT_SEC,
   REMOTE_HEARTBEAT_MAX_SEC,
   REMOTE_HEARTBEAT_MIN_SEC,
-  REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
   REMOTE_UNREACHABLE_FAILURES,
-  REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
 } from './constants.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'

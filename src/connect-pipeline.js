@@ -953,7 +953,7 @@ async function runReattach(ctx, runtime, info, token) {
 
     // A restart takes a moment to print its new readiness line: retry before giving up.
     const attempts = Math.max(1, Number(ctx.timers.reattachAttempts) || REMOTE_REATTACH_ATTEMPTS)
-    const intervalMs = Math.max(0, Number(ctx.timers.reattachIntervalMs) || 0)
+    const intervalMs = Math.max(0, Number(ctx.timers.reattachIntervalMs ?? REMOTE_REATTACH_INTERVAL_MS) || 0)
     let resolved = null
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       if (!isLinkWorkCurrent(runtime, token)) return

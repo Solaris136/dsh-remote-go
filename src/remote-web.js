@@ -387,13 +387,23 @@ export function versionFromCommand(command) {
  * carry one in the npx-cache and app-install shapes).
  */
 export function dshPackageDirFromCommand(command) {
-  const match = /((?:\/[^\s'"]+)+)\/node_modules\/@deepseek-ai\/dsh(?:\/lib\/bin\.js|[\s'"]|$)/.exec(
-    String(command ?? ''),
-  )
-  if (!match) return null
-  const dir = `${match[1]}/node_modules/@deepseek-ai/dsh`
-  if (!dir.startsWith('/') || dir.split('/').includes('..')) return null
-  return dir
+  const text = String(command ?? '')
+  const marker = '/node_modules/@deepseek-ai/dsh'
+  // Linear scan on purpose: a nested-quantifier regex over an argv with many `/` segments can be
+  // made to backtrack exponentially, and the command line is remote input.
+  let at = text.indexOf(marker)
+  while (at !== -1) {
+    const rest = text.slice(at + marker.length)
+    if (/^(?:\/lib\/bin\.js|[\s'"]|$)/.test(rest)) {
+      let start = at
+      while (start > 0 && !/[\s'"]/.test(text[start - 1])) start -= 1
+      const dir = text.slice(start, at + marker.length)
+      if (dir.startsWith('/') && !dir.split('/').includes('..')) return dir
+      return null
+    }
+    at = text.indexOf(marker, at + marker.length)
+  }
+  return null
 }
 
 /** Read the version of the DSH package a process actually loaded, over SFTP (no shell). */
