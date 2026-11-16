@@ -3236,7 +3236,8 @@ window.__ModuleLoader__.load({
       } catch (_error) {
         return false
       }
-      let row = 'error'
+      // `mountHostRow` reports one of its own status strings; a throw means the row is unusable.
+      let row
       try {
         row = mountHostRow(win)
       } catch (_error) {

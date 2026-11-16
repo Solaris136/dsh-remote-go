@@ -6,7 +6,7 @@ import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { makeTempRoot, resolveBrowser, resolveDshCli, sleep, skipOrFail, stopChild, tail } from './harness-support.js'
+import { makeTempRoot, resolveBrowser, resolveDshCli, skipOrFail, stopChild, tail } from './harness-support.js'
 import { createRemoteProxy } from '../../src/remote-proxy.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')

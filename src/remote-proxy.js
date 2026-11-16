@@ -424,8 +424,13 @@ export function createRemoteProxy(options) {
       },
     )
     upstream.on('error', (error) => {
+      // The host id in this message came from the request path; a raw path fragment in a log line
+      // is a log-injection sink, so the line names the loopback upstream instead (that port is what
+      // identifies the host to an operator).
       logger.debug?.(
-        `[dsh-remote-go] remote proxy ${parsed.hostId} failed: ${error instanceof Error ? error.message : String(error)}`,
+        `[dsh-remote-go] remote proxy upstream 127.0.0.1:${target.localPort} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       )
       plain(res, 502, 'remote UI is unreachable')
     })
