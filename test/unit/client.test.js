@@ -19,14 +19,15 @@ const PANEL_ID = 'dsh-remote-go'
 function loadClientPlugin(options = {}) {
   const sandbox = {
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: options.setTimeout || setTimeout,
+    clearTimeout: options.clearTimeout || clearTimeout,
     setInterval,
     clearInterval,
     fetch: options.fetch,
     document: options.document,
     getComputedStyle: options.getComputedStyle,
     URL: options.URL,
+    EventSource: options.EventSource,
   }
   sandbox.window = {
     fetch: options.fetch,
@@ -304,6 +305,9 @@ function fakeFrameDocument(options = {}) {
   }
   const head = create('head')
   const body = create('body')
+  const root = create('div')
+  root.id = 'root'
+  if (options.noRoot !== true) body.appendChild(root)
   return {
     head,
     body,
@@ -312,6 +316,10 @@ function fakeFrameDocument(options = {}) {
     createElement: create,
     createElementNS: (_namespace, tag) => create(tag),
     execCommand: options.execCommand,
+    querySelector(selector) {
+      if (selector === '#root' || selector === '[data-dsh-root]') return options.noRoot === true ? null : root
+      return null
+    },
     querySelectorAll: () => [],
     listeners: {},
     addEventListener(type, handler) {
@@ -3102,4 +3110,490 @@ test('remote icon is original, currentColor SVG that respects size', () => {
   assert.match(html, /<svg[^>]*width="18"[^>]*height="18"/)
   assert.match(html, /stroke="currentColor"/)
   assert.doesNotMatch(html, /fill="#/)
+})
+
+// ---------------------------------------------------------------------------------------------
+// Audit regressions: dialog stack, state revisions, host fields, validation, a11y and the guest
+// intent boundary. These drive the real module (not a re-implementation).
+// ---------------------------------------------------------------------------------------------
+
+/** A minimal element with the pieces the dialog stack touches. */
+function fakeDialogNode(doc, options = {}) {
+  const node = {
+    tagName: options.tagName || 'DIV',
+    attributes: {},
+    focusables: options.focusables || [],
+    ownerDocument: doc,
+    isConnected: true,
+    focused: false,
+    setAttribute(name, value) {
+      this.attributes[name] = String(value)
+    },
+    removeAttribute(name) {
+      delete this.attributes[name]
+    },
+    hasAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name)
+    },
+    getAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(this.attributes, name) ? this.attributes[name] : null
+    },
+    querySelectorAll() {
+      return this.focusables
+    },
+    contains(candidate) {
+      return candidate === this || this.focusables.includes(candidate)
+    },
+    focus() {
+      this.focused = true
+      doc.activeElement = this
+    },
+  }
+  return node
+}
+
+function fakeDialogDocument() {
+  const doc = {
+    activeElement: null,
+    body: { style: { overflow: 'auto' } },
+    listeners: {},
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    },
+    removeEventListener(type) {
+      delete this.listeners[type]
+    },
+  }
+  doc.body = { style: { overflow: 'auto' }, contains: () => false }
+  const opener = fakeDialogNode(doc)
+  doc.activeElement = opener
+  doc.opener = opener
+  return doc
+}
+
+function pressKey(doc, key, extra = {}) {
+  const event = {
+    key,
+    prevented: false,
+    stopped: false,
+    shiftKey: false,
+    preventDefault() {
+      this.prevented = true
+    },
+    stopPropagation() {
+      this.stopped = true
+    },
+    ...extra,
+  }
+  for (const handler of doc.listeners.keydown || []) handler(event)
+  return event
+}
+
+test('a single dialog stack sends Escape to the top layer and restores focus', () => {
+  const stack = plugin.__test.createDialogStack()
+  const doc = fakeDialogDocument()
+  const closed = []
+  const lowerInput = fakeDialogNode(doc, { tagName: 'INPUT' })
+  const lowerDialog = fakeDialogNode(doc, { focusables: [lowerInput] })
+  const upperButton = fakeDialogNode(doc, { tagName: 'BUTTON' })
+  const upperDialog = fakeDialogNode(doc, { focusables: [upperButton] })
+
+  const lowerLayer = fakeDialogNode(doc)
+  let removeLower = null
+  removeLower = stack.push({
+    layer: lowerLayer,
+    dialog: lowerDialog,
+    dismissible: () => true,
+    close: () => {
+      closed.push('lower')
+      removeLower()
+    },
+  })
+  const upperLayer = fakeDialogNode(doc)
+  let removeUpper = null
+  removeUpper = stack.push({
+    layer: upperLayer,
+    dialog: upperDialog,
+    dismissible: () => true,
+    close: () => {
+      closed.push('upper')
+      removeUpper()
+    },
+  })
+
+  // One listener on the document, no matter how many dialogs are open (the old bug installed one
+  // per dialog and removed/re-added it on every render).
+  assert.equal(doc.listeners.keydown.length, 1)
+  assert.equal(doc.body.style.overflow, 'hidden', 'the page behind the dialogs must not scroll')
+  // Only the top dialog is modal; the lower one is inert.
+  assert.equal(upperDialog.getAttribute('aria-modal'), 'true')
+  assert.equal(lowerDialog.getAttribute('aria-modal'), null)
+  assert.equal(upperLayer.attributes.inert, undefined)
+  assert.notEqual(lowerLayer.attributes.inert, undefined)
+  assert.equal(doc.activeElement, upperButton, 'focus moves into the dialog that just opened')
+
+  const firstEscape = pressKey(doc, 'Escape')
+  assert.deepEqual(closed, ['upper'], 'one Escape closes exactly the top dialog')
+  assert.equal(firstEscape.prevented, true)
+  assert.equal(firstEscape.stopped, true)
+
+  pressKey(doc, 'Escape')
+  assert.deepEqual(closed, ['upper', 'lower'], 'the second Escape closes the lower dialog')
+  assert.equal(doc.body.style.overflow, 'auto', 'the scroll lock is released with the last dialog')
+  assert.equal(doc.listeners.keydown, undefined, 'the document listener is removed with the last dialog')
+  assert.equal(doc.activeElement, doc.opener, 'focus returns to the element that opened the stack')
+
+  removeUpper()
+  removeLower()
+})
+
+test('a busy dialog swallows Escape and the backdrop instead of closing under its request', () => {
+  const stack = plugin.__test.createDialogStack()
+  const doc = fakeDialogDocument()
+  const closed = []
+  const dialog = fakeDialogNode(doc, { focusables: [] })
+  const remove = stack.push({
+    layer: fakeDialogNode(doc),
+    dialog,
+    dismissible: () => false,
+    close: () => closed.push('closed'),
+  })
+  const event = pressKey(doc, 'Escape')
+  assert.deepEqual(closed, [], 'a non-dismissible dialog must ignore Escape')
+  assert.equal(event.prevented, true, 'Escape is still consumed so it cannot reach a lower dialog')
+  remove()
+})
+
+test('the dialog stack cycles Tab inside the top dialog', () => {
+  const stack = plugin.__test.createDialogStack()
+  const doc = fakeDialogDocument()
+  const first = fakeDialogNode(doc, { tagName: 'BUTTON' })
+  const last = fakeDialogNode(doc, { tagName: 'BUTTON' })
+  const dialog = fakeDialogNode(doc, { focusables: [first, last] })
+  const remove = stack.push({
+    layer: fakeDialogNode(doc),
+    dialog,
+    dismissible: () => true,
+    close: () => {},
+  })
+  doc.activeElement = last
+  const tab = pressKey(doc, 'Tab')
+  assert.equal(tab.prevented, true)
+  assert.equal(doc.activeElement, first, 'Tab on the last control wraps to the first')
+  doc.activeElement = first
+  const shiftTab = pressKey(doc, 'Tab', { shiftKey: true })
+  assert.equal(shiftTab.prevented, true)
+  assert.equal(doc.activeElement, last, 'Shift+Tab on the first control wraps to the last')
+  remove()
+})
+
+test('the modal renders aria-labelledby and a focusable dialog element', () => {
+  const html = render(React.createElement(plugin.components.Modal, { title: '标题', onClose: () => {} }, 'body'))
+  assert.match(html, /role="dialog"/)
+  assert.match(html, /aria-labelledby="drg-dialog-title-\d+"/)
+  assert.match(html, /<h2[^>]*id="drg-dialog-title-\d+"/)
+  assert.match(html, /tabindex="-1"/)
+  assert.doesNotMatch(html, /aria-modal="true"/, 'the stack marks only the top dialog at mount')
+})
+
+test('state frames are accepted only when their revision is newer', () => {
+  const { isNewerState, stateRevision } = plugin.__test
+  assert.equal(stateRevision({ rev: 3 }), 3)
+  assert.equal(stateRevision({}), null)
+  assert.equal(isNewerState({ rev: 4 }, 5), false, 'an older frame is dropped')
+  assert.equal(isNewerState({ rev: 5 }, 5), false, 'a duplicate revision is a no-op')
+  assert.equal(isNewerState({ rev: 6 }, 5), true)
+  assert.equal(isNewerState({ hosts: [] }, 5), true, 'a Host without rev keeps the old behaviour')
+  // The refresh path captures the revision it started from: a slow response older than that is
+  // dropped even when it is the last one to resolve.
+  assert.equal(isNewerState({ rev: 5 }, 5), false)
+  assert.equal(isNewerState({ rev: 7 }, 6), true)
+})
+
+test('a dropped state stream polls, retries with backoff and returns to live', async () => {
+  const scheduled = []
+  const cleared = []
+  const fakeSetTimeout = (fn, ms) => {
+    const timer = { fn, ms }
+    scheduled.push(timer)
+    return timer
+  }
+  const fakeClearTimeout = (timer) => {
+    cleared.push(timer)
+  }
+  const instances = []
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url
+      this.listeners = {}
+      this.closed = false
+      instances.push(this)
+    }
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    }
+    close() {
+      this.closed = true
+    }
+    emit(type, payload) {
+      for (const handler of this.listeners[type] || []) handler(payload)
+    }
+  }
+  const states = []
+  const statuses = []
+  const client = loadClientPlugin({
+    EventSource: FakeEventSource,
+    setTimeout: fakeSetTimeout,
+    clearTimeout: fakeClearTimeout,
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, state: { rev: 1, hosts: [] } }) }),
+  })
+  const dispose = client.__test.subscribeState({
+    onState: (state) => states.push(state),
+    onStatus: (mode) => statuses.push(mode),
+  })
+  assert.equal(instances.length, 1)
+  assert.equal(statuses.at(-1), 'live')
+
+  instances[0].emit('error', {})
+  assert.equal(statuses.at(-1), 'polling', 'a failed stream falls back to polling immediately')
+  assert.equal(instances[0].closed, true, 'the dead EventSource is closed')
+  const retry = scheduled.find((timer) => timer.ms === client.__test.streamRetryDelay(0))
+  assert.ok(retry, 'a retry was scheduled with the base delay')
+  retry.fn()
+  assert.equal(instances.length, 2, 'the retry opens a new EventSource')
+
+  // The first frame after reconnect proves the stream works again: polling stops, mode is live.
+  instances[1].emit('state', { data: JSON.stringify({ rev: 2, hosts: [] }) })
+  assert.equal(statuses.at(-1), 'live')
+  assert.equal(instances[1].closed, false)
+  assert.equal(states.at(-1).rev, 2)
+  dispose()
+  assert.equal(instances[1].closed, true)
+})
+
+test('the retry delay grows exponentially and is capped', () => {
+  const { streamRetryDelay } = plugin.__test
+  assert.equal(streamRetryDelay(0), 500)
+  assert.equal(streamRetryDelay(1), 1000)
+  assert.equal(streamRetryDelay(2), 2000)
+  assert.equal(streamRetryDelay(10), 15000)
+  assert.equal(streamRetryDelay(99), 15000)
+})
+
+test('the host editor reads the plain HostView fields instead of parsing the masked address', () => {
+  const { initialDraft, parseMaskedAddress } = plugin.__test
+  // A bare IPv6 used to yield port 1 out of `:1`.
+  assert.deepEqual({ ...parseMaskedAddress('user@fe80::1') }, { username: 'user', port: null })
+  assert.deepEqual({ ...parseMaskedAddress('user@[fe80::1]:2222') }, { username: 'user', port: 2222 })
+  assert.deepEqual({ ...parseMaskedAddress('user@host:22') }, { username: 'user', port: 22 })
+
+  const settings = { defaultPort: 2222 }
+  const modern = initialDraft(
+    'edit',
+    hostView({ address: 'host-a', addressMasked: 'ubuntu@host-a', username: 'ubuntu', port: 2222 }),
+    settings,
+  )
+  assert.equal(modern.port, 2222, 'the remembered default port must not silently become 22')
+  assert.equal(modern.username, 'ubuntu')
+
+  const legacyV6 = initialDraft('edit', hostView({ address: 'fe80::1', addressMasked: 'user@fe80::1' }), settings)
+  assert.equal(legacyV6.port, 2222, 'an old Host without `port` must not turn IPv6 into port 1')
+  assert.equal(legacyV6.username, 'user')
+})
+
+test('client validation uses the same ranges the Host clamps with', async () => {
+  const { limits } = plugin.__test
+  const { sanitizeHostEntry, sanitizeSettings } = await import('../../src/settings.js')
+  assert.equal(sanitizeSettings({ connectTimeoutSec: 1 }).connectTimeoutSec, limits.connectTimeoutSec.min)
+  assert.equal(sanitizeSettings({ connectTimeoutSec: 9999 }).connectTimeoutSec, limits.connectTimeoutSec.max)
+  assert.equal(sanitizeSettings({ defaultPort: 0 }).defaultPort, limits.defaultPort.min)
+  assert.equal(sanitizeHostEntry({ address: 'h', idleMinutes: 0 }).idleMinutes, limits.idleMinutes.min)
+  assert.equal(sanitizeHostEntry({ address: 'h', idleMinutes: 99999 }).idleMinutes, limits.idleMinutes.max)
+  const auto = sanitizeSettings({ autoReconnect: { maxAttempts: 99, baseDelayMs: 1 } }).autoReconnect
+  assert.equal(auto.maxAttempts, limits.maxAttempts.max)
+  assert.equal(auto.baseDelayMs, limits.baseDelayMs.min)
+})
+
+test('host and settings validation return the field, not just a message', () => {
+  const { validateHostDraft, validateSettingsDraft, initialDraft, settingsDraft } = plugin.__test
+  const draft = {
+    ...initialDraft('add', null, { defaultPort: 22, defaultKeyPath: '~/.ssh/id_rsa' }),
+    name: 'host-a',
+    address: 'host-a',
+  }
+  assert.deepEqual({ ...validateHostDraft({ ...draft, name: '' }) }, { field: 'name', code: 'wizard.validationName' })
+  assert.deepEqual(
+    { ...validateHostDraft({ ...draft, port: 70000 }) },
+    { field: 'port', code: 'wizard.validationPort' },
+  )
+  const idle = { ...draft, keepAlive: 'idle', idleMinutes: 0 }
+  assert.deepEqual({ ...validateHostDraft(idle) }, { field: 'idleMinutes', code: 'wizard.validationIdleMinutes' })
+
+  const settings = settingsDraft({})
+  assert.deepEqual(
+    { ...validateSettingsDraft({ ...settings, defaultPort: 0 }) },
+    {
+      field: 'defaultPort',
+      code: 'settings.validationPort',
+    },
+  )
+  assert.deepEqual(
+    { ...validateSettingsDraft({ ...settings, profile: 'desktop' }) },
+    {
+      field: 'profile',
+      code: 'settings.validationProfile',
+    },
+  )
+  assert.deepEqual(
+    { ...validateSettingsDraft({ ...settings, connectTimeoutSec: 1 }) },
+    {
+      field: 'connectTimeoutSec',
+      code: 'settings.validationTimeout',
+    },
+  )
+  assert.equal(validateSettingsDraft(settings), null)
+})
+
+test('a 401 and a 403 from DSH admission are their own non-retryable views', async () => {
+  for (const [status, code] of [
+    [401, 'session-expired'],
+    [403, 'forbidden'],
+  ]) {
+    const client = loadClientPlugin({
+      fetch: async () => ({ ok: false, status, json: async () => null }),
+    })
+    await assert.rejects(client.api.getState(), (error) => {
+      assert.equal(error.view.code, code)
+      assert.equal(error.view.retryable, false)
+      assert.doesNotMatch(error.message, /插件内部错误|internal/i)
+      return true
+    })
+  }
+})
+
+test('the download card is not a status role around its buttons and the bar is labelled', () => {
+  const html = render(
+    React.createElement(plugin.components.DownloadProgress, {
+      t,
+      job: { id: 'dl_1', phase: 'preparing', name: 'project', totalBytes: 0, doneBytes: 0, error: null },
+      onCancel: () => {},
+    }),
+  )
+  const card = /<div[^>]*data-testid="dsh-remote-go-download"[^>]*>/.exec(html)
+  assert.ok(card)
+  assert.doesNotMatch(card[0], /role="status"/, 'the card contains buttons and cannot be the live region')
+  assert.match(html, /role="progressbar"[^>]*aria-label="下载进度：project"/)
+  assert.match(html, /aria-valuetext="正在下载"/)
+  assert.match(html, /role="status"[^>]*aria-live="polite"/)
+})
+
+test('toasts are a live region with queued tones', () => {
+  const html = render(
+    React.createElement(plugin.components.Toast, {
+      toasts: [
+        { id: 1, text: 'warned', tone: 'warn' },
+        { id: 2, text: 'failed', tone: 'error' },
+      ],
+    }),
+  )
+  assert.match(html, /role="status"/)
+  assert.match(html, /aria-live="polite"/)
+  assert.match(html, /data-testid="toast-region"/)
+  assert.match(html, /data-tone="warn"[^>]*>warned/)
+  assert.match(html, /data-tone="error"[^>]*>failed/)
+  assert.equal((html.match(/data-tone=/g) || []).length, 2)
+})
+
+test('host warning, version parity and the connecting-host filter render', () => {
+  const noop = () => {}
+  const listOf = (hosts) =>
+    render(
+      React.createElement(plugin.components.HostListView, {
+        t,
+        state: stateWith({ hosts }),
+        loading: false,
+        error: null,
+        onAdd: noop,
+        onRefresh: noop,
+        onOpenHost: noop,
+        onEditHost: noop,
+        onDeleteHost: noop,
+        onDiagnoseHost: noop,
+      }),
+    )
+  const warned = listOf([
+    hostView({
+      warning: { zh: '远端已有手工实例', en: 'A manual instance is running' },
+      versionParity: {
+        status: 'different',
+        local: '0.2.2-rc.3',
+        remote: '0.2.1',
+        same: false,
+        message: { zh: '', en: '' },
+      },
+    }),
+  ])
+  assert.match(warned, /data-testid="host-warning"/)
+  assert.match(warned, /远端已有手工实例/)
+  assert.match(warned, /data-testid="host-version-parity"/)
+  assert.match(warned, /0\.2\.1/)
+  assert.match(warned, /0\.2\.2-rc\.3/)
+
+  const connecting = listOf([hostView({ status: 'connecting', progress: { code: 'ssh-connecting' } })])
+  assert.doesNotMatch(connecting, /data-testid="host-card"/)
+  assert.match(connecting, /data-testid="connecting-hosts-note"/)
+
+  // A restart/stop action keeps its card and progress, but editing it while the link action runs
+  // is disabled.
+  const restarting = listOf([hostView({ status: 'connecting', progress: { code: 'restarting-remote' } })])
+  assert.match(restarting, /data-testid="host-card"/)
+  const editButton = /<button[^>]*data-testid="host-edit"[^>]*>/.exec(restarting)
+  assert.ok(editButton)
+  assert.match(editButton[0], /disabled=""/)
+})
+
+test('a guest intent can act on its own host only', () => {
+  const { sanitizeGuestIntent } = plugin.__test
+  assert.deepEqual(
+    { ...sanitizeGuestIntent({ action: 'download-file', path: '/a/b', name: 'b', kind: 'file' }, 'h_a') },
+    {
+      action: 'download-file',
+      hostId: 'h_a',
+      kind: 'file',
+      path: '/a/b',
+      name: 'b',
+    },
+  )
+  // A crafted hostId never wins over the carrier's host.
+  assert.equal(sanitizeGuestIntent({ action: 'download-file', hostId: 'h_victim', path: '/a' }, 'h_a').hostId, 'h_a')
+  assert.equal(sanitizeGuestIntent({ action: 'disconnect', hostId: 'h_victim' }, 'h_a').hostId, 'h_a')
+  assert.equal(sanitizeGuestIntent({ target: 'h_victim' }, 'h_a'), null)
+  assert.equal(sanitizeGuestIntent({ target: 'h_a' }, 'h_a').target, 'h_a')
+  assert.equal(sanitizeGuestIntent({ target: 'local' }, 'h_a').target, 'local')
+  assert.equal(sanitizeGuestIntent({ action: 'connect', hostId: 'h_a' }, 'h_a'), null)
+  assert.equal(sanitizeGuestIntent({ action: 'download-file', path: 'relative' }, 'h_a'), null)
+})
+
+test('the caption menubar inset accepts unitless computed values', () => {
+  const { captionMenuStart } = plugin.__test
+  assert.equal(captionMenuStart(true, '84px'), '84px')
+  assert.equal(captionMenuStart(true, '84'), '84px')
+  assert.equal(captionMenuStart(true, 'not-a-length'), '84px')
+  assert.equal(captionMenuStart(false, ''), '48px')
+})
+
+test('a carrier failure layer is an alert with a way back to the local page', () => {
+  const doc = fakeDocument()
+  const client = loadClientPlugin({ document: doc })
+  const layer = client.__test.createCarrierErrorLayer('failed to load', { localLabel: '返回本地' })
+  assert.equal(layer.attributes.role, 'alert')
+  assert.equal(layer.attributes['data-testid'], 'remote-overlay-error')
+  const button = layer.children.find((node) => node.tagName === 'BUTTON')
+  const text = layer.children.find((node) => node.className === 'drg-carrier-error-text')
+  assert.equal(button.attributes['data-testid'], 'remote-overlay-back-local')
+  assert.equal(button.textContent, '返回本地')
+  assert.equal(text.textContent, 'failed to load')
+  assert.doesNotThrow(() => button.click())
 })

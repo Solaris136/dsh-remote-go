@@ -102,6 +102,13 @@ export function measureButtons() {
     bodyBackground: getComputedStyle(document.body).backgroundColor,
     sectionBackground: format(sectionBackground.color),
     sectionGradient: sectionBackground.gradient,
+    // A dialog mounts with a 160ms fade; measuring while it runs can catch opacity 0 and
+    // report a false contrast failure (the desktop shell occasionally re-opened the window
+    // right before the measurement). Stability means: no animation is still running.
+    animations:
+      typeof document.getAnimations === 'function'
+        ? document.getAnimations().filter((animation) => animation.playState === 'running').length
+        : 0,
     buttons,
   }
 }
@@ -112,7 +119,11 @@ export async function measureStable(page, options) {
   let previous = null
   while (Date.now() - started <= timeoutMs) {
     const current = await page.evaluate(measureButtons)
-    const concrete = current.mounted === true && current.scheme === options.scheme && current.buttons.length >= 2
+    const concrete =
+      current.mounted === true &&
+      current.scheme === options.scheme &&
+      current.buttons.length >= 2 &&
+      (current.animations ?? 0) === 0
     const repainted = !options.previousBodyBackground || current.bodyBackground !== options.previousBodyBackground
     const sameAsPrevious = previous !== null && previous === JSON.stringify(current)
     if (concrete && repainted && sameAsPrevious) return current
