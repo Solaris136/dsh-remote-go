@@ -481,9 +481,10 @@ content-type: application/json
 - `path` 必须是绝对 POSIX 路径；Host 会 `stat` 判断文件或文件夹。
 - **不设置文件或文件夹大小上限，也不限制文件个数。**
 - `destination` 必填（DSH 目录选择器 `uiWorkspace.pickDirectory` 返回的绝对本机目录），并且：
-  - 必须在**本机用户主目录之下**；`Startup` / `autostart` / `systemd`、`Start Menu\Programs` 等自启动位置、
-    `.ssh` / `.gnupg` 等凭据目录、`.bashrc` / `.profile` / `.config` / `.local` 等登录脚本与配置目录、系统目录与
-    `shell:` 形式的路径一律拒绝（`invalid-input` + 字段 `destination`）。原因见
+  - 必须在**本机用户主目录之下**；`Startup` / `autostart` / `systemd`、`Start Menu\Programs`、
+    macOS 的 `Library/LaunchAgents` / `Library/LaunchDaemons` / `Library/StartupItems` 等自启动位置、
+    `.ssh` / `.gnupg` 等凭据目录、`.bashrc` / `.profile` / `.zshrc` / `.xsessionrc` / `.config` / `.local`
+    等登录脚本与配置目录、系统目录与 `shell:` 形式的路径一律拒绝（`invalid-input` + 字段 `destination`）。原因见
     [docs/design.md](design.md) §7.1：这个字段是「远端决定写什么、写到哪里」的写入口。
   - **远端命名的最终路径也受同一策略约束**：`destination` 合法不代表 `destination/<远端名字>` 合法。远端文件夹名
     `autostart`、`Startup`、`.ssh`，远端文件名 `.bash_login`，或会在其下生成受保护路径的上级目录（例如

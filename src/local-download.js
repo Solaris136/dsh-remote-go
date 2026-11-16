@@ -21,14 +21,18 @@ import { remoteFileName, safeLocalSegment } from './remote-path.js'
  * Path segments that execute something when the user logs in, or that authorize a login.
  * Matched case-insensitively as a whole segment anywhere below the home directory, so both
  * `…\Start Menu\Programs\Startup` and `~/.config/autostart` are covered. Shell startup files
- * and the two per-user containers that hold them (`~/.config`, `~/.local`, whose `bin` is on
- * PATH in many distributions) are refused for the same reason.
+ * and the per-user containers that hold them (`~/.config`, `~/.local`, whose `bin` is on PATH in
+ * many distributions) are refused for the same reason, as are the macOS login-item folders
+ * (`~/Library/LaunchAgents`, `LaunchDaemons`, `StartupItems`) and the X session files.
  */
 const FORBIDDEN_SEGMENTS = new Map([
   ['startup', 'autorun'],
   ['startupfolder', 'autorun'],
+  ['startupitems', 'autorun'],
   ['autostart', 'autorun'],
   ['systemd', 'autorun'],
+  ['launchagents', 'autorun'],
+  ['launchdaemons', 'autorun'],
   ['.ssh', 'credentials'],
   ['.gnupg', 'credentials'],
   ['.config', 'login'],
@@ -48,6 +52,9 @@ const FORBIDDEN_SEGMENTS = new Map([
   ['.tcshrc', 'login'],
   ['.login', 'login'],
   ['.logout', 'login'],
+  ['.xsessionrc', 'login'],
+  ['.xprofile', 'login'],
+  ['.xinitrc', 'login'],
 ])
 
 /** `shell:startup` / `shell:common startup` name an autorun folder without spelling a path. */
@@ -63,9 +70,13 @@ const SYSTEM_ROOTS = Object.freeze(
 /** A stronger reason wins when several segments of one path match (most specific first). */
 const REASON_PRIORITY = ['autorun', 'credentials', 'login', 'system']
 
-/** One resolved path, comparable on this platform (`C:\Users` vs `c:\users`). */
+/**
+ * One resolved path, comparable on this platform. Windows and macOS both have a
+ * case-insensitive default filesystem, so a case-insensitive compare is the one the OS itself
+ * would do (`C:\Users` vs `c:\users`, `/Users/Me` vs `/Users/me`).
+ */
 function comparable(value) {
-  return process.platform === 'win32' ? value.toLowerCase() : value
+  return process.platform === 'win32' || process.platform === 'darwin' ? value.toLowerCase() : value
 }
 
 function segmentsOf(resolved) {
@@ -81,13 +92,17 @@ function isInside(root, target) {
  * Locations whose *contents* run or authenticate at logon. A download may neither land inside
  * one of them nor create one of their ancestors: a remote folder named `Microsoft` under
  * `~/AppData/Roaming` would otherwise put a whole `Windows\Start Menu\Programs\Startup` tree on
- * disk without any single path segment looking suspicious.
+ * disk without any single path segment looking suspicious (macOS has the same shape under
+ * `~/Library`).
  * @param {string} home - resolved home directory.
  * @returns {string[]} resolved sensitive roots that exist by definition (not on disk).
  */
 function sensitiveRoots(home) {
   const roots = ['.config', '.local', '.ssh', '.gnupg'].map((name) => path.join(home, name))
   roots.push(path.join(home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu'))
+  for (const name of ['LaunchAgents', 'LaunchDaemons', 'StartupItems']) {
+    roots.push(path.join(home, 'Library', name))
+  }
   const appData = typeof process.env.APPDATA === 'string' && process.env.APPDATA.trim() !== ''
   if (appData) roots.push(path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu'))
   return roots

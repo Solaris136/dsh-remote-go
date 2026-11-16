@@ -366,11 +366,15 @@ export class RemoteGoService extends EventEmitter {
   async startRemoteDownload(id, path, options = {}) {
     await this.init()
     const runtime = runtimeOf(this.ctx, id)
+    // One home root for both checks: the pre-flight below and the write itself. Falling back to
+    // `os.homedir()` later could disagree with `userHome()` when HOME/USERPROFILE is unset, and
+    // then a destination accepted here would be refused by the job.
+    const home = this.userHome()
     // The local folder is checked before a job exists: a refused destination is the caller's
     // mistake (HTTP 400 `invalid-input`), not a job that first answers `preparing` and then
     // reports the refusal asynchronously (which also wasted a job slot and an SFTP stat).
-    await requireDestination(options.destination, { home: this.userHome() })
-    return this.downloads.start(runtime, path, options)
+    await requireDestination(options.destination, { home })
+    return this.downloads.start(runtime, path, { ...options, home })
   }
 
   /** Current view of one download job. */

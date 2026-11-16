@@ -41,9 +41,12 @@
   **当前值**深合并（嵌套 patch 不再把 `autoReconnect.baseDelayMs` 从 5000 重置成 800）；`saveToken` 先
   `load()`，不会再以 `{}` 覆盖已有 secrets。
 - **下载目标加固**（审计 F）。`POST /downloads` 的 `destination` 只允许本机用户主目录之下，并拒绝
-  `Startup` / `autostart` / `systemd` / `Start Menu\Programs` 等自启动位置、`.ssh` / `.gnupg` 等凭据
-  目录、`.bashrc` / `.profile` / `.config` / `.local` 等登录脚本与配置目录、系统目录与 `shell:startup`
-  一类路径；校验是同步的（坏路径直接 400，不再先建 `preparing` 任务再异步报错）。**远端命名的最终路径同样
+  `Startup` / `autostart` / `systemd` / `Start Menu\Programs` 等自启动位置、macOS 的
+  `Library/LaunchAgents` / `LaunchDaemons` / `StartupItems`、`.ssh` / `.gnupg` 等凭据目录、
+  `.bashrc` / `.profile` / `.zshrc` / `.xsessionrc` / `.config` / `.local` 等登录脚本与配置目录、系统目录与
+  `shell:startup` 一类路径（Windows / macOS 的路径比较按大小写不敏感处理）；校验是同步的（坏路径直接 400，
+  不再先建 `preparing` 任务再异步报错），并且 API 预检与写入用**同一个 home 根**（job 携带 `home`，不再回落到
+  `os.homedir()`）。**远端命名的最终路径同样
   过关**：`destination=~/.config` + 远端文件夹名 `autostart`、`~` + 远端文件名 `.bash_login`，以及会在其下
   生成受保护路径的上级目录都在创建前被拒绝（零写入）。主机 `id` 只由 Host 签发（客户端传来的未知/畸形 id
   一律替换成新的 `h_*`）；`POST /local-version` 只在探测失败时接受回填、不得低于 `engines.dsh` 下限，格式

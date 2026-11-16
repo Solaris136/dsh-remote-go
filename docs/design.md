@@ -377,8 +377,10 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
 1. `POST /downloads`：远端决定**写什么内容**（文件字节），也决定**写到哪里**（`destination` 下新建的文件/目录名
    就来自远端文件树）。
    - `destination` 必须是本机用户主目录之下，且不是系统目录、自启动目录（`Startup` / `autostart` / `systemd` /
-     `Start Menu\Programs`）、凭据目录（`.ssh` / `.gnupg`）、登录脚本与用户配置目录（`.bashrc` / `.profile` /
-     `.zshrc` / `.config` / `.local` 等）；`shell:startup` 一类未解析的 shell 路径直接拒绝。目标是把「远端不能把
+     `Start Menu\Programs` / macOS `Library/LaunchAgents`、`LaunchDaemons`、`StartupItems`）、凭据目录
+     （`.ssh` / `.gnupg`）、登录脚本与用户配置目录（`.bashrc` / `.profile` / `.zshrc` / `.xsessionrc` /
+     `.config` / `.local` 等）；`shell:startup` 一类未解析的 shell 路径直接拒绝。Windows 与 macOS 的路径比较
+     按各自文件系统的大小写不敏感语义做归一。目标是把「远端不能把
      可执行内容放进下次登录会执行的位置」这件事挡住，不是「任意内容都可以安全下载」。
    - **远端命名的最终路径同样过关**：`destination` 合法不代表 `destination/<远端名字>` 合法。远端文件夹名
      `autostart` / `Startup` / `.ssh`、远端文件名 `.bash_login`，以及会在其下生成受保护路径的上级目录

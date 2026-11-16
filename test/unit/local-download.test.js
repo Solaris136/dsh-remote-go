@@ -235,6 +235,20 @@ describe('download destination policy', () => {
       // Credential folders: writing `authorized_keys` into ~/.ssh would authorize the remote host.
       [under('.ssh'), 'credentials'],
       [under('.gnupg'), 'credentials'],
+      // macOS login items, and the X session files on Linux/BSD.
+      [under('Library', 'LaunchAgents'), 'autorun'],
+      [under('Library', 'LaunchDaemons'), 'autorun'],
+      [under('Library', 'StartupItems'), 'autorun'],
+      [under('Library', 'launchagents'), 'autorun'],
+      [under('.xsessionrc'), 'login'],
+      [under('.xinitrc'), 'login'],
+      [under('.xprofile'), 'login'],
+      // A macOS user folder that is not a login item is fine.
+      [under('Library', 'Caches'), null],
+      [under('Library', 'Application Support', 'app'), null],
+      // The segment rules themselves are case-insensitive on every platform.
+      [under('.SSH'), 'credentials'],
+      [under('Startup'), 'autorun'],
       // Login scripts and the per-user containers that hold them.
       [under('.config'), 'login'],
       [under('.config', 'mytool'), 'login'],
@@ -337,6 +351,27 @@ describe('download destination policy', () => {
     )
     assert.deepEqual(writes, [])
     assert.equal(existsSync(path.join(roaming, 'Microsoft')), false)
+  })
+
+  test('a remote-named macOS login item is refused before anything is written', async () => {
+    const base = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-launchagents-'))
+    const library = path.join(base, 'Library')
+    await mkdir(library)
+    const { runtime, writes } = recordingRuntime('folder')
+    // `~/Library` is an ordinary destination, but the remote chooses the name below it…
+    await assert.rejects(
+      readHostDownload(runtime, '/home/ubuntu/LaunchAgents', { destination: library, home: base }),
+      (error) => error.code === 'invalid-input',
+    )
+    // …and must not be able to create `~/Library` itself either: a tree written below it could
+    // contain `LaunchAgents/…`, which macOS runs at login.
+    await assert.rejects(
+      readHostDownload(runtime, '/home/ubuntu/Library', { destination: base, home: base }),
+      (error) => error.code === 'invalid-input',
+    )
+    assert.deepEqual(writes, [], 'a refused candidate must never reach the transport')
+    assert.deepEqual(await readdir(library), [])
+    assert.equal(existsSync(path.join(library, 'LaunchAgents')), false)
   })
 
   test('requireDestination accepts a real user folder and rejects a file', async () => {
