@@ -108,6 +108,10 @@ interface FingerprintView {
   status: 'pending' | 'pinned' | 'changed' | 'observed'
   pinned?: string | null
 }
+// 说明（跳板机）：确认提示期间这里展示的是**当前正在确认的那把密钥**。目标与跳板各有自己的
+// host-key 上下文：跳板机确认的 pin 只在本次会话内有效（不写 store），配置文件里没有跳板 pin 字段，
+// 插件重启后需要重新确认；改 `jumpHost` 后旧跳板 pin 会被丢弃并重新询问（不会报 `host-key-changed`）。
+// Client 的对话框按这一份视图渲染，不区分跳板 / 目标，也没有第二套文案——这是本版已知限制。
 
 interface ConnectLogEntry {
   seq: number                 // 本次连接内从 1 单调递增（每次连接重置），用于稳定渲染与去重
@@ -539,8 +543,7 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 
 - `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`；跳板机的确认额外带
   `role: "jump"` 与跳板机地址 `host`，这是「等待确认的是哪台机器」的唯一信号——目标机的帧形状不变）
-- `auth-checking`、`probing`
-- `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
+- `auth-checking`、`probing`- `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
 - `restarting-remote`（`reason`，可选 `pid` / `port` / `level`）：本地重启远端或远端自重启后的重挂；状态保持

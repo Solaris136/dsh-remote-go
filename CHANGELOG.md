@@ -127,29 +127,40 @@
     `host-key-changed`（不可重试），目标已有 pin 时第一个跳板连接就报 `host-key-changed`。现在两者各有独立的
     上下文：跳板只受全局策略约束、pin 只记在本次会话（`runtime.jumpFingerprint`），确认跳板**绝不**写目标
     记录；确认提示的进度帧对跳板带 `role: "jump"` 与地址，目标帧形状不变（见 [docs/api.md](docs/api.md)）。
-  - **`idle` 存活策略永远停不掉远端**：teardown 清空 `facts` 后，空闲计时器用一个字面量 `~` 路径拼命令，
-    `kill -0` 变成 no-op 却仍报成功。现在 teardown 先记住真实 `remoteHome` / `remotePid`，`remoteLayout(null)`
-    直接拒绝而不是造 `~`，`stopRemoteWeb` 既无 pid 也无 registry 时返回 `no-target`（不再假装停过）。
+  - **`idle` 存活策略永远停不掉远端、又会误杀刚接回来的链路**：teardown 清空 `facts` 后，空闲计时器用一个
+    字面量 `~` 路径拼命令，`kill -0` 变成 no-op 却仍报成功；而新的连接不会取消旧计时器，到点后会把用户刚连上的
+    链路停掉并留下「状态 connected、SSH/隧道已空」的僵尸态。现在：任何一次连接与每次成功挂载都会取消空闲计时器；
+    计时器触发时若主机已连接（`desired`/`status`/隧道任一）直接返回 `still-wanted` 且不释放 SSH；停机前先按
+    `/proc` 身份（starttime / DSH home / profile）证明那个 pid 仍是本连接启动的那个，pid 复用或无法证明归属时
+    不发信号；idle 保留的旧 SSH 在下一次连接开始时先释放。teardown 先记住真实 `remoteHome` / `remotePid`，
+    `remoteLayout(null)` 直接拒绝而不是造 `~`，`stopRemoteWeb` 既无 pid 也无 registry 时返回 `no-target`
+    （不再假装停过）。
+  - **失败启动的清理会误停别的进程**：`startRemoteWeb` 失败后改用「本次启动脚本打印的 pid」停止，且先确认它
+    仍存活；不再回退到 `run/web.json` 里的 pid——那份记录可能属于重挂接管、本插件没有启动过的实例。停止脚本
+    也只在记录确实命名被停的那个 pid 时才删除 registry。
+  - **跳板 pin 不按跳板身份区分**：`runtime.jumpFingerprint` 现在带 `host`/`port`，只在同一跳板（含端口）时
+    使用；改了主机的 `jumpHost` 会丢弃旧 pin 并重新询问，而不是把新跳板报成 `host-key-changed`。
   - **`autoReconnect.maxAttempts` 只重试一次**：每次进入管线都把计数清零，预算判定成了死代码。现在只有
     「用户手动连接」与「连接成功」会归零，重试由失败统一排下一次；用户在选择框点「取消/拒绝」或首次连接
     根本没建立起链路时不再自动重试。
   - **连接期间断线被报成 `internal` 且不重连**：断线监听只在 `connected` 之后才装，`exec`/`openSftp`/
-    `forwardOut` 在关闭的连接上抛裸 `Error`。现在 SSH 会话一建立就装上监听，关闭的连接返回
+    `forwardOut` 在关闭的连接上抛裸 `Error`。现在 SSH 会话一建立就装上监听（握手期也监听，握手期断开会让
+    挂起的指纹提示立即结算并按网络错误拒绝，而不是干等到超时），关闭的连接返回
     `network`（`reason=ssh-closed`），bootstrap 期间断线按网络失败处理并进入重连。
   - **用户操作与管线无互斥**：每个 `await` 之后都复查「用户还要这条连接吗」（`desired`/`closing`/`disposed`/
     主机仍在），隧道端口改用局部变量并校验，disconnect / 删除主机不会再收到假的 `connected` 帧，
     也不会再在 `runtime.tunnel.localPort` 上空指针崩溃；`removeHost` 先置 `desired: "idle"` 并清 `activeHostId`。
   - **指纹提示期间断开**：teardown 现在会以 `false` 结束挂起的确认并清 `pendingHostKey`（不再占住
     connectPromise 到 120s 超时），超时同样清理，确认只在 `fingerprint-pending` 期间被接受。
-  - **启动失败会留下远端进程**：`startRemoteWeb` 在 detached 启动之后才发现地址不对/超时，进程留在远端。
-    现在出错前用已知 pid（或 registry 里的 pid）把它停掉再报错。
   - **远端 `web.log` 里的 token 被默认 umask 落盘**：启动脚本开头 `umask 077` 并 `chmod 600` 日志；
     `profile-dump.yml` 用完即删。
   - **`run/web.json` 非原子写 / 停止失败也删 registry**：改为临时文件 + `mv`，停止未确认时保留记录，
-    registry 读不出来时仍能从中恢复 pid（不再误判为「没有记录」）。
+    registry 读不出来时仍能从中恢复 pid（不再误判为「没有记录」），且 pid 必须由 `,`/`}` 结束才算数。
   - **`known_hosts` 的明文条目对任意端口作保**：非 22 端口现在只认 `[host]:port`（与 OpenSSH 一致）。
+    已知限制：`!host` 否定行与 `|1|` 哈希行不支持（后者只统计数量），失败方向是更严格。
   - **文件夹下载在大小写不敏感的文件系统静默覆盖**：同名（仅大小写不同）的远端文件按 `name (2).ext`
-    改名，两者都落盘；`desktop.ini` / `thumbs.db` / `*.lnk` / `*.url` 等 Windows 元数据与快捷方式不再写进下载。
+    改名，两者都落盘（大小写不敏感判定在 Windows/macOS 默认开启）；`desktop.ini` / `thumbs.db` / `*.lnk` /
+    `*.url` 等 Windows 元数据与快捷方式只在 **Windows 本地**被跳过，跳过的名字在结果里可见，其他平台照常下载。
   - 另有若干低危加固：`shutdownAll` 先置关闭标志再收尾、重连计时器 `unref()`、`exec` 的进度回调抛错不再
     中断命令、探测/预检超时按网络条件分类、关闭隧道时销毁已建立的 SSH 通道、读取私钥前限制大小。
 - **连接日志每次连接都从干净的一页开始**：手动重连与断线自动重连会清空上一次连接的日志与序号，并先写一条
