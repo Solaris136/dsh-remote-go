@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.8）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.9）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -54,6 +54,12 @@
 > 承载方据此重新导航；`SettingsView` 增加 `remoteHeartbeat`；诊断报告增加 `restarts`；新增错误码
 > `remote-unreachable` 与 `restart-unavailable`。`POST /hosts/:id/connect` 在一次性动作进行中返回
 > `reason: "already-restarting"`。上述新路由与代理路径同样通过本机 DSH 的准入（v2.8 鉴权注记）。
+>
+> **v2.9 变更**：新增 `POST /hosts/:id/stop-remote`（关闭本连接管理的远端 DSH：停掉绑定的进程 → 关隧道 →
+> 释放 SSH → 主机留在 `disconnected`，配置与凭据保留、不自动重连）与进度码 `stopping-remote`、错误码
+> `stop-unavailable`。它与既有的 `POST /hosts/:id/disconnect` 的区别见端点小节：`disconnect` 按存活策略收尾、
+> 不做 kill 归属校验；`stop-remote` 是显式破坏性动作，只有本连接启动或接管的那个 pid 能停，且会清掉远端
+> `run/web.json`。语义变化只在新增路由与新增 code，`HostView` / `RemoteView` 字段不变。
 
 ## 0. 通用类型
 
@@ -81,8 +87,9 @@ type HostStatus =
 
 type ConnectPhase = 'ssh' | 'probe' | 'bootstrap' | 'start' | 'tunnel' | 'verifying' | 'ready'
 
-// `connecting` 同时覆盖首次连接、本地重启远端与远端自重启后的重挂：后两者的进度码固定是
-// `restarting-remote`，阶段只走 start → tunnel → verifying，且不重跑 ssh / probe / bootstrap。
+// `connecting` 同时覆盖首次连接、本地重启远端、远端自重启后的重挂与显式关闭远端：
+// 后三者的进度码分别是 `restarting-remote`、`restarting-remote` 与 `stopping-remote`，阶段只走
+// start（→ tunnel → verifying），且不重跑 ssh / probe / bootstrap。
 
 interface Progress { code: string; params?: Record<string, string | number> }  // 客户端按 code 查本地文案，params 只用于插值
 
@@ -227,6 +234,7 @@ interface StateView {
 | `remote-ui-unreachable` | 隧道或远端界面校验失败 | ✅ |
 | `remote-unreachable` | 远端自己重启后找不到可重挂实例（主机与配置保留） | ✅ |
 | `restart-unavailable` | 非可重启状态（未连接 / SSH 已释放 / 动作进行中）请求重启 | ✅ |
+| `stop-unavailable` | 非可关闭状态（未连接 / SSH 已释放 / 动作进行中）或远端 pid 无法证明归属时请求关闭远端 | ✅ |
 | `remote-file-unavailable` | 远端文件/文件夹不存在、不可读或超过下载上限 | ✅ |
 | `download-not-ready` | 下载任务尚在准备、已失败或已过期 | ✅ |
 | `download-busy` | 同时准备/保留的下载任务过多 | ✅ |
@@ -270,7 +278,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.8", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.9", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
@@ -317,6 +325,29 @@ data: {}
 
 ### `POST /hosts/:id/disconnect`
 请求 `{ "stopRemote": false }`；`stopRemote=true` 或该主机策略为 `stop` 时同时停止远端 web。响应 `{ "ok": true }`。
+这是「断开连接」的收尾路径：按存活策略处理（`keep` 只关隧道、`idle` 保留 SSH 稍后停、`stop` 停远端），
+停止远端时直接使用当前记录的 pid，**不做归属校验**。显式、可审计地「关掉这台远端 DSH」请用下面的
+`stop-remote`。
+
+### `POST /hosts/:id/stop-remote`
+关闭本连接管理的远端 DSH（管理界面卡片上的「关闭远端 DSH」），无请求体，同步执行：
+
+- 语义：在**同一条 SSH 会话**上停掉本连接绑定的那一个远端 web 进程（`stopRemoteWeb`：SIGTERM → 等待 →
+  SIGKILL，并删除远端 `run/web.json`）→ 关闭隧道 → 释放 SSH → 主机状态转 `disconnected`；主机配置、凭据与
+  存活策略保留，**不触发自动重连**，之后 `POST /hosts/:id/reconnect` 会起一个全新实例（新端口、新 token）。
+- 状态机：`connected` ✅；`error` + `error.code === "remote-unreachable"` ✅（该状态保留 SSH 会话；绑定的
+  pid 已经消失时只清理残留 registry 再释放连接）；其余状态（`unconfigured` / `disconnected` / `connecting` /
+  `fingerprint-pending` / `conflict-pending` / 其它 `error` / `limited`）以及另一个一次性动作进行中时一律拒绝，
+  HTTP **409** + `stop-unavailable`，`ErrorView.detail` 说明原因。
+- 授权（与 `restart` 同一套 `/proc` 身份证明）：pid 必须就是本连接绑定的那个；本连接必须记录过它（自己启动的，
+  或重挂接管的）；远端 `run/web.json` 必须仍命名它且 dshHome / profile 一致；`/proc/<pid>` 的 starttime、
+  cmdline 与 `DSH_HOME` 必须仍证明是同一进程。`alongside` 保留的 pid、pid 复用、归属证明不了的一律**不 kill**
+  （409 `stop-unavailable`，连接保持原样）。重挂接管的实例（`origin: "reattach"`）只有在用户显式调用本端点时
+  才可关闭，且只关那一个 pid。
+- 执行期间 `/events` 推送 `status: "connecting"` + 进度码 `stopping-remote`（`pid` / `port`），客户端据此禁用
+  卡片按钮并显示「正在关闭远端 DSH…」；结束后状态帧直接是 `disconnected`。
+- 响应：`{ "ok": true, "pid": 4242 }`（进程在动作前已消失时为 `pid` 仍为该绑定值、实际只清理了 registry）。
+  失败（远端没有报告干净停止）返回 409 `stop-unavailable`，连接保持原样以便重试或「重连」。
 
 ### `POST /hosts/:id/reconnect`
 等价于 disconnect（不停远端）+ connect。响应 `{ "ok": true }`。
@@ -449,6 +480,8 @@ content-type: application/json
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
 - `restarting-remote`（`reason`，可选 `pid` / `port` / `level`）：本地重启远端或远端自重启后的重挂；状态保持
   `connecting`，阶段只走 `start` → `tunnel` → `verifying`
+- `stopping-remote`（可选 `pid` / `port`）：显式关闭远端 DSH；状态保持 `connecting`，只走 `start` 阶段，
+  结束后直接是 `disconnected`，不会进入 `tunnel` / `verifying`
 
 ## 3. 安全约束（客户端必须遵守）
 

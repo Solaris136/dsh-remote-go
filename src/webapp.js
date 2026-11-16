@@ -11,6 +11,7 @@ export {
   buildStartScript,
   startRemoteWeb,
   stopRemoteWeb,
+  clearRunRegistry,
   readRunRegistry,
   readWebLineFromLog,
   remotePidAlive,

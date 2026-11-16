@@ -327,7 +327,7 @@ async function openTunnelFor(ctx, runtime, remotePort) {
  * hosted and displayed, but never signalled.
  */
 async function rememberLaunched(ctx, runtime, pid, layout, profile) {
-  if (!isPid(pid)) return
+  if (!isPid(pid)) return null
   if (!(runtime.launched instanceof Map)) runtime.launched = new Map()
   const identity = await ctx.deps.processIdentity(runtime.ssh, pid)
   if (identity.ok !== true) {
@@ -336,21 +336,60 @@ async function rememberLaunched(ctx, runtime, pid, layout, profile) {
       'debug',
       `launch: pid ${pid} identity unreadable (${identity.reason}); it will not be stopped`,
     )
-    return
+    return null
   }
   if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
     ctx.progress.log(runtime, 'debug', `launch: pid ${pid} runs with another DSH_HOME; it will not be stopped`)
-    return
+    return null
   }
   if (!commandMatchesProfile(identity.command, profile)) {
     ctx.progress.log(runtime, 'debug', `launch: pid ${pid} does not run profile ${profile}; it will not be stopped`)
-    return
+    return null
   }
-  runtime.launched.set(pid, {
+  const record = {
     startTime: identity.startTime,
     command: identity.command,
     dshHome: identity.dshHome,
-  })
+  }
+  runtime.launched.set(pid, record)
+  runtime.bound = { pid, startTime: identity.startTime, origin: 'launch' }
+  return record
+}
+
+/**
+ * Remember the remote web this connection is bound to without granting restart kill rights.
+ * A re-attach (or the adoption of a re-attached record) names a process this plugin did not
+ * launch: a restart must leave it running, but the user's explicit "Stop remote DSH" may stop
+ * exactly this pid. The identity recorded here is what that action re-proves before signalling.
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime with a live transport.
+ * @param {number} pid - the bound remote web pid.
+ * @param {object} layout - remote layout.
+ * @param {string} profile - remote DSH profile.
+ * @param {'launch'|'reattach'} origin - how this connection came to host the process.
+ * @returns {Promise<object|null>} the recorded binding, or null when it cannot be proven.
+ */
+async function rememberBound(ctx, runtime, pid, layout, profile, origin) {
+  if (!isPid(pid)) return null
+  const identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  if (identity.ok !== true) {
+    ctx.progress.log(
+      runtime,
+      'debug',
+      `bind: pid ${pid} identity unreadable (${identity.reason}); it will not be stopped on request`,
+    )
+    return null
+  }
+  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
+    ctx.progress.log(runtime, 'debug', `bind: pid ${pid} runs with another DSH_HOME; it cannot be stopped here`)
+    return null
+  }
+  if (!commandMatchesProfile(identity.command, profile)) {
+    ctx.progress.log(runtime, 'debug', `bind: pid ${pid} does not run profile ${profile}; it cannot be stopped here`)
+    return null
+  }
+  runtime.bound = { pid, startTime: identity.startTime, origin }
+  return runtime.bound
 }
 
 /**
@@ -542,6 +581,7 @@ async function connectPipeline(ctx, runtime) {
   runtime.alongsidePids = []
   // Kill rights belong to this connection: a fresh connect starts with no launched pids.
   runtime.launched = new Map()
+  runtime.bound = null
   runtime.tunnelRepairFailures = 0
   runtime.nextTunnelRepairAt = 0
   stopRemoteHeartbeat(runtime)
@@ -621,8 +661,10 @@ async function connectPipeline(ctx, runtime) {
         webInfo = { ...adopted, logPath: layout.logFile, startedAt: nowIso(), rawLine: '' }
         log('info', `adopted running remote web pid=${adopted.pid} port=${adopted.port}`)
         // Only a record written by a launch script proves the process is ours to stop; a
-        // re-attached record is hosted, not owned (B1).
+        // re-attached record is hosted, not owned (B1). It is still the instance this
+        // connection is bound to, so the explicit "Stop remote DSH" may stop it by identity.
         if (adopted.origin !== 'reattach') await rememberLaunched(ctx, runtime, adopted.pid, layout, profile)
+        else await rememberBound(ctx, runtime, adopted.pid, layout, profile, 'reattach')
       } else if (adopted && adopted.origin !== 'reattach') {
         log(
           'info',
@@ -1072,6 +1114,250 @@ async function runRestart(ctx, runtime, token) {
 }
 
 /**
+ * The explicit "stop remote DSH" authorization. A restart must never stop a process this
+ * plugin did not launch; here the user is pointing at the instance this connection is bound
+ * to, so a re-attached pid is stoppable too - with the same `/proc` proofs, re-read now:
+ *
+ * - the pid must be the one this connection is bound to (`remote.pid`);
+ * - it must stay out of `alongsidePids` (the user asked to keep it);
+ * - this connection must have recorded it: launched it, or bound to it after a re-attach;
+ * - `run/web.json` must still name that pid with the same DSH home and profile;
+ * - `/proc/<pid>` must still be the same process (kernel start time), same home, same profile.
+ *
+ * A pid that is already gone is not an error for this action: the caller clears the stale
+ * registry and releases the link, which is exactly what "stop" means in that state.
+ *
+ * @param {object} ctx - service context.
+ * @param {object} runtime - connected (or remote-unreachable) host runtime.
+ * @param {number} pid - the bound remote web pid.
+ * @param {object} layout - remote layout.
+ * @param {string} profile - remote DSH profile.
+ * @returns {Promise<{ ok: true } | { ok: false, reason: string }>} the verdict.
+ */
+async function closeAuthorized(ctx, runtime, pid, layout, profile) {
+  if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
+  if (Number(runtime.remote.pid) !== pid) return { ok: false, reason: 'not-the-bound-instance' }
+  if ((Array.isArray(runtime.alongsidePids) ? runtime.alongsidePids : []).includes(pid)) {
+    return { ok: false, reason: 'kept-alongside' }
+  }
+  const launched = runtime.launched instanceof Map ? runtime.launched.get(pid) : undefined
+  const bound = runtime.bound !== null && Number(runtime.bound?.pid) === pid ? runtime.bound : null
+  const proof = launched ?? bound
+  if (!proof) return { ok: false, reason: 'not-launched-by-this-connection' }
+  const registry = await readRegistryQuietly(ctx, runtime, layout)
+  const registered =
+    registry !== null &&
+    registry.dshHome === layout.dshHome &&
+    registry.profile === profile &&
+    Number(registry.pid) === pid
+  if (!registered) return { ok: false, reason: 'registry-mismatch' }
+  const identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  if (identity.ok !== true) {
+    // The process is gone: there is nothing to signal, only a stale registry to clear.
+    if (identity.reason === 'missing') return { ok: false, reason: 'identity-missing' }
+    return { ok: false, reason: `identity-${identity.reason}` }
+  }
+  if (typeof proof.startTime === 'string' && identity.startTime !== proof.startTime) {
+    return { ok: false, reason: 'pid-reused' }
+  }
+  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
+    return { ok: false, reason: 'dsh-home-mismatch' }
+  }
+  if (!commandMatchesProfile(identity.command, profile)) return { ok: false, reason: 'profile-mismatch' }
+  return { ok: true }
+}
+
+/** Why the explicit stop refused, as the bilingual `ErrorView.detail` the Client renders. */
+function describeStopRefusal(reason, pid) {
+  const target = isPid(pid) ? `pid ${pid}` : 'pid unknown'
+  switch (reason) {
+    case 'kept-alongside':
+      return {
+        zh: `远端进程 ${target} 是你在冲突提示里选择「保留」的实例，不会被停止。`,
+        en: `The remote process ${target} is the one you chose to keep alongside; it will not be stopped.`,
+      }
+    case 'not-launched-by-this-connection':
+    case 'not-the-bound-instance':
+      return {
+        zh: '远端进程不是本连接启动或接管的实例，无法证明归属，因此没有停止它；可以点「重连」。',
+        en: 'The remote process is not the instance this connection launched or took over, so its ownership cannot be proven and it was not stopped; use Reconnect.',
+      }
+    case 'registry-mismatch':
+      return {
+        zh: '远端 run/web.json 没有命名本连接的进程（或读不到），无法证明归属，因此没有停止它。',
+        en: 'The remote run/web.json does not name this connection\u2019s process (or could not be read), so ownership cannot be proven and nothing was stopped.',
+      }
+    case 'pid-reused':
+      return {
+        zh: '这个 pid 已被另一个进程复用，不是本连接启动的 DSH；没有停止它。',
+        en: 'This pid was reused by another process, not the DSH this connection launched; nothing was stopped.',
+      }
+    case 'dsh-home-mismatch':
+    case 'profile-mismatch':
+      return {
+        zh: '远端进程的 DSH home / profile 与本连接不一致，没有停止它。',
+        en: 'The remote process runs a different DSH home / profile than this connection; nothing was stopped.',
+      }
+    case 'pid-unknown':
+      return {
+        zh: '本连接没有记录远端 DSH 的 pid，无法定位要停止的进程。',
+        en: 'This connection has no recorded remote DSH pid, so there is no process to stop.',
+      }
+    default:
+      return {
+        zh: `无法读取远端进程 ${target} 的身份（${reason}），没有停止它。`,
+        en: `The identity of the remote process ${target} could not be proven (${reason}), so nothing was stopped.`,
+      }
+  }
+}
+
+/**
+ * Stop the remote DSH this connection manages, then release the link: the tunnel closes,
+ * the SSH session is released and the host lands on `disconnected` (settings and credentials
+ * kept, no automatic reconnect) so the card offers Reconnect again. `run/web.json` is removed
+ * by the stop itself, so the next connect starts a clean instance instead of raising the
+ * "a manually started DSH is already running" conflict.
+ *
+ * Unlike the disconnect action this never kills a pid without an ownership proof: it reuses
+ * the restart's `/proc` identity rules and additionally accepts the re-attached pid this
+ * connection is bound to (docs/design.md §5.7). Available while connected and in the
+ * `remote-unreachable` error state, which keeps the SSH session on purpose.
+ *
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime.
+ * @returns {Promise<{ ok: true, pid: number | null }>} the stopped pid (null when already gone).
+ */
+export async function stopRemoteHost(ctx, runtime) {
+  await ctx.init()
+  if (runtime.connectPromise || runtime.linkBusy !== null) {
+    throw errors.stopRemoteUnavailable(
+      {
+        zh: '这台主机正在执行另一个连接动作，请等它结束后再关闭远端 DSH。',
+        en: 'This host is busy with another link action; wait for it to finish before stopping the remote DSH.',
+      },
+      { technical: 'reason=link-busy' },
+    )
+  }
+  const connected = runtime.status === 'connected' && runtime.ssh?.connected === true && runtime.tunnel !== null
+  const recoverable =
+    runtime.status === 'error' &&
+    runtime.error?.code === 'remote-unreachable' &&
+    runtime.ssh?.connected === true &&
+    runtime.facts !== null
+  if (!connected && !recoverable) throw errors.stopRemoteUnavailable()
+  const token = beginLinkWork(runtime, 'stop')
+  const previous = {
+    status: runtime.status,
+    phase: runtime.phase,
+    progress: runtime.progress,
+    error: runtime.error,
+    uiReady: runtime.remote.uiReady,
+    localPort: runtime.remote.localPort,
+  }
+  try {
+    return await runStopRemote(ctx, runtime, token)
+  } catch (error) {
+    const view = toErrorView(error)
+    const phase = typeof runtime.phase === 'string' ? runtime.phase : previous.phase
+    if (isLinkWorkCurrent(runtime, token)) {
+      restoreStopState(ctx, runtime, previous)
+      // The failure explains itself in the log too (phase, code, reason, hints, details).
+      ctx.progress.logFailure(runtime, view, { phase, label: STOP_FAILED_LABEL })
+    }
+    throw error
+  } finally {
+    endLinkWork(runtime, token)
+  }
+}
+
+/** The first log line a refused/failed stop prints; `logFailure` owns the rest. */
+const STOP_FAILED_LABEL = {
+  zh: '关闭远端 DSH 失败',
+  en: 'Stopping the remote DSH failed',
+}
+
+/** Put a host back the way it was when a stop did not happen. */
+function restoreStopState(ctx, runtime, previous) {
+  if (previous.status === 'error') {
+    runtime.status = 'error'
+    runtime.error = previous.error
+    runtime.phase = previous.phase
+    runtime.progress = previous.progress
+    runtime.remote.uiReady = previous.uiReady === true
+    runtime.remote.localPort = previous.localPort ?? null
+    ctx.emitState()
+    return
+  }
+  resumeConnected(ctx, runtime)
+}
+
+async function runStopRemote(ctx, runtime, token) {
+  const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
+  const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
+  const layout = remoteLayout(runtime.facts?.home ?? null)
+  const profile = runtime.remote.profile ?? ctx.settings().bootstrap.profile
+  const pid = Number(runtime.remote.pid ?? 0)
+  const port = Number(runtime.remote.port ?? 0)
+  log(
+    'info',
+    `stop remote requested (pid=${isPid(pid) ? pid : 'unknown'}, remote port=${isPid(port) ? port : 'unknown'})`,
+  )
+  // One-shot link action: the card shows a progress line and no other action may interleave.
+  stopRemoteHeartbeat(runtime)
+  cancelReconnect(runtime)
+  cancelIdleStop(runtime)
+  ctx.progress.set(runtime, { status: 'connecting', error: null, phase: 'start' })
+  phase('start', 'stopping-remote', {
+    pid: isPid(pid) ? pid : 0,
+    port: isPid(port) ? port : 0,
+  })
+
+  const verdict = await closeAuthorized(ctx, runtime, pid, layout, profile)
+  if (!isLinkWorkCurrent(runtime, token)) {
+    log('debug', 'stop remote aborted: the link was replaced by a disconnect or reconnect')
+    return { ok: true, pid: null }
+  }
+  if (verdict.ok !== true && verdict.reason !== 'identity-missing') {
+    throw errors.stopRemoteUnavailable(describeStopRefusal(verdict.reason, pid), {
+      technical: `reason=${verdict.reason} pid=${isPid(pid) ? pid : 'unknown'}`,
+    })
+  }
+
+  if (verdict.reason === 'identity-missing') {
+    // Nothing to signal: the process is already gone. Only its stale record remains, and it
+    // must go away or the next connect would try to stop/adopt a dead pid.
+    log('info', `stop remote: the bound remote process pid=${pid} is already gone; clearing its run registry`)
+    const cleared = await ctx.deps.clearRegistry(runtime.ssh, layout)
+    if (cleared?.ok !== true) {
+      log('warn', 'stop remote: the stale run registry could not be cleared:', cleared?.output ?? 'no output')
+    }
+  } else {
+    const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, { pid })
+    if (stopped?.ok !== true) {
+      throw errors.stopRemoteUnavailable(
+        {
+          zh: '远端 DSH 进程没有报告干净停止；连接保持原样，可以重试或点「重连」。',
+          en: 'The remote DSH process did not report a clean stop; the connection is unchanged, so retry or use Reconnect.',
+        },
+        { technical: String(stopped?.output ?? '').slice(0, 1200) || 'no output' },
+      )
+    }
+    log('info', `stop remote: stopped the managed remote web pid=${pid}`)
+    if (runtime.launched instanceof Map) runtime.launched.delete(pid)
+  }
+  if (!isLinkWorkCurrent(runtime, token)) {
+    log('debug', 'stop remote: the link was replaced after the stop; leaving the state to that action')
+    return { ok: true, pid: isPid(pid) ? pid : null }
+  }
+  runtime.bound = null
+  // Reuse the single teardown path; `stopped` keeps the idle policy from arming a second stop.
+  await disconnectHost(ctx, runtime, { stopRemote: false, stopped: true })
+  runtime.bound = null
+  log('info', 'stop remote: the remote DSH is stopped; the host is kept and can be reconnected')
+  return { ok: true, pid: isPid(pid) ? pid : null }
+}
+
+/**
  * Re-attach to a remote web that restarted on its own (plugin-market update, supervisor,
  * remote reboot): re-read the real pid/port, refresh `run/web.json`, rebuild the tunnel,
  * take the new launch token and verify. The SSH session and the host entry are untouched.
@@ -1216,6 +1502,10 @@ async function runReattach(ctx, runtime, info, token) {
     await verifyRemoteUi(ctx, runtime, resolved.port, resolved.token)
     if (!isLinkWorkCurrent(runtime, token)) return
     if (ctx.settings().saveTokens) await ctx.store.saveToken(runtime.id, resolved.token)
+    if (!isLinkWorkCurrent(runtime, token)) return
+    // The re-attached instance is now the one this connection is bound to. It stays out of
+    // `launched` (a restart must not kill it), but the explicit stop action may end exactly it.
+    await rememberBound(ctx, runtime, resolved.pid, layout, profile, 'reattach')
     if (!isLinkWorkCurrent(runtime, token)) return
     recordRestart(runtime, {
       kind: 'remote-reattach',

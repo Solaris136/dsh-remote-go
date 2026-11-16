@@ -107,6 +107,15 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
   被加载包的 `package.json`，证明不了就保持未知且不写进 registry。通过后 `writeRunRegistry(origin:"reattach")`、
   关旧隧道、按新端口重建、换 token、`verifyRemoteUi`、`markConnected`，并写 `runtime.restarts`（诊断导出）。
   重挂失败报 `remote-unreachable`，保留 SSH 与主机配置。
+- `stopRemoteHost`：显式「关闭远端 DSH」，同步执行。状态机与 `restartHost` 相同（`connected` / `remote-unreachable`），
+  其余与进行中的一次性动作一律抛 `stop-unavailable`（API 409）。授权是 `closeAuthorized`：pid 必须是
+  `runtime.remote.pid`、不在 `alongsidePids`、本连接记录过（`runtime.launched` 或 `runtime.bound`）、
+  `run/web.json` 仍命名它且 home/profile 一致、`/proc` starttime / cmdline / `DSH_HOME` 再证明一次；任一不满足
+  就不 kill 并恢复原状态（`restoreStopState`，失败详情经 `logFailure` 写入连接日志）。pid 已消失时只调
+  `clearRunRegistry`（新注入的 `ctx.deps.clearRegistry`，绝不按残留 pid 发信号）。成功路径复用
+  `disconnectHost(..., {stopped:true})`：不再 arm 空闲停止、释放 SSH，状态落 `disconnected`。
+  `rememberBound` 在重挂（`runReattach`）与收养 reattach 记录时写入 `runtime.bound`（pid + starttime + origin），
+  它给关闭动作提供身份证明，但**不**写进 `runtime.launched`，所以重启仍然只杀自己启动的进程。
 - 两个动作都持有一个**令牌**（`beginLinkWork` / `isLinkWorkCurrent` / `endLinkWork`）：disconnect、SSH `close`
   或新的连接会 `cancelLinkWork`，迟到的旧动作只会打一行 debug 日志，不能写状态。`markConnected` 每次
   `remote.viewRev + 1` 并重启心跳。
@@ -134,7 +143,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 - 托管 Node 版本取本机 DSH `engines.node` 下限（`node-runtime.js` 负责下载、SHA-256 校验、解压与复用）；`remote-web.js` 持有全部远端 shell 命令模板：启动脚本写 `logs/web.log` 并读 `dsh web:` 行，`run/web.json` 只记录 pid/port/version/profile/dshHome/launch 标记（无 token）。
 
 ## 5. 本地 HTTP API 与同源远端代理
-`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；每条请求先过 `admit`（§2，`/health` 除外），再按路由走 `authorize()`（`x-dsh-remote-go: 1` + Host 自检 + Origin 同源 + 拒绝 cross-site）或 `/events` 的 `authorizeOrigin()`（EventSource 不能加头，Host 自检与同源栅栏照旧）；`/health` 免会话、但同样过 Host/Origin 栅栏。Host 自检就是 `request-trust.js#sameServerHost`（与代理侧同一份实现）：Host 必须指向本机监听 origin，loopback 拼写互换，省略默认端口按协议折算——DNS rebinding 下攻击页的 `Host` 是攻击者域名，这一条是唯一能拦下它的检查，`/events` 只有这一道。解析器需要改写的 authority 一律拒绝（`user@host`、反斜杠、`#`/`?`、尾点 `127.0.0.1.`、补零端口 `:057442` 等），因为浏览器只会送出序列化后的 authority，而按改写结果比对会把 `attacker.example@127.0.0.1:port` 当成回环。`getOrigin()` 在监听尚未绑定（或内核没有该方法）时返回 null，此时 Host 自检跳过、保留旧行为：受支持的 `engines.dsh` 范围都提供 `webServer.getOrigin`，这一边界只为不让内核差异把插件变成全 403。请求体上限 1 MiB；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、未知异常→500；SSE 在 `service.on('state')`、`service.on('download')` 与 `service.on('remote-unreachable')` 上广播，连接先推一帧、15s 一次 `ping`。本 PR 的 `POST /hosts/:id/restart` 挂在同一 dispatcher 之后，自动继承 `admit`，不单独放行。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行，用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`DELETE` 取消；Host 用同一条 SSH/SFTP 连接把文件或文件夹**流式写入用户选择的本地目录**，不返回二进制字节、不打包 ZIP、不在远端落盘（取消会清理由本次任务创建的文件/目录）。
+`api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；每条请求先过 `admit`（§2，`/health` 除外），再按路由走 `authorize()`（`x-dsh-remote-go: 1` + Host 自检 + Origin 同源 + 拒绝 cross-site）或 `/events` 的 `authorizeOrigin()`（EventSource 不能加头，Host 自检与同源栅栏照旧）；`/health` 免会话、但同样过 Host/Origin 栅栏。Host 自检就是 `request-trust.js#sameServerHost`（与代理侧同一份实现）：Host 必须指向本机监听 origin，loopback 拼写互换，省略默认端口按协议折算——DNS rebinding 下攻击页的 `Host` 是攻击者域名，这一条是唯一能拦下它的检查，`/events` 只有这一道。解析器需要改写的 authority 一律拒绝（`user@host`、反斜杠、`#`/`?`、尾点 `127.0.0.1.`、补零端口 `:057442` 等），因为浏览器只会送出序列化后的 authority，而按改写结果比对会把 `attacker.example@127.0.0.1:port` 当成回环。`getOrigin()` 在监听尚未绑定（或内核没有该方法）时返回 null，此时 Host 自检跳过、保留旧行为：受支持的 `engines.dsh` 范围都提供 `webServer.getOrigin`，这一边界只为不让内核差异把插件变成全 403。请求体上限 1 MiB；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、未知异常→500；SSE 在 `service.on('state')`、`service.on('download')` 与 `service.on('remote-unreachable')` 上广播，连接先推一帧、15s 一次 `ping`。本 PR 的 `POST /hosts/:id/restart` 与 `POST /hosts/:id/stop-remote` 挂在同一 dispatcher 之后，自动继承 `admit`，不单独放行。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行，用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`DELETE` 取消；Host 用同一条 SSH/SFTP 连接把文件或文件夹**流式写入用户选择的本地目录**，不返回二进制字节、不打包 ZIP、不在远端落盘（取消会清理由本次任务创建的文件/目录）。
 
 `remote-proxy.js` 是浏览器半端的远端界面承载面（契约「远端界面同源代理」）：`parseViewPath` 把
 `/dsh-remote-go/remote/<hostId>/<rest>` 拆成主机与上游路径；`handle` 与 `handleUpgrade` 都先过 `admit`
@@ -190,7 +199,11 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 - 桌面接管：`showOverlay` 经 `window.dshDesktop.browser.acquire` 创建 guest，carrier 铺满整窗；`applyGuestCaption` 在每个 `dom-ready`/`did-stop-loading` 注入 `data-windows-titlebar`、高度与 `data-fullscreen`，`syncCarrierCaption` 决定让出标题栏或退回整体下移，并同步 `drg-carrier-grip` 拖拽条与 `html.drg-caption-live`；本地全屏状态由 `watchCaptionState` 的 MutationObserver 推给 guest；每次 `did-stop-loading` 在标题栏之后重注入主机条，`__drgBridgeQueue` 轮询用 `TAKE_INTENTS_SCRIPT` **一次取走并清空**（读/清分两次会吞掉落在中间的 intent），再把点击交回 `switcher.dispatch`。标题栏菜单的起点跟着**画这条带的那一页**走：`installSidebarMirror` 注入 `mountSidebarMirror`（`SIDEBAR_MIRROR_SCRIPT`），装载时返回 `{ collapsed, start }` 并在每次变化时把 `{ action:'caption-sidebar', collapsed, start }` 放进同一条队列——`start` 是 guest 里 DSH 自己解析出的 `--dsh-windows-menu-start`（收起 `84px`、展开为空），所以数值不靠复刻；`applyGuestSidebar` 记进 `entry.sidebarCollapsed` / `entry.sidebarStart`（`dom-ready` 时清空，新文档不继承旧 rail），`ownCaptionBand` 用 `setCaptionMenuStart` 把该值写成 `<html>` 内联变量，读不到时退回 48 / 84px 常量，回本地页时删掉、交还 DSH 自己的 `:has([data-sidebar-collapsed])` 规则（#63）。浏览器接管：`GET /hosts/:id/open` 的 `webUrl` 经 `isValidViewPath` 校验后赋给 iframe，`load` 事件里 `installWebCarrier` 设 `__drgBridgeSink`、调用 `mountHostRow` / `mountGuestTools` / `mountCapabilityBridge` / `mountGuestStorage`；桌面端在 `installGuestTools` 之后跑 `CAPABILITY_BRIDGE_SCRIPT`，安装成功也参与「要不要开始轮询」；没有标题栏与 caption 逻辑。
 - API 客户端：`openHost(id)` 同时返回并校验 `url`（桌面回环地址）与 `webUrl`（浏览器同源路径）；只校验存在的字段，旧 Host 的响应不会阻塞桌面路径。
 - 重启/重挂的承载：`RemoteView.viewRev` 变化（本地重启 / 远端重挂）后，热窗口重新取 `open`；即使 URL 相同也重新导航。`entry.viewRev` 只在**真正发生导航**后写入，旧 attach 的 URL 不会被重放。
-- 主机卡片：已连接时在「断开」旁提供「重启远端 DSH」（`host-restart`），`restarting-remote` 期间按钮禁用、卡片显示进度文案；重连按钮仍只出现在可重试状态（`disconnected` / `error` / `limited`），因为重启只在 `connected` 与可解释的 `remote-unreachable` 错误下有效。
+- 主机卡片：已连接时在「断开」旁提供「重启远端 DSH」（`host-restart`）与「关闭远端 DSH」（`host-stop-remote`），
+  `restarting-remote` / `stopping-remote` 期间两个按钮都禁用、卡片显示对应进度文案；「关闭」先弹
+  `StopRemoteDialog`（破坏性确认，明示会停止远端进程并可重连），确认后走 `api.stopRemote`。重连按钮仍只出现在
+  可重试状态（`disconnected` / `error` / `limited`），因为重启/关闭只在 `connected` 与可解释的
+  `remote-unreachable` 错误下有效。
 - 意图：`panelStore.requestIntent({ kind:'open'|'disconnect'|'manage'|'local' })` 与 `wizardStore.open({ mode, host })` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开并释放窗口、Host 确认后交回本地，`manage` 开清单，`local` 隐藏远端窗口并清 Host 侧 active。意图订阅在挂载时建立，回调读不到最新窗口状态，「窗口在哪台」的收尾一律走 ref 或 `setState(fn)`。
 - 安全不变量（测试读源码断言）：客户端自己不开任何窗口——唯一的新窗口调用点是能力桥的 `openExternalUrl`，只接受 http(s) 且先经 `externalUrlOf` 收窄；桌面路径不渲染 iframe；浏览器 iframe 只接受 `/dsh-remote-go/remote/<hostId>/` 形状的同源路径（无绝对 URL、`//`、反斜杠或 `..`）；token/URL 不写 localStorage；桌面只用回环 URL。文件内分区（`//#region`）：常量 → i18n 字典/助手 → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 连接窗口（进度 + 连接日志）/远端窗口 → 主机条 → 远端下载桥（`mountGuestTools`）→ 能力桥（`externalUrlOf` / `openExternalUrl` / `mountCapabilityBridge` / `mountGuestStorage`）→ 载体池（桌面 guest + 浏览器 frame 两个后端）→ 密钥选择器 → 添加/编辑主机 → 诊断 → 设置 → 密码/冲突 → toast → 浮层宿主（`PluginOverlay`，含可拖动下载卡）→ 样式 → 注册。
 
@@ -201,10 +214,12 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | 准入栅栏 | `request-trust`（经 `api` / `remote-proxy` 用例覆盖） | `Host` 同源（loopback 互换、默认端口折算）、`Origin` 同源、`cross-site` 拒绝 |
 | 运行时 | `node-runtime/bootstrap/remote-web/remote-proc/tunnel/ssh` | 托管 Node、npx 判定与命令模板、启动/收养、URL/token 握手、隧道、认证与指纹 |
 | 同源代理 | `remote-proxy` | 视图路径解析、cookie jar / 路径与过期 / 按 remote authority 重置、Host/Origin 栅栏、准入拒绝（HTTP 与升级）、头部与 Location 改写、HTTP 转发、升级转发 |
-| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权、原子写、下载任务 |
-| 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、两种载体、关键组件、重启按钮与 viewRev 重导航、CSS 卫生 |
-| 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫 |
+| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart/stop-remote` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、关闭远端（状态机 + 归属授权 + registry 清理 + `keepAlive:"stop"` 不重复信号）、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权、原子写、下载任务 |
+| 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、两种载体、关键组件、重启/关闭按钮与 viewRev 重导航、CSS 卫生 |
+| 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫；远端 stop 真正关闭监听器与 token |
 | 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表；监听器重建与重挂后重启冲突在单测覆盖（含三种 keepAlive 的 disconnect 窗口与 removeHost/shutdown） |
+| 关闭/重连端到端 | `test/integration/stop-remote.test.js` | 真实 SSH + 真实隧道：关闭停掉绑定的 pid、远端不再应答、`run/web.json` 清空，重连起新端口/新 token 且不弹冲突 |
+| 按钮真实浏览器 | `test/integration/stop-remote.browser.test.js` | 真实 Chromium：卡片按钮 → 确认框（取消不请求）→ POST → `stopping-remote` 禁用态与进度文案 → 断线卡片可重连 |
 | 代理端到端 | `test/integration/remote-proxy.test.js` | 隔离 `dsh web` 实例 → 同源代理 → 真实首页 / 插件资源 / WebSocket 升级 |
 | 真实浏览器 | `test/integration/web.e2e.js` / `desktop.e2e.js` / `browser-carrier.test.js` | 打包产物装进隔离 `dsh web` / 桌面端 → 主机条浮窗 → 主题；浏览器载体 → 真实远端页面 + 注入主机条 + 本地意图 + 能力桥（真实点击链接触发顶层新标签、frame 内复制写入真实剪贴板并回执、按 hostId 分区的 localStorage） |
 

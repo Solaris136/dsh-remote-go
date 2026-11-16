@@ -103,8 +103,12 @@ function say(value) {
  * the failed phase and code, the localized reason, every hint, then the redacted and
  * head-tail-truncated technical detail — the remote log tail line by line for a failed start.
  *
+ * `options.label` replaces the first line for a one-shot action that is not a connect (the
+ * explicit remote stop), so its failure is not announced as a connection failure.
+ *
  * @param {{ code?: string, title?: unknown, detail?: unknown, nextSteps?: unknown[], technical?: string } | null} view
- * @param {{ phase?: string | null }} [options] - the phase the pipeline was in when it failed.
+ * @param {{ phase?: string | null, label?: { zh: string, en: string } | null }} [options] -
+ *   the phase the pipeline was in when it failed, and the first line's wording.
  * @returns {{ level: string, phase: string | null, message: string, text?: { zh: string, en: string } }[]}
  */
 export function connectFailureLines(view, options = {}) {
@@ -114,10 +118,12 @@ export function connectFailureLines(view, options = {}) {
   const push = (text) => lines.push({ level: 'error', phase, message: text.en, text })
   const raw = (message) => lines.push({ level: 'error', phase, message })
 
+  const label = normalizeText(options.label)
   push(
-    phase === null
-      ? pair(`连接失败：${code}`, `Connect failed: ${code}`)
-      : pair(`连接失败于 ${phase} 阶段：${code}`, `Connect failed in phase ${phase}: ${code}`),
+    label ??
+      (phase === null
+        ? pair(`连接失败：${code}`, `Connect failed: ${code}`)
+        : pair(`连接失败于 ${phase} 阶段：${code}`, `Connect failed in phase ${phase}: ${code}`)),
   )
 
   // The card explains the failure in one sentence; the log has to carry that sentence.

@@ -174,6 +174,7 @@ export async function makeTestService(overrides = {}) {
     adopt: overrides.adopt ?? (async () => null),
     resolveRemote: overrides.resolveRemote ?? (async () => ({ ok: false, reason: 'no-running-web' })),
     writeRegistry: overrides.writeRegistry ?? (async () => ({ ok: true, output: 'REGISTRY-WRITTEN' })),
+    clearRegistry: overrides.clearRegistry ?? (async () => ({ ok: true, output: '' })),
     remoteStatus: overrides.remoteStatus ?? (async () => 200),
     processIdentity:
       overrides.processIdentity ??

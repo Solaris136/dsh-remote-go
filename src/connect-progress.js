@@ -59,11 +59,12 @@ export function createConnectProgress(options) {
 
   /**
    * Print a failed connection as the lines that explain it (phase, code, localized reason,
-   * hints, redacted details), instead of one line of code plus a raw message.
+   * hints, redacted details), instead of one line of code plus a raw message. `context.label`
+   * replaces the leading line for a one-shot action that is not a connect (the remote stop).
    */
   function logFailure(runtime, view, context = {}) {
     const phase = typeof context.phase === 'string' && context.phase !== '' ? context.phase : null
-    for (const line of connectFailureLines(view, { phase })) {
+    for (const line of connectFailureLines(view, { phase, label: context.label })) {
       write(runtime, { level: line.level, message: line.message, text: line.text, phase: line.phase })
     }
     scheduleFlush(runtime)

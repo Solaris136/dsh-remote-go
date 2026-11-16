@@ -428,8 +428,10 @@ function runRegistry(sim) {
 async function replaceRemoteWeb(sim) {
   const previous = sim.remoteServer
   const next = await startRemoteWeb(0)
-  previous?.closeAllConnections?.()
-  await closeServer(previous)
+  if (previous) {
+    previous.closeAllConnections?.()
+    await closeServer(previous)
+  }
   sim.remoteServer = next.server
   sim.remotePort = next.port
   sim.token = `sim-token-${String(sim.generation).padStart(2, '0')}`
@@ -441,7 +443,9 @@ async function replaceRemoteWeb(sim) {
 async function startScriptAnswer(sim) {
   sim.launches = (sim.launches ?? 0) + 1
   if (sim.launches > 1) {
-    // A relaunch (plugin restart) binds a new random port again.
+    // A relaunch is a new process generation on the remote: a new random port and a new
+    // launch token, exactly like the real `--port 0` start (after a stop or a restart).
+    sim.generation = (sim.generation ?? 1) + 1
     await replaceRemoteWeb(sim)
     sim.staleRegistry = null
   }
@@ -606,10 +610,21 @@ async function respond(command, sim) {
     return ok(port === sim.remotePort ? `PID:${sim.pid}\n` : '')
   }
 
-  // 3. Remote web stop (src/webapp.js stopRemoteWeb).
+  // 3. Remote web stop (src/webapp.js stopRemoteWeb). The simulated process really goes away:
+  //    its listener is closed, its pid stops answering and run/web.json is left empty, which is
+  //    what a stopped remote DSH looks like to the next connect.
   if (cmd.startsWith('set -u\nPID=') && cmd.includes('STOPPED')) {
+    sim.stops = (sim.stops ?? 0) + 1
     sim.started = false
     sim.pid = 0
+    sim.token = ''
+    const previous = sim.remoteServer
+    sim.remoteServer = null
+    if (previous) {
+      previous.closeAllConnections?.()
+      await closeServer(previous)
+    }
+    publishState(sim)
     return ok('STOPPED\n')
   }
 
@@ -788,6 +803,10 @@ function publishState(sim) {
     dshVersion: SIM.dshVersion,
     generation: sim.generation ?? 1,
     launch: sim.launches ?? 0,
+    // The simulated remote web's own state, so a test can watch it stop and come back.
+    started: sim.started === true,
+    stops: sim.stops ?? 0,
+    token: sim.token ?? '',
   }
   mkdirSync(path.dirname(STATE_FILE), { recursive: true })
   writeFileSync(STATE_FILE, `${JSON.stringify(published, null, 2)}\n`, 'utf8')

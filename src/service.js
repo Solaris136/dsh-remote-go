@@ -14,7 +14,14 @@ import {
 } from './constants.js'
 import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
 import { createDownloadJobs } from './download-jobs.js'
-import { reattachHost, reconnectHost, repairTunnel, restartHost, startConnect } from './connect-pipeline.js'
+import {
+  reattachHost,
+  reconnectHost,
+  repairTunnel,
+  restartHost,
+  startConnect,
+  stopRemoteHost,
+} from './connect-pipeline.js'
 import { diagnoseHost } from './diagnostics.js'
 import { errors } from './errors.js'
 import {
@@ -39,6 +46,7 @@ import { normalizeVersion } from './version.js'
 import { nowIso } from './util.js'
 import {
   adoptRemoteWeb,
+  clearRunRegistry,
   exchangeTokenOverTunnel,
   findForeignDshProcesses,
   readRunRegistry,
@@ -88,6 +96,7 @@ export class RemoteGoService extends EventEmitter {
       adopt: options.adopt ?? adoptRemoteWeb,
       resolveRemote: options.resolveRemote ?? resolveRemoteWeb,
       writeRegistry: options.writeRegistry ?? writeRunRegistry,
+      clearRegistry: options.clearRegistry ?? clearRunRegistry,
       remoteStatus: options.remoteStatus ?? remoteHttpStatus,
       processIdentity: options.processIdentity ?? remoteProcessIdentity,
       findForeign: options.findForeign ?? findForeignDshProcesses,
@@ -242,6 +251,17 @@ export class RemoteGoService extends EventEmitter {
   async restart(id) {
     await this.init()
     return restartHost(this.ctx, runtimeOf(this.ctx, id))
+  }
+
+  /**
+   * Stop the managed remote web this connection is bound to, then release the link and
+   * leave the host `disconnected` (the "Stop remote DSH" card action). Runs synchronously
+   * on the same SSH session: `/state` carries `stopping-remote` while it works, and a
+   * refusal (wrong state, busy, or an unprovable pid) is thrown as a coded error (HTTP 409).
+   */
+  async stopRemote(id) {
+    await this.init()
+    return stopRemoteHost(this.ctx, runtimeOf(this.ctx, id))
   }
 
   async confirmFingerprint(id, decision) {

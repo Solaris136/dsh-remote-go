@@ -39,7 +39,7 @@
 - 状态点即可用性：**已连接是绿色发光点**（点它就能切过去）；未连接 / 断线是灰点；连接中、待确认指纹、冲突、失败各有自己的颜色。
 - 点「本地」回本地页面；点某台主机切到那台（未连接时先浮出主机清单、在那里连接，连上自动接管）；每台主机的「打开」与它等价。
 - 已连接主机行右侧有「断开」，**鼠标移到该行才显示**：断开这台（并释放它的窗口），不会切过去。断的是当前这台，窗口回本地、主机条也回「本地」；断的是别的热窗口，主机条不动。
-- 「添加主机」与「管理界面」都是浮窗（`shell.overlay`）：浮在当前页面之上，远端开着时背景仍是远端，关掉回原来那一页。管理清单里是编辑 / 诊断 / 删除 / 重连，已连接的卡片另有「重启远端 DSH」（见 §5.5）；正在连接的那台**不进清单**——它有独立的连接窗口（§4.4）。密码与远端冲突按需弹窗。
+- 「添加主机」与「管理界面」都是浮窗（`shell.overlay`）：浮在当前页面之上，远端开着时背景仍是远端，关掉回原来那一页。管理清单里是编辑 / 诊断 / 删除 / 重连，已连接的卡片另有「重启远端 DSH」与「关闭远端 DSH」（见 §5.5、§5.7）；正在连接的那台**不进清单**——它有独立的连接窗口（§4.4）。密码与远端冲突按需弹窗。
 - 没有单独的「刷新远端界面」：要重载用清单里的「重连」（重建窗口）；点同一台只是重新显示热窗口，不重新加载。
 
 主机条是页面 DOM 的一部分（用页面自己的主题变量绘制），继承该页面的字体、hover 与弹层遮罩，并带很高的 `z-index`，所以页面自己的模态遮罩弹出时也能点。数据只有一次常驻的 `/state` 订阅（在浮层宿主里），主机条、浮窗与远端窗口都读它；命令走两条一次性通道：`panelStore`（open / disconnect / manage / local）与 `wizardStore`（add / edit 草稿）。
@@ -167,7 +167,11 @@
 
 `phase` 取值：`ssh` → `probe` → `bootstrap` → `start` → `tunnel` → `verifying` → `ready`。进度码是细粒度、可本地化的 `{ code, params }`，具体列表以 [api.md](api.md) 为准；客户端只按 code 查文案，不推断连接逻辑。
 
-`connecting` 不只表示首次连接：本地重启远端（§5.5）与远端自重启后的重挂（§5.6）也用它，但进度码固定是 `restarting-remote`，阶段只走 `start` → `tunnel` → `verifying`，不会重跑 `ssh` / `probe` / `bootstrap`；主机卡片据此显示「重启中」而不是「连接中」。`remote-unreachable` 是这两个动作之外的一种**错误**（没有可重挂实例时才出现，§8），不是状态。
+`connecting` 不只表示首次连接：本地重启远端（§5.5）、远端自重启后的重挂（§5.6）与显式关闭远端（§5.7）也用它，
+但进度码分别是 `restarting-remote`、`restarting-remote` 与 `stopping-remote`：重启/重挂阶段只走 `start` →
+`tunnel` → `verifying`，关闭只走 `start` 并以 `disconnected` 结束；三者都不会重跑 `ssh` / `probe` / `bootstrap`。
+主机卡片据进度码显示「重启中」/「关闭中」而不是「连接中」。`remote-unreachable` 是这些动作之外的一种**错误**
+（没有可重挂实例时才出现，§8），不是状态。
 
 ### 5.2 连接流程
 ```text
@@ -246,6 +250,38 @@ restart(id)（同一条 SSH 会话）
    ```
    运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**；重挂发现的 pid 只有显示/承载权，**没有 kill 权**（`run/web.json` 记 `origin: "reattach"`，下一次连接 adoption 也只接管不授权）。重挂成功后 `launched` 只保留与当前监听 pid 相同的条目（包装进程的旧 pid 被清理），所以真实 npx 形态下重启会走 §5.5 的冲突提示而不是静默双实例。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
 
+### 5.7 关闭远端 DSH（显式停止）
+`POST /hosts/:id/stop-remote`，管理界面卡片上的「关闭远端 DSH」：这是**显式、破坏性**的一次性动作，
+与按存活策略处理的「断开」不同——目标是**停掉本连接管理的那个远端 web 进程**，然后释放整条链路。仅
+`connected` 可用；`remote-unreachable` 错误状态也可用（§5.6 有意保留了 SSH），此时远端进程多半已消失，
+动作退化为「清掉残留 registry 再释放连接」。其余状态、以及另一个一次性动作进行中，一律 409
+`stop-unavailable`。
+
+```text
+stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecting + stopping-remote）
+  ├─ 授权（closeAuthorized，与 §5.5 同一套 /proc 证明，另加两条）
+  │   1) pid 必须就是本连接绑定的那个（remote.pid），且不在 alongsidePids 里
+  │   2) 本连接记录过它：launched（自己启动 / launch 记录收养）或 bound（重挂接管时的 /proc 身份）
+  │   3) run/web.json 仍命名该 pid，dshHome / profile 一致
+  │   4) /proc/<pid> starttime 与记录一致，cmdline/env 仍是同一 home/profile
+  │   任一不满足 → 不 kill，409 + 可读原因；连接保持原样（不会半停）
+  ├─ pid 已消失 → 不 kill，只清 run/web.json（clearRunRegistry，绝不按残留 pid 发信号）
+  ├─ 否则 stopRemoteWeb(pid)：SIGTERM → 等待 → SIGKILL，并删 run/web.json
+  └─ 复用 disconnectHost(..., {stopped:true})：desired=idle、取消重连 / 空闲计时器 / 心跳、关隧道、
+     释放 SSH、status=disconnected、progress=null；主机条目、凭据与 keepAlive 不变
+```
+
+- 为什么需要一个新端点而不是 `disconnect {stopRemote:true}`：后者是策略收尾（`keep` / `idle` / `stop`），停止
+  远端时直接用记录的 pid、没有归属证明，也没有可观察的进度码；而「关闭远端 DSH」必须拒绝无法证明归属的
+  pid，并把动作过程（`stopping-remote`）与拒绝原因（409 + `stop-unavailable`）告诉用户。两者的语义在
+  [api.md](api.md) 里分开写。
+- 停掉后不触发自动重连（`desired = idle`），卡片回到「断线」，点「重连」重新走完整连接管线起一个新实例；
+  因为 `run/web.json` 随停止被删除，下一次 connect 不会把死 pid 当残留实例、也不会弹「远端已有手工启动的
+  DSH」冲突（§6.3）。
+- 重挂接管的实例（`origin: "reattach"`）**重启永远不会杀**（§5.5），但用户显式关闭时可以关掉绑定的那一个
+  进程：`bound` 记录的是接管时 `/proc` 证明过的 starttime，关闭前再核对一次，pid 复用即拒绝。`alongside`
+  保留的进程任何路径都不杀。
+
 ## 6. 远端运行时
 ### 6.1 托管 Node + npx
 只有一条路径：插件把**自己的 Node** 装到 `~/.dsh/remote-go/node/v<version>`，再用它的 `npx -y @deepseek-ai/dsh@<本机版本>` 拉起 DSH。
@@ -270,6 +306,9 @@ restart(id)（同一条 SSH 会话）
 | `keep`（默认） | 只关隧道，远端继续 | 保留远端进程 |
 | `stop` | 停止远端 web 后关隧道 | 停止远端 web |
 | `idle` | 关隧道，N 分钟后停止远端 | 保留（按 keep 处理） |
+
+显式的「关闭远端 DSH」（§5.7）不受这张表影响：它总是停掉本连接绑定的那个远端进程，然后释放 SSH，
+不会留下空闲计时器。
 
 ### 6.5 凭据与远端数据
 连接只读取远端的版本、端口与运行状态；远端 `~/.dsh` 里的插件、配置、凭据与会话始终由远端自己维护，

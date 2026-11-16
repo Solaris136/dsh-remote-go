@@ -25,6 +25,14 @@
 
 ### 新增
 
+- **远端 DSH 关闭**：主机清单里已连接的卡片（以及在 `remote-unreachable` 错误状态上）新增「关闭远端 DSH」，
+  与「重连」「重启远端 DSH」并列。它是破坏性操作，先弹确认框；确认后 Host 在同一条 SSH 会话上停掉**本连接
+  绑定的那一个**远端 web 进程，然后关隧道、释放 SSH，主机落到 `disconnected`（配置与凭据保留，不会自动重连），
+  之后点「重连」就能起一个全新的实例。停掉时复用重启的授权：run registry 命名该 pid、`/proc` starttime 仍是
+  同一进程且 profile/home 一致；重挂接管的实例也允许关闭，但只按当时记录的 `/proc` 身份关那一个 pid，
+  `alongside` 保留的进程、pid 复用与无法证明归属的进程一律不杀（返回可解释的 `stop-unavailable`，409）。
+  `run/web.json` 随停止被清掉，下一次连接不会误弹「远端已有手工启动的 DSH」。API 契约升到 **2.9**：新增
+  `POST /hosts/:id/stop-remote`、进度码 `stopping-remote` 与错误码 `stop-unavailable`。
 - **远端 DSH 重启**：主机清单里已连接的卡片新增「重启远端 DSH」。Host 用同一条 SSH 会话停掉自己拉起的
   远端进程，重新 `npx` 启动、刷新 `run/web.json`、按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，
   不会再次索要密码或主机指纹。只有同时满足「run registry 命名」「本连接启动过」「`/proc` starttime 仍是同一
