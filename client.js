@@ -171,6 +171,10 @@ window.__ModuleLoader__.load({
       cardReconnect: ['重连', 'Reconnect'],
       cardRestart: ['重启远端 DSH', 'Restart remote DSH'],
       cardRestarting: ['正在重启远端 DSH…', 'Restarting the remote DSH…'],
+      remoteRestartBusy: [
+        '远端链路正在重建隧道，请稍后再试。',
+        'The remote link is rebuilding its tunnel; try again shortly.',
+      ],
       cardDiagnose: ['诊断', 'Diagnose'],
       cardEdit: ['编辑', 'Edit'],
       cardDelete: ['删除', 'Delete'],
@@ -6082,7 +6086,16 @@ window.__ModuleLoader__.load({
        */
       const restartHost = (host) => {
         if (!host) return
-        runAction(host, () => api.restart(host.id))
+        runAction(
+          host,
+          () => api.restart(host.id),
+          (result) => {
+            // A repair or another one-shot action owns the link: say so instead of doing nothing.
+            if (result && result.accepted === false && result.reason === 'busy') {
+              notify(t('remoteRestartBusy'), 'info')
+            }
+          },
+        )
       }
 
       const resolveConflict = (host, action) => {

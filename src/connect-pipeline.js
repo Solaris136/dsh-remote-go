@@ -241,14 +241,11 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
     ctx.progress.log(runtime, 'debug', 'foreign DSH: registry read failed:', messageOf(error))
   }
   const found = await ctx.deps.findForeign(runtime.ssh, { ignorePids })
-  if (found.ok !== true) {
-    ctx.progress.log(runtime, 'debug', 'foreign DSH: scan failed:', found.reason ?? found.technical ?? 'unknown')
-    return null
-  }
-  const processes = Array.isArray(found.processes) ? [...found.processes] : []
+  const processes = found.ok === true && Array.isArray(found.processes) ? [...found.processes] : []
   // The registry-named instance is normally ignored by the scan (it is this connection's own
   // process). When the caller cannot stop it - a pid a re-attach discovered - it still must be
-  // put in front of the user: a second instance must never start silently next to it.
+  // put in front of the user: a second instance must never start silently next to it. Merge it
+  // before failing open on a scan error: its identity came from /proc, not from the scan.
   const known = options.knownProcess
   const knownPid = Number(known?.pid)
   // A pid the user already chose to keep alongside is never asked about again; the
@@ -263,6 +260,12 @@ async function resolveForeignConflict(ctx, runtime, layout, profile, options = {
       pid: knownPid,
       command: typeof known.command === 'string' && known.command !== '' ? known.command : `dsh --profile ${profile}`,
     })
+  }
+  if (found.ok !== true) {
+    ctx.progress.log(runtime, 'debug', 'foreign DSH: scan failed:', found.reason ?? found.technical ?? 'unknown')
+    // A broken scan must never allow a silent second instance: with a known live process we
+    // still ask; with nothing known there is nothing to conflict with (the old behavior).
+    if (processes.length === 0) return null
   }
   if (processes.length === 0) return null
   const pidList = processes.map((entry) => `pid ${entry.pid}`).join(', ')
@@ -510,6 +513,9 @@ function markConnected(ctx, runtime) {
   runtime.remote.uiReady = true
   // Every attach invalidates the previous launch URL / cookie: the Client re-navigates its carrier.
   runtime.remote.viewRev = (Number(runtime.remote.viewRev) || 0) + 1
+  // A fresh attach is a new listener budget: an old rebuild failure must not keep it in backoff.
+  runtime.tunnelRepairFailures = 0
+  runtime.nextTunnelRepairAt = 0
   startRemoteHeartbeat(ctx, runtime)
   ctx.emitState()
 }
@@ -906,16 +912,25 @@ async function runRestart(ctx, runtime, token) {
     if (killable) {
       const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, { pid: managedPid })
       stoppedOwn = stopped?.ok === true
-      if (stoppedOwn) log('info', `restart: stopped the managed remote web pid=${managedPid}`)
-      else {
+      if (stoppedOwn) {
+        log('info', `restart: stopped the managed remote web pid=${managedPid}`)
+        if (runtime.launched instanceof Map) runtime.launched.delete(managedPid)
+      } else {
+        // Never start a second instance next to one whose stop was not confirmed. The old
+        // tunnel is still open, so the host stays usable and the user can retry.
+        runtime.warning = {
+          zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试，或先断开再重连。',
+          en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly, or disconnect and reconnect.',
+        }
         log(
           'warn',
-          `restart: the managed remote web did not report a clean stop; launching a new instance anyway (${
+          `restart: the managed remote web did not confirm its stop; not launching a second instance (${
             String(stopped?.output ?? '').slice(0, 300) || 'no output'
           })`,
         )
+        resumeConnected(ctx, runtime)
+        return
       }
-      if (runtime.launched instanceof Map) runtime.launched.delete(managedPid)
     }
     if (!isLinkWorkCurrent(runtime, token)) return
 

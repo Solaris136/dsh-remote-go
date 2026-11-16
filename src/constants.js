@@ -70,6 +70,13 @@ export const REMOTE_REPAIR_BACKOFF_MS = 30_000
 export const REMOTE_REPAIR_BACKOFF_MAX_MS = 120_000
 
 /**
+ * How long teardown waits for an in-flight listener rebuild. The rebuild is local and fast;
+ * a stuck one must not delay disconnect / host removal / shutdown indefinitely. Its token is
+ * already cancelled, so it still closes any listener it manages to publish afterwards.
+ */
+export const REMOTE_TUNNEL_REPAIR_SETTLE_MS = 5_000
+
+/**
  * A remote restart needs a little time to print its new readiness line. The
  * re-attach retries the read-back a few times before it declares the remote gone.
  */

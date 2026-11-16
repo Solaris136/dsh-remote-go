@@ -331,7 +331,8 @@ data: {}
 
 - 异步执行：立即返回 `{ "ok": true, "accepted": true }`，进度经 `/events` 推送（`status: "connecting"` + 进度码 `restarting-remote`）。已有连接 / 重启在进行时返回 `{ "ok": true, "accepted": false, "reason": "busy" }`。
 - 状态机：`connected` ✅；`error` + `error.code === "remote-unreachable"` ✅（该状态有意保留 SSH 会话）；其余状态（`unconfigured` / `disconnected` / `connecting` / `fingerprint-pending` / `conflict-pending` / 其它 `error` / `limited`）一律拒绝，HTTP **409** + `restart-unavailable`，`ErrorView.detail` 说明原因。
-- 只杀自己启动的实例：同时满足「run registry 命名该 pid」「本连接实际启动过它（start 脚本返回的 pid，或 adopt 自 `origin: "launch"` 记录）」「`/proc/<pid>` 的 starttime 与记录一致且 cmdline/env 仍是同一 DSH home/profile」才会 kill；pid 复用、重挂发现的 pid、`alongside` 保留的 pid 一律不 kill。本连接无法 kill、但仍存活且不是 alongside 的实例（典型是重挂发现的监听进程）会并入 `POST /hosts/:id/conflict` 的冲突提示（`stop` / `alongside` / `cancel`），在用户选择前**不会启动第二个实例**；冲突提示在 kill 之前，取消时保留当前连接与隧道。
+- 只杀自己启动的实例：同时满足「run registry 命名该 pid」「本连接实际启动过它（start 脚本返回的 pid，或 adopt 自 `origin: "launch"` 记录）」「`/proc/<pid>` 的 starttime 与记录一致且 cmdline/env 仍是同一 DSH home/profile」才会 kill；pid 复用、重挂发现的 pid、`alongside` 保留的 pid 一律不 kill。本连接无法 kill、但仍存活且不是 alongside 的实例（典型是重挂发现的监听进程）会并入 `POST /hosts/:id/conflict` 的冲突提示（`stop` / `alongside` / `cancel`），在用户选择前**不会启动第二个实例**；外部扫描失败时同样先把已知实例交给冲突提示，不会 fail-open。冲突提示在 kill 之前，取消时保留当前连接与隧道。
+- 受管实例的停止没有确认（`stopWeb` 返回 `ok:false`）时**不会**继续启动新实例：保留原连接与隧道，`HostView.warning` 给出可解释文案，用户可重试或先断开。
 - 未连接（或 SSH 已释放）时返回 409 `restart-unavailable`。
 - 成功后 `RemoteView.viewRev` 自增，旧 `url` / `webUrl` 与 token 失效；承载方应重新 `GET /hosts/:id/open` 并导航。
 

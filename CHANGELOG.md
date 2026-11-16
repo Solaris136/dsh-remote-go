@@ -36,8 +36,10 @@
   才重读远端真实状态——候选必须能证明「同一 profile、同一 `~/.dsh`、端口属于该 pid，且最新就绪行给出 launch
   token」，`/proc` 进程扫描只用于解释失败；拿不到 token 不会假装重挂，而是报可解释的 `remote-unreachable` 并
   保留主机与配置。版本来自 npx pin 或被加载包的 `package.json`，证明不了就保持未知、不写进 registry。远端健康
-  但隧道坏时重建本地监听器，而不是误判进程重启。重挂期间显示 `restarting-remote` 进度码而不是「连接断开」；
-  诊断报告新增最近 10 次重启 / 重挂记录。
+  但隧道坏时重建本地监听器（先建新、再关旧；重建后 `viewRev` 自增让承载方重新 `open` 并导航，关闭旧 listener
+  会短暂断开现有 WebSocket/下载，属预期），而不是误判进程重启。重挂发现的监听进程没有 kill 权，点「重启远端
+  DSH」会先弹 stop/alongside/cancel 提示，用户选择前不会静默启动第二个实例。重挂期间显示 `restarting-remote`
+  进度码而不是「连接断开」；诊断报告新增最近 10 次重启 / 重挂记录。
 - **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
   本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
   HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端

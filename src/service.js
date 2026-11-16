@@ -7,6 +7,7 @@ import {
   REMOTE_CONFLICT_TIMEOUT_MS,
   REMOTE_REATTACH_ATTEMPTS,
   REMOTE_REATTACH_INTERVAL_MS,
+  REMOTE_TUNNEL_REPAIR_SETTLE_MS,
   REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
   REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
   REMOTE_VIEW_PREFIX,
@@ -109,6 +110,7 @@ export class RemoteGoService extends EventEmitter {
         remoteRecheckMs: options.remoteRecheckMs ?? REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
         reattachAttempts: options.reattachAttempts ?? REMOTE_REATTACH_ATTEMPTS,
         reattachIntervalMs: options.reattachIntervalMs ?? REMOTE_REATTACH_INTERVAL_MS,
+        tunnelRepairSettleMs: options.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS,
       },
       // Live readers, never cached: a setting or a detected version can change
       // while a connect is already in flight.

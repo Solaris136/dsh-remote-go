@@ -7,6 +7,7 @@ import {
   REMOTE_HEARTBEAT_DEFAULT_SEC,
   REMOTE_HEARTBEAT_MAX_SEC,
   REMOTE_HEARTBEAT_MIN_SEC,
+  REMOTE_TUNNEL_REPAIR_SETTLE_MS,
   REMOTE_UNREACHABLE_FAILURES,
 } from './constants.js'
 import { errors, toErrorView } from './errors.js'
@@ -355,16 +356,32 @@ export async function disposeSsh(runtime) {
 /**
  * Wait for an in-flight tunnel rebuild (if any) after the caller cancelled link work.
  * The rebuild closes its own replacement in `finally` when its token is gone, so awaiting
- * here is what makes disconnect / removeHost / shutdown leak-free.
+ * here is what makes disconnect / removeHost / shutdown leak-free. Bounded: a stuck rebuild
+ * must not delay teardown forever; its token is already cancelled, so it cannot publish.
+ * @param {object} ctx - service context.
  * @param {object} runtime - host runtime.
  */
-async function settleTunnelRepair(runtime) {
+async function settleTunnelRepair(ctx, runtime) {
   const repair = runtime.tunnelRepair
   if (!repair) return
+  const timeoutMs = Number(ctx.timers?.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS)
+  let timer = null
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), Math.max(0, timeoutMs))
+    timer.unref?.()
+  })
   try {
-    await repair
+    const outcome = await Promise.race([repair, timeout])
+    if (outcome === 'timeout') {
+      ctx.progress.log(runtime, 'warn', 'tunnel rebuild did not finish in time; abandoning it')
+      // The rebuild was cancelled via cancelLinkWork; its own finally will close any listener
+      // it creates. Clear the slot so teardown never waits on it again.
+      runtime.tunnelRepair = null
+    }
   } catch {
     // swallow-ok: the rebuild reports its own failure; teardown must still proceed
+  } finally {
+    if (timer !== null) clearTimeout(timer)
   }
 }
 
@@ -376,7 +393,7 @@ export async function teardownRuntime(ctx, runtime, options = {}) {
   cancelIdleStop(runtime)
   // A tunnel rebuild owns a listener it may be creating right now. Cancel it (above), then
   // wait for it to clean up: otherwise the listener would be assigned after this teardown.
-  await settleTunnelRepair(runtime)
+  await settleTunnelRepair(ctx, runtime)
   if (options.stopRemote && runtime.ssh?.connected) {
     try {
       await ctx.deps.stopWeb(runtime.ssh, remoteLayout(runtime.facts?.home ?? null), {
@@ -430,7 +447,7 @@ export async function shutdownAll(ctx) {
     cancelIdleStop(runtime)
     cancelLinkWork(runtime)
     stopRemoteHeartbeat(runtime)
-    await settleTunnelRepair(runtime)
+    await settleTunnelRepair(ctx, runtime)
     try {
       if (runtime.entry.keepAlive === 'stop') {
         await stopRemoteQuietly(ctx, runtime)

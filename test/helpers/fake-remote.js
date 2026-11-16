@@ -197,6 +197,7 @@ export async function makeTestService(overrides = {}) {
     remoteRecheckMs: overrides.remoteRecheckMs ?? 5,
     reattachAttempts: overrides.reattachAttempts ?? 2,
     reattachIntervalMs: overrides.reattachIntervalMs ?? 0,
+    tunnelRepairSettleMs: overrides.tunnelRepairSettleMs ?? 1000,
   })
   await service.init()
   return { service, store, dir, events, facts }

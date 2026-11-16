@@ -221,6 +221,8 @@ restart(id)（同一条 SSH 会话）
 **重挂后重启（N3）**：真实形态里启动脚本的 `$!` 是 npx 包装进程，而监听者是它 spawn 的 DSH 子进程；重挂记录的是后者（端口 owner），本连接的 `launched` 里没有它。因此重挂后点重启时，这个实例不是「可 kill」，但仍是**已知、存活、非 alongside** 的实例：它会被合并进冲突提示（即便 registry pid 本来在扫描的 ignore 列表里），用户选 `stop`（显式停止）或 `alongside`（显式并存）后才继续 `[start]`；`cancel` 保留当前连接。选择 `stop` 后 `stoppedOwn=true`，后续失败不会“恢复”一个已经停掉的实例。这条也覆盖「registry 与 pid 不匹配 / pid 复用但仍是同 home+profile 的 DSH」。
 关于身份校验的边界：`killAuthorized` 在 `/proc/<pid>/environ` 不可读（`DSH_HOME` 为空）时允许继续，只依赖 starttime（exec 不变、pid 复用必变）+ cmdline 的 `--profile`；这已足以排除误杀，且方向是 fail-closed（读不到 identity 直接不杀）。与之相对，`resolveRemoteWeb` 的接管路径要求 `DSH_HOME` 必须可读并等于真实 home，因为那里是在「选择接管一个陌生进程」，标准更严。
 
+冲突扫描自身的失败也不允许 fail-open：`knownProcess` 在扫描失败分支**之前**合并，扫描失败但仍有已知存活实例时照常弹冲突；只有扫描失败且没有任何已知实例时才继续（旧行为）。另外，`stopWeb` 返回 `ok:false`（停止未确认）时不 `[start]`：保留原连接与隧道、在主机卡片给出 warning，用户可重试或先断开。
+
 ### 5.6 远端自重启：心跳、确认与重挂
 远端 DSH 可能自己重启（插件市场更新、supervisor、远端重启），而启动命令固定 `--port 0`，所以**重启后端口一定变化**，且市场发起的重启不会写插件的 `run/web.json`。处理分三层：
 
