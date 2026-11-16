@@ -135,10 +135,12 @@
 | `clipboard-write` | 覆写 frame 的 `navigator.clipboard.writeText` | 本页 `copyText`：`writeText` → 失败仍走 `execCommand('copy')` | `{ id, ok }` 经 `__drgCapabilityReply`（浏览器载体是直接返回的 promise）；frame 收到失败先用自己的 `execCommand` 兜底，再失败才 reject 并发 `notify` |
 | `notify` | 桥自己无法告知用户的失败（目前是剪贴板） | 复用浮层 toast（`toolStore.requestNotice`），`code` 由本页本地化 | 无 |
 
-- **链接**：只拦 `http(s)` 且**跨 origin**；同源链接、`download` 属性、以及插件自己注入的下载项（`data-drg-dir-download`）一律放行。真实点击会把手势激活传到父文档，所以顶层 `window.open` 拿得到浏览器要的手势。`noopener,noreferrer` 是硬约束（打开的站点既不能摸到本页 `window.opener`，Referer 也不能带上本页 URL——它含本地 launch token），代价是**成功打开也返回 `null`**，所以弹窗拦截无法可靠判定：桥不猜，也就不对被拦弹窗报错。
-- **剪贴板**：写入**只在顶层文档发生**；桥从不代读剪贴板（不碰 `readText`/`read`），也没有把任意页面文本暴露给远端页面的路径。
+- **链接**：只拦 `http(s)` 且**跨 origin**；同源链接、`download` 属性、以及插件自己注入的下载项（`data-drg-dir-download`）一律放行。**修饰键 / 非主键点击不动**（`button !== 0`、`ctrl/meta/shift/alt`）：那是用户要浏览器的默认语义（后台标签、新窗口、中键），桥不接管，与 chat 视图自带的 `openExternalLink` 守卫一致。普通左键点击会把手势激活传到父文档（**仅浏览器载体**；桌面 guest 是另一个 WebContents，不传递），所以顶层 `window.open` 拿得到浏览器要的手势。`noopener,noreferrer` 是硬约束（打开的站点既不能摸到本页 `window.opener`，Referer 也不能带上本页 URL——它含本地 launch token），代价是**成功打开也返回 `null`**，所以弹窗拦截无法可靠判定：桥不猜，也就不对被拦弹窗报错。行为变更：桥在捕获阶段接走点击，前端 `linkOpening='sidebar'` 设置对它覆盖的这类链接不再生效（issue #64 期望的正是「顶层开」而不是「远端页里再嵌一层」）。
+- **`allow=popups` 的边界**：`popups` 是登录 `about:blank` 骨架与「新标签打开」的必需项，但它同时让 frame 获得**原生开窗**能力——远端页面自己的 `a[target=_blank]`（或 `window.open` 走原生分支）可以打开任意 URL，**完全不经过**桥与 `externalUrlOf`。所以 URL 白名单是 **UX / 一致性护栏，不是对远端页面的隔离边界**；真正的边界是「远端页面本身可信」——它是用户自己连的那台主机的 DSH，本来就能渲染整窗、经同一通道切换/断开主机。桥要挡的是**意外**（前端在 frame 里开空白嵌套页、复制静默失败），不是防住这台主机。
+- **剪贴板**：写入**只在顶层文档发生**；桥从不代读剪贴板（不碰 `readText`/`read`），也没有把任意页面文本暴露给远端页面的路径。两处如实说明：frame 的 `allow` 仍带基线就有的 `clipboard-read`（桥不代读，页面能否原生 `readText` 取决于浏览器权限与焦点）；`clipboard-write` 不校验 `userActivation`，只要本地页聚焦，远端页即可**无手势**覆写剪贴板——这是桥主动授予的能力（frame 之前没有），依据同样是「远端页=用户自己的 DSH」。
 - **登录弹窗**：iframe 现在声明 `popups`，账号登录的 `window.open('about:blank')` 骨架仍交给浏览器（桥只接管有 URL 的 http(s) 目标），所以空白弹窗能开、后续导航由页面自己完成；OAuth 回调能否走通仍取决于远端页面自己的流程，插件不承诺。
 - **语音输入**：`allow` 补上 `microphone`；麦克风授权仍由远端页面自己请求、由用户在该站点上授权，插件不代授权、也无法把授权结果搬到顶层。
+- **提示（notify）**：已知 `code`（目前 `clipboard-failed`）映射到本页文案；**自由文本一律带「远端界面：」来源前缀**，让它不可能读起来像本地 chrome 的提示——信任前提仍是「远端页面可信」，前缀只是避免伪装成本地界面。
 - **存储分区**：远端页面与本地页面同源，偏好类配置（快捷键、终端偏好、会话宽度）默认会互相覆盖。`mountGuestStorage` 在加载后把 frame 的 `localStorage` 换成按 `drg:<hostId>:` 分区的 Storage 视图：远端写不进本地键，本地也改不动远端值。**边界**（已知限制，不是安全问题）：
   - 注入发生在 frame 的 `load`，页面**启动时**读到的值仍来自未分区的那一份——远端界面重载后会先用共享值启动一次，从注入之后的读写才走自己的命名空间。所以被隔离的是「远端写 → 本地读」与「本地写 → 远端读」的实时/后续路径，不包括远端页面自己的启动读取；要连启动读取也隔离，得在 host 半端注入（改写被代理的 HTML）或把偏好改走宿主/服务端存储，这两条都不在本 PR 内。
   - 只代理 `localStorage` 的常用接口；`sessionStorage`、cookie、IndexedDB 不受影响。页面若在注入前缓存了原始 `Storage` 引用（或走 `Storage.prototype`），仍可绕过——这是**数据卫生**，不是安全边界。
@@ -228,9 +230,11 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
   链接先经 `externalUrlOf` 收窄（http/https、必须有主机、不带凭据、≤8KB），再交给浏览器；顶层 `window.open` 用
   `noopener,noreferrer`（打开的站点既拿不到 `window.opener`，Referer 也不含本页 URL），因此无法从返回值判断弹窗是否被拦，
   桥不重试、不换通道，也不对被拦弹窗报错。桥**不提供读剪贴板**，也不把本地
-  页面的任何状态交给 frame。frame 里的页面按「用户自己连的那台远端 DSH」对待：它本来就能渲染整窗、也能通过同一通道切换/
-  断开主机；桥只是把它已经有能力做的事搬到有权限的文档里执行。`localStorage` 分区是数据卫生（防止偏好互相覆盖），
-  不是同源隔离的安全边界。
+  页面的任何状态交给 frame。**这些护栏不是对远端页面的隔离边界**：frame 的 `allow=popups` 让远端页面自己的
+  `a[target=_blank]` 可以原生开任意 URL，绕开桥与 `externalUrlOf`；`clipboard-write` 也不校验手势，远端页可以在本地页
+  聚焦时静默覆写剪贴板。两者都建立在「frame 里的页面 = 用户自己连的那台远端 DSH」这一信任前提上：它本来就能渲染整窗、
+  也能通过同一通道切换/断开主机，桥只是把它需要的浏览器能力搬到有权限的文档里执行，不宣称把它关进沙箱。
+  `localStorage` 分区是数据卫生（防止偏好互相覆盖），不是同源隔离的安全边界。
 
 ## 8. 失败与恢复
 | 场景 | 表现 |

@@ -503,6 +503,19 @@ window.ReactDOM = { createRoot }`,
       ])
       assert.match(afterLinkClick.href, /\/dsh-remote-go\/remote\/h_a\//, 'the frame must not navigate away')
 
+      // A modified click belongs to the browser (background tab / new window): it must keep its
+      // default and never become a bridge intent.
+      const modifiedClick = await page.evaluate(() => {
+        const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+        const link = frame.contentDocument.getElementById('drg-e2e-link')
+        const before = window.__opened.length
+        const event = new MouseEvent('click', { bubbles: true, cancelable: true, ctrlKey: true, button: 0 })
+        link.dispatchEvent(event)
+        return { before, after: window.__opened.length, prevented: event.defaultPrevented }
+      })
+      assert.equal(modifiedClick.after, modifiedClick.before, 'a ctrl+click must not go through the bridge')
+      assert.equal(modifiedClick.prevented, false, 'a ctrl+click keeps the browser’s own behaviour')
+
       // A non-web href is left to the page: the bridge never opens it.
       const scriptLink = await page.evaluate(() => {
         const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')

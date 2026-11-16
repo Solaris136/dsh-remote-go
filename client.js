@@ -174,6 +174,7 @@ window.__ModuleLoader__.load({
         '复制失败：远端界面没能写入剪贴板。',
         'Copy failed: the remote view could not write the clipboard.',
       ],
+      remoteNoticePrefix: ['远端界面：', 'Remote view: '],
       connectLogTitle: ['连接日志', 'Connect log'],
       connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
       connectLogCount: ['{count} 行', '{count} lines'],
@@ -2831,7 +2832,6 @@ window.__ModuleLoader__.load({
         var doc = win.document
         if (!doc || !doc.documentElement) return 'no-document'
         if (win.__drgCapabilityBridge === true) return 'already'
-        win.__drgCapabilityBridge = true
         var PromiseCtor = typeof win.Promise === 'function' ? win.Promise : Promise
         var emit =
           typeof win.__drgBridgeSink === 'function'
@@ -2976,6 +2976,11 @@ window.__ModuleLoader__.load({
         // --- links: capture a real external click before the page's own handler swallows it ------
         var onLinkClick = function (event) {
           if (!event || event.defaultPrevented === true) return
+          // A modified or non-primary click is the user asking for the browser's own behaviour
+          // (new background tab, new window, middle-click paste): leave it to the page and the
+          // browser, exactly like the chat view's own `openExternalLink` handler does. Otherwise
+          // the bridge would silently take those gestures over.
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
           var target = event.target
           if (!target || typeof target.closest !== 'function') return
           // The file menu's download entry is this plugin's own control, never a navigation.
@@ -3034,6 +3039,9 @@ window.__ModuleLoader__.load({
         } catch (_error) {
           /* a browser that freezes `window.open` keeps the native one */
         }
+        // Only claim the bridge once every shim above is in place: a half-installed page must be
+        // retried by the next load stop instead of reporting `already` forever.
+        win.__drgCapabilityBridge = true
         return 'installed'
       } catch (_error) {
         return 'error'
@@ -6646,13 +6654,17 @@ window.__ModuleLoader__.load({
           )
         }
         if (intent.action === 'notify') {
-          // The bridge's only "say something" verb. Codes stay localized here; free text is a
-          // fallback for a page that already renders its own messages.
+          // The bridge's only "say something" verb. Known codes map to this page's own strings;
+          // free text stays the framed page's message, so it is tagged with its origin — a remote
+          // notice must never read like local chrome (the trust model is in docs/design.md §4.8).
           const code = typeof intent.code === 'string' ? intent.code : ''
-          const known = code === 'clipboard-failed' ? t('clipboardWriteFailed') : ''
-          const text = known !== '' ? known : typeof intent.text === 'string' ? intent.text : ''
-          if (text !== '') {
-            toolStore.requestNotice({ tone: intent.tone === 'error' ? 'error' : 'info', text })
+          let message = ''
+          if (code === 'clipboard-failed') message = t('clipboardWriteFailed')
+          else if (typeof intent.text === 'string' && intent.text !== '') {
+            message = t('remoteNoticePrefix') + intent.text
+          }
+          if (message !== '') {
+            toolStore.requestNotice({ tone: intent.tone === 'error' ? 'error' : 'info', text: message })
           }
           return
         }

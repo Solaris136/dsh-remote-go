@@ -37,12 +37,15 @@
 - **浏览器端远端界面里的复制、外链、登录弹窗与偏好存储**：同源 iframe 的页面拿不到只有顶层文档才有的浏览器能力，
   过去表现为「复制无反应、无提示」「点网页链接没反应」「登录弹窗被拦」「本地与远端共用一份 `localStorage`」。
   现在注入一个能力桥，把这三类请求经既有 intent 通道交给本地页面执行：外链（`a[href]` 点击与 `window.open`）
-  在顶层以新标签页打开并只放行 http(s)、clipboard 写入由本地页面执行并把结果回执给前端（成功置 ✓、失败弹
-  「复制失败」提示，不再静默）、提示复用浮层 toast；frame 的 `allow` 补上 `microphone` / `fullscreen` / `popups`，
-  登录用的 `about:blank` 弹窗可以打开，语音输入可以请求麦克风。远端页面的 `localStorage` 按主机分成
-  `drg:<hostId>:` 命名空间，远端与本地的偏好不再互相覆盖。已知边界：OAuth 回调能否走通取决于远端页面自己的流程；
-  桌面端 guest 的 `setWindowOpenHandler` 在 DSH 桌面主进程里，插件改不到，桌面路径复用同一条桥（桌面壳若不允许
-  新窗口，链接就只会在那儿被丢掉，桥拿不到可判定的失败信号）。
+  在顶层以新标签页打开、只放行 http(s)（`ctrl/cmd/shift/alt` 与中键仍交浏览器默认）、clipboard 写入由本地页面执行
+  并把结果回执给前端（成功置 ✓、失败弹「复制失败」提示，不再静默）、提示复用浮层 toast；frame 的 `allow` 补上
+  `microphone` / `fullscreen` / `popups`，登录用的 `about:blank` 弹窗可以打开，语音输入可以请求麦克风。
+  远端页面的 `localStorage` 在桥注入后按主机分成 `drg:<hostId>:` 命名空间，远端与本地不再互相覆盖对方写入的键。
+  已知边界：`popups` 同时让远端页面自己的 `a[target=_blank]` 可以原生开任意 URL（绕过桥的白名单），所以白名单是
+  UX 护栏、不是对远端页面的隔离边界（信任前提是「远端页面=用户自己连的那台 DSH」）；存储分区从注入之后生效，
+  **首次加载/重载启动时仍读共享 store**，且 `sessionStorage` / cookie / IndexedDB 未隔离；OAuth 回调能否走通取决于
+  远端页面自己的流程；桌面端 guest 的 `setWindowOpenHandler` 在 DSH 桌面主进程里，插件改不到，桌面路径复用同一条桥
+  （桌面壳若不允许新窗口，链接就只会在那儿被丢掉，桥拿不到可判定的失败信号）。
 
 ## [0.1.0] - 2026-11-16
 

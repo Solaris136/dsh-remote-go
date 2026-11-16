@@ -169,9 +169,15 @@ function fakeAnchor(attributes) {
   }
 }
 
-function fakeClick(target) {
+/** A click as the browser reports it: primary button, no modifiers unless overridden. */
+function fakeClick(target, overrides = {}) {
   const event = {
     target,
+    button: 0,
+    metaKey: false,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
     defaultPrevented: false,
     prevented: false,
     stopped: false,
@@ -182,6 +188,7 @@ function fakeClick(target) {
     stopPropagation() {
       this.stopped = true
     },
+    ...overrides,
   }
   return event
 }
@@ -1970,6 +1977,16 @@ test('the capability bridge opens external links from the frame at the top level
   fire(frameWindow.document, 'click', ownItem)
   assert.equal(ownItem.prevented, false, 'the download entry the plugin injected must keep working')
 
+  // A modified or non-primary click is the user asking for the browser's own behaviour
+  // (background tab, new window, middle-click): the bridge must leave it alone.
+  const narrowed = opened.length
+  for (const gesture of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }]) {
+    const modified = fakeClick(fakeLinkTarget(fakeAnchor({ href: 'https://example.com/modified' })), gesture)
+    fire(frameWindow.document, 'click', modified)
+    assert.equal(modified.prevented, false, `a ${JSON.stringify(gesture)} click keeps the browser default`)
+  }
+  assert.equal(opened.length, narrowed, 'no modified or middle click may become a bridge intent')
+
   // `window.open` in the frame turns into the same intent and returns no window.
   assert.equal(frameWindow.open('https://example.com/tab'), null)
   assert.deepEqual(opened.at(-1), ['https://example.com/tab', '_blank', 'noopener,noreferrer'])
@@ -2027,13 +2044,14 @@ test('the notify intent reuses the shell toast channel', async () => {
     },
   )
   // A tone that is not a toast tone is shown as information, not as a second error style.
+  // Free text is the framed page's own message, so it always names its origin.
   frameWindow.__drgBridgeSink({ action: 'notify', text: '远端页面自己的一句话' })
   assert.deepEqual(
     { ...face.toolStore.take() },
     {
       kind: 'notice',
       tone: 'info',
-      text: '远端页面自己的一句话',
+      text: '远端界面：远端页面自己的一句话',
     },
   )
 })
