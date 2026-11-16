@@ -11,7 +11,11 @@ const CLIENT_PATH = path.join(ROOT, 'client.js')
 
 const GUEST_HTML = `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>DeepSeek Harness</title></head>
-<body><div id="root"><div class="guest-app">remote DSH</div></div>
+<body>
+<div id="sidebar" style="position:fixed;left:0;top:0;width:280px;height:100vh">
+  <div data-window-drag style="width:280px;height:40px"></div>
+  <div id="root"><div class="guest-app">remote DSH</div></div>
+</div>
 <script>
   window.emitDownload = (overrides) => window.__drgBridgeSink(Object.assign(
     { action: 'download-file', kind: 'file', path: '/home/user/a.txt', name: 'a.txt' }, overrides || {}))
@@ -57,7 +61,7 @@ function harnessPage() {
     lastOpenedAt: null, createdAt: now(), updatedAt: now()
   }, overrides || {})
   window.__state = {
-    rev: 1, hostVersion: '0.2.2-rc.3', targetVersion: '0.2.2-rc.3',
+    rev: 1, instance: 'host-1', hostVersion: '0.2.2-rc.3', targetVersion: '0.2.2-rc.3',
     activeHostId: null, firstRun: false,
     settings: {
       defaultPort: 2222, defaultAuth: 'key', defaultKeyPath: '~/.ssh/id_rsa',
@@ -77,6 +81,9 @@ function harnessPage() {
         status: 'disconnected', phase: null,
         remote: { version: null, uiReady: false, localPort: null, viewRev: 0 } }),
       hostView({ id: 'h_bad', name: 'bad-host', address: 'bad-host', addressMasked: 'bad-host',
+        username: null, port: 22 }),
+      // A frame that never commits: the carrier must still show a failure layer and an exit.
+      hostView({ id: 'h_hang', name: 'hang-host', address: 'hang-host', addressMasked: 'hang-host',
         username: null, port: 22 })
     ]
   }
@@ -127,7 +134,7 @@ function harnessPage() {
           nextSteps: []
         } }, 409)
       }
-      await delay(150)
+      await delay(window.__connectMode === 'slow' ? 1200 : 150)
       return json({ ok: true })
     }
     return json({ ok: true })
@@ -260,6 +267,10 @@ window.ReactDOM = { createRoot }`,
         if (pathname === '/client.js') {
           res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
           res.end(readFileSync(CLIENT_PATH))
+          return
+        }
+        if (pathname === '/dsh-remote-go/remote/h_hang/') {
+          // Never answer: the carrier's load timeout owns this case.
           return
         }
         if (Object.prototype.hasOwnProperty.call(ROUTES, pathname)) {
@@ -496,6 +507,42 @@ window.ReactDOM = { createRoot }`,
         await closeManage()
       })
 
+      await t.test('a busy dialog ignores its header close button', async () => {
+        await openManage()
+        await page.evaluate(() => {
+          window.__connectMode = 'auth-error'
+          window.__connectAttempts = 0
+        })
+        await page.click('[data-testid="host-card"][data-host-id="h_pw"] [data-testid="host-open"]')
+        await page.waitForSelector('[data-testid="password-prompt"]', { visible: true, timeout: 5000 })
+        await page.evaluate(() => {
+          window.__connectMode = 'slow'
+        })
+        await page.type('[data-testid="password-input"]', 'secret')
+        await page.click('[data-testid="password-submit"]')
+        await page.waitForFunction(
+          () => document.querySelector('[data-testid="password-prompt"]')?.getAttribute('aria-busy') === 'true',
+          { timeout: 5000 },
+        )
+        const closeButton = await page.$('[data-testid="password-prompt"] .drg-modal-head .drg-iconbtn')
+        assert.ok(closeButton, 'the prompt has a header close control')
+        assert.equal(await closeButton.evaluate((node) => node.disabled), true)
+        await closeButton.click()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="password-prompt"]'))),
+          true,
+          'the × cannot close a dialog whose request is still running',
+        )
+        await page.waitForFunction(() => !document.querySelector('[data-testid="password-prompt"]'), {
+          timeout: 5000,
+        })
+        await page.evaluate(() => {
+          window.__connectMode = 'ok'
+        })
+        await closeManage()
+      })
+
       await t.test('a dropped SSE stream shows polling and reconnects on demand', async () => {
         await openManage()
         await page.evaluate(() => window.__failStream())
@@ -505,9 +552,29 @@ window.ReactDOM = { createRoot }`,
         )
         assert.match(banner, /实时连接已断开/)
         assert.match(banner, /正在轮询/)
+        // The degradation is also visible outside the management window (the reviewer saw the
+        // banner only there): the shell toast must carry it over the local page / a carrier.
+        await page.waitForFunction(
+          () =>
+            [...document.querySelectorAll('[data-testid="toast-region"] .drg-toast')].some((node) =>
+              node.textContent.includes('实时连接已断开'),
+            ),
+          { timeout: 5000 },
+        )
         const streamsBefore = await page.evaluate(() => window.__streams.length)
         await page.click('[data-testid="live-reconnect"]')
         await page.waitForFunction((count) => window.__streams.length > count, { timeout: 5000 }, streamsBefore)
+        // A reconnect that has not opened yet must NOT clear the banner (review blocker 2).
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        const duringRetry = await page.evaluate(() => {
+          const bannerNode = document.querySelector('[data-testid="live-reconnect"]')
+          return {
+            banner: Boolean(bannerNode),
+            text: bannerNode?.closest('.drg-live-banner')?.textContent ?? '',
+          }
+        })
+        assert.equal(duringRetry.banner, true, 'the banner stays until the stream actually opens')
+        assert.match(duringRetry.text, /正在重新连接/)
         await page.evaluate(() => window.__pushState(Object.assign({}, window.__state, { rev: 2 })))
         await page.waitForFunction(() => !document.querySelector('[data-testid="live-reconnect"]'), { timeout: 5000 })
         await closeManage()
@@ -532,7 +599,7 @@ window.ReactDOM = { createRoot }`,
         })
         try {
           await page.waitForFunction(
-            () => (document.querySelector('.drg-summary')?.textContent ?? '').includes('已连接 2'),
+            () => (document.querySelector('.drg-summary')?.textContent ?? '').includes('已连接 3'),
             { timeout: 5000 },
           )
         } catch (error) {
@@ -551,7 +618,7 @@ window.ReactDOM = { createRoot }`,
           summary: document.querySelector('.drg-summary')?.textContent ?? '',
           status: document.querySelector('[data-host-id="h_a"]')?.getAttribute('data-status') ?? '',
         }))
-        assert.match(painted.summary, /已连接 2/)
+        assert.match(painted.summary, /已连接 3/)
         assert.equal(painted.status, 'connected')
 
         // A slow GET /state that resolves *after* a newer frame is stale as well: request a
@@ -566,8 +633,44 @@ window.ReactDOM = { createRoot }`,
           summary: document.querySelector('.drg-summary')?.textContent ?? '',
           status: document.querySelector('[data-host-id="h_a"]')?.getAttribute('data-status') ?? '',
         }))
-        assert.match(painted.summary, /已连接 2/, 'a late older GET response must not repaint the list')
+        assert.match(painted.summary, /已连接 3/, 'a late older GET response must not repaint the list')
         assert.equal(painted.status, 'connected')
+
+        // A Host restart / plugin reload starts a new publish instance with a fresh rev: its
+        // frames must be accepted even though rev went backwards (review feedback: otherwise the
+        // Client freezes on the old high-water mark forever).
+        await page.evaluate(() => {
+          const base = window.__staleFrames.newer
+          window.__pushState({
+            ...base,
+            instance: 'host-2',
+            rev: 1,
+            hosts: base.hosts.map((host, index) => (index === 0 ? { ...host, status: 'disconnected' } : host)),
+          })
+        })
+        await page.waitForFunction(
+          () => (document.querySelector('.drg-summary')?.textContent ?? '').includes('已连接 2'),
+          { timeout: 5000 },
+        )
+        assert.equal(
+          await page.evaluate(() => document.querySelector('[data-host-id="h_a"]')?.getAttribute('data-status')),
+          'disconnected',
+          'a frame from the new Host instance is accepted despite its lower rev',
+        )
+        // Put the host back for the carrier scenarios that follow.
+        await page.evaluate(() => {
+          const base = window.__staleFrames.newer
+          window.__pushState({
+            ...base,
+            instance: 'host-2',
+            rev: 2,
+            hosts: base.hosts.map((host, index) => (index === 0 ? { ...host, status: 'connected' } : host)),
+          })
+        })
+        await page.waitForFunction(
+          () => (document.querySelector('.drg-summary')?.textContent ?? '').includes('已连接 3'),
+          { timeout: 5000 },
+        )
         await closeManage()
       })
 
@@ -582,6 +685,31 @@ window.ReactDOM = { createRoot }`,
         )
         const frame = await page.$('#dsh-remote-go-overlay-h_a iframe')
         const frameHandle = await frame.contentFrame()
+        await page.waitForFunction(
+          () => {
+            const node = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
+            return Boolean(node && node.contentDocument && node.contentDocument.querySelector('#drg-host-row'))
+          },
+          { timeout: 5000 },
+        )
+        // The guest row shows Local + its own host only: it must not paint another host's exit
+        // control (review blocker 1).
+        const rowTargets = await frameHandle.evaluate(() =>
+          [...document.querySelectorAll('#drg-host-row .drg-hr-item')]
+            .map((node) => node.getAttribute('data-target'))
+            .filter(Boolean),
+        )
+        assert.deepEqual(rowTargets, ['local', 'h_a'])
+        const disconnectsBefore = await page.evaluate(
+          () => window.__calls.filter((call) => /\/disconnect$/.test(call.url)).length,
+        )
+        await frameHandle.evaluate(() => window.__drgBridgeSink({ action: 'disconnect', hostId: 'h_victim' }))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const disconnectsAfter = await page.evaluate(
+          () => window.__calls.filter((call) => /\/disconnect$/.test(call.url)).length,
+        )
+        assert.equal(disconnectsAfter, disconnectsBefore, 'a guest cannot disconnect another host')
+        assert.equal(await page.evaluate(() => window.__harness.plugin.carrier.shown()), 'h_a')
         await frameHandle.evaluate(() => window.emitDownload())
         await page.waitForFunction(() => window.__downloads.length > 0, { timeout: 5000 })
         let downloads = await page.evaluate(() => window.__downloads)
@@ -616,6 +744,28 @@ window.ReactDOM = { createRoot }`,
         assert.equal(failure.role, 'alert')
         assert.equal(failure.label, '返回本地')
         await page.click('#dsh-remote-go-overlay-h_bad [data-testid="remote-overlay-back-local"]')
+        await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
+      })
+
+      await t.test('a frame that never loads still gets the failure layer and a way back', async () => {
+        await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'open', hostId: 'h_hang' }))
+        await page.waitForFunction(
+          () => {
+            const layer = document.querySelector('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-error"]')
+            return Boolean(layer && layer.style.display === 'flex')
+          },
+          { timeout: 20_000 },
+        )
+        const layer = await page.evaluate(() => {
+          const node = document.querySelector('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-error"]')
+          return {
+            role: node.getAttribute('role'),
+            button: Boolean(node.querySelector('[data-testid="remote-overlay-back-local"]')),
+          }
+        })
+        assert.equal(layer.role, 'alert')
+        assert.equal(layer.button, true)
+        await page.click('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-back-local"]')
         await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
       })
 

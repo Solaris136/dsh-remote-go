@@ -1673,8 +1673,13 @@ test('the takeover carrier hands the window to the guest and injects the switche
     takeover.carrier.update({ hosts, current: 'h_a' })
     await settle()
     assert.ok(
-      calls.some((code) => code.includes('43.133.80.40') && code.includes('生产机 ubuntu')),
-      'the host list must be pushed into the injected row',
+      calls.some((code) => code.includes('43.133.80.40')),
+      'the carrier host must be pushed into the injected row',
+    )
+    assert.equal(
+      calls.some((code) => code.includes('生产机 ubuntu')),
+      false,
+      'a guest row must not render another host (review blocker 1)',
     )
     assert.ok(
       calls.some((code) => code.includes('"current":"h_a"')),
@@ -3295,23 +3300,42 @@ test('the modal renders aria-labelledby and a focusable dialog element', () => {
   assert.match(html, /<h2[^>]*id="drg-dialog-title-\d+"/)
   assert.match(html, /tabindex="-1"/)
   assert.doesNotMatch(html, /aria-modal="true"/, 'the stack marks only the top dialog at mount')
+  // A non-dismissible dialog also disables its header ×: Escape and the backdrop are ignored,
+  // and the button was the remaining way to close it under a running request (review blocker 3).
+  const busy = render(
+    React.createElement(
+      plugin.components.Modal,
+      { title: '标题', onClose: () => {}, dismissible: false, busy: true },
+      'body',
+    ),
+  )
+  const close = /<button[^>]*aria-label="Close"[^>]*>/.exec(busy)
+  assert.ok(close)
+  assert.match(close[0], /disabled=""/)
 })
 
-test('state frames are accepted only when their revision is newer', () => {
-  const { isNewerState, stateRevision } = plugin.__test
+test('state frames are accepted only when their revision is newer, or from a new Host instance', () => {
+  const { isNewerState, stateRevision, stateInstance } = plugin.__test
   assert.equal(stateRevision({ rev: 3 }), 3)
   assert.equal(stateRevision({}), null)
-  assert.equal(isNewerState({ rev: 4 }, 5), false, 'an older frame is dropped')
-  assert.equal(isNewerState({ rev: 5 }, 5), false, 'a duplicate revision is a no-op')
-  assert.equal(isNewerState({ rev: 6 }, 5), true)
-  assert.equal(isNewerState({ hosts: [] }, 5), true, 'a Host without rev keeps the old behaviour')
+  assert.equal(stateInstance({ instance: 'host-1' }), 'host-1')
+  assert.equal(stateInstance({}), null)
+  assert.equal(isNewerState({ rev: 4 }, 5, null), false, 'an older frame is dropped')
+  assert.equal(isNewerState({ rev: 5 }, 5, null), false, 'a duplicate revision is a no-op')
+  assert.equal(isNewerState({ rev: 6 }, 5, null), true)
+  assert.equal(isNewerState({ hosts: [] }, 5, null), true, 'a Host without rev keeps the old behaviour')
   // The refresh path captures the revision it started from: a slow response older than that is
   // dropped even when it is the last one to resolve.
-  assert.equal(isNewerState({ rev: 5 }, 5), false)
-  assert.equal(isNewerState({ rev: 7 }, 6), true)
+  assert.equal(isNewerState({ rev: 5 }, 5, null), false)
+  assert.equal(isNewerState({ rev: 7 }, 6, null), true)
+  // A Host restart or plugin reload resets the counter: the new generation is accepted even when
+  // its rev is smaller, otherwise the Client would stay frozen on the old high-water mark.
+  assert.equal(isNewerState({ rev: 1, instance: 'host-2' }, 999, 'host-1'), true)
+  assert.equal(isNewerState({ rev: 1000, instance: 'host-1' }, 999, 'host-1'), true)
+  assert.equal(isNewerState({ rev: 1, instance: 'host-1' }, 999, 'host-1'), false)
 })
 
-test('a dropped state stream polls, retries with backoff and returns to live', async () => {
+test('a dropped state stream polls, keeps the banner during retries and returns to live', async () => {
   const scheduled = []
   const cleared = []
   const fakeSetTimeout = (fn, ms) => {
@@ -3338,6 +3362,7 @@ test('a dropped state stream polls, retries with backoff and returns to live', a
       this.closed = true
     }
     emit(type, payload) {
+      if (type === 'open' && typeof this.onopen === 'function') this.onopen(payload)
       for (const handler of this.listeners[type] || []) handler(payload)
     }
   }
@@ -3354,15 +3379,18 @@ test('a dropped state stream polls, retries with backoff and returns to live', a
     onStatus: (mode) => statuses.push(mode),
   })
   assert.equal(instances.length, 1)
-  assert.equal(statuses.at(-1), 'live')
+  assert.deepEqual(statuses, [], 'opening an EventSource does not claim live before `open`')
+  instances[0].emit('open', {})
+  assert.deepEqual(statuses, ['live'])
 
   instances[0].emit('error', {})
-  assert.equal(statuses.at(-1), 'polling', 'a failed stream falls back to polling immediately')
+  assert.deepEqual(statuses.slice(-2), ['polling', 'reconnecting'], 'fallback + a scheduled retry')
   assert.equal(instances[0].closed, true, 'the dead EventSource is closed')
   const retry = scheduled.find((timer) => timer.ms === client.__test.streamRetryDelay(0))
   assert.ok(retry, 'a retry was scheduled with the base delay')
   retry.fn()
   assert.equal(instances.length, 2, 'the retry opens a new EventSource')
+  assert.equal(statuses.at(-1), 'reconnecting', 'a reconnect that has not opened yet keeps the banner')
 
   // The first frame after reconnect proves the stream works again: polling stops, mode is live.
   instances[1].emit('state', { data: JSON.stringify({ rev: 2, hosts: [] }) })
@@ -3371,6 +3399,60 @@ test('a dropped state stream polls, retries with backoff and returns to live', a
   assert.equal(states.at(-1).rev, 2)
   dispose()
   assert.equal(instances[1].closed, true)
+})
+
+test('the automatic reconnect chain stops after the documented attempt cap', () => {
+  const scheduled = []
+  const cleared = []
+  const instances = []
+  class FakeEventSource {
+    constructor() {
+      this.listeners = {}
+      this.closed = false
+      instances.push(this)
+    }
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    }
+    close() {
+      this.closed = true
+    }
+    emit(type) {
+      for (const handler of this.listeners[type] || []) handler({})
+    }
+  }
+  const statuses = []
+  const client = loadClientPlugin({
+    EventSource: FakeEventSource,
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      scheduled.push(timer)
+      return timer
+    },
+    clearTimeout: (timer) => cleared.push(timer),
+    fetch: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, state: { rev: 1 } }) }),
+  })
+  const dispose = client.__test.subscribeState({ onStatus: (mode) => statuses.push(mode) })
+  // Drive 40 failures. Only the first 8 may create a new EventSource; the chain then stays in
+  // polling, and a manual reconnect starts a fresh chain.
+  for (let round = 0; round < 40; round += 1) {
+    const source = instances.at(-1)
+    source.emit('error')
+    const next = scheduled.at(-1)
+    if (next && next.fn) {
+      next.fn()
+      scheduled.pop()
+    }
+  }
+  assert.equal(scheduled.length, 0, 'no retry timer is left after the cap')
+  assert.equal(instances.length, 9, 'the initial source + 8 automatic reconnects')
+  assert.equal(statuses.at(-1), 'polling', 'the cap leaves the panel in the polling fallback')
+  assert.equal(statuses.filter((mode) => mode === 'reconnecting').length, 8)
+  dispose.reconnect()
+  assert.equal(instances.length, 10, 'a manual reconnect resets the counter and tries again')
+  assert.equal(statuses.at(-1), 'reconnecting')
+  dispose()
 })
 
 test('the retry delay grows exponentially and is capped', () => {
@@ -3568,7 +3650,16 @@ test('a guest intent can act on its own host only', () => {
   )
   // A crafted hostId never wins over the carrier's host.
   assert.equal(sanitizeGuestIntent({ action: 'download-file', hostId: 'h_victim', path: '/a' }, 'h_a').hostId, 'h_a')
-  assert.equal(sanitizeGuestIntent({ action: 'disconnect', hostId: 'h_victim' }, 'h_a').hostId, 'h_a')
+  // A guest may only disconnect its own host; a forged id is refused, not rewritten into
+  // "disconnect yourself" (review blocker 1).
+  assert.equal(sanitizeGuestIntent({ action: 'disconnect', hostId: 'h_victim' }, 'h_a'), null)
+  assert.deepEqual(
+    { ...sanitizeGuestIntent({ action: 'disconnect', hostId: 'h_a' }, 'h_a') },
+    {
+      action: 'disconnect',
+      hostId: 'h_a',
+    },
+  )
   assert.equal(sanitizeGuestIntent({ target: 'h_victim' }, 'h_a'), null)
   assert.equal(sanitizeGuestIntent({ target: 'h_a' }, 'h_a').target, 'h_a')
   assert.equal(sanitizeGuestIntent({ target: 'local' }, 'h_a').target, 'local')

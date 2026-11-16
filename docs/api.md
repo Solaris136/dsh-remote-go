@@ -249,6 +249,12 @@ interface StateView {
    * 旧 Host 没有该字段：Client 退回「后到即生效」。
    */
   rev: number
+  /**
+   * 本次发布的代际：Host 进程 / 插件每次启动都不同。`rev` 只在本代际内单调；Client 发现 `instance`
+   * 变化时接受新帧并重置水位（Host 重启或插件重载后 `rev` 会从 0 重新计数）。
+   * 旧 Host 没有该字段：Client 只按 `rev` 比较。
+   */
+  instance: string
   hostVersion: string | null    // 本机 DSH 版本
   targetVersion: string | null  // = 本机 DSH 版本
   hosts: HostView[]; settings: SettingsView

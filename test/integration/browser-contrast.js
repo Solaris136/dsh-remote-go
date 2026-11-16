@@ -96,6 +96,22 @@ export function measureButtons() {
       labelRatio: renderedLabel ? round(contrast(renderedLabel, background.color)) : null,
     }
   })
+  // 11–12px metadata is normal-size text for WCAG: 4.5:1, not the 3:1 large-text floor. It used
+  // to be excluded from this check entirely, so `label-caption` slipped through (review).
+  const smallText = [...section.querySelectorAll('.drg-card-meta dt, .drg-card-meta dd')].map((node) => {
+    const style = getComputedStyle(node)
+    const background = effectiveBackground(node)
+    const opacity = accumulatedOpacity(node)
+    const color = parseColor(style.color)
+    const rendered = renderedForeground(color, background.color, opacity)
+    return {
+      text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30),
+      color: style.color,
+      background: format(background.color),
+      opacity: round(opacity),
+      ratio: rendered ? round(contrast(rendered, background.color)) : null,
+    }
+  })
   return {
     mounted: true,
     scheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
@@ -110,6 +126,7 @@ export function measureButtons() {
         ? document.getAnimations().filter((animation) => animation.playState === 'running').length
         : 0,
     buttons,
+    smallText,
   }
 }
 
@@ -165,6 +182,12 @@ export async function assertMeasured(measured, mode) {
         `${mode}: ${name} label contrast ratio ${button.labelRatio} is below ${MIN_CONTRAST} (${button.labelColor} at opacity ${button.opacity} on ${button.background})`,
       )
     }
+  }
+  for (const item of measured.smallText ?? []) {
+    assert.ok(
+      item.ratio !== null && item.ratio >= 4.5,
+      `${mode}: small metadata "${item.text}" contrast ratio ${item.ratio} is below 4.5 (${item.color} at opacity ${item.opacity} on ${item.background})`,
+    )
   }
   const primary = measured.buttons.filter((button) => PRIMARY_TEST_IDS.includes(button.testId))
   assert.equal(primary.length, PRIMARY_TEST_IDS.length, `${mode}: the primary buttons under test are missing`)

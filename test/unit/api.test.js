@@ -176,6 +176,7 @@ test('GET /state returns the contract shape', async () => {
     assert.equal(result.json.ok, true)
     const state = result.json.state
     assert.equal(typeof state.rev, 'number', 'every snapshot carries its monotonic revision')
+    assert.equal(typeof state.instance, 'string', 'and the publish instance that scopes the revision')
     assert.equal(state.hostVersion, '0.2.2-rc.1')
     assert.equal(state.hosts.length, 1)
     assert.equal(state.firstRun, false)

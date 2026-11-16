@@ -484,6 +484,7 @@ window.__ModuleLoader__.load({
       ],
       liveReconnect: ['重新连接', 'Reconnect'],
       liveReconnecting: ['正在重新连接…', 'Reconnecting…'],
+      liveStreamRestored: ['实时连接已恢复。', 'Live updates restored.'],
       hostWarnings: ['提示', 'Notice'],
       versionDifferent: [
         '远端 DSH {remote} 与本机 {local} 不一致',
@@ -1182,9 +1183,16 @@ window.__ModuleLoader__.load({
       }
       const scheduleStreamRetry = () => {
         if (disposed || retryTimer !== null) return
+        if (retryAttempt >= STREAM_RETRY_MAX_ATTEMPTS) {
+          // The automatic chain stops here; polling continues and the banner offers a manual
+          // reconnect, which resets the counter. This is the cap the UI promises.
+          setMode('polling')
+          return
+        }
         if (typeof setTimeout !== 'function') return
         const attempt = retryAttempt
-        retryAttempt = Math.min(retryAttempt + 1, STREAM_RETRY_MAX_ATTEMPTS)
+        retryAttempt += 1
+        setMode('reconnecting')
         retryTimer = setTimeout(() => {
           retryTimer = null
           if (!disposed) startStream()
@@ -1250,7 +1258,9 @@ window.__ModuleLoader__.load({
           stopStream()
           scheduleStreamRetry()
         })
-        setMode('live')
+        // Do not claim `live` here: until `open` (or the first frame/ping) arrives the banner
+        // must stay up. A manual or automatic reconnect used to clear it before the stream
+        // actually worked (review blocker 2).
       }
       const reconnect = () => {
         if (disposed) return
@@ -1260,7 +1270,12 @@ window.__ModuleLoader__.load({
         if (retryTimer !== null && typeof clearTimeout === 'function') clearTimeout(retryTimer)
         retryTimer = null
         startStream()
-        if (mode !== 'live') startPolling()
+        if (mode !== 'live') {
+          startPolling()
+          // `startPolling` sets `polling`; the retry attempt is the state that keeps the banner
+          // saying "reconnecting" until the stream actually opens.
+          setMode('reconnecting')
+        }
       }
 
       // Initial read in parallel with opening the stream, so the panel can paint immediately even when SSE is slow.
@@ -2035,7 +2050,15 @@ window.__ModuleLoader__.load({
               props.subtitle ? box('p', 'drg-modal-subtitle', props.subtitle) : null,
             ),
             typeof onClose === 'function'
-              ? h(IconButton, { icon: h(IconClose), label: props.closeLabel || 'Close', onClick: onClose })
+              ? h(IconButton, {
+                  icon: h(IconClose),
+                  label: props.closeLabel || 'Close',
+                  // The header × is part of the same dismissal contract as Escape and the
+                  // backdrop: while the dialog's request is in flight it is disabled too
+                  // (review blocker 3).
+                  disabled: !dismissible,
+                  onClick: dismissible ? onClose : undefined,
+                })
               : null,
           ),
           box('div', 'drg-modal-body', props.children),
@@ -2427,29 +2450,33 @@ window.__ModuleLoader__.load({
       }
 
       // The stream died and the panel is polling: say so instead of silently showing stale
-      // numbers, and offer the one action that can restore live updates (audit S2-1).
-      const liveBanner =
-        props.mode === 'polling'
-          ? box(
-              'div',
-              'drg-live-banner',
-              h(
-                Notice,
-                { tone: 'warn', title: t('liveStreamLostTitle') },
-                t('liveStreamLostBody', { seconds: Math.round(POLL_INTERVAL_MS / 1000) }),
-              ),
-              h(
-                Button,
-                {
-                  variant: 'secondary',
-                  testId: 'live-reconnect',
-                  onClick: props.onRetryLive,
-                  disabled: typeof props.onRetryLive !== 'function',
-                },
-                t('liveReconnect'),
-              ),
-            )
-          : null
+      // numbers, and offer the one action that can restore live updates (audit S2-1). The banner
+      // also stays up while a reconnect attempt is in flight (`reconnecting`): only an actual
+      // `open`/first frame clears it.
+      const liveDegraded = props.mode === 'polling' || props.mode === 'reconnecting'
+      const liveBanner = liveDegraded
+        ? box(
+            'div',
+            'drg-live-banner',
+            h(
+              Notice,
+              { tone: 'warn', title: t('liveStreamLostTitle') },
+              props.mode === 'reconnecting'
+                ? t('liveReconnecting')
+                : t('liveStreamLostBody', { seconds: Math.round(POLL_INTERVAL_MS / 1000) }),
+            ),
+            h(
+              Button,
+              {
+                variant: 'secondary',
+                testId: 'live-reconnect',
+                onClick: props.onRetryLive,
+                disabled: typeof props.onRetryLive !== 'function',
+              },
+              t('liveReconnect'),
+            ),
+          )
+        : null
 
       return box(
         'div',
@@ -2842,7 +2869,7 @@ window.__ModuleLoader__.load({
       }
       const payload = switcherPayload()
       pushLocalHostRow(payload)
-      pushGuestHostRow(payload)
+      pushGuestHostRow()
       return payload
     }
 
@@ -2880,11 +2907,26 @@ window.__ModuleLoader__.load({
       return switcher.installed
     }
 
-    function pushGuestHostRow(payload) {
+    /**
+     * The row payload for a carrier's own page. A guest must not render other hosts' rows at
+     * all: its exit control is bound to its own host, and a forged intent for another host is
+     * refused by `sanitizeGuestIntent` (audit review). So the projection is `local + own host`;
+     * cross-host switching from a remote page goes through Local first.
+     */
+    function guestSwitcherPayload(hostId) {
+      const payload = switcherPayload()
+      return {
+        ...payload,
+        current: payload.current === hostId ? hostId : 'local',
+        hosts: payload.hosts.filter((host) => host.id === hostId),
+      }
+    }
+
+    function pushGuestHostRow() {
       const entry = shownCarrier()
       if (entry === null || entry.rowInstalled !== true) return
       try {
-        entry.backend.pushRow(entry, payload)
+        entry.backend.pushRow(entry, guestSwitcherPayload(entry.hostId))
       } catch (_error) {
         // the framed page or guest may still be navigating
       }
@@ -4019,6 +4061,8 @@ window.__ModuleLoader__.load({
     /** A switched-to carrier waits this long for its guest document before showing anyway. */
     const CARRIER_READY_TIMEOUT_MS = 1200
     const CARRIER_PAINT_TIMEOUT_MS = 320
+    /** A framed page that never fires `load` still needs a visible failure and a way out. */
+    const CARRIER_LOAD_TIMEOUT_MS = 10000
     /** Installing the injected row can fail while the sidebar is still mounting: retry soon. */
     const CARRIER_INSTALL_RETRY_MS = 1500
     const CARRIER_INSTALL_MAX_ATTEMPTS = 8
@@ -4085,7 +4129,7 @@ window.__ModuleLoader__.load({
       // places the row as soon as the remote sidebar is wide enough to hold it.
       const live = typeof status === 'string' && status !== 'error' && status !== 'no-document'
       entry.rowInstalled = live
-      if (live && carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+      if (live && carrierPool.current === entry.hostId) pushGuestHostRow()
       return live
     }
 
@@ -4586,7 +4630,10 @@ window.__ModuleLoader__.load({
             // links and clipboard any more than it costs it the file bridge.
             const capabilities = await installCapabilityBridge(entry)
             if (entry.view !== view) return
-            if (!live && !tools && !capabilities) return
+            // Each committed document is a fresh install attempt; a collapsed / not-yet-mounted
+            // sidebar retries with backoff instead of leaving the guest without its row.
+            entry.installAttempts = 0
+            if (!live || !tools || !capabilities) scheduleCarrierInstall(entry)
             if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
           })
       })
@@ -4663,6 +4710,7 @@ window.__ModuleLoader__.load({
         timer: null,
         installAttempts: 0,
         installTimer: null,
+        loadTimer: null,
         /** What the frame shows when the loaded document is not the DSH UI. */
         notDshMessage: typeof message === 'string' ? message : '',
       }
@@ -4671,7 +4719,28 @@ window.__ModuleLoader__.load({
       document.body.appendChild(root)
       // Assign after the listener and the element are in place, so the first load is observed.
       frame.src = url
+      armCarrierLoadTimeout(entry)
       return entry
+    }
+
+    /** A frame that never commits still gets the failure layer instead of an empty window. */
+    function clearCarrierLoadTimeout(entry) {
+      if (entry === null || entry === undefined || entry.loadTimer === null || entry.loadTimer === undefined) return
+      if (typeof clearTimeout === 'function') clearTimeout(entry.loadTimer)
+      entry.loadTimer = null
+    }
+    function armCarrierLoadTimeout(entry) {
+      if (entry === null || entry === undefined) return
+      clearCarrierLoadTimeout(entry)
+      if (typeof setTimeout !== 'function') return
+      entry.loadTimer = setTimeout(() => {
+        entry.loadTimer = null
+        if (!carrierPool.entries.includes(entry)) return
+        if (entry.ready === true) return
+        showCarrierError(entry.errorLayer)
+        markCarrierReady(entry)
+      }, CARRIER_LOAD_TIMEOUT_MS)
+      unrefTimer(entry.loadTimer)
     }
 
     function webWindow(entry) {
@@ -4689,6 +4758,15 @@ window.__ModuleLoader__.load({
     function onWebFrameLoad(entry) {
       if (entry === null || entry.kind !== 'web') return
       const win = webWindow(entry)
+      // The initial about:blank of a freshly appended iframe can dispatch `load` before the
+      // assigned URL commits. It is not the remote document, so it must not be mistaken for a
+      // non-DSH page; the load timeout owns the case where the real URL never arrives.
+      try {
+        if (win && win.location && win.location.href === 'about:blank') return
+      } catch (_error) {
+        // a cross-origin document is handled below (the frame is reset to its view path)
+      }
+      clearCarrierLoadTimeout(entry)
       if (win === null) {
         // The framed page left this origin (an external link, an OAuth hop): a cross-origin
         // frame would hide the host switcher and trap the window there, so bring it back.
@@ -4718,7 +4796,7 @@ window.__ModuleLoader__.load({
       markCarrierReady(entry)
       const installed = installWebCarrier(entry, win)
       if (!installed) scheduleCarrierInstall(entry)
-      if (carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+      if (carrierPool.current === entry.hostId) pushGuestHostRow()
     }
 
     /**
@@ -4739,7 +4817,7 @@ window.__ModuleLoader__.load({
       if ((entry.installAttempts || 0) >= CARRIER_INSTALL_MAX_ATTEMPTS) return
       const delay = CARRIER_INSTALL_RETRY_MS * Math.min(8, 2 ** (entry.installAttempts || 0))
       entry.installAttempts = (entry.installAttempts || 0) + 1
-      entry.installTimer = setTimeout(() => {
+      entry.installTimer = setTimeout(async () => {
         entry.installTimer = null
         if (!carrierPool.entries.includes(entry)) return
         let installed = false
@@ -4748,7 +4826,12 @@ window.__ModuleLoader__.load({
             const win = webWindow(entry)
             installed = win ? installWebCarrier(entry, win) : false
           } else {
-            installed = installHostRow(entry)
+            // A desktop guest gets the same retry for all three injections: the row, the file
+            // bridge and the capability bridge are independent and each can fail while the
+            // sidebar is still mounting.
+            installed = await installHostRow(entry)
+            await installGuestTools(entry)
+            await installCapabilityBridge(entry)
           }
         } catch (_error) {
           installed = false
@@ -4756,7 +4839,7 @@ window.__ModuleLoader__.load({
         if (installed) {
           entry.installAttempts = 0
           if (carrierPool.current === entry.hostId) {
-            pushGuestHostRow(switcherPayload())
+            pushGuestHostRow()
             if (typeof entry.backend.poll === 'function') entry.backend.poll(entry)
           }
           return
@@ -4809,7 +4892,12 @@ window.__ModuleLoader__.load({
             name: typeof intent.name === 'string' ? intent.name : '',
           }
         }
-        if (action === 'disconnect') return { action, hostId }
+        if (action === 'disconnect') {
+          // The row a guest sees only contains Local and its own host, so the only legitimate
+          // exit is its own. A forged id for another host is refused instead of being rewritten
+          // into "disconnect myself" (review blocker 1).
+          return intent.hostId === hostId ? { action, hostId } : null
+        }
         if (action === 'clipboard-write') {
           return {
             action,
@@ -4857,7 +4945,7 @@ window.__ModuleLoader__.load({
       }
       const live = typeof row === 'string' && row !== 'error' && row !== 'no-document'
       entry.rowInstalled = live
-      if (live) pushWebCarrierRow(entry, switcherPayload())
+      if (live) pushWebCarrierRow(entry, guestSwitcherPayload(entry.hostId))
       try {
         mountGuestTools(win)
       } catch (_error) {
@@ -4928,8 +5016,11 @@ window.__ModuleLoader__.load({
         entry.url = url
         entry.rowInstalled = false
         entry.ready = false
+        entry.installAttempts = 0
+        stopCarrierInstall(entry)
         try {
           entry.frame.src = url
+          armCarrierLoadTimeout(entry)
         } catch (_error) {
           // a frame that refuses a navigation reports it through the load event
         }
@@ -4951,6 +5042,7 @@ window.__ModuleLoader__.load({
 
     function disposeWebCarrier(entry) {
       stopCarrierInstall(entry)
+      clearCarrierLoadTimeout(entry)
       try {
         entry.frame.src = 'about:blank'
       } catch (_error) {
@@ -5112,7 +5204,7 @@ window.__ModuleLoader__.load({
       ownCaptionBand(entry, entry.captionApplied === true)
       updateSwitcher({ current: hostId })
       if (entry.rowInstalled === true) {
-        pushGuestHostRow(switcherPayload())
+        pushGuestHostRow()
         if (typeof entry.backend.poll === 'function') entry.backend.poll(entry)
       }
       return { ok: true, reused }
@@ -5794,6 +5886,15 @@ window.__ModuleLoader__.load({
                 describedBy: fieldErrors.password ? 'wizard-password-error' : undefined,
                 onChange: (value) => {
                   setAuthDirty(true)
+                  // Clear the field error like every other input: the password has no draft
+                  // field, so `patchDraft` was not called and the error stuck (review feedback).
+                  setFieldErrors((current) => {
+                    if (current.password === undefined) return current
+                    const next = { ...current }
+                    delete next.password
+                    return next
+                  })
+                  if (formError !== null) setFormError(null)
                   setPassword(value)
                 },
               }),
@@ -6362,6 +6463,9 @@ window.__ModuleLoader__.load({
       const [password, setPassword] = useState('')
       const [remember, setRemember] = useState(false)
       const [localError, setLocalError] = useState('')
+      // A failure reported by the previous connect attempt is cleared as soon as the user
+      // edits the password, like every other field error.
+      const [serverErrorCleared, setServerErrorCleared] = useState(false)
       const canRemember = props.storageAvailable === true
       const submit = () => {
         // Enter can fire faster than React disables the field: the guard lives in the handler
@@ -6399,7 +6503,7 @@ window.__ModuleLoader__.load({
           Field,
           {
             label: t('passwordPromptLabel'),
-            error: localError || (typeof props.error === 'string' ? props.error : ''),
+            error: localError || (serverErrorCleared ? '' : typeof props.error === 'string' ? props.error : ''),
             errorId: 'password-prompt-error',
           },
           h(TextInput, {
@@ -6410,10 +6514,11 @@ window.__ModuleLoader__.load({
             testId: 'password-input',
             ariaLabel: t('passwordPromptLabel'),
             disabled: props.busy === true,
-            invalid: localError !== '' || typeof props.error === 'string',
+            invalid: localError !== '' || (!serverErrorCleared && typeof props.error === 'string'),
             describedBy: 'password-prompt-error',
             onChange: (value) => {
               setPassword(value)
+              setServerErrorCleared(true)
               if (localError !== '') setLocalError('')
             },
             onKeyDown: (event) => {
@@ -6535,7 +6640,17 @@ window.__ModuleLoader__.load({
     function stateRevision(state) {
       return state && typeof state.rev === 'number' && Number.isFinite(state.rev) ? state.rev : null
     }
-    function isNewerState(next, currentRev) {
+    /**
+     * The Host's publish generation. `rev` restarts at 0 with every Host process / plugin
+     * reload, so a Client holding the old high-water mark would reject every new frame forever.
+     * A frame from another generation is accepted regardless of its revision.
+     */
+    function stateInstance(state) {
+      return state && typeof state.instance === 'string' && state.instance !== '' ? state.instance : null
+    }
+    function isNewerState(next, currentRev, currentInstance) {
+      const instance = stateInstance(next)
+      if (instance !== null && currentInstance !== null && instance !== currentInstance) return true
       const rev = stateRevision(next)
       if (rev === null) return true
       return !(typeof currentRev === 'number' && rev <= currentRev)
@@ -6549,9 +6664,11 @@ window.__ModuleLoader__.load({
       const [mode, setMode] = useState('idle')
       const alive = useRef(true)
       const revRef = useRef(stateRevision(initialState))
+      const instanceRef = useRef(stateInstance(initialState))
       const streamRef = useRef(null)
       const applyState = (next) => {
-        if (!isNewerState(next, revRef.current)) return false
+        if (!isNewerState(next, revRef.current, instanceRef.current)) return false
+        instanceRef.current = stateInstance(next) ?? instanceRef.current
         revRef.current = stateRevision(next) ?? revRef.current
         setState(next)
         return true
@@ -6560,13 +6677,14 @@ window.__ModuleLoader__.load({
       downloadHandler.current = typeof onDownload === 'function' ? onDownload : () => {}
       const refresh = useCallback(() => {
         setLoading(true)
-        // The revision this refresh was requested at: a response that is not newer than it is
-        // stale even when it is the last one to resolve.
+        // The revision (and publish generation) this refresh was requested at: a response that
+        // is not newer than it is stale even when it is the last one to resolve.
         const requestedAt = revRef.current
+        const requestedInstance = instanceRef.current
         return api.getState().then(
           (next) => {
             if (!alive.current) return
-            if (!isNewerState(next, requestedAt)) {
+            if (!isNewerState(next, requestedAt, requestedInstance)) {
               setLoading(false)
               return
             }
@@ -7111,14 +7229,26 @@ window.__ModuleLoader__.load({
       }, [])
 
       // While the state stream is down, download cards must keep moving from a status poll:
-      // SSE `download` frames are exactly what stops arriving in polling mode (audit S2-1).
+      // SSE `download` frames are exactly what stops arriving in fallback mode (audit S2-1).
       useEffect(() => {
-        if (remote.mode !== 'polling') return
+        if (remote.mode !== 'polling' && remote.mode !== 'reconnecting') return
         for (const id of Object.keys(downloadJobsRef.current)) {
           const job = downloadJobsRef.current[id]
           if (!job || job.phase === 'saving' || job.phase === 'done' || job.phase === 'error') continue
           startDownloadPoll(id)
         }
+      }, [remote.mode])
+
+      // The management window's footer banner is not visible while a remote carrier fills the
+      // window. Surface the same degradation through the shell's toast so it is visible on the
+      // local page and over a guest, and announce the recovery (review feedback).
+      const lastStreamMode = useRef('idle')
+      useEffect(() => {
+        const degraded = remote.mode === 'polling' || remote.mode === 'reconnecting'
+        const wasDegraded = lastStreamMode.current === 'polling' || lastStreamMode.current === 'reconnecting'
+        if (degraded && !wasDegraded) notify(t('liveStreamLostTitle'), 'warn')
+        else if (remote.mode === 'live' && wasDegraded) notify(t('liveStreamRestored'), 'success')
+        lastStreamMode.current = remote.mode
       }, [remote.mode])
 
       // A failed connect drops the prompt too; the toast carries the reason.
@@ -7730,7 +7860,7 @@ window.__ModuleLoader__.load({
     }
     .drg-download-meta {
       display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11px;
-      color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums;
+      color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums;
     }
     .drg-download-detail {
       margin: 6px 0 0; font-size: 11px; line-height: 1.45; color: var(--dsw-alias-state-error-primary);
@@ -7811,7 +7941,7 @@ window.__ModuleLoader__.load({
     .drg-card-progress { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
     .drg-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
     .drg-card-meta > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-    .drg-card-meta dt { color: var(--dsw-alias-label-caption); font-size: 11px; }
+    .drg-card-meta dt { color: var(--dsw-alias-label-secondary); font-size: 11px; }
     .drg-card-meta dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: 12px; }
     .drg-card-actions {
       display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 2px; padding-top: 12px;
@@ -8354,6 +8484,7 @@ window.__ModuleLoader__.load({
       createDialogStack,
       subscribeState,
       stateRevision,
+      stateInstance,
       isNewerState,
       streamRetryDelay,
       initialDraft,

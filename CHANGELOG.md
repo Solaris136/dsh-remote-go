@@ -15,13 +15,16 @@
   Escape 与 Tab，不再每个 `Modal` 各自挂监听（旧实现依赖每次渲染都变的 `onClose`，重挂监听时一次按键
   会先关掉下层）。同时补上初始焦点、Tab 循环、卸载还原焦点、`overflow:hidden` 滚动锁、仅栈顶
   `aria-modal`、下层 `inert`、标题 `aria-labelledby`；输入框恢复 `:focus-visible` 外环。动作进行中的
-  对话框不可被 Escape/遮罩关闭。
+  对话框不可被 Escape/遮罩/头部 × 关闭（× 同时 disabled）。
 - **编辑主机不再静默改端口 / 把 IPv6 读成端口 1**。`HostView` 新增非敏感的 `port` / `username`，编辑
   表单直接读取；`addressMasked` 只用于展示（端口 22 省略、IPv6 加方括号）并补跨端一致性测试。
-- **`/state` 增加单调 `rev`，旧帧不再回退界面**。Host 每次发布状态时自增 `rev`；Client 只接受更新的帧，
-  迟到的 `GET /state` 响应低于当前 revision 即丢弃。契约升到 **2.10**（只增字段，向后兼容）。
-- **SSE 断开后自动重连并明确降级**。状态流按指数退避重建 EventSource（成功收帧后复位），期间以 3s 轮询
-  兜底；主机清单页脚显示「实时连接已断开，正在轮询」与「重新连接」，轮询期间继续补下载任务状态。
+- **`/state` 增加单调 `rev` 与发布代际 `instance`，旧帧不再回退界面**。Host 每次发布状态时自增 `rev`；
+  Client 只接受更新的帧，迟到的 `GET /state` 响应低于当前 revision 即丢弃；Host 重启/插件重载换
+  `instance`，新代际的帧即使 `rev` 回退也会被接受，不会永久卡在旧高水位。契约升到 **2.10**（只增字段，
+  向后兼容）。
+- **SSE 断开后自动重连并明确降级**。状态流按指数退避重建 EventSource（最多 8 次，之后停在轮询并保留手动
+  「重新连接」）；只有真正收到 `open`/首帧才恢复 live，重连期间横幅保持可见，期间以 3s 轮询兜底；主机清单
+  页脚与宿主 toast 同时提示降级/恢复，轮询期间继续补下载任务状态。
 - **密码流程**：编辑密码主机而没改认证方式时不再要求输入密码（文案说明连接时会再询问）；`passwordSaved`
   为真时先尝试无密码连接、失败再弹窗；密码框在请求进行中禁用输入与回车，避免一次 Enter 发两次
   `POST /connect`。
@@ -33,13 +36,15 @@
 - **管理界面**：正在连接的主机不进清单（重启/关闭这类一次性动作的卡片保留，但连接中禁用编辑/删除）；
   删除连接中的主机需二次确认；卡片与连接窗口渲染 `warning` 与版本差异提示；下载卡改为不含按钮的
   live region，进度条带 `aria-label` / `aria-valuetext`；toast 支持 `warn`/`info` 强调色、队列与
-  `aria-live`。
+  `aria-live`；11px 元信息改用 `label-secondary` 并纳入对比度门禁（≥4.5:1）。
 - **载体交互**：浏览器载体的下载桥统一补上 carrier 的 `hostId`（guest 自带 hostId 不能伪造），guest
-  intent 在收口处做 action 白名单与 hostId 强制覆盖；失败层增加「返回本地」按钮与 `role="alert"`，浏览器
-  载体检测到「文档不是 DSH」时显示该层；主机条支持键盘（Tab/Enter/Space/方向键/Escape/roving tabindex）；
-  `wanted` 竞态在所有分支统一检查；主机条注入失败按 1.5s 起退避重试；`executeJavaScript` 失败与 intent
-  drain 超时不再静默卡死；`localStorage` 分区不可被 `delete` 绕过；`findSlot`、重装幂等、`readStart`
-  单位、`disposeCarrier` 清理 launch URL 等低危项一并修正。审计来源见 PR #63。
+  intent 在收口处做 action 白名单与 hostId 强制覆盖（guest 行只投影本地 + 自己的主机，断开其他主机直接
+  拒绝）；失败层增加「返回本地」按钮与 `role="alert"`，浏览器载体检测到「文档不是 DSH」或 10s 未
+  load 时都显示该层；主机条支持键盘（Tab/Enter/Space/方向键/Escape/roving tabindex）；`wanted` 竞态在
+  所有分支统一检查；主机条/能力桥注入失败按 1.5s 起退避重试（桌面与浏览器载体都接）；`executeJavaScript`
+  失败与 intent drain 超时不再静默卡死；`localStorage` 分区不可被 `delete` 绕过；`findSlot`、重装幂等、
+  `readStart` 单位、`disposeCarrier` 清理 launch URL 等低危项一并修正。审计来源见 PR #63。
+
 ### 安全
 
 - **`ErrorView` 统一脱敏并限长**（独立安全审计 A）。失败连接会把远端进程输出塞进 `ErrorView.technical`，
