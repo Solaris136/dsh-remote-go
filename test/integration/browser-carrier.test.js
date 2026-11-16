@@ -838,7 +838,9 @@ window.ReactDOM = { createRoot }`,
           null,
         { timeout: 10_000 },
       )
-      // The guest reports through the row's 400ms poll; a couple of rounds, then measure.
+      // The guest reports through the row's 400ms poll, so the host catches up within one cycle.
+      // The overlap during that cycle is the documented transient (docs/design.md §4.2): this
+      // measurement is after it, and asserting the transient itself would only add timing flakes.
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const collapsed = await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
@@ -854,9 +856,15 @@ window.ReactDOM = { createRoot }`,
           newSession: rect === null ? null : { left: Math.round(rect.left), right: Math.round(rect.right) },
           newSessionPosition: button === null ? '' : guest.defaultView.getComputedStyle(button).position,
           menuStart: getComputedStyle(document.documentElement).getPropertyValue('--dsh-windows-menu-start').trim(),
+          // The guest's own copy of DSH's rule: the value the plugin hands over comes from here.
+          guestStart: guest.defaultView
+            .getComputedStyle(guest.documentElement)
+            .getPropertyValue('--dsh-windows-menu-start')
+            .trim(),
         }
       })
       assert.equal(collapsed.railCollapsed, true, 'the remote rail is collapsed')
+      assert.equal(collapsed.guestStart, '84px', 'the guest resolves the menubar inset with DSH own rule')
       assert.equal(collapsed.newSessionPosition, 'fixed', 'a collapsed rail lifts new-session into the band')
       assert.equal(collapsed.newSession.left, 48, 'the caption controls still start after the toggle')
       assert.equal(

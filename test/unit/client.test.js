@@ -1557,12 +1557,16 @@ test('a guest that refuses the caption script stays below the local band', async
   }
 })
 
-test('the guest mirror reports the remote rail state on the bridge queue', () => {
+test('the guest mirror reports the rail state and the authority inset on the bridge queue', () => {
   const local = loadClientPlugin({ document: fakeDocument() })
-  // 84px is where the collapsed rail's caption controls end (toggle at 12px, new-session at 48px),
-  // the same inset the window drag strip leaves; 48px is the shell preload's own default.
-  assert.equal(local.carrier.captionMenuStart(true), 84, 'a collapsed rail ends its controls at 84px')
-  assert.equal(local.carrier.captionMenuStart(false), 48, 'an expanded sidebar leaves the preload default')
+  // The guest hands over DSH's own resolved value; these two are the fallback for a guest that
+  // cannot answer (84px = the collapsed rail's controls: toggle at 12px + 28, new-session at 48px
+  // + 28, 8px of air; 48px = the shell preload's own default).
+  assert.equal(local.carrier.captionMenuStart(true, ''), '84px', 'a collapsed rail ends its controls at 84px')
+  assert.equal(local.carrier.captionMenuStart(false, ''), '48px', 'an expanded sidebar keeps the preload default')
+  assert.equal(local.carrier.captionMenuStart(true, ' 96px '), '96px', 'the guest value wins over the fallback')
+  assert.equal(local.carrier.captionMenuStart(true, 'garbage'), '84px', 'an unreadable value falls back')
+  assert.equal(local.carrier.captionMenuStart(true, '9999px'), '84px', 'an absurd inset is not copied')
   const script = local.carrier.sidebarMirror()
   assert.match(script, /^\(function mountSidebarMirror\(win\)/)
   const observers = []
@@ -1575,6 +1579,7 @@ test('the guest mirror reports the remote rail state on the bridge queue', () =>
     disconnect() {}
   }
   let rail = false
+  let resolved = ''
   const guestDom = {
     documentElement: {},
     querySelector(selector) {
@@ -1582,22 +1587,51 @@ test('the guest mirror reports the remote rail state on the bridge queue', () =>
       return rail ? { getAttribute: () => 'true' } : null
     },
   }
-  const guestWindow = { document: guestDom, MutationObserver: FakeObserver }
+  const guestWindow = {
+    document: guestDom,
+    MutationObserver: FakeObserver,
+    // The guest carries the desktop marker, so DSH's sidebar rule resolves the menubar inset there.
+    getComputedStyle: () => ({ getPropertyValue: (name) => (name === '--dsh-windows-menu-start' ? resolved : '') }),
+  }
   const install = new Function('window', 'return ' + script)
-  assert.equal(install(guestWindow), 'expanded', 'the state at install time tells the host where to start')
-  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false }])
-  // The remote UI marks the frame it collapsed; that is the whole signal.
+  assert.deepEqual(
+    install(guestWindow),
+    { collapsed: false, start: '' },
+    'the record at install time tells the host where to start',
+  )
+  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false, start: '' }])
+  // The remote UI marks the frame it collapsed, and its own rule raises the inset: report both.
   rail = true
+  resolved = ' 84px '
   observers[0].callback()
-  assert.deepEqual(guestWindow.__drgBridgeQueue.at(-1), { action: 'caption-sidebar', collapsed: true })
+  assert.deepEqual(guestWindow.__drgBridgeQueue.at(-1), {
+    action: 'caption-sidebar',
+    collapsed: true,
+    start: '84px',
+  })
   observers[0].callback()
   assert.equal(guestWindow.__drgBridgeQueue.length, 2, 'a state that did not change is not reported again')
   // The host replaces the queue after every drain, so a report must never cache the old array.
   guestWindow.__drgBridgeQueue = []
   rail = false
+  resolved = ''
   observers[0].callback()
-  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false }])
+  assert.deepEqual(guestWindow.__drgBridgeQueue, [{ action: 'caption-sidebar', collapsed: false, start: '' }])
   assert.equal(install(guestWindow), 'already', 'a second install into the same document is a no-op')
+  // A guest that cannot resolve the variable still reports the rail state: the host falls back.
+  const bare = {
+    document: { documentElement: {}, querySelector: () => ({ getAttribute: () => 'true' }) },
+    MutationObserver: FakeObserver,
+  }
+  assert.deepEqual(new Function('window', 'return ' + script)(bare), { collapsed: true, start: '' })
+  const throwing = {
+    document: bare.document,
+    MutationObserver: FakeObserver,
+    getComputedStyle() {
+      throw new Error('detached')
+    },
+  }
+  assert.deepEqual(new Function('window', 'return ' + script)(throwing), { collapsed: true, start: '' })
 })
 
 test('a collapsed guest rail moves the local caption menubar with it', async () => {
@@ -1618,6 +1652,7 @@ test('a collapsed guest rail moves the local caption menubar with it', async () 
   })
   const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
   const menuStart = () => doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start')
+  const takeScript = takeover.carrier.intentsScript()
   try {
     const opened = await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
     assert.equal(opened.ok, true)
@@ -1627,10 +1662,10 @@ test('a collapsed guest rail moves the local caption menubar with it', async () 
     // The guest answers in the order the carrier asks: caption, rail state, row, then the queue.
     let drained = false
     view.executeJavaScript = (code) => {
-      if (code.includes('mountSidebarMirror')) return Promise.resolve('collapsed')
+      if (code.includes('mountSidebarMirror')) return Promise.resolve({ collapsed: true, start: '84px' })
       if (code.includes('mountHostRow')) return Promise.resolve('installed')
-      if (code === 'window.__drgBridgeQueue || []') {
-        const pending = drained ? [] : [{ action: 'caption-sidebar', collapsed: false }]
+      if (code === takeScript) {
+        const pending = drained ? [] : [{ action: 'caption-sidebar', collapsed: false, start: '' }]
         drained = true
         return Promise.resolve(pending)
       }
@@ -1655,6 +1690,127 @@ test('a collapsed guest rail moves the local caption menubar with it', async () 
     await takeover.carrier.close()
   }
   assert.deepEqual(released, ['lease-1'])
+})
+
+test('a rail report queued while the host drains is neither dropped nor dispatched', async () => {
+  const doc = fakeDocument({ captionHeight: '40px' })
+  const local = loadClientPlugin({
+    document: doc,
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+    }),
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-2', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async () => {},
+      },
+    },
+  })
+  // The real plugin must be applied: a leaked caption intent would then act like a row click.
+  runApply(local)
+  const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const menuStart = () => doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start')
+  const takeScript = local.carrier.intentsScript()
+  // The report that is queued while the host is taking the previous one. It carries the row's own
+  // shape (`target`) so that falling through to the dispatch would switch the window away.
+  const late = { action: 'caption-sidebar', collapsed: true, start: '84px', target: 'local' }
+  const first = { action: 'caption-sidebar', collapsed: false, start: '' }
+  const guestQueue = [first]
+  let drained = 0
+  let legacyClear = false
+  try {
+    const opened = await local.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    assert.equal(opened.ok, true)
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    view.loadURL = () => Promise.resolve()
+    view.executeJavaScript = (code) => {
+      if (code.includes('mountSidebarMirror')) return Promise.resolve({ collapsed: true, start: '84px' })
+      if (code.includes('mountHostRow')) return Promise.resolve('installed')
+      if (code === takeScript) {
+        // One round trip takes and clears together; a report pushed right after it stays queued.
+        const taken = guestQueue.splice(0, guestQueue.length)
+        if (drained === 0) guestQueue.push(late)
+        drained += 1
+        return Promise.resolve(taken)
+      }
+      if (code === 'window.__drgBridgeQueue || []') {
+        // The two-call protocol this replaced: read, then a separate clear (below) that wiped
+        // whatever the guest queued in between.
+        const taken = guestQueue.slice()
+        if (drained === 0) guestQueue.push(late)
+        drained += 1
+        return Promise.resolve(taken)
+      }
+      if (code === 'window.__drgBridgeQueue = []') {
+        guestQueue.length = 0
+        legacyClear = true
+        return Promise.resolve('ok')
+      }
+      return Promise.resolve('ok')
+    }
+    fire(view, 'dom-ready')
+    fire(view, 'did-stop-loading')
+    await settle()
+    assert.equal(menuStart(), '84px', 'the mirror install is adopted at once')
+    // First poll round: the queued report is applied, and the late one is queued during it.
+    await settle(520)
+    assert.equal(menuStart(), '48px')
+    // Second round: the report queued during the first one must still arrive.
+    await settle(700)
+    assert.equal(menuStart(), '84px', 'the report queued during the drain must not be lost')
+    assert.equal(legacyClear, false, 'the intents must be taken and cleared in one round trip')
+    assert.equal(local.carrier.shown(), 'h_a', 'nor may it reach the switcher dispatch')
+  } finally {
+    await local.carrier.close()
+  }
+})
+
+test('a navigation forgets the rail state of the document it replaced', async () => {
+  const doc = fakeDocument({ captionHeight: '40px' })
+  const takeover = loadClientPlugin({
+    document: doc,
+    getComputedStyle: () => ({
+      getPropertyValue: (name) => (name === '--dsh-windows-titlebar-height' ? '40px' : ''),
+    }),
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => ({ lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }),
+        release: async () => {},
+      },
+    },
+  })
+  const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+  const menuStart = () => doc.documentElement.style.getPropertyValue('--dsh-windows-menu-start')
+  try {
+    await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:43210/?token=abc' })
+    const root = doc.body.children.find((node) => node.id === 'dsh-remote-go-overlay-h_a')
+    const view = root.children.find((node) => node.className === 'drg-carrier-view')
+    view.loadURL = () => Promise.resolve()
+    view.executeJavaScript = (code) => {
+      if (code.includes('mountSidebarMirror')) return Promise.resolve({ collapsed: true, start: '84px' })
+      if (code.includes('mountHostRow')) return Promise.resolve('installed')
+      return Promise.resolve('ok')
+    }
+    fire(view, 'dom-ready')
+    fire(view, 'did-stop-loading')
+    await settle()
+    assert.equal(menuStart(), '84px')
+    // The remote page navigates again. Its new document has not reported a rail yet, so the band
+    // must fall back to the shell default instead of repeating the old document's 84px.
+    view.executeJavaScript = (code) => {
+      if (code.includes('mountSidebarMirror')) return Promise.resolve({ collapsed: false, start: '' })
+      if (code.includes('mountHostRow')) return Promise.resolve('installed')
+      return Promise.resolve('ok')
+    }
+    fire(view, 'dom-ready')
+    await settle()
+    assert.equal(menuStart(), '48px', 'the replaced document’s rail must not be written onto this band')
+  } finally {
+    await takeover.carrier.close()
+  }
 })
 
 test('the browser carrier leaves the caption menubar to the local page', async () => {

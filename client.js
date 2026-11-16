@@ -31,21 +31,24 @@ window.__ModuleLoader__.load({
     const CAPTION_MARKER = 'data-windows-titlebar'
     const CAPTION_LIVE_CLASS = 'drg-caption-live'
     /**
-     * Where the caption band's own controls end: the sidebar toggle sits at 12px, a collapsed rail
-     * pins the new-session control at 48px (both are DSH's, see SidebarRoot.module.css), 28px wide,
-     * plus 8px of air. The window drag strip starts here, and so does the caption menubar while the
-     * guest's rail is collapsed.
+     * Fallback for the caption band's control strip, used only when the guest cannot report DSH's
+     * own value: the sidebar toggle sits at 12px, a collapsed rail pins the new-session control at
+     * 48px (both are DSH's, see SidebarRoot.module.css), 28px wide, plus 8px of air. The window drag
+     * strip starts here.
      */
     const CAPTION_CONTROLS_END = 84
     const CAPTION_GRIP_LEFT = CAPTION_CONTROLS_END
     /**
      * Where DSH mounts the Windows caption menubar (应用 / 编辑): a fixed host that reads
-     * `--dsh-windows-menu-start` (default 48px), which DSH's sidebar raises to 84px from its own
-     * collapsed rule. While a guest owns the band, its rail has to drive that inset instead.
+     * `--dsh-windows-menu-start`, which the sidebar's own collapse rule raises to the value above.
+     * The guest resolves that variable for this page (its document carries the same rule), so these
+     * two numbers are only the fallback for a guest that cannot answer.
      */
     const CAPTION_MENU_VAR = '--dsh-windows-menu-start'
     const CAPTION_MENU_START = 48
     const CAPTION_MENU_START_COLLAPSED = CAPTION_CONTROLS_END
+    /** A caption band is tens of pixels tall; an inset past this is not a number worth copying. */
+    const CAPTION_MENU_MAX = 200
     /** A guest reports its rail state through the same queue its row clicks use (mountSidebarMirror). */
     const CAPTION_SIDEBAR_INTENT = 'caption-sidebar'
     /** Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). */
@@ -3323,7 +3326,7 @@ window.__ModuleLoader__.load({
         if (draining) return
         let pending = null
         try {
-          pending = view.executeJavaScript('window.__drgBridgeQueue || []')
+          pending = view.executeJavaScript(TAKE_INTENTS_SCRIPT)
         } catch (_error) {
           return
         }
@@ -3332,16 +3335,15 @@ window.__ModuleLoader__.load({
         pending
           .then((value) => {
             if (!value || !Array.isArray(value) || value.length === 0 || carrierPool.poll !== entry) return
-            try {
-              view.executeJavaScript('window.__drgBridgeQueue = []')
-            } catch (_error) {
-              // ignore a guest that navigated away mid-poll
-            }
             for (const intent of value) {
               // A rail report is news about the band, not a click: it moves this page's caption
               // menubar and must never reach the intent dispatch.
               if (isCaptionSidebarIntent(intent)) {
-                applyGuestSidebar(entry, intent.collapsed === true)
+                applyGuestSidebar(
+                  entry,
+                  intent.collapsed === true,
+                  typeof intent.start === 'string' ? intent.start : '',
+                )
                 continue
               }
               // File intents belong to the host whose guest queued them; row intents
@@ -3401,9 +3403,16 @@ window.__ModuleLoader__.load({
       return { height }
     }
 
-    /** The caption menubar's inset for a band whose sidebar is collapsed or expanded. */
-    function captionMenuStart(collapsed) {
-      return collapsed === true ? CAPTION_MENU_START_COLLAPSED : CAPTION_MENU_START
+    /**
+     * The caption menubar's inset for a band whose sidebar is collapsed or expanded. The guest
+     * hands over the value DSH's own rule resolves to there (`84px` collapsed, nothing expanded),
+     * so a DSH that changes the number keeps working; the constants above are only the fallback for
+     * a guest that cannot answer.
+     */
+    function captionMenuStart(collapsed, start = '') {
+      const raw = typeof start === 'string' ? start.trim() : ''
+      if (/^\d+(?:\.\d+)?px$/.test(raw) && Number.parseFloat(raw) <= CAPTION_MENU_MAX) return raw
+      return (collapsed === true ? CAPTION_MENU_START_COLLAPSED : CAPTION_MENU_START) + 'px'
     }
 
     /**
@@ -3413,17 +3422,15 @@ window.__ModuleLoader__.load({
      * which wins over that stylesheet without touching it — and removes the override again when the
      * local page takes the band back, leaving DSH's own rule in charge.
      */
-    function setCaptionMenuStart(collapsed, root = null) {
-      let target = root
-      if (target === null && typeof document !== 'undefined' && document.documentElement) {
-        target = document.documentElement
-      }
-      if (target === null || !target.style || typeof target.style.setProperty !== 'function') return false
+    function setCaptionMenuStart(collapsed, start = '') {
+      const target = typeof document === 'undefined' ? null : document.documentElement
+      if (target === null || target === undefined || !target.style) return false
+      if (typeof target.style.setProperty !== 'function') return false
       if (collapsed === null || collapsed === undefined) {
         if (typeof target.style.removeProperty === 'function') target.style.removeProperty(CAPTION_MENU_VAR)
         return true
       }
-      target.style.setProperty(CAPTION_MENU_VAR, captionMenuStart(collapsed) + 'px')
+      target.style.setProperty(CAPTION_MENU_VAR, captionMenuStart(collapsed, start))
       return true
     }
 
@@ -3432,12 +3439,15 @@ window.__ModuleLoader__.load({
      * new-session control in the band at 48px, which is exactly where the local page's caption
      * menubar starts until the local sidebar collapses as well. A guest that reserves the band
      * therefore decides that inset, the same way the local sidebar's rule does when it owns it.
+     * `collapsed === null` means "this document has not told us yet": the state is forgotten rather
+     * than carried over from the page that navigated away.
      */
-    function applyGuestSidebar(entry, collapsed) {
+    function applyGuestSidebar(entry, collapsed, start = '') {
       if (entry === null || entry === undefined) return
-      entry.sidebarCollapsed = collapsed === true
+      entry.sidebarCollapsed = collapsed === true ? true : collapsed === false ? false : null
+      entry.sidebarStart = typeof start === 'string' ? start : ''
       if (carrierPool.current !== entry.hostId || entry.captionApplied !== true) return
-      setCaptionMenuStart(entry.sidebarCollapsed)
+      setCaptionMenuStart(entry.sidebarCollapsed === true, entry.sidebarStart)
     }
 
     /** True when an intent is the guest's rail report rather than a click on the switcher row. */
@@ -3446,10 +3456,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Guest half: report the remote sidebar's rail state. It changes long after the document loaded,
-     * and `executeJavaScript` is the desktop guest's only channel back, so the watcher leaves one
-     * intent in the bridge queue the row and the file bridge already use. Returns the state at
-     * install time, which the host adopts before waiting for the next drain.
+     * Guest half: report the remote sidebar's rail state and the caption menubar inset DSH's own
+     * rule resolves for it. Both change long after the document loaded, and `executeJavaScript` is
+     * the desktop guest's only channel back, so the watcher leaves one intent in the bridge queue
+     * the row and the file bridge already use. Returns the same record at install time, which the
+     * host adopts before waiting for the next drain.
      */
     function mountSidebarMirror(win) {
       try {
@@ -3463,16 +3474,32 @@ window.__ModuleLoader__.load({
           var frame = doc.querySelector('[data-sidebar-collapsed]')
           return frame !== null && frame.getAttribute('data-sidebar-collapsed') !== 'false'
         }
+        // The guest carries the desktop marker, so DSH's sidebar rule resolves the menubar inset
+        // here too: hand the authoritative value over instead of repeating its number.
+        var readStart = function () {
+          try {
+            if (typeof win.getComputedStyle !== 'function') return ''
+            var computed = win.getComputedStyle(doc.documentElement)
+            if (!computed || typeof computed.getPropertyValue !== 'function') return ''
+            var value = computed.getPropertyValue('--dsh-windows-menu-start')
+            return typeof value === 'string' ? value.trim() : ''
+          } catch (_error) {
+            return ''
+          }
+        }
+        var current = function () {
+          return { collapsed: read(), start: readStart() }
+        }
         var last = null
         var report = function () {
-          var collapsed = read()
-          if (collapsed === last) return
-          last = collapsed
+          var state = current()
+          if (last !== null && state.collapsed === last.collapsed && state.start === last.start) return
+          last = state
           // Read the queue fresh: the host replaces the array after every drain. The action name
           // has to match CAPTION_SIDEBAR_INTENT (a stringified guest cannot close over it).
           var queue = win.__drgBridgeQueue
           if (!queue || typeof queue.push !== 'function') queue = []
-          queue.push({ action: 'caption-sidebar', collapsed: collapsed })
+          queue.push({ action: 'caption-sidebar', collapsed: state.collapsed, start: state.start })
           win.__drgBridgeQueue = queue
         }
         if (typeof win.MutationObserver === 'function') {
@@ -3483,7 +3510,7 @@ window.__ModuleLoader__.load({
           })
         }
         report()
-        return read() ? 'collapsed' : 'expanded'
+        return current()
       } catch (_error) {
         return 'error'
       }
@@ -3492,20 +3519,29 @@ window.__ModuleLoader__.load({
     const SIDEBAR_MIRROR_SCRIPT = '(' + mountSidebarMirror.toString() + ')(window)'
 
     /**
+     * One round trip that hands this guest's queued intents over and clears them together. Reading
+     * (the old `window.__drgBridgeQueue || []`) and clearing in two calls left a window for an
+     * intent queued in between to be wiped — and a wiped rail report never comes back, because the
+     * guest already recorded that state as reported.
+     */
+    const TAKE_INTENTS_SCRIPT = '(function(){var q=window.__drgBridgeQueue||[];window.__drgBridgeQueue=[];return q})()'
+
+    /**
      * Install the rail watcher in the shown guest and adopt what it reports right away; the row's
      * intent poll only carries the changes that follow.
      */
     async function installSidebarMirror(entry) {
       const view = entry && entry.view
       if (!view || typeof view.executeJavaScript !== 'function') return false
-      let state = ''
+      let state = null
       try {
         state = await view.executeJavaScript(SIDEBAR_MIRROR_SCRIPT)
       } catch (_error) {
-        state = ''
+        state = null
       }
-      if (state !== 'collapsed' && state !== 'expanded') return false
-      applyGuestSidebar(entry, state === 'collapsed')
+      if (state === null || typeof state !== 'object' || Array.isArray(state)) return false
+      if (typeof state.collapsed !== 'boolean') return false
+      applyGuestSidebar(entry, state.collapsed, typeof state.start === 'string' ? state.start : '')
       return true
     }
 
@@ -3583,7 +3619,9 @@ window.__ModuleLoader__.load({
     function ownCaptionBand(entry, owned) {
       const mine = owned === true && entry !== null && entry !== undefined
       setCaptionLive(mine)
-      setCaptionMenuStart(mine ? entry.sidebarCollapsed === true : null)
+      // A guest that has not reported its rail yet keeps the band's own default (the shell's 48px),
+      // never a value remembered from the document it replaced.
+      setCaptionMenuStart(mine ? entry.sidebarCollapsed === true : null, mine ? entry.sidebarStart : '')
     }
 
     async function createDesktopCarrier(hostId, url, message) {
@@ -3668,6 +3706,8 @@ window.__ModuleLoader__.load({
         captionApplied: false,
         /** The guest's rail state as it last reported it; null until the mirror says. */
         sidebarCollapsed: null,
+        /** The menubar inset the guest's own DSH rule resolved to; empty when it could not say. */
+        sidebarStart: '',
         url,
         rowInstalled: false,
         failed: false,
@@ -3691,6 +3731,9 @@ window.__ModuleLoader__.load({
       // caption marker: re-apply it before the page can paint the Web grid.
       view.addEventListener('dom-ready', () => {
         if (entry.view !== view) return
+        // The document that just went away says nothing about this one's rail: forget its state
+        // instead of writing it onto this page's band once more (the mirror reports again below).
+        applyGuestSidebar(entry, null)
         applyGuestCaption(entry).then((applied) => {
           if (entry.view !== view) return
           syncCarrierCaption(entry, applied)
@@ -6899,9 +6942,10 @@ window.__ModuleLoader__.load({
         bridge: (win) => mountCapabilityBridge(win),
         /** Install the per-host `localStorage` partition into one framed page. */
         partition: (win, hostId) => mountGuestStorage(win, hostId),
-        /** Guest-side rail watcher and the caption menubar inset it maps to (issue #63). */
+        /** Guest-side rail watcher, the atomic intent take, and the inset it maps to (issue #63). */
         sidebarMirror: () => SIDEBAR_MIRROR_SCRIPT,
-        captionMenuStart: (collapsed) => captionMenuStart(collapsed),
+        intentsScript: () => TAKE_INTENTS_SCRIPT,
+        captionMenuStart: (collapsed, start) => captionMenuStart(collapsed, start),
       },
     }
   },
