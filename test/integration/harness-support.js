@@ -168,6 +168,7 @@ const REQUIRED_PACKAGE_FILES = [
   'src/index.js',
   'src/api.js',
   'src/remote-proxy.js',
+  'src/tools.js',
   'locale/en.json',
   'locale/zh.json',
   'vendor/ssh2.bundle.cjs',

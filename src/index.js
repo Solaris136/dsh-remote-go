@@ -12,6 +12,7 @@ import { createRemoteProxy } from './remote-proxy.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
+import { registerHostTools } from './tools.js'
 import { messageOf } from './util.js'
 
 export const name = PLUGIN_ID
@@ -83,6 +84,9 @@ export function apply(ctx, config = {}) {
       path: proxy.routePath,
       handler: (/** @type {any} */ req, /** @type {any} */ res) => proxy.handle(req, res),
     })
+    // The model-facing host list lives on the Host half only: a local LLM session reads the same
+    // snapshot the switcher renders, and the remote DSH never loads this package.
+    const disposeTools = registerHostTools(ctx, { service, logger })
     const syncViewRoutes = () => proxy.sync(service.hostIds())
     service.on('state', syncViewRoutes)
     logger.info(`API mounted at ${API_PREFIX} (state dir ${stateDir})`)
@@ -109,6 +113,13 @@ export function apply(ctx, config = {}) {
 
     return () => {
       service.removeListener('state', syncViewRoutes)
+      // A failing disposer must not skip the rest of the unload: the proxy, the API and the SSH
+      // transports below still have to be released.
+      try {
+        disposeTools()
+      } catch (error) {
+        logger.error('unload: could not dispose the model tools:', error)
+      }
       proxy.dispose()
       api.dispose()
       void service.shutdown()
