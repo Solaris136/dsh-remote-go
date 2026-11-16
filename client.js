@@ -8528,6 +8528,7 @@ window.__ModuleLoader__.load({
       sanitizeGuestIntent,
       createCarrierErrorLayer,
       createLoadGuard,
+      loadTimeoutMs: CARRIER_LOAD_TIMEOUT_MS,
       captionMenuStart,
       withTimeout,
     }

@@ -3681,7 +3681,9 @@ test('a carrier load guard does not fire for a 15s slow document before the 25s 
     },
   })
   const fired = []
-  const guard = client.__test.createLoadGuard(25000, () => fired.push(now))
+  const timeout = client.__test.loadTimeoutMs
+  assert.ok(timeout >= 20_000, `the carrier load budget must tolerate a slow tunnel, got ${timeout}ms`)
+  const guard = client.__test.createLoadGuard(timeout, () => fired.push(now))
   const advance = (ms) => {
     now += ms
     for (const timer of [...timers]) {
@@ -3693,19 +3695,19 @@ test('a carrier load guard does not fire for a 15s slow document before the 25s 
   guard.arm()
   advance(15000)
   assert.deepEqual(fired, [], 'a document still arriving at 15s must not be reported as failed')
-  advance(9999)
+  advance(timeout - 15000 - 1)
   assert.deepEqual(fired, [])
   advance(1)
-  assert.deepEqual(fired, [25000], 'only the 25s budget fires the failure layer')
+  assert.deepEqual(fired, [timeout], 'only the full budget fires the failure layer')
   // A cancelled timer (the document committed) never fires, and dispose makes arm() inert.
   guard.arm()
   guard.cancel()
-  advance(30000)
-  assert.deepEqual(fired, [25000])
+  advance(timeout + 5000)
+  assert.deepEqual(fired, [timeout])
   guard.dispose()
   guard.arm()
-  advance(30000)
-  assert.deepEqual(fired, [25000])
+  advance(timeout + 5000)
+  assert.deepEqual(fired, [timeout])
 })
 
 test('the caption menubar inset accepts unitless computed values', () => {
