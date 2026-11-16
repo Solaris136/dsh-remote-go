@@ -806,3 +806,29 @@ test('a leftover registry record from a re-attach is left running by a new conne
   assert.deepEqual(stopped, [])
   await service.shutdown()
 })
+
+test('every emitted state frame carries a strictly increasing revision and a publish instance', async () => {
+  const { service } = await makeTestService()
+  const first = service.snapshot()
+  assert.equal(typeof first.rev, 'number')
+  assert.equal(typeof first.instance, 'string')
+  assert.notEqual(first.instance, '')
+  const revisions = []
+  service.on('state', (state) => revisions.push(state.rev))
+  const start = first.rev
+  service.emitState()
+  service.emitState()
+  assert.deepEqual(revisions, [start + 1, start + 2])
+  assert.equal(service.snapshot().rev, revisions.at(-1), 'GET /state reports the latest revision')
+  // A host mutation publishes through the same counter, so the Client can reject a stale frame.
+  const before = service.snapshot().rev
+  await createHost(service)
+  assert.ok(service.snapshot().rev > before)
+  // A restart (or a plugin reload) starts a new instance: its rev may be lower, and the Client
+  // relies on the instance change to accept its frames instead of freezing on the old mark.
+  const restarted = await makeTestService()
+  assert.notEqual(restarted.service.snapshot().instance, service.snapshot().instance)
+  assert.equal(typeof restarted.service.snapshot().rev, 'number')
+  await service.shutdown()
+  await restarted.service.shutdown()
+})

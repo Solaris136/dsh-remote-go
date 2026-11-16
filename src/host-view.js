@@ -11,6 +11,13 @@ export function hostView(runtime, ctx) {
     name: entry.name,
     address: entry.address,
     addressMasked: maskAddress(entry),
+    /**
+     * The plain connection fields. The masked address is presentation only: the editor must not
+     * parse it back (a bare IPv6 like `fe80::1` used to yield port 1, and the default port was
+     * silently replaced by 22). Never a secret.
+     */
+    username: entry.username ?? null,
+    port: entry.port ?? 22,
     /** Never the secret itself; lets the Client ask for a one-time password. */
     authType: entry.auth?.type ?? 'key',
     /** The configured key file path (not a secret); lets the edit form prefill it. */
@@ -49,9 +56,16 @@ export function hostView(runtime, ctx) {
   }
 }
 
-function maskAddress(entry) {
+/**
+ * The display form of the endpoint: `user@host`, `user@host:2222`, and bracketed IPv6
+ * (`user@[fe80::1]`, `user@[fe80::1]:2222`). The port is omitted only for SSH's default 22, which
+ * is why the Client reads `port`/`username` instead of parsing this string.
+ */
+export function maskAddress(entry) {
   const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   const user = entry.username ? `${entry.username}@` : ''
-  const host = entry.address || '?'
+  const raw = entry.address || '?'
+  // An unbracketed address containing a colon is IPv6 in URL/SSH notation.
+  const host = raw.includes(':') && !(raw.startsWith('[') && raw.endsWith(']')) ? `[${raw}]` : raw
   return `${user}${host}${port}`
 }

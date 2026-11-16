@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.9）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.10）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -7,6 +7,8 @@
 > （`ctx.connection.requestRejection`），与 DSH 自带路由同一套检查；`/health` 不要求会话，但仍过 Host/Origin 栅栏。
 > 内核没有该服务时（旧内核）退回本插件自己的标识头 + 同源栅栏。
 > HTTP 状态：成功 200；DSH 准入拒绝 401（会话未认证/失效）或 403（Host/Origin 不通过）；缺头或跨站 403；未知路径 404；`invalid-input` 400；请求体超过 1 MiB 413；`internal` 500；其余业务错误 409。
+> 401/403 由准入层直接返回、**没有** `{ok:false,error}` 信封；Client 按状态码把它们显示为「会话已失效，请刷新」
+> 与「被安全策略拒绝（Host/Origin）」且不提供重试（`retryable:false`），不再落到「插件内部错误」。
 >
 > **v2.0 变更**：移除镜像/工作区相关端点（`GET /local/workspaces`、`GET /hosts/:id/workspaces`、`GET /hosts/:id/mirrors`、`POST /hosts/:id/mirrors/sync`）。主机、连接、诊断与设置端点保持不变。
 >
@@ -61,7 +63,15 @@
 > 不做 kill 归属校验；`stop-remote` 是显式破坏性动作，只有本连接启动或接管的那个 pid 能停，且会清掉远端
 > `run/web.json`。语义变化只在新增路由与新增 code，`HostView` / `RemoteView` 字段不变。
 >
-> **v2.9 安全修正**（独立安全审计结论，端点集合不变，与 stop-remote 同一版发布）：`ErrorView` 统一脱敏并
+> **v2.10 变更**（含独立安全审计的修正，均为向后兼容，与 2.9 的 stop-remote 同处未发布窗口）：
+> `StateView` 增加 `rev` / `instance` 与 `storeCorrupt`，`HostView` 增加 `username` / `port` 与 `storeCorrupt`。
+> 新字段只增不改，旧 Client 忽略它们；旧 Host 缺少 `rev` / `instance` / `port` / `username` 时新 Client 退回旧行为
+> （无版本回退、从 `addressMasked` 反解析编辑字段）。`rev` 只在同一个 `instance` 内单调；Host 进程重启或插件
+> 重载会换 `instance`，Client 遇到新代际时接受其帧（即使 `rev` 回退），不会永久卡在旧高水位。
+> `addressMasked` 只用于展示：端口 22 省略、IPv6 加方括号（`user@[fe80::1]:2222`）；编辑表单必须读
+> `port` / `username`。
+>
+> **v2.10 安全修正**（#76，独立安全审计结论，端点集合不变）：`ErrorView` 统一脱敏并
 > 限长（§0）；HTTP 状态改为 `invalid-input` 400、请求体过大 413、`internal` 500、其余业务错误 409；
 > `Origin` 比较改为回环等价（`127.0.0.1` / `localhost` / `[::1]`），用 `localhost` 打开 GUI 不再「能读不能写」；
 > `/health` 收敛为 `{ "ok": true }`；`/diagnostics/self` 与 `/keyfile/list` 不再回显机器路径（越界为 400）；
@@ -147,7 +157,9 @@ interface HostView {
   id: string
   name: string
   address: string               // 地址或 ~/.ssh/config 别名
-  addressMasked: string         // user@host:port 展示形式
+  addressMasked: string         // user@host[:port] 展示形式；端口 22 省略，IPv6 用 [host] 括起。只用于展示
+  username: string | null       // 明文用户名（非秘密），编辑表单直接使用；旧 Host 没有该字段
+  port: number                  // 明文端口（默认 22，非秘密），编辑表单直接使用；旧 Host 没有该字段
   authType: 'key' | 'password'
   authKeyPath: string | null    // 已配置的私钥路径（不是秘密），供编辑表单预填
   passwordSaved: boolean        // 凭据存储里是否有；永不返回值
@@ -231,6 +243,18 @@ interface SettingsView {
 }
 
 interface StateView {
+  /**
+   * `/state` 快照的单调 revision：每次 Host 发布（SSE 帧与每次 GET 读到的当前快照）都带同一个当前值，
+   * 状态变化时自增。Client 只接受比屏幕上更新的帧，乱序 SSE 或迟到的 GET 响应不得把界面回退。
+   * 旧 Host 没有该字段：Client 退回「后到即生效」。
+   */
+  rev: number
+  /**
+   * 本次发布的代际：Host 进程 / 插件每次启动都不同。`rev` 只在本代际内单调；Client 发现 `instance`
+   * 变化时接受新帧并重置水位（Host 重启或插件重载后 `rev` 会从 0 重新计数）。
+   * 旧 Host 没有该字段：Client 只按 `rev` 比较。
+   */
+  instance: string
   hostVersion: string | null    // 本机 DSH 版本
   targetVersion: string | null  // = 本机 DSH 版本
   hosts: HostView[]; settings: SettingsView
@@ -303,7 +327,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.9", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.10", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`

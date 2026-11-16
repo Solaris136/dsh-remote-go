@@ -67,6 +67,18 @@ export { describePreflightEvent }
 /** Milliseconds a paused host-key handshake waits for the user. */
 const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
 
+/**
+ * One Host process can create several services (tests, a plugin reload in-process). The
+ * instance id must differ for each so the Client can tell a new publish generation from a stale
+ * frame without trusting wall-clock ordering.
+ */
+let stateInstanceSequence = 0
+function stateInstanceId() {
+  stateInstanceSequence += 1
+  const pid = typeof process !== 'undefined' && Number.isInteger(process.pid) ? process.pid.toString(36) : '0'
+  return `${pid}-${Date.now().toString(36)}-${stateInstanceSequence.toString(36)}`
+}
+
 export class RemoteGoService extends EventEmitter {
   constructor(options) {
     super()
@@ -81,6 +93,15 @@ export class RemoteGoService extends EventEmitter {
     this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
     this.conflictConfirmTimeoutMs = options.conflictConfirmTimeoutMs ?? REMOTE_CONFLICT_TIMEOUT_MS
     this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
+    /** Monotonic revision of the published `/state` snapshot (StateView.rev). */
+    this.stateRev = 0
+    /**
+     * Identifies this plugin instance. `rev` is only monotonic inside one process; after a Host
+     * restart or a plugin reload a fresh counter would look older to a Client that is still
+     * holding the previous high-water mark, and every new frame would be dropped. The Client
+     * accepts a frame from a different instance regardless of its `rev` (StateView.instance).
+     */
+    this.stateInstance = stateInstanceId()
 
     const deps = {
       sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
@@ -179,6 +200,10 @@ export class RemoteGoService extends EventEmitter {
 
   emitState() {
     try {
+      // Every emitted frame gets its own monotonic revision. The Client drops a frame whose
+      // `rev` is not newer than the one on screen, so an out-of-order SSE delivery or a slow
+      // `GET /state` can no longer repaint the panel backwards (docs/api.md StateView.rev).
+      this.stateRev += 1
       this.emit('state', this.snapshot())
     } catch (error) {
       this.logger.warn?.('[dsh-remote-go] state listener failed:', error)
@@ -231,7 +256,7 @@ export class RemoteGoService extends EventEmitter {
 
   /** Build the client-facing state snapshot (contract: docs/api.md). */
   snapshot() {
-    return snapshot(this.ctx)
+    return { ...snapshot(this.ctx), rev: this.stateRev, instance: this.stateInstance }
   }
 
   userHome() {

@@ -785,7 +785,9 @@ window.ReactDOM = { createRoot }`,
               guest.querySelector('[data-sidebar-toggle]'),
             )
           },
-          { timeout: 60_000 },
+          // Timer polling: a backgrounded page throttles requestAnimationFrame, which made
+          // this wait time out even though the guest had already booted (CI flake).
+          { timeout: 60_000, polling: 100 },
         )
       } catch (error) {
         const state = await desktopPage.evaluate(() => {
@@ -816,7 +818,7 @@ window.ReactDOM = { createRoot }`,
             Math.round(document.querySelector('#caption-menubar').getBoundingClientRect().left) === 48
           )
         },
-        { timeout: 10_000 },
+        { timeout: 10_000, polling: 100 },
       )
       const expanded = await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
@@ -850,7 +852,7 @@ window.ReactDOM = { createRoot }`,
         () =>
           document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') !==
           null,
-        { timeout: 10_000 },
+        { timeout: 10_000, polling: 100 },
       )
       // The guest reports through the row's 400ms poll, so the host catches up within one cycle.
       // The overlap during that cycle is the documented transient (docs/design.md §4.2): this
@@ -903,7 +905,7 @@ window.ReactDOM = { createRoot }`,
         () =>
           document.querySelector('[data-guest-seat]').contentDocument.querySelector('[data-sidebar-collapsed]') ===
           null,
-        { timeout: 10_000 },
+        { timeout: 10_000, polling: 100 },
       )
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const reExpanded = await desktopPage.evaluate(() => ({

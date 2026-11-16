@@ -82,7 +82,7 @@
     "test:desktop": "node --test \"test/integration/desktop.e2e.js\"",
     "test:integration": "node --test --test-concurrency=1 \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",
     "test:integration:local": "node --test --test-concurrency=1 test/integration/sim.test.js test/integration/remote-restart.test.js test/integration/stop-remote.test.js",
-    "test:integration:external": "node --test --test-concurrency=1 test/integration/remote-proxy.test.js test/integration/web.e2e.js test/integration/browser-carrier.test.js test/integration/guest-tools.e2e.js test/integration/stop-remote.browser.test.js",
+    "test:integration:external": "node --test --test-concurrency=1 test/integration/client-ui.test.js test/integration/remote-proxy.test.js test/integration/web.e2e.js test/integration/browser-carrier.test.js test/integration/guest-tools.e2e.js test/integration/stop-remote.browser.test.js",
     "sim:remote": "node e2e/sim/simulated-remote.mjs --self-test",
     "test:coverage": "node scripts/check-coverage.mjs",
     "lint": "node scripts/check-repo.mjs",

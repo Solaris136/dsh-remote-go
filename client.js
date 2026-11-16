@@ -25,6 +25,19 @@ window.__ModuleLoader__.load({
     const API_BASE = '/dsh-remote-go/api'
     const EVENT_PATH = '/dsh-remote-go/api/events'
     const POLL_INTERVAL_MS = 3000
+    /**
+     * A dropped SSE stream is rebuilt with exponential backoff instead of leaving the panel in
+     * polling forever (docs/api.md `/events`). The first retry is immediate enough to ride out a
+     * page reload, and the cap keeps a permanently refused stream from hammering the Host.
+     */
+    const STREAM_RETRY_BASE_MS = 500
+    const STREAM_RETRY_MAX_MS = 15000
+    /** One state fetch in a retry chain must not hold the stream down forever. */
+    const STREAM_RETRY_MAX_ATTEMPTS = 8
+    function streamRetryDelay(attempt) {
+      const safe = Math.max(0, Math.min(30, Math.floor(Number(attempt) || 0)))
+      return Math.min(STREAM_RETRY_MAX_MS, STREAM_RETRY_BASE_MS * 2 ** safe)
+    }
     const DESKTOP_BRIDGE_VERSION = 1
     const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
     const CAPTION_FALLBACK_HEIGHT = 40
@@ -240,6 +253,8 @@ window.__ModuleLoader__.load({
       ],
       downloadFolderChoose: ['请选择保存文件夹…', 'Choose a destination folder…'],
       downloadFiles: ['{done} / {total} 个文件', '{done} / {total} files'],
+      downloadProgress: ['下载进度：{name}', 'Download progress: {name}'],
+      downloadInProgress: ['正在下载', 'Downloading'],
       'progress.ssh-connecting': ['正在连接 SSH…', 'Connecting over SSH…'],
       'progress.host-key-confirm': ['等待确认主机指纹…', 'Waiting for you to confirm the host key…'],
       'progress.auth-checking': ['正在认证…', 'Authenticating…'],
@@ -449,6 +464,49 @@ window.__ModuleLoader__.load({
       ],
       'settings.saveSettings': ['保存设置', 'Save settings'],
       'settings.saved': ['设置已保存。', 'Settings saved.'],
+      'settings.validationPort': ['端口应为 1-65535', 'The port must be 1–65535'],
+      'settings.validationTimeout': ['连接超时应为 5-300 秒', 'The connect timeout must be 5–300 seconds'],
+      'settings.validationAttempts': ['最大重试次数应为 0-20', 'Max attempts must be 0–20'],
+      'settings.validationBaseDelay': ['重试间隔应为 100-30000 毫秒', 'The retry delay must be 100–30000 ms'],
+      'settings.validationProfile': [
+        'profile 只能包含字母、数字与 . _ -，且不能是 desktop',
+        'A profile may only contain letters, digits and . _ -, and cannot be desktop',
+      ],
+      'wizard.validationIdleMinutes': ['空闲分钟数应为 1-1440', 'Idle minutes must be 1–1440'],
+      'wizard.passwordSavedHint': [
+        '已保存的密码不会被读取；连接时会再询问。',
+        'The saved password is never read; you will be asked again when connecting.',
+      ],
+      liveStreamLostTitle: ['实时连接已断开，正在轮询', 'Live updates lost; polling instead'],
+      liveStreamLostBody: [
+        '状态更新已退回轮询（每 {seconds} 秒一次）。可以手动重新建立实时连接。',
+        'State updates fell back to polling every {seconds}s. You can reconnect the live stream.',
+      ],
+      liveReconnect: ['重新连接', 'Reconnect'],
+      liveReconnecting: ['正在重新连接…', 'Reconnecting…'],
+      liveStreamRestored: ['实时连接已恢复。', 'Live updates restored.'],
+      hostWarnings: ['提示', 'Notice'],
+      versionDifferent: [
+        '远端 DSH {remote} 与本机 {local} 不一致',
+        'The remote DSH {remote} differs from this machine ({local})',
+      ],
+      versionUnknown: ['无法确认远端 DSH 版本', 'The remote DSH version could not be confirmed'],
+      managingConnectingHosts: [
+        '正在连接的主机显示在连接窗口里，不在此清单中。',
+        'Hosts that are connecting appear in the connection window, not in this list.',
+      ],
+      deleteConnectingWarning: [
+        '这台主机正在连接；删除会立即中断连接。',
+        'This host is connecting; deleting it interrupts the connection immediately.',
+      ],
+      deleteStillConfirm: ['仍要删除（会中断连接）', 'Delete anyway (interrupts the connection)'],
+      carrierBackToLocal: ['返回本地', 'Back to local'],
+      carrierNotDsh: [
+        '远端页面不是 DSH 界面（可能是代理错误或版本不兼容）。',
+        'The remote page is not a DSH UI (proxy error or incompatible version).',
+      ],
+      'settings.defaultPortHint': ['新增主机时预填的端口', 'Prefilled as the port for new hosts'],
+      'settings.connectTimeoutHint': ['SSH 连接与远端就绪的整体超时', 'Overall timeout for SSH and remote readiness'],
       'error.actionFailed': ['操作失败', 'Action failed'],
     }
     const zh = Object.fromEntries(Object.entries(STRINGS).map(([key, pair]) => [key, pair[0]]))
@@ -570,6 +628,25 @@ window.__ModuleLoader__.load({
 
     function unrefTimer(timer) {
       if (timer && typeof timer.unref === 'function') timer.unref()
+    }
+
+    /** A guest call that never answers must not wedge the intent drain (it would stop forever). */
+    function withTimeout(promise, timeoutMs) {
+      return new Promise((resolve) => {
+        let settled = false
+        const finish = (value) => {
+          if (settled) return
+          settled = true
+          if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
+          resolve(value)
+        }
+        let timer = null
+        if (typeof setTimeout === 'function') {
+          timer = setTimeout(() => finish(null), timeoutMs)
+          unrefTimer(timer)
+        }
+        Promise.resolve(promise).then(finish, () => finish(null))
+      })
     }
 
     function readBootVersion() {
@@ -772,6 +849,43 @@ window.__ModuleLoader__.load({
           { zh: '运行诊断检查隧道状态', en: 'Run diagnostics to check the tunnel' },
         ],
       },
+      /**
+       * DSH's admission fence answered without a JSON envelope (401: no browser session, 403:
+       * Host/Origin refused). Neither is a plugin failure, and retrying the same request cannot
+       * help, so they are their own views instead of the old "internal error".
+       */
+      'session-expired': {
+        code: 'session-expired',
+        retryable: false,
+        title: { zh: '会话已失效', en: 'The session has expired' },
+        detail: {
+          zh: '本机 DSH 的浏览器会话已失效，请刷新页面后重试。',
+          en: 'This browser session for the local DSH is no longer valid. Refresh the page and try again.',
+        },
+        nextSteps: [
+          { zh: '刷新页面以重新建立会话', en: 'Refresh the page to establish a new session' },
+          {
+            zh: '如果仍被拒绝，确认 DSH Web 的登录状态',
+            en: 'If it is still refused, check the DSH Web sign-in state',
+          },
+        ],
+      },
+      forbidden: {
+        code: 'forbidden',
+        retryable: false,
+        title: { zh: '被安全策略拒绝', en: 'Refused by the security policy' },
+        detail: {
+          zh: 'DSH 的 Host/Origin 准入拒绝了这次请求；请用本机地址打开 DSH Web，不要经反向代理或外部域名访问。',
+          en: 'The Host/Origin admission refused this request. Open DSH Web on this machine, not through a reverse proxy or an external host name.',
+        },
+        nextSteps: [
+          {
+            zh: '使用 http://127.0.0.1:<端口> 打开本机 DSH Web',
+            en: 'Open the local DSH Web via http://127.0.0.1:<port>',
+          },
+          { zh: '刷新页面后重试', en: 'Refresh the page and try again' },
+        ],
+      },
     }
 
     function localErrorView(code, technical) {
@@ -843,6 +957,11 @@ window.__ModuleLoader__.load({
       }
       if (payload && payload.ok === false) throw apiError(payload.error)
       if (!response || !response.ok) {
+        // DSH admission answers without this plugin's JSON envelope. A 401 means the browser
+        // session is gone and a 403 means Host/Origin was refused: neither is "internal", and
+        // repeating the same request cannot fix either one.
+        if (response && response.status === 401) throw apiError(localErrorView('session-expired', 'HTTP 401'))
+        if (response && response.status === 403) throw apiError(localErrorView('forbidden', 'HTTP 403'))
         throw apiError(localErrorView('internal', 'HTTP ' + String(response && response.status)))
       }
       if (!payload || payload.ok !== true) throw apiError(localErrorView('internal', 'malformed response'))
@@ -995,6 +1114,13 @@ window.__ModuleLoader__.load({
       },
     }
 
+    /**
+     * The one `/state` feed for the whole plugin: SSE when it is available, a three-second poll
+     * while the stream is down, and an exponential-backoff rebuild of the stream in the
+     * background. A reconnected stream stops the poll and reports `live` again. Handlers:
+     * `onState(frame)`, `onStatus('live' | 'polling')`, `onError(error)`, `onDownload(job)`.
+     * The returned disposer also carries `reconnect()`, which the fallback banner uses.
+     */
     function subscribeState(handlers) {
       const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
       const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
@@ -1003,7 +1129,16 @@ window.__ModuleLoader__.load({
       let disposed = false
       let source = null
       let timer = null
+      let retryTimer = null
+      let retryAttempt = 0
       let polling = false
+      let mode = 'idle'
+      /** Every callback that settles a state frame, so a late frame can still land. */
+      const setMode = (next) => {
+        if (mode === next) return
+        mode = next
+        if (!disposed) onStatus(next)
+      }
 
       const deliver = (state) => {
         if (disposed || !state || typeof state !== 'object') return
@@ -1025,39 +1160,86 @@ window.__ModuleLoader__.load({
           source = null
         }
       }
+      const stopPolling = () => {
+        polling = false
+        if (timer !== null && typeof clearInterval === 'function') clearInterval(timer)
+        timer = null
+      }
       const startPolling = () => {
-        if (disposed || polling) return
-        polling = true
-        stopStream()
-        onStatus('polling')
-        if (typeof setInterval === 'function') {
-          timer = setInterval(fetchOnce, POLL_INTERVAL_MS)
-          unrefTimer(timer)
+        if (disposed) return
+        if (!polling) {
+          polling = true
+          if (typeof setInterval === 'function') {
+            timer = setInterval(fetchOnce, POLL_INTERVAL_MS)
+            unrefTimer(timer)
+          }
+          fetchOnce()
         }
-        fetchOnce()
+        setMode('polling')
+      }
+      const clearRetry = () => {
+        if (retryTimer !== null && typeof clearTimeout === 'function') clearTimeout(retryTimer)
+        retryTimer = null
+      }
+      const scheduleStreamRetry = () => {
+        if (disposed || retryTimer !== null) return
+        if (retryAttempt >= STREAM_RETRY_MAX_ATTEMPTS) {
+          // The automatic chain stops here; polling continues and the banner offers a manual
+          // reconnect, which resets the counter. This is the cap the UI promises.
+          setMode('polling')
+          return
+        }
+        if (typeof setTimeout !== 'function') return
+        const attempt = retryAttempt
+        retryAttempt += 1
+        setMode('reconnecting')
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          if (!disposed) startStream()
+        }, streamRetryDelay(attempt))
+        unrefTimer(retryTimer)
+      }
+      const onStreamOpen = () => {
+        if (disposed) return
+        // The stream is alive again: polling and the retry chain stop, and the backoff resets so
+        // the next drop starts from the base delay.
+        retryAttempt = 0
+        clearRetry()
+        stopPolling()
+        setMode('live')
       }
       const startStream = () => {
         if (disposed) return
         if (typeof EventSource !== 'function') {
           startPolling()
+          scheduleStreamRetry()
           return
         }
+        stopStream()
         try {
           source = new EventSource(EVENT_PATH)
         } catch (_error) {
           startPolling()
+          scheduleStreamRetry()
           return
         }
-        onStatus('live')
+        const stream = source
+        source.onopen = () => {
+          if (source === stream) onStreamOpen()
+        }
         source.addEventListener('state', (event) => {
+          if (source !== stream) return
           try {
             const state = JSON.parse(event.data)
+            // The first frame proves the stream works even when `open` never fired.
+            onStreamOpen()
             deliver(state)
           } catch (_error) {
             // a malformed frame must not kill the stream
           }
         })
         source.addEventListener('download', (event) => {
+          if (source !== stream) return
           try {
             const job = JSON.parse(event.data)
             if (job && typeof job === 'object') onDownload(job)
@@ -1065,23 +1247,49 @@ window.__ModuleLoader__.load({
             // a malformed frame must not kill the stream
           }
         })
-        source.addEventListener('ping', () => {})
-        source.addEventListener('error', () => {
-          if (disposed) return
-          startPolling()
+        source.addEventListener('ping', () => {
+          if (source === stream) onStreamOpen()
         })
+        source.addEventListener('error', () => {
+          if (disposed || source !== stream) return
+          // Never leave the panel without data: poll from now on and rebuild the stream with
+          // backoff. A successful frame (`onStreamOpen`) turns polling off again.
+          startPolling()
+          stopStream()
+          scheduleStreamRetry()
+        })
+        // Do not claim `live` here: until `open` (or the first frame/ping) arrives the banner
+        // must stay up. A manual or automatic reconnect used to clear it before the stream
+        // actually worked (review blocker 2).
+      }
+      const reconnect = () => {
+        if (disposed) return
+        retryAttempt = 0
+        clearRetry()
+        // A manual retry is a fresh attempt even when a scheduled one is in flight.
+        if (retryTimer !== null && typeof clearTimeout === 'function') clearTimeout(retryTimer)
+        retryTimer = null
+        startStream()
+        if (mode !== 'live') {
+          startPolling()
+          // `startPolling` sets `polling`; the retry attempt is the state that keeps the banner
+          // saying "reconnecting" until the stream actually opens.
+          setMode('reconnecting')
+        }
       }
 
       // Initial read in parallel with opening the stream, so the panel can paint immediately even when SSE is slow.
       fetchOnce()
       startStream()
 
-      return () => {
+      const dispose = () => {
         disposed = true
         stopStream()
-        if (timer !== null && typeof clearInterval === 'function') clearInterval(timer)
-        timer = null
+        stopPolling()
+        clearRetry()
       }
+      dispose.reconnect = reconnect
+      return dispose
     }
 
     //#region 7. icons and small UI primitives
@@ -1340,11 +1548,16 @@ window.__ModuleLoader__.load({
       }
       const cancellable = (preparing || job.phase === 'ready') && typeof props.onCancel === 'function'
       const dismissible = (failed || donePhase) && typeof props.onDismiss === 'function'
+      const progressText =
+        total > 0
+          ? percent + '%' + (meta.length > 0 ? ' · ' + meta.join(' · ') : '')
+          : preparing
+            ? t('downloadInProgress')
+            : title
       return h(
         'div',
         {
           className: 'drg-download' + (failed ? ' drg-download-error' : ''),
-          role: 'status',
           'data-testid': 'dsh-remote-go-download',
           'data-phase': job.phase,
         },
@@ -1367,7 +1580,10 @@ window.__ModuleLoader__.load({
               [2, 7, 12].map((cy) => [2, 8].map((cx) => h('circle', { key: cx + '-' + cy, cx, cy, r: 1.1 }))),
             ),
           ),
-          h('span', { className: 'drg-download-title', title }, title),
+          // The visible title is the drag handle's label; the live region below announces it
+          // once, and buttons stay outside the status so a screen reader is not told to press
+          // Cancel as part of the status (audit S3).
+          h('span', { className: 'drg-download-title', title, 'aria-hidden': 'true' }, title),
           cancellable
             ? h(
                 'button',
@@ -1394,12 +1610,24 @@ window.__ModuleLoader__.load({
         h(
           'div',
           {
+            className: 'drg-download-status drg-sr-only',
+            role: 'status',
+            'aria-live': 'polite',
+            'aria-atomic': 'true',
+          },
+          title + (detail ? ' · ' + detail : ''),
+        ),
+        h(
+          'div',
+          {
             className: 'drg-download-track',
             'data-indeterminate': percent === 0 && preparing ? 'true' : undefined,
             role: 'progressbar',
+            'aria-label': t('downloadProgress', { name }),
             'aria-valuemin': 0,
             'aria-valuemax': 100,
             'aria-valuenow': total > 0 ? percent : undefined,
+            'aria-valuetext': progressText,
           },
           h('span', {
             className: 'drg-download-fill',
@@ -1408,11 +1636,11 @@ window.__ModuleLoader__.load({
         ),
         h(
           'div',
-          { className: 'drg-download-meta' },
+          { className: 'drg-download-meta', 'aria-hidden': 'true' },
           h('span', null, meta.filter(Boolean).join(' · ')),
           total > 0 ? h('span', null, percent + '%') : null,
         ),
-        detail ? h('p', { className: 'drg-download-detail' }, detail) : null,
+        detail ? h('p', { className: 'drg-download-detail', 'aria-hidden': 'true' }, detail) : null,
       )
     }
 
@@ -1427,6 +1655,226 @@ window.__ModuleLoader__.load({
       })
     }
 
+    //#region 7a. dialog stack (Escape, focus trap, scroll lock)
+
+    const DIALOG_FOCUSABLE =
+      'a[href],button:not([disabled]),input:not([disabled]):not([type="hidden"]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+
+    /**
+     * One stack for every dialog this plugin draws. Before this, each `Modal` installed its own
+     * document `keydown` listener with `useEffect(..., [onClose])`; because `onClose` is a new
+     * function on every render, every re-render removed and re-added the listener — and a single
+     * Escape that started on the top dialog was handled by the *lower* one before React got to
+     * re-register. The window management dialog closed under the wizard, exactly as the audit
+     * reproduces (S1-1). Now: one listener on the document, the top layer alone receives Escape,
+     * `dismissible:false` swallows it, and the listener never changes during a key event.
+     *
+     * The same stack owns the rest of the dialog contract (S2-4): initial focus, Tab cycling,
+     * focus restoration on unmount, `overflow:hidden` on `<body>`, `aria-modal` on the top dialog
+     * only, and `inert` on every lower layer.
+     */
+    function createDialogStack() {
+      const layers = []
+      let doc = null
+      let installed = false
+      let savedOverflow = null
+      let initialFocus = null
+
+      const top = () => layers[layers.length - 1] || null
+      const focusOf = (root) => {
+        if (!root || typeof root.querySelectorAll !== 'function') return []
+        let list = []
+        try {
+          list = Array.prototype.slice.call(root.querySelectorAll(DIALOG_FOCUSABLE))
+        } catch (_error) {
+          return []
+        }
+        return list.filter((node) => {
+          if (!node || node.disabled === true) return false
+          if (typeof node.hasAttribute === 'function' && node.hasAttribute('aria-hidden')) return false
+          return typeof node.focus === 'function'
+        })
+      }
+      const firstFocusable = (root) => {
+        const list = focusOf(root)
+        if (list.length === 0) return null
+        // A form dialog opens on its first field rather than on its close button.
+        return list.find((node) => /^(INPUT|SELECT|TEXTAREA)$/.test(String(node.tagName || ''))) || list[0]
+      }
+      const focusNode = (node) => {
+        try {
+          node.focus()
+        } catch (_error) {
+          // a detached node cannot take focus
+        }
+      }
+      const setAttr = (node, name, value) => {
+        if (!node || typeof node.setAttribute !== 'function') return
+        if (value === null) {
+          if (typeof node.removeAttribute === 'function') node.removeAttribute(name)
+          return
+        }
+        node.setAttribute(name, value)
+      }
+      const sync = () => {
+        const active = top()
+        for (const layer of layers) {
+          const isTop = layer === active
+          setAttr(layer.dialog, 'aria-modal', isTop ? 'true' : null)
+          if (isTop) {
+            if (layer.layer && typeof layer.layer.removeAttribute === 'function') layer.layer.removeAttribute('inert')
+          } else {
+            setAttr(layer.layer, 'inert', '')
+          }
+        }
+      }
+      const trapTab = (layer, event) => {
+        const list = focusOf(layer.dialog)
+        if (list.length === 0) {
+          event.preventDefault()
+          focusNode(layer.dialog)
+          return
+        }
+        const active = doc ? doc.activeElement : null
+        const index = list.indexOf(active)
+        if (index === -1) {
+          event.preventDefault()
+          focusNode(event.shiftKey ? list[list.length - 1] : list[0])
+          return
+        }
+        if (event.shiftKey && index === 0) {
+          event.preventDefault()
+          focusNode(list[list.length - 1])
+        } else if (!event.shiftKey && index === list.length - 1) {
+          event.preventDefault()
+          focusNode(list[0])
+        }
+      }
+      const onKeyDown = (event) => {
+        const layer = top()
+        if (layer === null || !event) return
+        if (event.key === 'Escape') {
+          // A dialog always owns Escape: even when it may not close, the key must not fall
+          // through to the dialog underneath it.
+          event.preventDefault()
+          if (typeof event.stopPropagation === 'function') event.stopPropagation()
+          if (layer.dismissible() === false) return
+          layer.close()
+          return
+        }
+        if (event.key === 'Tab') trapTab(layer, event)
+      }
+      const install = (target) => {
+        if (installed || !target) return
+        doc = target
+        doc.addEventListener('keydown', onKeyDown, true)
+        installed = true
+      }
+      const uninstall = () => {
+        if (!installed || !doc) return
+        doc.removeEventListener('keydown', onKeyDown, true)
+        installed = false
+        doc = null
+      }
+      const lockScroll = () => {
+        if (!doc || !doc.body || !doc.body.style) return
+        savedOverflow = doc.body.style.overflow
+        doc.body.style.overflow = 'hidden'
+      }
+      const unlockScroll = () => {
+        if (!doc || !doc.body || !doc.body.style) return
+        doc.body.style.overflow = savedOverflow === null ? '' : savedOverflow
+        savedOverflow = null
+      }
+      const focusInitial = (layer) => {
+        const node = firstFocusable(layer.dialog)
+        if (node !== null) {
+          focusNode(node)
+          return
+        }
+        setAttr(layer.dialog, 'tabindex', '-1')
+        focusNode(layer.dialog)
+      }
+      const remove = (layer) => {
+        const index = layers.indexOf(layer)
+        if (index < 0) return
+        layers.splice(index, 1)
+        sync()
+        if (layers.length === 0) {
+          unlockScroll()
+          uninstall()
+        }
+        // Hand focus back to whatever opened this dialog; a removed trigger (the dialog was
+        // opened by a command channel, for example) falls back to the new top dialog.
+        const restore = layer.returnFocus || (layers.length === 0 ? initialFocus : null)
+        if (restore && restore !== layer.dialog) {
+          const stillThere = restore.isConnected !== false
+          if (stillThere) focusNode(restore)
+        }
+        if (layers.length > 0) {
+          const active = doc && doc.activeElement
+          if (!active || !top().dialog.contains(active)) focusInitial(top())
+        } else {
+          initialFocus = null
+        }
+      }
+
+      return {
+        push(layer) {
+          if (!layer || !layer.dialog) return () => {}
+          const elementDocument = layer.dialog.ownerDocument || (typeof document === 'undefined' ? null : document)
+          if (elementDocument === null) return () => {}
+          install(elementDocument)
+          if (layers.length === 0) {
+            initialFocus = doc && doc.activeElement ? doc.activeElement : null
+            lockScroll()
+          } else {
+            layer.returnFocus = doc && doc.activeElement ? doc.activeElement : null
+          }
+          layers.push(layer)
+          sync()
+          focusInitial(layer)
+          return () => remove(layer)
+        },
+        remove,
+        top,
+        size: () => layers.length,
+        /** @internal test seam */
+        keydown: onKeyDown,
+      }
+    }
+
+    let sharedDialogStack = null
+    function dialogStack() {
+      if (sharedDialogStack === null) sharedDialogStack = createDialogStack()
+      return sharedDialogStack
+    }
+
+    /**
+     * Register one rendered dialog with the shared stack. `onClose` is read through a ref, so a
+     * render that creates a new callback does not re-register (the S1-1 trigger).
+     */
+    function useDialogLayer(options) {
+      const closeRef = useRef(options.onClose)
+      closeRef.current = options.onClose
+      const dismissibleRef = useRef(options.dismissible !== false)
+      dismissibleRef.current = options.dismissible !== false
+      useEffect(() => {
+        const layer = options.layerRef && options.layerRef.current
+        const dialog = options.dialogRef && options.dialogRef.current
+        if (!layer || !dialog) return undefined
+        return dialogStack().push({
+          layer,
+          dialog,
+          dismissible: () => dismissibleRef.current,
+          close: () => {
+            const close = closeRef.current
+            if (typeof close === 'function') close()
+          },
+        })
+      }, [])
+    }
+
     function Field(props) {
       return h(
         'label',
@@ -1436,7 +1884,7 @@ window.__ModuleLoader__.load({
         props.label ? box('span', 'drg-field-label', props.label) : null,
         props.children,
         props.hint ? box('span', 'drg-field-hint', props.hint) : null,
-        props.error ? h('span', { className: 'drg-field-error', role: 'alert' }, props.error) : null,
+        props.error ? h('span', { className: 'drg-field-error', role: 'alert', id: props.errorId }, props.error) : null,
       )
     }
 
@@ -1454,6 +1902,8 @@ window.__ModuleLoader__.load({
         onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.value) : undefined,
         onKeyDown: typeof props.onKeyDown === 'function' ? props.onKeyDown : undefined,
         'aria-label': props.ariaLabel,
+        'aria-invalid': props.invalid === true ? 'true' : undefined,
+        'aria-describedby': props.describedBy,
       })
     }
 
@@ -1466,6 +1916,8 @@ window.__ModuleLoader__.load({
           value: props.value === undefined || props.value === null ? '' : String(props.value),
           disabled: props.disabled === true,
           'aria-label': props.ariaLabel,
+          'aria-invalid': props.invalid === true ? 'true' : undefined,
+          'aria-describedby': props.describedBy,
           'data-testid': props.testId,
           onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.value) : undefined,
         },
@@ -1476,18 +1928,22 @@ window.__ModuleLoader__.load({
     /** One form field from a spec; `after` runs alongside the patch (touched/dirty flags). */
     function formRow(t, draft, patch, spec) {
       const label = t(spec.label)
+      const error = spec.error ? t(spec.error) : undefined
+      const errorId = error && spec.testId ? spec.testId + '-error' : undefined
       const onChange = (next) => {
         patch({ [spec.key]: next })
         if (spec.after) spec.after(next)
       }
       return h(
         Field,
-        { label, hint: spec.hint ? t(spec.hint) : undefined },
+        { label, hint: spec.hint ? t(spec.hint) : undefined, error, errorId },
         spec.options
           ? h(Select, {
               value: draft[spec.key],
               ariaLabel: label,
               testId: spec.testId,
+              invalid: Boolean(error),
+              describedBy: errorId,
               options: spec.options.map(([value, key]) => ({ value, label: t(key) })),
               onChange,
             })
@@ -1497,6 +1953,8 @@ window.__ModuleLoader__.load({
               placeholder: spec.placeholder ? t(spec.placeholder) : undefined,
               ariaLabel: label,
               testId: spec.testId,
+              invalid: Boolean(error),
+              describedBy: errorId,
               onChange,
             }),
       )
@@ -1521,7 +1979,12 @@ window.__ModuleLoader__.load({
       const tone = props.tone || 'info'
       return h(
         'div',
-        { className: 'drg-notice', 'data-tone': tone, role: tone === 'error' ? 'alert' : 'status' },
+        {
+          className: 'drg-notice',
+          'data-tone': tone,
+          role: tone === 'error' ? 'alert' : 'status',
+          'data-testid': props.testId,
+        },
         h(
           'span',
           { className: 'drg-notice-icon', 'aria-hidden': 'true' },
@@ -1538,34 +2001,42 @@ window.__ModuleLoader__.load({
       )
     }
 
+    let modalSequence = 0
     function Modal(props) {
       const onClose = props.onClose
+      const layerRef = useRef(null)
+      const dialogRef = useRef(null)
+      const titleIdRef = useRef(null)
+      if (titleIdRef.current === null) {
+        modalSequence += 1
+        titleIdRef.current = 'drg-dialog-title-' + modalSequence
+      }
+      // `dismissible:false` while the dialog's own request is in flight: Escape and the backdrop
+      // are ignored so a busy connect/delete cannot be left running behind a closed UI (S2-5).
+      const dismissible = typeof onClose === 'function' && props.dismissible !== false
+      useDialogLayer({ layerRef, dialogRef, onClose, dismissible })
       // A dialog whose title is drawn by its own body (the host-management window) still
       // needs the close affordance, but not an empty header strip above the page title.
       const bare = !props.title && !props.subtitle
-      useEffect(() => {
-        if (typeof onClose !== 'function' || typeof document === 'undefined') return undefined
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') onClose()
-        }
-        document.addEventListener('keydown', onKeyDown)
-        return () => document.removeEventListener('keydown', onKeyDown)
-      }, [onClose])
-      return box(
+      return h(
         'div',
-        'drg-modal-layer',
+        { className: 'drg-modal-layer', ref: layerRef },
         h('div', {
           className: 'drg-modal-backdrop',
-          onClick: typeof onClose === 'function' ? onClose : undefined,
+          onClick: dismissible ? onClose : undefined,
           'aria-hidden': 'true',
+          'data-dismissible': dismissible ? undefined : 'false',
         }),
         h(
           'div',
           {
             className: 'drg-modal' + (props.wide === true ? ' drg-modal-wide' : ''),
             role: 'dialog',
-            'aria-modal': 'true',
-            'aria-label': props.title || undefined,
+            'aria-labelledby': props.title ? titleIdRef.current : undefined,
+            'aria-label': !props.title && props.ariaLabel ? props.ariaLabel : undefined,
+            'aria-busy': props.busy === true ? 'true' : undefined,
+            tabIndex: -1,
+            ref: dialogRef,
             'data-testid': props.testId,
             'data-bare': bare ? 'true' : undefined,
           },
@@ -1575,11 +2046,19 @@ window.__ModuleLoader__.load({
             box(
               'div',
               'drg-modal-titles',
-              props.title ? box('h2', 'drg-modal-title', props.title) : null,
+              props.title ? h('h2', { className: 'drg-modal-title', id: titleIdRef.current }, props.title) : null,
               props.subtitle ? box('p', 'drg-modal-subtitle', props.subtitle) : null,
             ),
             typeof onClose === 'function'
-              ? h(IconButton, { icon: h(IconClose), label: props.closeLabel || 'Close', onClick: onClose })
+              ? h(IconButton, {
+                  icon: h(IconClose),
+                  label: props.closeLabel || 'Close',
+                  // The header × is part of the same dismissal contract as Escape and the
+                  // backdrop: while the dialog's request is in flight it is disabled too
+                  // (review blocker 3).
+                  disabled: !dismissible,
+                  onClick: dismissible ? onClose : undefined,
+                })
               : null,
           ),
           box('div', 'drg-modal-body', props.children),
@@ -1596,6 +2075,8 @@ window.__ModuleLoader__.load({
           onClose: props.onCancel,
           closeLabel: props.cancelLabel,
           testId: props.testId,
+          busy: props.busy === true,
+          dismissible: props.busy !== true,
           footer: footerRow(
             h(
               Button,
@@ -1739,6 +2220,33 @@ window.__ModuleLoader__.load({
           h('div', null, h('dt', null, t('remoteVersion')), h('dd', null, remoteVersion)),
           h('div', null, h('dt', null, t('lastOpened')), h('dd', null, lastOpened)),
         ),
+        // Both fields were already in the contract but never painted: a Host that warns about a
+        // shared ~/.dsh or reports a version difference now says so on its card (audit S3).
+        host.warning
+          ? h(
+              'div',
+              { 'data-testid': 'host-warning' },
+              h(Notice, { tone: 'warn', title: t('hostWarnings') }, resolveText(host.warning, locale)),
+            )
+          : null,
+        host.versionParity && host.versionParity.status === 'different'
+          ? h(
+              'div',
+              { 'data-testid': 'host-version-parity' },
+              h(
+                Notice,
+                { tone: 'warn' },
+                resolveText(host.versionParity.message, locale) ||
+                  t('versionDifferent', {
+                    remote: host.versionParity.remote || '?',
+                    local: host.versionParity.local || host.targetVersion || '?',
+                  }),
+              ),
+            )
+          : null,
+        host.versionParity && host.versionParity.status === 'unknown'
+          ? h('p', { className: 'drg-field-hint', 'data-testid': 'host-version-unknown' }, t('versionUnknown'))
+          : null,
         box(
           'div',
           'drg-card-actions',
@@ -1818,14 +2326,15 @@ window.__ModuleLoader__.load({
               label: t('cardEdit'),
               testId: 'host-edit',
               onClick: () => props.onEdit && props.onEdit(host),
-              disabled: busy,
+              // Editing while a link is being built would race the connection's own settings.
+              disabled: busy || host.status === 'connecting',
             }),
             h(IconButton, {
               icon: h(IconTrash),
               label: t('cardDelete'),
               testId: 'host-delete',
               onClick: () => props.onDelete && props.onDelete(host),
-              disabled: busy,
+              disabled: busy || host.status === 'connecting',
             }),
           ),
         ),
@@ -1839,6 +2348,16 @@ window.__ModuleLoader__.load({
       const loading = props.loading === true
       const error = props.error || null
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
+      // A connecting host owns the connection window (docs/design.md §4.1), so it is not a card
+      // here. Restart/stop progress is the exception: that host is not building a new link but
+      // finishing a one-shot action, and its card is where the action lives (§5.5/§5.7).
+      const isOneShotLinkAction = (host) =>
+        host &&
+        host.status === 'connecting' &&
+        host.progress !== null &&
+        (host.progress.code === 'restarting-remote' || host.progress.code === 'stopping-remote')
+      const connectingHosts = hosts.filter((host) => host && host.status === 'connecting' && !isOneShotLinkAction(host))
+      const visibleHosts = hosts.filter((host) => host && (host.status !== 'connecting' || isOneShotLinkAction(host)))
       const connected = hosts.filter((host) => host && host.status === 'connected').length
       const total = hosts.length
       const busyHostId = props.busyHostId || null
@@ -1889,27 +2408,32 @@ window.__ModuleLoader__.load({
             h(StatusDot, { status: connected > 0 ? 'connected' : 'idle' }),
             h('span', null, t('summary', { connected, total })),
           ),
-          h(
-            'ul',
-            { className: 'drg-host-list', 'data-testid': 'host-list' },
-            hosts.map((host) =>
-              h(HostCard, {
-                key: host.id,
-                t,
-                locale,
-                host,
-                busy: busyHostId === host.id,
-                onOpen: props.onOpenHost,
-                onDisconnect: props.onDisconnectHost,
-                onReconnect: props.onReconnectHost,
-                onRestart: props.onRestartHost,
-                onStopRemote: requestStop,
-                onEdit: props.onEditHost,
-                onDelete: props.onDeleteHost,
-                onDiagnose: props.onDiagnoseHost,
-              }),
-            ),
-          ),
+          connectingHosts.length > 0
+            ? h(Notice, { tone: 'info', testId: 'connecting-hosts-note' }, t('managingConnectingHosts'))
+            : null,
+          visibleHosts.length > 0
+            ? h(
+                'ul',
+                { className: 'drg-host-list', 'data-testid': 'host-list' },
+                visibleHosts.map((host) =>
+                  h(HostCard, {
+                    key: host.id,
+                    t,
+                    locale,
+                    host,
+                    busy: busyHostId === host.id,
+                    onOpen: props.onOpenHost,
+                    onDisconnect: props.onDisconnectHost,
+                    onReconnect: props.onReconnectHost,
+                    onRestart: props.onRestartHost,
+                    onStopRemote: requestStop,
+                    onEdit: props.onEditHost,
+                    onDelete: props.onDeleteHost,
+                    onDiagnose: props.onDiagnoseHost,
+                  }),
+                ),
+              )
+            : null,
           pendingStop !== null
             ? h(StopRemoteDialog, {
                 key: 'stop-remote:' + pendingStop.id,
@@ -1924,6 +2448,35 @@ window.__ModuleLoader__.load({
             : null,
         )
       }
+
+      // The stream died and the panel is polling: say so instead of silently showing stale
+      // numbers, and offer the one action that can restore live updates (audit S2-1). The banner
+      // also stays up while a reconnect attempt is in flight (`reconnecting`): only an actual
+      // `open`/first frame clears it.
+      const liveDegraded = props.mode === 'polling' || props.mode === 'reconnecting'
+      const liveBanner = liveDegraded
+        ? box(
+            'div',
+            'drg-live-banner',
+            h(
+              Notice,
+              { tone: 'warn', title: t('liveStreamLostTitle') },
+              props.mode === 'reconnecting'
+                ? t('liveReconnecting')
+                : t('liveStreamLostBody', { seconds: Math.round(POLL_INTERVAL_MS / 1000) }),
+            ),
+            h(
+              Button,
+              {
+                variant: 'secondary',
+                testId: 'live-reconnect',
+                onClick: props.onRetryLive,
+                disabled: typeof props.onRetryLive !== 'function',
+              },
+              t('liveReconnect'),
+            ),
+          )
+        : null
 
       return box(
         'div',
@@ -1970,6 +2523,7 @@ window.__ModuleLoader__.load({
           ),
         ),
         content,
+        liveBanner,
       )
     }
 
@@ -2224,6 +2778,18 @@ window.__ModuleLoader__.load({
       return h(
         React.Fragment,
         null,
+        host.warning ? h(Notice, { tone: 'warn', title: t('hostWarnings') }, resolveText(host.warning, locale)) : null,
+        host.versionParity && host.versionParity.status === 'different'
+          ? h(
+              Notice,
+              { tone: 'warn' },
+              resolveText(host.versionParity.message, locale) ||
+                t('versionDifferent', {
+                  remote: host.versionParity.remote || '?',
+                  local: host.versionParity.local || host.targetVersion || '?',
+                }),
+            )
+          : null,
         h(
           'div',
           { className: 'drg-manage-live', 'data-testid': 'manage-live' },
@@ -2303,7 +2869,7 @@ window.__ModuleLoader__.load({
       }
       const payload = switcherPayload()
       pushLocalHostRow(payload)
-      pushGuestHostRow(payload)
+      pushGuestHostRow()
       return payload
     }
 
@@ -2326,6 +2892,10 @@ window.__ModuleLoader__.load({
       }
       if (status === 'absent' || status === 'error') {
         try {
+          // A half-installed row must be dismantled before a second mount: the old code only
+          // dropped the reference, leaving its DOM/listeners behind (audit "reinstall not
+          // idempotent").
+          if (win.__drgHostRow && typeof win.__drgHostRow.destroy === 'function') win.__drgHostRow.destroy()
           win.__drgHostRow = null
           status = mountHostRow(win)
           if (status === 'installed') win.__drgHostRow.update(payload)
@@ -2337,11 +2907,26 @@ window.__ModuleLoader__.load({
       return switcher.installed
     }
 
-    function pushGuestHostRow(payload) {
+    /**
+     * The row payload for a carrier's own page. A guest must not render other hosts' rows at
+     * all: its exit control is bound to its own host, and a forged intent for another host is
+     * refused by `sanitizeGuestIntent` (audit review). So the projection is `local + own host`;
+     * cross-host switching from a remote page goes through Local first.
+     */
+    function guestSwitcherPayload(hostId) {
+      const payload = switcherPayload()
+      return {
+        ...payload,
+        current: payload.current === hostId ? hostId : 'local',
+        hosts: payload.hosts.filter((host) => host.id === hostId),
+      }
+    }
+
+    function pushGuestHostRow() {
       const entry = shownCarrier()
       if (entry === null || entry.rowInstalled !== true) return
       try {
-        entry.backend.pushRow(entry, payload)
+        entry.backend.pushRow(entry, guestSwitcherPayload(entry.hostId))
       } catch (_error) {
         // the framed page or guest may still be navigating
       }
@@ -2475,8 +3060,10 @@ window.__ModuleLoader__.load({
         var row = make('div')
         row.id = 'drg-host-row'
         row.setAttribute('role', 'button')
+        row.setAttribute('tabindex', '0')
         row.setAttribute('aria-haspopup', 'menu')
         row.setAttribute('aria-expanded', 'false')
+        row.setAttribute('aria-controls', 'drg-host-row-menu')
         var dotNode = make('span', 'drg-hr-dot')
         dotNode.setAttribute('data-state', 'local')
         row.appendChild(dotNode)
@@ -2500,6 +3087,7 @@ window.__ModuleLoader__.load({
         chevNode.appendChild(svg)
         row.appendChild(chevNode)
         var menuNode = make('span', 'drg-hr-menu')
+        menuNode.id = 'drg-host-row-menu'
         menuNode.setAttribute('role', 'menu')
         row.appendChild(menuNode)
 
@@ -2518,6 +3106,8 @@ window.__ModuleLoader__.load({
           var opts = options || {}
           var node = make('span', 'drg-hr-item')
           node.setAttribute('role', 'menuitem')
+          // Roving focus: the menu itself is one Tab stop, arrows move between its items.
+          node.setAttribute('tabindex', '-1')
           if (opts.target) node.setAttribute('data-target', opts.target)
           if (opts.action) node.setAttribute('data-action', opts.action)
           if (opts.active === true) node.setAttribute('data-active', '1')
@@ -2624,6 +3214,9 @@ window.__ModuleLoader__.load({
             if (rect.width < 180 || rect.width > 480) continue
             if (rect.height < win.innerHeight * 0.6) continue
             found = columns[probe]
+            // The first matching column is the sidebar; a later full-height section is not a
+            // better answer, and the old loop took the last one it saw.
+            break
           }
           if (found === null) return null
           return { column: found, anchor: found.children.length > 0 ? found.children[0] : null }
@@ -2658,6 +3251,27 @@ window.__ModuleLoader__.load({
           row.classList.remove('drg-open')
           row.setAttribute('aria-expanded', 'false')
         }
+        var menuItems = function () {
+          return Array.prototype.slice.call(menuNode.querySelectorAll('.drg-hr-item'))
+        }
+        var focusItem = function (index) {
+          var items = menuItems()
+          if (items.length === 0) return
+          var at = Math.max(0, Math.min(items.length - 1, index))
+          var node = items[at]
+          if (node && typeof node.focus === 'function') node.focus()
+        }
+        var openMenu = function (focusFirst) {
+          // The sidebar clips its children: anchor the fixed menu to the row so it can
+          // escape that overflow and sit over the page like a native menu.
+          var rect = row.getBoundingClientRect()
+          menuNode.style.top = rect.bottom + 4 + 'px'
+          menuNode.style.left = rect.left + 'px'
+          menuNode.style.width = rect.width + 'px'
+          row.classList.add('drg-open')
+          row.setAttribute('aria-expanded', 'true')
+          if (focusFirst === true) focusItem(0)
+        }
         row.addEventListener('click', function (event) {
           var target = event.target
           // A host's own exit control acts on that host without switching to it.
@@ -2682,14 +3296,60 @@ window.__ModuleLoader__.load({
             closeMenu()
             return
           }
-          // The sidebar clips its children: anchor the fixed menu to the row so it can
-          // escape that overflow and sit over the page like a native menu.
-          var rect = row.getBoundingClientRect()
-          menuNode.style.top = rect.bottom + 4 + 'px'
-          menuNode.style.left = rect.left + 'px'
-          menuNode.style.width = rect.width + 'px'
-          row.classList.add('drg-open')
-          row.setAttribute('aria-expanded', 'true')
+          openMenu(false)
+        })
+        // Keyboard parity (audit "host row unreachable by keyboard"): the row is a real button,
+        // Enter/Space opens it, arrows walk the menu, Escape closes and returns focus to the row.
+        row.addEventListener('keydown', function (event) {
+          var key = event.key
+          var focusTarget = event.target
+          // A real button inside the row keeps its native Enter/Space activation.
+          if (focusTarget && focusTarget.classList && focusTarget.classList.contains('drg-hr-act')) return
+          var items = menuItems()
+          var active = doc.activeElement
+          var index = items.indexOf(active)
+          var opened = row.classList.contains('drg-open')
+          if (key === 'Enter' || key === ' ') {
+            event.preventDefault()
+            if (index >= 0) {
+              // The items are spans: activate the focused one exactly like a click.
+              var node = items[index]
+              if (typeof node.click === 'function') node.click()
+              return
+            }
+            if (opened) closeMenu()
+            else openMenu(true)
+            return
+          }
+          if (key === 'ArrowDown' || key === 'ArrowUp') {
+            if (!opened) {
+              event.preventDefault()
+              openMenu(true)
+              if (key === 'ArrowUp') focusItem(menuItems().length - 1)
+              return
+            }
+            if (items.length === 0) return
+            event.preventDefault()
+            if (index < 0) {
+              focusItem(key === 'ArrowDown' ? 0 : items.length - 1)
+              return
+            }
+            var step = key === 'ArrowDown' ? 1 : -1
+            focusItem((index + step + items.length) % items.length)
+            return
+          }
+          if (key === 'Home' || key === 'End') {
+            if (!opened) return
+            event.preventDefault()
+            focusItem(key === 'Home' ? 0 : items.length - 1)
+            return
+          }
+          if (key === 'Escape' && opened) {
+            event.preventDefault()
+            event.stopPropagation()
+            closeMenu()
+            if (typeof row.focus === 'function') row.focus()
+          }
         })
         var outsideClick = function (event) {
           if (row.contains && row.contains(event.target)) return
@@ -2747,7 +3407,8 @@ window.__ModuleLoader__.load({
         var doc = win.document
         if (!doc || !doc.documentElement) return 'no-document'
         if (win.__drgGuestTools === true) return 'already'
-        win.__drgGuestTools = true
+        // The installed flag is set only once every listener is in place: setting it first made
+        // a partial install permanent, because the retry then answered "already" (audit).
         var emit =
           typeof win.__drgBridgeSink === 'function'
             ? win.__drgBridgeSink
@@ -2979,6 +3640,7 @@ window.__ModuleLoader__.load({
           },
           true,
         )
+        win.__drgGuestTools = true
         return 'installed'
       } catch (_error) {
         return 'error'
@@ -2986,7 +3648,6 @@ window.__ModuleLoader__.load({
     }
 
     const GUEST_TOOLS_SCRIPT = '(' + mountGuestTools.toString() + ')(window)'
-
     /**
      * The guest half of the capability bridge. A same-origin subdocument keeps this origin's DOM
      * access but not the browser capabilities a top-level document owns: clipboard writes are
@@ -3286,7 +3947,9 @@ window.__ModuleLoader__.load({
         }
         try {
           Object.defineProperty(win, 'localStorage', {
-            configurable: true,
+            // Non-configurable: the page must not be able to `delete window.localStorage` and
+            // fall back to the shared origin store (documented data-hygiene limit, audit S3).
+            configurable: false,
             enumerable: true,
             get: function () {
               return view
@@ -3388,12 +4051,92 @@ window.__ModuleLoader__.load({
 
     const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:var(--dsw-alias-bg-base);pointer-events:auto}
-      .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;align-items:center;justify-content:center;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
+      .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
+      .drg-carrier-error-text{max-width:52ch;line-height:1.6}
+      .drg-carrier-error button{height:32px;padding:0 14px;border:0.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;cursor:pointer}
+      .drg-carrier-error button:hover{background:var(--dsw-alias-interactive-bg-hover)}
+      .drg-carrier-error button:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
     `
 
     /** A switched-to carrier waits this long for its guest document before showing anyway. */
     const CARRIER_READY_TIMEOUT_MS = 1200
     const CARRIER_PAINT_TIMEOUT_MS = 320
+    /** A framed page that never fires `load` still needs a visible failure and a way out. */
+    const CARRIER_LOAD_TIMEOUT_MS = 25000
+
+    /**
+     * The one-shot timer behind a carrier's load failure. A cold remote on a slow SSH tunnel can
+     * take well over ten seconds for the whole document, so the timeout is deliberately generous;
+     * the timer only fires when no committed document arrived and is cancelled by the first real
+     * `load`. Exposed for the fake-clock test (`__test.createLoadGuard`).
+     */
+    function createLoadGuard(timeoutMs, onTimeout) {
+      let timer = null
+      let disposed = false
+      const cancel = () => {
+        if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
+        timer = null
+      }
+      return {
+        arm() {
+          if (disposed) return
+          cancel()
+          if (typeof setTimeout !== 'function') return
+          timer = setTimeout(() => {
+            timer = null
+            if (!disposed && typeof onTimeout === 'function') onTimeout()
+          }, timeoutMs)
+          unrefTimer(timer)
+        },
+        cancel,
+        dispose() {
+          disposed = true
+          cancel()
+        },
+      }
+    }
+    /** Installing the injected row can fail while the sidebar is still mounting: retry soon. */
+    const CARRIER_INSTALL_RETRY_MS = 1500
+    const CARRIER_INSTALL_MAX_ATTEMPTS = 8
+
+    /** Set by `apply` (the panel store lives there); a carrier's error layer asks for the local page. */
+    let requestLocalPage = null
+
+    function createCarrierErrorLayer(message, options) {
+      const opts = options || {}
+      const layer = document.createElement('div')
+      layer.className = 'drg-carrier-error'
+      layer.setAttribute('data-testid', 'remote-overlay-error')
+      // A failure that fills the window is an alert: it appears without user action and the only
+      // useful move out of it is a button that must be reachable.
+      layer.setAttribute('role', 'alert')
+      const text = document.createElement('p')
+      text.className = 'drg-carrier-error-text'
+      text.textContent = typeof message === 'string' ? message : ''
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.setAttribute('data-testid', 'remote-overlay-back-local')
+      button.textContent = typeof opts.localLabel === 'string' && opts.localLabel !== '' ? opts.localLabel : 'Local'
+      button.addEventListener('click', () => {
+        hideOverlays()
+        if (typeof requestLocalPage === 'function') requestLocalPage()
+      })
+      layer.append(text, button)
+      layer.style.display = 'none'
+      layer.__drgText = text
+      return layer
+    }
+
+    function showCarrierError(layer, message) {
+      if (!layer) return
+      if (layer.__drgText && typeof message === 'string' && message !== '') layer.__drgText.textContent = message
+      layer.style.display = 'flex'
+    }
+
+    function hideCarrierError(layer) {
+      if (!layer) return
+      layer.style.display = 'none'
+    }
     /**
      * Resolves once the guest has painted frames of its own: a hidden `<webview>`'s guest does not
      * paint, so this is what tells a reveal that there is something to show instead of the empty
@@ -3418,7 +4161,7 @@ window.__ModuleLoader__.load({
       // places the row as soon as the remote sidebar is wide enough to hold it.
       const live = typeof status === 'string' && status !== 'error' && status !== 'no-document'
       entry.rowInstalled = live
-      if (live && carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+      if (live && carrierPool.current === entry.hostId) pushGuestHostRow()
       return live
     }
 
@@ -3482,7 +4225,9 @@ window.__ModuleLoader__.load({
         }
         if (pending === null || typeof pending.then !== 'function') return
         draining = true
-        pending
+        // A guest that stops answering must not keep `draining` true forever: the drain would
+        // never run again and the row/capability bridge would go dead silently.
+        withTimeout(pending, 5000)
           .then((value) => {
             if (!value || !Array.isArray(value) || value.length === 0 || carrierPool.poll !== entry) return
             for (const intent of value) {
@@ -3496,11 +4241,10 @@ window.__ModuleLoader__.load({
                 )
                 continue
               }
-              // File intents belong to the host whose guest queued them; row intents
-              // keep their own hostId (a disconnect can target another host).
-              const answer = dispatchSwitcherIntent(
-                intent && intent.action === 'download-file' ? { ...intent, hostId: entry.hostId } : intent,
-              )
+              // File intents belong to the host whose guest queued them, and every guest intent
+              // goes through the same whitelist/hostId override as the browser frame.
+              const safe = sanitizeGuestIntent(intent, entry.hostId)
+              const answer = safe === null ? undefined : dispatchSwitcherIntent(safe)
               // A capability intent carries the id its guest is waiting on; answer it even when
               // the dispatch refused it (`ok:false`) so the page can fail instead of hanging.
               if (intent && typeof intent.id === 'string' && intent.id !== '') {
@@ -3561,7 +4305,10 @@ window.__ModuleLoader__.load({
      */
     function captionMenuStart(collapsed, start = '') {
       const raw = typeof start === 'string' ? start.trim() : ''
-      if (/^\d+(?:\.\d+)?px$/.test(raw) && Number.parseFloat(raw) <= CAPTION_MENU_MAX) return raw
+      // `getComputedStyle` normally resolves the custom property to px; a unitless value is read
+      // as px as well, because the old px-only regex dropped a perfectly good number (audit).
+      if (/^\d+(?:\.\d+)?(?:px)?$/.test(raw) && Number.parseFloat(raw) <= CAPTION_MENU_MAX)
+        return raw.replace(/px$/, '') + 'px'
       return (collapsed === true ? CAPTION_MENU_START_COLLAPSED : CAPTION_MENU_START) + 'px'
     }
 
@@ -3774,7 +4521,7 @@ window.__ModuleLoader__.load({
       setCaptionMenuStart(mine ? entry.sidebarCollapsed === true : null, mine ? entry.sidebarStart : '')
     }
 
-    async function createDesktopCarrier(hostId, url, message) {
+    async function createDesktopCarrier(hostId, url, message, options) {
       const bridge = desktopBrowserBridge()
       if (bridge === null) return null
       let reservation = null
@@ -3812,11 +4559,8 @@ window.__ModuleLoader__.load({
       style.textContent = CARRIER_CSS
 
       // A failed main-frame load leaves a blank window; say so instead of showing
-      // nothing. Sub-resource failures stay silent (see did-fail-load below).
-      const errorLayer = document.createElement('div')
-      errorLayer.className = 'drg-carrier-error'
-      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
-      errorLayer.textContent = typeof message === 'string' ? message : ''
+      // nothing, and keep a way back to the local page (audit "failed layer has no exit").
+      const errorLayer = createCarrierErrorLayer(message, { localLabel: options.localLabel })
 
       // A guest that covers the caption band takes the window drag away with it (Electron ignores app regions inside a
       // guest). This strip hands the empty part of the band back to the window; the guest's own fixed caption controls
@@ -3891,7 +4635,7 @@ window.__ModuleLoader__.load({
       })
       view.addEventListener('did-stop-loading', () => {
         if (entry.view !== view) return
-        errorLayer.style.display = 'none'
+        errorLayer && hideCarrierError(errorLayer)
         entry.failed = false
         // The document is there: a switch waiting for it may show the guest from here on.
         markCarrierReady(entry)
@@ -3918,7 +4662,10 @@ window.__ModuleLoader__.load({
             // links and clipboard any more than it costs it the file bridge.
             const capabilities = await installCapabilityBridge(entry)
             if (entry.view !== view) return
-            if (!live && !tools && !capabilities) return
+            // Each committed document is a fresh install attempt; a collapsed / not-yet-mounted
+            // sidebar retries with backoff instead of leaving the guest without its row.
+            entry.installAttempts = 0
+            if (!live || !tools || !capabilities) scheduleCarrierInstall(entry)
             if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
           })
       })
@@ -3930,7 +4677,7 @@ window.__ModuleLoader__.load({
         const aborted = event && (event.errorCode === -3 || event.errorCode === undefined)
         if (!isMainFrame || aborted) return
         entry.failed = true
-        errorLayer.style.display = 'flex'
+        showCarrierError(errorLayer)
         // The failure line is the page now: show it rather than wait for a frame that never comes.
         markCarrierReady(entry)
         // The page cannot paint its own frame, so it must not own the caption band either:
@@ -3953,7 +4700,7 @@ window.__ModuleLoader__.load({
      * local proxy forwards it to the host's tunnel. Same origin is what lets the row and the file
      * bridge be injected below; it is also why the frame must never navigate off the view prefix.
      */
-    function createWebCarrier(hostId, url, message) {
+    function createWebCarrier(hostId, url, message, options) {
       const root = document.createElement('div')
       root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
       root.setAttribute('data-testid', 'remote-overlay')
@@ -3964,11 +4711,9 @@ window.__ModuleLoader__.load({
       ].join(';')
       const style = document.createElement('style')
       style.textContent = CARRIER_CSS
-      // A frame that never loads would otherwise be a blank window; say why instead.
-      const errorLayer = document.createElement('div')
-      errorLayer.className = 'drg-carrier-error'
-      errorLayer.setAttribute('data-testid', 'remote-overlay-error')
-      errorLayer.textContent = typeof message === 'string' ? message : ''
+      // A frame that never loads would otherwise be a blank window; say why instead, and keep a
+      // button that hands the window back to the local page.
+      const errorLayer = createCarrierErrorLayer(message, { localLabel: options.localLabel })
       const frame = document.createElement('iframe')
       frame.className = 'drg-carrier-view drg-carrier-frame'
       frame.setAttribute('data-testid', 'remote-frame')
@@ -3989,17 +4734,31 @@ window.__ModuleLoader__.load({
         root,
         frame,
         url,
+        errorLayer,
         rowInstalled: false,
         ready: false,
         readyWaiters: [],
         revealToken: 0,
         timer: null,
+        installAttempts: 0,
+        installTimer: null,
+        /** Arms the "the document never committed" timer for this navigation. */
+        loadGuard: null,
+        /** What the frame shows when the loaded document is not the DSH UI. */
+        notDshMessage: typeof message === 'string' ? message : '',
       }
       frame.addEventListener('load', () => onWebFrameLoad(entry))
       root.append(style, frame, errorLayer)
       document.body.appendChild(root)
+      entry.loadGuard = createLoadGuard(CARRIER_LOAD_TIMEOUT_MS, () => {
+        if (!carrierPool.entries.includes(entry)) return
+        if (entry.ready === true) return
+        showCarrierError(entry.errorLayer)
+        markCarrierReady(entry)
+      })
       // Assign after the listener and the element are in place, so the first load is observed.
       frame.src = url
+      entry.loadGuard.arm()
       return entry
     }
 
@@ -4018,6 +4777,15 @@ window.__ModuleLoader__.load({
     function onWebFrameLoad(entry) {
       if (entry === null || entry.kind !== 'web') return
       const win = webWindow(entry)
+      // The initial about:blank of a freshly appended iframe can dispatch `load` before the
+      // assigned URL commits. It is not the remote document, so it must not be mistaken for a
+      // non-DSH page; the load timeout owns the case where the real URL never arrives.
+      try {
+        if (win && win.location && win.location.href === 'about:blank') return
+      } catch (_error) {
+        // a cross-origin document is handled below (the frame is reset to its view path)
+      }
+      if (entry.loadGuard) entry.loadGuard.cancel()
       if (win === null) {
         // The framed page left this origin (an external link, an OAuth hop): a cross-origin
         // frame would hide the host switcher and trap the window there, so bring it back.
@@ -4028,9 +4796,76 @@ window.__ModuleLoader__.load({
         }
         return
       }
+      // The proxy can answer 200 with an error page (or the Host can hand out a wrong path):
+      // detect that this document is not the DSH UI and give the user the way out instead of a
+      // frame with no switcher (audit "failure layer always display:none").
+      let isDsh = false
+      try {
+        const doc = win.document
+        isDsh = Boolean(doc && (doc.querySelector('#root') || doc.querySelector('[data-dsh-root]')))
+      } catch (_error) {
+        isDsh = false
+      }
+      if (!isDsh) {
+        showCarrierError(entry.errorLayer, entry.notDshMessage || '')
+        markCarrierReady(entry)
+        return
+      }
+      hideCarrierError(entry.errorLayer)
       markCarrierReady(entry)
-      installWebCarrier(entry, win)
-      if (carrierPool.current === entry.hostId) pushGuestHostRow(switcherPayload())
+      const installed = installWebCarrier(entry, win)
+      if (!installed) scheduleCarrierInstall(entry)
+      if (carrierPool.current === entry.hostId) pushGuestHostRow()
+    }
+
+    /**
+     * A row that failed to install because the sidebar was still mounting must not stay missing
+     * for the life of the window (audit "install failure never retried"). Retry with a growing
+     * delay, capped, and stop once the carrier is gone or the row is live.
+     */
+    function stopCarrierInstall(entry) {
+      if (entry === null || entry === undefined) return
+      if (entry.installTimer !== null && entry.installTimer !== undefined) {
+        if (typeof clearTimeout === 'function') clearTimeout(entry.installTimer)
+        entry.installTimer = null
+      }
+    }
+    function scheduleCarrierInstall(entry) {
+      if (entry === null || entry === undefined || entry.installTimer) return
+      if (!carrierPool.entries.includes(entry)) return
+      if ((entry.installAttempts || 0) >= CARRIER_INSTALL_MAX_ATTEMPTS) return
+      const delay = CARRIER_INSTALL_RETRY_MS * Math.min(8, 2 ** (entry.installAttempts || 0))
+      entry.installAttempts = (entry.installAttempts || 0) + 1
+      entry.installTimer = setTimeout(async () => {
+        entry.installTimer = null
+        if (!carrierPool.entries.includes(entry)) return
+        let installed = false
+        try {
+          if (entry.kind === 'web') {
+            const win = webWindow(entry)
+            installed = win ? installWebCarrier(entry, win) : false
+          } else {
+            // A desktop guest gets the same retry for all three injections: the row, the file
+            // bridge and the capability bridge are independent and each can fail while the
+            // sidebar is still mounting.
+            installed = await installHostRow(entry)
+            await installGuestTools(entry)
+            await installCapabilityBridge(entry)
+          }
+        } catch (_error) {
+          installed = false
+        }
+        if (installed) {
+          entry.installAttempts = 0
+          if (carrierPool.current === entry.hostId) {
+            pushGuestHostRow()
+            if (typeof entry.backend.poll === 'function') entry.backend.poll(entry)
+          }
+          return
+        }
+        scheduleCarrierInstall(entry)
+      }, delay)
+      unrefTimer(entry.installTimer)
     }
 
     /**
@@ -4038,6 +4873,75 @@ window.__ModuleLoader__.load({
      * taking its window, so nothing is evaluated as a string (a CSP without 'unsafe-eval' cannot
      * break them) and the intent sink is a direct call back into this module.
      */
+    /** Guest actions that can never target another host. */
+    const GUEST_ACTIONS = new Set([
+      'download-file',
+      'open-external',
+      'clipboard-write',
+      'notify',
+      'add',
+      'manage',
+      'disconnect',
+    ])
+
+    /**
+     * The trust boundary for everything a framed/guest page can ask the local half to do. The
+     * document inside the carrier is the user's own remote DSH, but its intents used to be handed
+     * to `switcher.dispatch` unchanged: a page could switch the whole window to any host id or
+     * disconnect any host (audit "intent trust"). Now:
+     *   - only the known actions pass (unknown actions are dropped);
+     *   - a download or a disconnect is forced to this carrier's host, so a crafted `hostId` in
+     *     the intent cannot reach a different one;
+     *   - a host switch is only accepted for `local` or this carrier's own host; switching to a
+     *     third host from a remote page goes through Local first (docs/design.md §4.8/§7).
+     */
+    function sanitizeGuestIntent(intent, hostId) {
+      if (!intent || typeof intent !== 'object') return null
+      const action = typeof intent.action === 'string' ? intent.action : ''
+      if (action !== '' && GUEST_ACTIONS.has(action)) {
+        if (action === 'download-file') {
+          const kind = intent.kind === 'directory' ? 'directory' : 'file'
+          const path = typeof intent.path === 'string' ? intent.path : ''
+          if (path === '' || path.charAt(0) !== '/') return null
+          return {
+            action,
+            hostId,
+            kind,
+            path,
+            name: typeof intent.name === 'string' ? intent.name : '',
+          }
+        }
+        if (action === 'disconnect') {
+          // The row a guest sees only contains Local and its own host, so the only legitimate
+          // exit is its own. A forged id for another host is refused instead of being rewritten
+          // into "disconnect myself" (review blocker 1).
+          return intent.hostId === hostId ? { action, hostId } : null
+        }
+        if (action === 'clipboard-write') {
+          return {
+            action,
+            id: typeof intent.id === 'string' ? intent.id : undefined,
+            text: typeof intent.text === 'string' ? intent.text : '',
+          }
+        }
+        if (action === 'open-external') return { action, url: intent.url }
+        if (action === 'notify') return { action, code: intent.code, tone: intent.tone, text: intent.text }
+        return { action }
+      }
+      const target = typeof intent.target === 'string' ? intent.target : ''
+      if (target === 'local' || (hostId !== '' && target === hostId)) return { target }
+      return null
+    }
+
+    /** The sink handed to a framed page: sanitize, then dispatch (and report a refusal). */
+    function guestIntentSink(entry) {
+      return (intent) => {
+        const safe = sanitizeGuestIntent(intent, entry.hostId)
+        if (safe === null) return { ok: false, reason: 'blocked-intent' }
+        return dispatchSwitcherIntent(safe)
+      }
+    }
+
     function installWebCarrier(entry, existingWindow) {
       const win = existingWindow ?? webWindow(entry)
       if (!win) {
@@ -4045,7 +4949,9 @@ window.__ModuleLoader__.load({
         return false
       }
       try {
-        win.__drgBridgeSink = dispatchSwitcherIntent
+        // The page calls this function directly, so the host id is bound here rather than read
+        // from the intent (a guest-supplied hostId must never win).
+        win.__drgBridgeSink = guestIntentSink(entry)
       } catch (_error) {
         return false
       }
@@ -4058,7 +4964,7 @@ window.__ModuleLoader__.load({
       }
       const live = typeof row === 'string' && row !== 'error' && row !== 'no-document'
       entry.rowInstalled = live
-      if (live) pushWebCarrierRow(entry, switcherPayload())
+      if (live) pushWebCarrierRow(entry, guestSwitcherPayload(entry.hostId))
       try {
         mountGuestTools(win)
       } catch (_error) {
@@ -4094,7 +5000,7 @@ window.__ModuleLoader__.load({
     /** Desktop guest backend: the shell hands out a Chromium guest lease per host. */
     const DESKTOP_CARRIER = {
       kind: 'desktop',
-      create: (hostId, url, message) => createDesktopCarrier(hostId, url, message),
+      create: (hostId, url, message, options) => createDesktopCarrier(hostId, url, message, options),
       load: async (entry, url) => {
         entry.url = url
         try {
@@ -4105,9 +5011,10 @@ window.__ModuleLoader__.load({
       },
       pushRow: (entry, payload) => {
         try {
-          entry.view.executeJavaScript(
+          const answer = entry.view.executeJavaScript(
             'window.__drgHostRow && window.__drgHostRow.update(' + JSON.stringify(payload) + ')',
           )
+          if (answer && typeof answer.catch === 'function') answer.catch(() => {})
         } catch (_error) {
           // the guest may still be navigating
         }
@@ -4123,13 +5030,16 @@ window.__ModuleLoader__.load({
     /** Web frame backend: a same-origin iframe, warmed and hidden exactly like the guest. */
     const WEB_CARRIER = {
       kind: 'web',
-      create: (hostId, url, message) => createWebCarrier(hostId, url, message),
+      create: (hostId, url, message, options) => createWebCarrier(hostId, url, message, options),
       load: (entry, url) => {
         entry.url = url
         entry.rowInstalled = false
         entry.ready = false
+        entry.installAttempts = 0
+        stopCarrierInstall(entry)
         try {
           entry.frame.src = url
+          if (entry.loadGuard) entry.loadGuard.arm()
         } catch (_error) {
           // a frame that refuses a navigation reports it through the load event
         }
@@ -4141,13 +5051,17 @@ window.__ModuleLoader__.load({
     }
 
     /** Build the carrier that fits this window: guest when the shell offers one, frame otherwise. */
-    function createCarrier(hostId, url, message) {
+    function createCarrier(hostId, url, message, options) {
       const surface = carrierSurface()
       if (surface === null) return null
-      return surface === 'desktop' ? createDesktopCarrier(hostId, url, message) : createWebCarrier(hostId, url, message)
+      return surface === 'desktop'
+        ? createDesktopCarrier(hostId, url, message, options)
+        : createWebCarrier(hostId, url, message, options)
     }
 
     function disposeWebCarrier(entry) {
+      stopCarrierInstall(entry)
+      if (entry.loadGuard) entry.loadGuard.dispose()
       try {
         entry.frame.src = 'about:blank'
       } catch (_error) {
@@ -4253,7 +5167,7 @@ window.__ModuleLoader__.load({
       if (entry === null) {
         if (surface === null) return { ok: false, reason: 'acquire-failed' }
         if (!acceptsCarrierUrl(surface, url)) return { ok: false, reason: 'bad-url' }
-        entry = await createCarrier(hostId, url, options.message)
+        entry = await createCarrier(hostId, url, options.message, options)
         if (entry === null) return { ok: false, reason: 'acquire-failed' }
         navigatedRev = options.viewRev
         // The user moved on (another host, or back to local) while this one was being
@@ -4272,6 +5186,13 @@ window.__ModuleLoader__.load({
         await entry.backend.load(entry, url)
         navigatedRev = options.viewRev
       }
+      // The localized "not a DSH document" line is owned by the caller; a reload reuses the
+      // entry but may carry a fresh translation.
+      if (typeof options.message === 'string' && options.message !== '') entry.notDshMessage = options.message
+      // Every caller (including the reuse branch) must respect the last request: the carrier
+      // build is async, and a stale call used to take the window back from the host the user
+      // actually chose (audit "wanted race").
+      if (carrierPool.wanted !== hostId) return { ok: false, reason: 'superseded' }
       // Remember which attach this carrier was navigated for: the next attach invalidates it.
       if (navigatedRev !== null && Number.isInteger(navigatedRev)) entry.viewRev = navigatedRev
       // A desktop guest whose page failed is not worth showing as-is: retry it once.
@@ -4302,7 +5223,7 @@ window.__ModuleLoader__.load({
       ownCaptionBand(entry, entry.captionApplied === true)
       updateSwitcher({ current: hostId })
       if (entry.rowInstalled === true) {
-        pushGuestHostRow(switcherPayload())
+        pushGuestHostRow()
         if (typeof entry.backend.poll === 'function') entry.backend.poll(entry)
       }
       return { ok: true, reused }
@@ -4318,9 +5239,13 @@ window.__ModuleLoader__.load({
       ownCaptionBand(null, false)
     }
 
+    /** Set by the overlay host: a disposed carrier invalidates the launch URL kept for it. */
+    let onCarrierDisposed = null
+
     /** Tear one carrier down. Safe for one that never entered the pool. */
     async function disposeCarrier(entry) {
       if (entry === null || entry === undefined) return
+      stopCarrierInstall(entry)
       if (carrierPool.poll === entry) stopHostRowPoll()
       carrierPool.entries = carrierPool.entries.filter((item) => item !== entry)
       // The window that filled the page is going away, so the local page is next: the row has to follow here as well.
@@ -4332,6 +5257,8 @@ window.__ModuleLoader__.load({
         ownCaptionBand(null, false)
       }
       await entry.backend.dispose(entry)
+      // The launch URL for this host is one-shot and its tunnel is gone: keep no copy of it.
+      if (typeof onCarrierDisposed === 'function') onCarrierDisposed(entry.hostId)
       if (wasShown) updateSwitcher({ current: 'local' })
     }
 
@@ -4339,7 +5266,8 @@ window.__ModuleLoader__.load({
     async function disposeDesktopCarrier(entry) {
       if (entry.view !== null && entry.rowInstalled === true) {
         try {
-          entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
+          const destroyed = entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
+          if (destroyed && typeof destroyed.catch === 'function') destroyed.catch(() => {})
         } catch (_error) {
           // the guest may already be gone
         }
@@ -4471,18 +5399,56 @@ window.__ModuleLoader__.load({
 
     //#region 10. connect wizard
 
+    /**
+     * The ranges the Host actually enforces (`src/settings.js` clamps to them). The Client now
+     * checks the same numbers before it saves, so a value is either accepted unchanged on both
+     * sides or rejected with a field error — never silently rewritten by the Host. `__test.limits`
+     * keeps this table pinned to the Host's behaviour in `test/unit/client.test.js`.
+     */
+    const HOST_LIMITS = {
+      defaultPort: { min: 1, max: 65535 },
+      connectTimeoutSec: { min: 5, max: 300 },
+      idleMinutes: { min: 1, max: 1440 },
+      maxAttempts: { min: 0, max: 20 },
+      baseDelayMs: { min: 100, max: 30000 },
+    }
+    /** A profile name DSH can boot: one safe path segment, and never `desktop`. */
+    const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+    function isValidProfileName(value) {
+      const text = typeof value === 'string' ? value.trim() : ''
+      return text !== '' && PROFILE_PATTERN.test(text) && text.toLowerCase() !== 'desktop'
+    }
+    function inRange(value, limit) {
+      const number = toInt(value, NaN)
+      return Number.isInteger(number) && number >= limit.min && number <= limit.max
+    }
+
     function toInt(value, fallback) {
       const number =
         typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
       return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
     }
 
+    /**
+     * Legacy Hosts only expose `addressMasked`; this reads a port out of it. Bracketed IPv6
+     * (`user@[fe80::1]:2222`) carries one; a bare IPv6 (`user@fe80::1`) never does, so its last
+     * colon-separated group is not a port. New Hosts expose `port`/`username`, and the editor reads
+     * those directly (see `initialDraft`).
+     */
     function parseMaskedAddress(masked) {
       const text = String(masked || '')
       const result = { username: '', port: null }
       const at = text.lastIndexOf('@')
       if (at >= 0) result.username = text.slice(0, at)
       const tail = at >= 0 ? text.slice(at + 1) : text
+      const bracketed = tail.match(/^\[([^\]]+)\](?::(\d+))?$/)
+      if (bracketed) {
+        result.port = bracketed[2] ? Number(bracketed[2]) : null
+        return result
+      }
+      // An unbracketed address with more than one colon is IPv6: nothing after the last colon is
+      // a port (`fe80::1` used to yield port 1 here).
+      if ((tail.match(/:/g) || []).length > 1) return result
       const match = tail.match(/:(\d+)\s*$/)
       if (match) result.port = Number(match[1])
       return result
@@ -4516,19 +5482,51 @@ window.__ModuleLoader__.load({
       return host
     }
 
+    /** One validation failure names the field so the form can mark and focus it, not only toast it. */
+    function fieldError(field, code) {
+      return { field, code }
+    }
+
     function validateHostDraft(draft, options = {}) {
-      if (!String(draft.name || '').trim()) return 'wizard.validationName'
+      if (!String(draft.name || '').trim()) return fieldError('name', 'wizard.validationName')
       const address = String(draft.address || '').trim()
-      if (!address) return 'wizard.validationAddress'
-      if (looksLikeWebAddress(address)) return 'wizard.validationAddressUrl'
-      const port = toInt(draft.port, NaN)
-      if (!Number.isFinite(port) || port < 1 || port > 65535) return 'wizard.validationPort'
+      if (!address) return fieldError('address', 'wizard.validationAddress')
+      if (looksLikeWebAddress(address)) return fieldError('address', 'wizard.validationAddressUrl')
+      if (!inRange(draft.port, HOST_LIMITS.defaultPort)) return fieldError('port', 'wizard.validationPort')
+      if (draft.keepAlive === 'idle' && !inRange(draft.idleMinutes, HOST_LIMITS.idleMinutes)) {
+        return fieldError('idleMinutes', 'wizard.validationIdleMinutes')
+      }
       // An edit that leaves authentication untouched keeps the stored key, so an
       // empty field is only an error when this save actually sends auth.
       const requireKeyPath = options.requireKeyPath !== false
       if (draft.authType === 'key' && requireKeyPath && !String(draft.keyPath || '').trim()) {
-        return 'wizard.validationKeyPath'
+        return fieldError('keyPath', 'wizard.validationKeyPath')
       }
+      if (
+        draft.authType === 'password' &&
+        options.requirePassword === true &&
+        String(draft.password || '').trim() === ''
+      ) {
+        return fieldError('password', 'wizard.validationPassword')
+      }
+      return null
+    }
+
+    /** The settings modal validates against the same table the Host clamps with. */
+    function validateSettingsDraft(draft) {
+      if (!inRange(draft.defaultPort, HOST_LIMITS.defaultPort)) {
+        return fieldError('defaultPort', 'settings.validationPort')
+      }
+      if (!inRange(draft.connectTimeoutSec, HOST_LIMITS.connectTimeoutSec)) {
+        return fieldError('connectTimeoutSec', 'settings.validationTimeout')
+      }
+      if (!inRange(draft.maxAttempts, HOST_LIMITS.maxAttempts)) {
+        return fieldError('maxAttempts', 'settings.validationAttempts')
+      }
+      if (!inRange(draft.baseDelayMs, HOST_LIMITS.baseDelayMs)) {
+        return fieldError('baseDelayMs', 'settings.validationBaseDelay')
+      }
+      if (!isValidProfileName(draft.profile)) return fieldError('profile', 'settings.validationProfile')
       return null
     }
 
@@ -4536,14 +5534,17 @@ window.__ModuleLoader__.load({
       const defaults = settings && typeof settings === 'object' ? settings : {}
       const auto = defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
       if (mode === 'edit' && host) {
-        // Fill what the HostView exposes; username/port are parsed from the
-        // masked address so saving an edit does not clobber them with defaults.
+        // Read the plain fields the Host exposes; the masked address is presentation only and
+        // parsing it back used to invent a port (`user@fe80::1` -> 1) or overwrite the default
+        // port with 22. The parse stays as the fallback for a Host from before v2.10.
         const parsed = parseMaskedAddress(host.addressMasked)
+        const exposedPort = typeof host.port === 'number' && Number.isInteger(host.port) ? host.port : null
+        const exposedUser = typeof host.username === 'string' ? host.username : null
         return {
           name: host.name || '',
           address: host.address || '',
-          port: parsed.port === null ? defaults.defaultPort || 22 : parsed.port,
-          username: parsed.username,
+          port: exposedPort === null ? (parsed.port === null ? defaults.defaultPort || 22 : parsed.port) : exposedPort,
+          username: exposedUser === null ? parsed.username : exposedUser,
           jumpHost: typeof host.jumpHost === 'string' ? host.jumpHost : '',
           jumpHostKnown: typeof host.jumpHost === 'string',
           authType: typeof host.authType === 'string' ? host.authType : defaults.defaultAuth || 'key',
@@ -4586,6 +5587,8 @@ window.__ModuleLoader__.load({
       const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
       const [saving, setSaving] = useState(null)
       const [formError, setFormError] = useState(null)
+      /** Field-level messages keyed by draft field, cleared as soon as that field changes. */
+      const [fieldErrors, setFieldErrors] = useState({})
       const [aliases, setAliases] = useState([])
       const [knownHosts, setKnownHosts] = useState(null)
       const [aliasesLoading, setAliasesLoading] = useState(false)
@@ -4614,8 +5617,39 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      const patchDraft = (patch) => setDraft((current) => ({ ...current, ...patch }))
-      const row = (spec) => formRow(t, draft, patchDraft, spec)
+      const patchDraft = (patch) => {
+        setDraft((current) => ({ ...current, ...patch }))
+        // Correcting a field clears its own error (and the summary) instead of leaving a stale
+        // message until the next save (audit S2-3).
+        setFieldErrors((current) => {
+          const next = { ...current }
+          let changed = false
+          for (const key of Object.keys(patch)) {
+            if (next[key] !== undefined) {
+              delete next[key]
+              changed = true
+            }
+          }
+          return changed ? next : current
+        })
+        if (formError !== null) setFormError(null)
+      }
+      const row = (spec) => formRow(t, draft, patchDraft, { ...spec, error: fieldErrors[spec.key] })
+      const focusField = (field) => {
+        if (typeof document === 'undefined' || !document.querySelector) return
+        const testId = {
+          name: 'wizard-name',
+          address: 'wizard-address',
+          port: 'wizard-port',
+          username: 'wizard-username',
+          idleMinutes: 'wizard-idle-minutes',
+          keyPath: 'wizard-key-path',
+          password: 'wizard-password',
+        }[field]
+        if (!testId) return
+        const node = document.querySelector('[data-testid="' + testId + '"]')
+        if (node && typeof node.focus === 'function') node.focus()
+      }
 
       const onAddressChange = (value) => {
         patchDraft({ address: value })
@@ -4641,15 +5675,21 @@ window.__ModuleLoader__.load({
       }
 
       const submit = async (intent) => {
-        const invalid = validateHostDraft(draft, { requireKeyPath: mode === 'add' || authDirty })
+        // An edit that does not touch authentication keeps the stored credential, so it does
+        // not need (and must not demand) a password: the connection asks for it later
+        // (audit S2-2). A password typed into the wizard stays a one-time value.
+        const requiresPassword = draft.authType === 'password' && (mode === 'add' || authDirty)
+        const invalid = validateHostDraft(
+          { ...draft, password },
+          { requireKeyPath: mode === 'add' || authDirty, requirePassword: requiresPassword },
+        )
         if (invalid !== null) {
-          setFormError(invalid)
+          setFieldErrors({ [invalid.field]: invalid.code })
+          setFormError(invalid.code)
+          focusField(invalid.field)
           return
         }
-        if (draft.authType === 'password' && String(password).trim() === '') {
-          setFormError('wizard.validationPassword')
-          return
-        }
+        setFieldErrors({})
         setFormError(null)
         setSaving(intent)
         try {
@@ -4668,7 +5708,10 @@ window.__ModuleLoader__.load({
           props.onClose()
         } catch (error) {
           setSaving(null)
-          setFormError(toErrorView(error))
+          const view = toErrorView(error)
+          // A Host validation error names a field when it can; keep it next to that field too.
+          if (view && typeof view.field === 'string') setFieldErrors({ [view.field]: view.code })
+          setFormError(view)
         }
       }
 
@@ -4725,22 +5768,33 @@ window.__ModuleLoader__.load({
             testId: 'wizard-name',
             after: () => setNameTouched(true),
           }),
-          h(Field, { label: t('wizard.address'), hint: t('wizard.addressHint') }, [
-            h(TextInput, {
-              key: 'address',
-              value: draft.address,
-              placeholder: t('wizard.addressPlaceholder'),
-              ariaLabel: t('wizard.address'),
-              list: 'drg-ssh-alias-list',
-              testId: 'wizard-address',
-              onChange: onAddressChange,
-            }),
-            h(
-              'datalist',
-              { key: 'aliases', id: 'drg-ssh-alias-list' },
-              addressOptions.map((alias) => h('option', { key: alias.alias, value: alias.alias }, alias.host || '')),
-            ),
-          ]),
+          h(
+            Field,
+            {
+              label: t('wizard.address'),
+              hint: t('wizard.addressHint'),
+              error: fieldErrors.address ? t(fieldErrors.address) : undefined,
+              errorId: fieldErrors.address ? 'wizard-address-error' : undefined,
+            },
+            [
+              h(TextInput, {
+                key: 'address',
+                value: draft.address,
+                placeholder: t('wizard.addressPlaceholder'),
+                ariaLabel: t('wizard.address'),
+                list: 'drg-ssh-alias-list',
+                testId: 'wizard-address',
+                invalid: Boolean(fieldErrors.address),
+                describedBy: fieldErrors.address ? 'wizard-address-error' : undefined,
+                onChange: onAddressChange,
+              }),
+              h(
+                'datalist',
+                { key: 'aliases', id: 'drg-ssh-alias-list' },
+                addressOptions.map((alias) => h('option', { key: alias.alias, value: alias.alias }, alias.host || '')),
+              ),
+            ],
+          ),
         ),
         addressOptions.length > 0
           ? box(
@@ -4798,7 +5852,11 @@ window.__ModuleLoader__.load({
         draft.authType === 'key'
           ? h(
               Field,
-              { label: t('wizard.keyPath') },
+              {
+                label: t('wizard.keyPath'),
+                error: fieldErrors.keyPath ? t(fieldErrors.keyPath) : undefined,
+                errorId: fieldErrors.keyPath ? 'wizard-key-path-error' : undefined,
+              },
               box(
                 'div',
                 'drg-field-inline',
@@ -4807,6 +5865,8 @@ window.__ModuleLoader__.load({
                   placeholder: t('wizard.keyPathPlaceholder'),
                   ariaLabel: t('wizard.keyPath'),
                   testId: 'wizard-key-path',
+                  invalid: Boolean(fieldErrors.keyPath),
+                  describedBy: fieldErrors.keyPath ? 'wizard-key-path-error' : undefined,
                   onChange: (value) => {
                     setAuthDirty(true)
                     patchDraft({ keyPath: value })
@@ -4827,15 +5887,33 @@ window.__ModuleLoader__.load({
         draft.authType === 'password'
           ? h(
               Field,
-              { label: t('wizard.password'), hint: t('wizard.passwordPlaceholder') },
+              {
+                label: t('wizard.password'),
+                // An edit that leaves auth alone does not need the password: the Host asks for it
+                // when the connection actually starts (audit S2-2).
+                hint: mode === 'edit' && !authDirty ? t('wizard.passwordSavedHint') : t('wizard.passwordPlaceholder'),
+                error: fieldErrors.password ? t(fieldErrors.password) : undefined,
+                errorId: fieldErrors.password ? 'wizard-password-error' : undefined,
+              },
               h(TextInput, {
                 type: 'password',
                 value: password,
                 placeholder: t('wizard.passwordPlaceholder'),
                 ariaLabel: t('wizard.password'),
                 testId: 'wizard-password',
+                invalid: Boolean(fieldErrors.password),
+                describedBy: fieldErrors.password ? 'wizard-password-error' : undefined,
                 onChange: (value) => {
                   setAuthDirty(true)
+                  // Clear the field error like every other input: the password has no draft
+                  // field, so `patchDraft` was not called and the error stuck (review feedback).
+                  setFieldErrors((current) => {
+                    if (current.password === undefined) return current
+                    const next = { ...current }
+                    delete next.password
+                    return next
+                  })
+                  if (formError !== null) setFormError(null)
                   setPassword(value)
                 },
               }),
@@ -4907,6 +5985,8 @@ window.__ModuleLoader__.load({
             closeLabel: t('close'),
             wide: true,
             testId: 'host-wizard',
+            busy: saving !== null,
+            dismissible: saving === null,
             footer,
           },
           h('div', { className: 'drg-wizard-body', 'data-testid': 'wizard-form' }, body),
@@ -4978,15 +6058,12 @@ window.__ModuleLoader__.load({
       const status = props.status || 'loading'
       const report = props.report || null
       const [copied, setCopied] = useState(false)
-
-      useEffect(() => {
-        if (typeof props.onClose !== 'function' || typeof document === 'undefined') return undefined
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') props.onClose()
-        }
-        document.addEventListener('keydown', onKeyDown)
-        return () => document.removeEventListener('keydown', onKeyDown)
-      }, [props.onClose])
+      const layerRef = useRef(null)
+      const dialogRef = useRef(null)
+      const titleIdRef = useRef('drg-drawer-title')
+      // The drawer is a dialog like the modals: one Escape handler for the whole stack, so a
+      // drawer under a wizard cannot close first (audit S1-1).
+      useDialogLayer({ layerRef, dialogRef, onClose: props.onClose, dismissible: true })
 
       const handleCopy = async () => {
         const text = report
@@ -5057,17 +6134,18 @@ window.__ModuleLoader__.load({
         )
       }
 
-      return box(
+      return h(
         'div',
-        'drg-drawer-layer',
+        { className: 'drg-drawer-layer', ref: layerRef },
         h('div', { className: 'drg-drawer-backdrop', onClick: props.onClose, 'aria-hidden': 'true' }),
         h(
           'aside',
           {
             className: 'drg-drawer',
             role: 'dialog',
-            'aria-modal': 'true',
-            'aria-label': t('diag.title'),
+            'aria-labelledby': titleIdRef.current,
+            tabIndex: -1,
+            ref: dialogRef,
             'data-testid': 'diagnostics',
           },
           box(
@@ -5076,7 +6154,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               null,
-              box('h2', 'drg-drawer-title', t('diag.title')),
+              box('h2', { className: 'drg-drawer-title', id: titleIdRef.current }, t('diag.title')),
               host
                 ? box(
                     'p',
@@ -5109,15 +6187,19 @@ window.__ModuleLoader__.load({
     //#region 12. settings modal
 
     function settingsPatchFromDraft(draft) {
+      const clamp = (value, limit, fallback) => {
+        const number = toInt(value, fallback)
+        return Math.min(limit.max, Math.max(limit.min, number))
+      }
       return {
-        defaultPort: toInt(draft.defaultPort, 22),
+        defaultPort: clamp(draft.defaultPort, HOST_LIMITS.defaultPort, 22),
         defaultAuth: draft.defaultAuth === 'password' ? 'password' : 'key',
         defaultKeyPath: String(draft.defaultKeyPath || '').trim(),
-        connectTimeoutSec: Math.max(1, toInt(draft.connectTimeoutSec, 30)),
+        connectTimeoutSec: clamp(draft.connectTimeoutSec, HOST_LIMITS.connectTimeoutSec, 30),
         autoReconnect: {
           enabled: draft.autoReconnectEnabled === true,
-          maxAttempts: Math.max(0, toInt(draft.maxAttempts, 3)),
-          baseDelayMs: Math.max(0, toInt(draft.baseDelayMs, 1000)),
+          maxAttempts: clamp(draft.maxAttempts, HOST_LIMITS.maxAttempts, 3),
+          baseDelayMs: clamp(draft.baseDelayMs, HOST_LIMITS.baseDelayMs, 1000),
         },
         hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
         saveTokens: draft.saveTokens === true,
@@ -5156,14 +6238,46 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = useState(() => settingsDraft(props.settings))
       const [saving, setSaving] = useState(false)
       const [error, setError] = useState(null)
+      const [fieldErrors, setFieldErrors] = useState({})
       // Key-file picker overlay for the default key path.
       const [keyPicker, setKeyPicker] = useState(false)
-      const patch = (patchValue) => setDraft((current) => ({ ...current, ...patchValue }))
+      const patch = (patchValue) => {
+        setDraft((current) => ({ ...current, ...patchValue }))
+        setFieldErrors((current) => {
+          const next = { ...current }
+          let changed = false
+          for (const key of Object.keys(patchValue)) {
+            if (next[key] !== undefined) {
+              delete next[key]
+              changed = true
+            }
+          }
+          return changed ? next : current
+        })
+      }
       const set = (field) => (value) => patch({ [field]: value })
 
-      const fieldRow = (spec) => formRow(t, draft, patch, spec)
+      const fieldRow = (spec) => {
+        const row = formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
+        // The settings body is built from `.map(fieldRow)`: every element needs a stable key or
+        // React reports a missing-key warning on every render.
+        return React.cloneElement(row, { key: spec.key })
+      }
+      const focusField = (field) => {
+        if (typeof document === 'undefined' || !document.querySelector) return
+        const node = document.querySelector('[data-testid="settings-' + field + '"]')
+        if (node && typeof node.focus === 'function') node.focus()
+      }
 
       const handleSave = async () => {
+        const invalid = validateSettingsDraft(draft)
+        if (invalid !== null) {
+          setFieldErrors({ [invalid.field]: invalid.code })
+          setError(null)
+          focusField(invalid.field)
+          return
+        }
+        setFieldErrors({})
         setSaving(true)
         setError(null)
         try {
@@ -5177,7 +6291,13 @@ window.__ModuleLoader__.load({
       }
 
       const footer = footerRow(
-        h(Button, { variant: 'ghost', onClick: props.onClose }, t('cancel')),
+        // Same dismissal contract as Escape / the backdrop / the header ×: a save in flight
+        // cannot be cancelled by the footer button either.
+        h(
+          Button,
+          { variant: 'ghost', testId: 'settings-cancel', disabled: saving, onClick: props.onClose },
+          t('cancel'),
+        ),
         h(
           Button,
           { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave },
@@ -5196,6 +6316,8 @@ window.__ModuleLoader__.load({
             closeLabel: t('close'),
             wide: true,
             testId: 'settings',
+            busy: saving,
+            dismissible: !saving,
             footer,
           },
           box(
@@ -5209,7 +6331,13 @@ window.__ModuleLoader__.load({
                 'div',
                 'drg-form-grid drg-form-grid-3',
                 [
-                  { kind: 'number', key: 'defaultPort', label: 'settings.defaultPort' },
+                  {
+                    kind: 'number',
+                    key: 'defaultPort',
+                    label: 'settings.defaultPort',
+                    hint: 'settings.defaultPortHint',
+                    testId: 'settings-defaultPort',
+                  },
                   {
                     kind: 'select',
                     key: 'defaultAuth',
@@ -5219,7 +6347,13 @@ window.__ModuleLoader__.load({
                       ['password', 'settings.defaultAuthPassword'],
                     ],
                   },
-                  { kind: 'number', key: 'connectTimeoutSec', label: 'settings.connectTimeout' },
+                  {
+                    kind: 'number',
+                    key: 'connectTimeoutSec',
+                    label: 'settings.connectTimeout',
+                    hint: 'settings.connectTimeoutHint',
+                    testId: 'settings-connectTimeoutSec',
+                  },
                 ].map(fieldRow),
                 h(
                   Field,
@@ -5282,8 +6416,8 @@ window.__ModuleLoader__.load({
                 'div',
                 'drg-form-grid',
                 [
-                  { kind: 'number', key: 'maxAttempts', label: 'settings.maxAttempts' },
-                  { kind: 'number', key: 'baseDelayMs', label: 'settings.baseDelay' },
+                  { kind: 'number', key: 'maxAttempts', label: 'settings.maxAttempts', testId: 'settings-maxAttempts' },
+                  { kind: 'number', key: 'baseDelayMs', label: 'settings.baseDelay', testId: 'settings-baseDelayMs' },
                 ].map(fieldRow),
               ),
             ),
@@ -5295,9 +6429,15 @@ window.__ModuleLoader__.load({
               box(
                 'div',
                 'drg-form-grid',
-                [{ kind: 'text', key: 'profile', label: 'settings.profile', hint: 'settings.profileHint' }].map(
-                  fieldRow,
-                ),
+                [
+                  {
+                    kind: 'text',
+                    key: 'profile',
+                    label: 'settings.profile',
+                    hint: 'settings.profileHint',
+                    testId: 'settings-profile',
+                  },
+                ].map(fieldRow),
               ),
             ),
             box(
@@ -5353,8 +6493,14 @@ window.__ModuleLoader__.load({
       const [password, setPassword] = useState('')
       const [remember, setRemember] = useState(false)
       const [localError, setLocalError] = useState('')
+      // A failure reported by the previous connect attempt is cleared as soon as the user
+      // edits the password, like every other field error.
+      const [serverErrorCleared, setServerErrorCleared] = useState(false)
       const canRemember = props.storageAvailable === true
       const submit = () => {
+        // Enter can fire faster than React disables the field: the guard lives in the handler
+        // itself, so one prompt can never start two `POST /connect` requests (audit S2-2).
+        if (props.busy === true) return
         if (String(password).trim() === '') {
           setLocalError(t('passwordPromptRequired'))
           return
@@ -5369,8 +6515,12 @@ window.__ModuleLoader__.load({
           onClose: props.onCancel,
           closeLabel: t('cancel'),
           testId: 'password-prompt',
+          busy: props.busy === true,
+          // While the connect request is in flight the dialog must not disappear under it:
+          // the answer arrives into this prompt (audit S2-2/S2-5).
+          dismissible: props.busy !== true,
           footer: footerRow(
-            h(Button, { variant: 'ghost', onClick: props.onCancel }, t('cancel')),
+            h(Button, { variant: 'ghost', onClick: props.onCancel, disabled: props.busy === true }, t('cancel')),
             h(
               Button,
               { variant: 'primary', testId: 'password-submit', busy: props.busy === true, onClick: submit },
@@ -5383,7 +6533,8 @@ window.__ModuleLoader__.load({
           Field,
           {
             label: t('passwordPromptLabel'),
-            error: localError || (typeof props.error === 'string' ? props.error : ''),
+            error: localError || (serverErrorCleared ? '' : typeof props.error === 'string' ? props.error : ''),
+            errorId: 'password-prompt-error',
           },
           h(TextInput, {
             type: 'password',
@@ -5392,8 +6543,12 @@ window.__ModuleLoader__.load({
             autoComplete: 'off',
             testId: 'password-input',
             ariaLabel: t('passwordPromptLabel'),
+            disabled: props.busy === true,
+            invalid: localError !== '' || (!serverErrorCleared && typeof props.error === 'string'),
+            describedBy: 'password-prompt-error',
             onChange: (value) => {
               setPassword(value)
+              setServerErrorCleared(true)
               if (localError !== '') setLocalError('')
             },
             onKeyDown: (event) => {
@@ -5435,6 +6590,8 @@ window.__ModuleLoader__.load({
           closeLabel: t('cancel'),
           testId: 'remote-conflict-prompt',
           wide: true,
+          busy,
+          dismissible: !busy,
           footer: footerRow(
             h(
               Button,
@@ -5476,15 +6633,58 @@ window.__ModuleLoader__.load({
     //#region 14. toast
 
     function Toast(props) {
-      if (!props || !props.toast) return null
+      const toasts = props && Array.isArray(props.toasts) ? props.toasts : props && props.toast ? [props.toast] : []
+      if (toasts.length === 0) return null
       return h(
         'div',
-        { className: 'drg-toast', 'data-tone': props.toast.tone || 'info', role: 'status' },
-        props.toast.text,
+        {
+          className: 'drg-toasts',
+          role: 'status',
+          'aria-live': 'polite',
+          'aria-atomic': 'false',
+          'data-testid': 'toast-region',
+        },
+        toasts.map((toast, index) =>
+          h(
+            'div',
+            {
+              key: toast && toast.id !== undefined ? String(toast.id) : String(index),
+              className: 'drg-toast',
+              'data-tone': (toast && toast.tone) || 'info',
+            },
+            toast && toast.text,
+          ),
+        ),
       )
     }
 
     //#region 15. overlay host (floating windows + remote window)
+
+    /**
+     * Accept a state frame only when it is not older than what is already on screen. The Host
+     * stamps every snapshot with a monotonic `rev` (docs/api.md); SSE frames and slow `GET /state`
+     * responses can arrive out of order, and a stale one used to paint the UI backwards (a
+     * connected host flipping to `connecting`, or `disconnected` after a newer frame). A Host
+     * from before `rev` sends no number and keeps the old last-writer-wins behaviour.
+     */
+    function stateRevision(state) {
+      return state && typeof state.rev === 'number' && Number.isFinite(state.rev) ? state.rev : null
+    }
+    /**
+     * The Host's publish generation. `rev` restarts at 0 with every Host process / plugin
+     * reload, so a Client holding the old high-water mark would reject every new frame forever.
+     * A frame from another generation is accepted regardless of its revision.
+     */
+    function stateInstance(state) {
+      return state && typeof state.instance === 'string' && state.instance !== '' ? state.instance : null
+    }
+    function isNewerState(next, currentRev, currentInstance) {
+      const instance = stateInstance(next)
+      if (instance !== null && currentInstance !== null && instance !== currentInstance) return true
+      const rev = stateRevision(next)
+      if (rev === null) return true
+      return !(typeof currentRev === 'number' && rev <= currentRev)
+    }
 
     function useRemoteState(initialState, onDownload) {
       const hasInitial = initialState !== undefined && initialState !== null
@@ -5493,14 +6693,32 @@ window.__ModuleLoader__.load({
       const [loading, setLoading] = useState(!hasInitial)
       const [mode, setMode] = useState('idle')
       const alive = useRef(true)
+      const revRef = useRef(stateRevision(initialState))
+      const instanceRef = useRef(stateInstance(initialState))
+      const streamRef = useRef(null)
+      const applyState = (next) => {
+        if (!isNewerState(next, revRef.current, instanceRef.current)) return false
+        instanceRef.current = stateInstance(next) ?? instanceRef.current
+        revRef.current = stateRevision(next) ?? revRef.current
+        setState(next)
+        return true
+      }
       const downloadHandler = useRef(typeof onDownload === 'function' ? onDownload : () => {})
       downloadHandler.current = typeof onDownload === 'function' ? onDownload : () => {}
       const refresh = useCallback(() => {
         setLoading(true)
+        // The revision (and publish generation) this refresh was requested at: a response that
+        // is not newer than it is stale even when it is the last one to resolve.
+        const requestedAt = revRef.current
+        const requestedInstance = instanceRef.current
         return api.getState().then(
           (next) => {
             if (!alive.current) return
-            setState(next)
+            if (!isNewerState(next, requestedAt, requestedInstance)) {
+              setLoading(false)
+              return
+            }
+            applyState(next)
             setError(null)
             setLoading(false)
           },
@@ -5516,7 +6734,9 @@ window.__ModuleLoader__.load({
         const dispose = subscribeState({
           onState: (next) => {
             if (!alive.current) return
-            setState(next)
+            if (!applyState(next)) return
+            // A frame that is newer than the screen is also newer than any pending refresh: a
+            // refresh that resolves after it will be dropped by `isNewerState`.
             setError(null)
             setLoading(false)
           },
@@ -5532,15 +6752,21 @@ window.__ModuleLoader__.load({
             if (alive.current) downloadHandler.current(job)
           },
         })
+        streamRef.current = dispose
         return () => {
           alive.current = false
+          streamRef.current = null
           dispose()
         }
       }, [])
       const patch = useCallback((updater) => {
         setState((current) => (current === null ? current : updater(current)))
       }, [])
-      return { state, error, loading, mode, refresh, patch }
+      const reconnectStream = useCallback(() => {
+        const dispose = streamRef.current
+        if (dispose && typeof dispose.reconnect === 'function') dispose.reconnect()
+      }, [])
+      return { state, error, loading, mode, refresh, patch, reconnectStream }
     }
 
     function ManageWindow(props) {
@@ -5554,7 +6780,7 @@ window.__ModuleLoader__.load({
         { className: 'drg-manage-window', 'data-testid': 'manage-window' },
         h(
           Modal,
-          { wide: true, onClose: props.onClose, closeLabel: t('cancel') },
+          { wide: true, onClose: props.onClose, closeLabel: t('cancel'), ariaLabel: t('hostsTitle') },
           connecting
             ? h(ConnectWindow, {
                 t,
@@ -5575,6 +6801,8 @@ window.__ModuleLoader__.load({
                 loading: props.loading,
                 error: props.error,
                 busyHostId: props.busyHostId,
+                mode: props.mode,
+                onRetryLive: props.onRetryLive,
                 onAdd: props.onAdd,
                 onRefresh: props.onRefresh,
                 onOpenSettings: props.onOpenSettings,
@@ -5622,24 +6850,46 @@ window.__ModuleLoader__.load({
       const [settingsOpen, setSettingsOpen] = useState(false)
       const [pendingDelete, setPendingDelete] = useState(null)
       const [deleting, setDeleting] = useState(false)
+      // Deleting a host whose link is being built needs a second, explicit confirmation.
+      const [deleteArmed, setDeleteArmed] = useState(false)
       const [passwordPrompt, setPasswordPrompt] = useState(null)
+      // Synchronous guard: two Enter events in the same tick both see `pending.busy === false`
+      // because React has not re-rendered yet, so the ref is what makes the submit idempotent.
+      const passwordBusy = useRef(false)
       const [conflictBusy, setConflictBusy] = useState(false)
       const [fingerprintBusy, setFingerprintBusy] = useState(false)
-      const [toast, setToast] = useState(null)
+      // A queue, not one slot: a second message used to replace the first before it could be
+      // read (audit S3). Newest last, at most three, each with its own dismissal timer.
+      const [toasts, setToasts] = useState([])
+      const toastSeq = useRef(0)
+      const toastTimers = useRef(new Map())
       const [wizard, setWizard] = useState(() => {
         const store = props.wizardStore
         return store && typeof store.current === 'function' ? store.current() : null
       })
-      const toastTimer = useRef(null)
 
+      const dismissToast = (id) => {
+        const timer = toastTimers.current.get(id)
+        if (timer !== undefined && typeof clearTimeout === 'function') clearTimeout(timer)
+        toastTimers.current.delete(id)
+        setToasts((current) => current.filter((toast) => toast.id !== id))
+      }
       const notify = (text, tone) => {
-        setToast({ text, tone: tone || 'info' })
-        if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
-        if (typeof setTimeout === 'function') toastTimer.current = setTimeout(() => setToast(null), 4200)
+        toastSeq.current += 1
+        const id = toastSeq.current
+        setToasts((current) => [...current, { id, text, tone: tone || 'info' }].slice(-3))
+        if (typeof setTimeout === 'function') {
+          const timer = setTimeout(() => dismissToast(id), 4200)
+          unrefTimer(timer)
+          toastTimers.current.set(id, timer)
+        }
       }
       useEffect(
         () => () => {
-          if (toastTimer.current !== null && typeof clearTimeout === 'function') clearTimeout(toastTimer.current)
+          for (const timer of toastTimers.current.values()) {
+            if (typeof clearTimeout === 'function') clearTimeout(timer)
+          }
+          toastTimers.current.clear()
         },
         [],
       )
@@ -5928,7 +7178,12 @@ window.__ModuleLoader__.load({
           return
         }
         if (carrierHoldsView(target, activeViewRev)) {
-          showOverlay({ hostId: target, message: t('viewportOverlayLoadFailed'), viewRev: activeViewRev })
+          showOverlay({
+            hostId: target,
+            message: t('viewportOverlayLoadFailed'),
+            localLabel: t('carrierBackToLocal'),
+            viewRev: activeViewRev,
+          })
           return
         }
         // The launch URL for *this* host is still being fetched: keep the current carrier up
@@ -5949,6 +7204,7 @@ window.__ModuleLoader__.load({
           hostId: target,
           url: carrierUrl,
           message: t('viewportOverlayLoadFailed'),
+          localLabel: t('carrierBackToLocal'),
           viewRev: remoteUrl.viewRev,
         })
         if (shown && typeof shown.then === 'function') {
@@ -5993,10 +7249,37 @@ window.__ModuleLoader__.load({
 
       // While the plugin is loaded its windows stay warm; the plugin's own disposal (in `apply`) tears them down.
       useEffect(() => {
+        onCarrierDisposed = (hostId) => {
+          setRemoteUrl((current) => (current !== null && current.hostId === hostId ? null : current))
+        }
         return () => {
+          onCarrierDisposed = null
           hideOverlays()
         }
       }, [])
+
+      // While the state stream is down, download cards must keep moving from a status poll:
+      // SSE `download` frames are exactly what stops arriving in fallback mode (audit S2-1).
+      useEffect(() => {
+        if (remote.mode !== 'polling' && remote.mode !== 'reconnecting') return
+        for (const id of Object.keys(downloadJobsRef.current)) {
+          const job = downloadJobsRef.current[id]
+          if (!job || job.phase === 'saving' || job.phase === 'done' || job.phase === 'error') continue
+          startDownloadPoll(id)
+        }
+      }, [remote.mode])
+
+      // The management window's footer banner is not visible while a remote carrier fills the
+      // window. Surface the same degradation through the shell's toast so it is visible on the
+      // local page and over a guest, and announce the recovery (review feedback).
+      const lastStreamMode = useRef('idle')
+      useEffect(() => {
+        const degraded = remote.mode === 'polling' || remote.mode === 'reconnecting'
+        const wasDegraded = lastStreamMode.current === 'polling' || lastStreamMode.current === 'reconnecting'
+        if (degraded && !wasDegraded) notify(t('liveStreamLostTitle'), 'warn')
+        else if (remote.mode === 'live' && wasDegraded) notify(t('liveStreamRestored'), 'success')
+        lastStreamMode.current = remote.mode
+      }, [remote.mode])
 
       // A failed connect drops the prompt too; the toast carries the reason.
       const performConnect = (host, password) =>
@@ -6017,6 +7300,32 @@ window.__ModuleLoader__.load({
         const needsConnect = statusOf(host.status).connect === true
         const ready = host.status === 'connected'
         if (needsConnect && host.authType === 'password' && password === null) {
+          if (host.passwordSaved === true) {
+            // A remembered password is never read by the Client: try the connect without one,
+            // and only ask when the Host says that password no longer works (audit S2-2).
+            pendingSwitch.current = host.id
+            setManageView('connect')
+            setManageOpen(true)
+            setTarget(host.id)
+            api.activate(host.id).catch(() => {})
+            setBusyHostId(host.id)
+            api.connect(host.id, {}).then(
+              () => {
+                setBusyHostId(null)
+                remote.refresh()
+              },
+              (error) => {
+                setBusyHostId(null)
+                const view = toErrorView(error)
+                if (view && view.code === 'auth') {
+                  setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
+                  return
+                }
+                notify(errorMessage(error), 'error')
+              },
+            )
+            return
+          }
           pendingSwitch.current = host.id
           setManageView('connect')
           setManageOpen(true)
@@ -6113,13 +7422,16 @@ window.__ModuleLoader__.load({
 
       const submitPassword = (submitted) => {
         const pending = passwordPrompt
-        if (!pending || !pending.host) return
+        // The prompt's own handler guards Enter, but the doubling in the audit came from two
+        // events in the same tick; the store-level guard is the last line (S2-2).
+        if (!pending || !pending.host || pending.busy === true || passwordBusy.current === true) return
         const value = submitted && typeof submitted.password === 'string' ? submitted.password : ''
         const remember = submitted && submitted.remember === true
         if (value.trim() === '') {
           setPasswordPrompt({ ...pending, error: t('passwordPromptRequired') })
           return
         }
+        passwordBusy.current = true
         const host = pending.host
         const intent = pending.intent
         if (intent === 'open') {
@@ -6149,11 +7461,15 @@ window.__ModuleLoader__.load({
               notify(message, 'error')
             },
           )
-          .finally(() => setBusyHostId(null))
+          .finally(() => {
+            passwordBusy.current = false
+            setBusyHostId(null)
+          })
       }
       const cancelPassword = () => {
         // The row moved to that host when it was picked; the switch was cancelled, so put
         // it back where the window actually is.
+        passwordBusy.current = false
         pendingSwitch.current = null
         updateSwitcher({ current: target === null ? 'local' : target })
         setPasswordPrompt(null)
@@ -6254,7 +7570,13 @@ window.__ModuleLoader__.load({
       }
 
       const confirmDeleteHost = () => {
-        if (!pendingDelete) return
+        if (!pendingDelete || deleting) return
+        // A connecting host has a live link-work action behind it: one more click is what makes
+        // the user read the warning instead of losing that connection to a single Enter (S3).
+        if (pendingDelete.status === 'connecting' && deleteArmed !== true) {
+          setDeleteArmed(true)
+          return
+        }
         setDeleting(true)
         const deletedId = pendingDelete.id
         api
@@ -6320,6 +7642,8 @@ window.__ModuleLoader__.load({
           loading: remote.loading,
           error: remote.error,
           busyHostId,
+          mode: remote.mode,
+          onRetryLive: remote.reconnectStream,
           fingerprintBusy,
           onClose: () => setManageOpen(false),
           onShowList: () => setManageView('list'),
@@ -6332,7 +7656,10 @@ window.__ModuleLoader__.load({
           onRestartHost: restartHost,
           onStopRemoteHost: stopRemoteHost,
           onEditHost: (host) => openWizard({ mode: 'edit', host }),
-          onDeleteHost: (host) => setPendingDelete(host),
+          onDeleteHost: (host) => {
+            setDeleteArmed(false)
+            setPendingDelete(host)
+          },
           onDiagnoseHost: runDiagnose,
           onAcceptFingerprint: (host, remember) => answerFingerprint(host, true, remember === true),
           onRejectFingerprint: (host) => answerFingerprint(host, false, false),
@@ -6383,12 +7710,23 @@ window.__ModuleLoader__.load({
         pendingDelete
           ? h(ConfirmDialog, {
               title: t('deleteTitle'),
-              body: t('deleteBody', { name: pendingDelete.name || pendingDelete.id }),
-              confirmLabel: deleting ? t('deleteBusy') : t('deleteConfirm'),
+              testId: 'delete-dialog',
+              body:
+                t('deleteBody', { name: pendingDelete.name || pendingDelete.id }) +
+                (pendingDelete.status === 'connecting' ? ' ' + t('deleteConnectingWarning') : ''),
+              confirmLabel: deleting
+                ? t('deleteBusy')
+                : pendingDelete.status === 'connecting' && deleteArmed !== true
+                  ? t('deleteStillConfirm')
+                  : t('deleteConfirm'),
               cancelLabel: t('cancel'),
               busy: deleting,
               onConfirm: confirmDeleteHost,
-              onCancel: () => setPendingDelete(null),
+              onCancel: () => {
+                if (deleting) return
+                setDeleteArmed(false)
+                setPendingDelete(null)
+              },
             })
           : null,
         conflictHost
@@ -6413,7 +7751,7 @@ window.__ModuleLoader__.load({
               onCancel: cancelPassword,
             })
           : null,
-        h(Toast, { toast }),
+        h(Toast, { toasts }),
       )
     }
 
@@ -6552,7 +7890,7 @@ window.__ModuleLoader__.load({
     }
     .drg-download-meta {
       display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 11px;
-      color: var(--dsw-alias-label-tertiary); font-variant-numeric: tabular-nums;
+      color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums;
     }
     .drg-download-detail {
       margin: 6px 0 0; font-size: 11px; line-height: 1.45; color: var(--dsw-alias-state-error-primary);
@@ -6562,6 +7900,12 @@ window.__ModuleLoader__.load({
       font-size: 12.5px; cursor: pointer;
     }
     .drg-linkbtn:hover { text-decoration: underline; text-underline-offset: 2px; }
+    /* Available to assistive technology only: a live region and its visible twin must not
+       announce the same update twice. */
+    .drg-sr-only {
+      position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+      clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+    }
 
     /* ---- status ------------------------------------------------------------- */
     .drg-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; }
@@ -6627,7 +7971,7 @@ window.__ModuleLoader__.load({
     .drg-card-progress { color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 18px; }
     .drg-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
     .drg-card-meta > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-    .drg-card-meta dt { color: var(--dsw-alias-label-caption); font-size: 11px; }
+    .drg-card-meta dt { color: var(--dsw-alias-label-secondary); font-size: 11px; }
     .drg-card-meta dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: 12px; }
     .drg-card-actions {
       display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 2px; padding-top: 12px;
@@ -6814,9 +8158,14 @@ window.__ModuleLoader__.load({
     .drg-input, .drg-select {
       width: 100%; height: 36px; padding: 0 12px; border: 0.5px solid var(--dsw-alias-border-l4);
       border-radius: var(--dsw-radius-md); background: var(--dsw-alias-bg-layer-3);
-      color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; outline: none;
+      color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px;
       transition: border-color 140ms ease, box-shadow 140ms ease;
     }
+    /* The field keeps the app's focus ring for keyboard users; only a pointer focus drops the
+       outline, because the border/shadow below already marks the field. Removed the old blanket
+       outline:none, which also removed the ring for Tab users (audit S2-4). */
+    .drg-input:focus:not(:focus-visible), .drg-select:focus:not(:focus-visible) { outline: none; }
+    .drg-input:focus-visible, .drg-select:focus-visible { outline-offset: 1px; }
     .drg-input:hover:not(:disabled), .drg-select:hover:not(:disabled) { border-color: var(--dsw-alias-label-caption); }
     .drg-input:focus, .drg-select:focus {
       border-color: var(--dsw-alias-state-business-primary);
@@ -6891,6 +8240,16 @@ window.__ModuleLoader__.load({
        the host's toast pair stays legible while the edge names the outcome. */
     .drg-toast[data-tone="error"] { border-left-color: var(--dsw-alias-state-error-primary); }
     .drg-toast[data-tone="success"] { border-left-color: var(--dsw-alias-state-success-primary); }
+    .drg-toast[data-tone="warn"] { border-left-color: var(--dsw-alias-state-warn-primary); }
+    .drg-toast[data-tone="info"] { border-left-color: var(--dsw-alias-state-business-primary); }
+    /* Toasts stack instead of replacing each other: a warning and a later error can both matter. */
+    .drg-toasts {
+      position: fixed; left: 50%; bottom: 24px; z-index: 80; display: flex; flex-direction: column;
+      align-items: center; gap: 8px; max-width: min(560px, calc(100vw - 32px));
+      transform: translateX(-50%); pointer-events: none;
+    }
+    .drg-toasts .drg-toast { position: static; transform: none; max-width: 100%; animation: drg-toast-rise 180ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+    @keyframes drg-toast-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
     @keyframes drg-toast-in { from { opacity: 0; transform: translate(-50%, 6px); } to { opacity: 1; transform: translateX(-50%); } }
 
     /* ---- responsive / accessibility ---------------------------------------- */
@@ -6963,6 +8322,8 @@ window.__ModuleLoader__.load({
       }
 
       const panelStore = createPanelRequestStore()
+      // A carrier's failure layer hands the window back to the local page through this hook.
+      requestLocalPage = () => panelStore.requestIntent({ kind: 'local' })
       const wizardStore = createWizardStore()
       const toolStore = createToolRequestStore()
       const openWizard = (draft) => {
@@ -7145,10 +8506,38 @@ window.__ModuleLoader__.load({
       Toast,
     }
 
+    /**
+     * Pure pieces the unit tests drive directly. This is a test seam, not part of the plugin
+     * contract: the exported components and `carrier`/`api` stay the only supported surface.
+     */
+    const __test = {
+      createDialogStack,
+      subscribeState,
+      stateRevision,
+      stateInstance,
+      isNewerState,
+      streamRetryDelay,
+      initialDraft,
+      buildHostInput,
+      validateHostDraft,
+      validateSettingsDraft,
+      settingsPatchFromDraft,
+      settingsDraft,
+      parseMaskedAddress,
+      limits: HOST_LIMITS,
+      sanitizeGuestIntent,
+      createCarrierErrorLayer,
+      createLoadGuard,
+      loadTimeoutMs: CARRIER_LOAD_TIMEOUT_MS,
+      captionMenuStart,
+      withTimeout,
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply,
       components,
+      __test,
       /**
        * The Host-API client, exposed so unit tests can exercise the real security
        */

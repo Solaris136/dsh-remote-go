@@ -96,13 +96,37 @@ export function measureButtons() {
       labelRatio: renderedLabel ? round(contrast(renderedLabel, background.color)) : null,
     }
   })
+  // 11–12px metadata is normal-size text for WCAG: 4.5:1, not the 3:1 large-text floor. It used
+  // to be excluded from this check entirely, so `label-caption` slipped through (review).
+  const smallText = [...section.querySelectorAll('.drg-card-meta dt, .drg-card-meta dd')].map((node) => {
+    const style = getComputedStyle(node)
+    const background = effectiveBackground(node)
+    const opacity = accumulatedOpacity(node)
+    const color = parseColor(style.color)
+    const rendered = renderedForeground(color, background.color, opacity)
+    return {
+      text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30),
+      color: style.color,
+      background: format(background.color),
+      opacity: round(opacity),
+      ratio: rendered ? round(contrast(rendered, background.color)) : null,
+    }
+  })
   return {
     mounted: true,
     scheme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
     bodyBackground: getComputedStyle(document.body).backgroundColor,
     sectionBackground: format(sectionBackground.color),
     sectionGradient: sectionBackground.gradient,
+    // A dialog mounts with a 160ms fade; measuring while it runs can catch opacity 0 and
+    // report a false contrast failure (the desktop shell occasionally re-opened the window
+    // right before the measurement). Stability means: no animation is still running.
+    animations:
+      typeof document.getAnimations === 'function'
+        ? document.getAnimations().filter((animation) => animation.playState === 'running').length
+        : 0,
     buttons,
+    smallText,
   }
 }
 
@@ -112,16 +136,28 @@ export async function measureStable(page, options) {
   let previous = null
   while (Date.now() - started <= timeoutMs) {
     const current = await page.evaluate(measureButtons)
-    const concrete = current.mounted === true && current.scheme === options.scheme && current.buttons.length >= 2
+    const concrete =
+      current.mounted === true &&
+      current.scheme === options.scheme &&
+      current.buttons.length >= 2 &&
+      (current.animations ?? 0) === 0
     const repainted = !options.previousBodyBackground || current.bodyBackground !== options.previousBodyBackground
     const sameAsPrevious = previous !== null && previous === JSON.stringify(current)
     if (concrete && repainted && sameAsPrevious) return current
     previous = JSON.stringify(current)
     await new Promise((resolve) => setTimeout(resolve, 200))
   }
+  const running = await page.evaluate(() =>
+    typeof document.getAnimations === 'function'
+      ? document
+          .getAnimations()
+          .filter((animation) => animation.playState === 'running')
+          .map((animation) => animation.animationName || animation.transitionProperty || animation.constructor.name)
+      : [],
+  )
   throw new Error(
     `the ${options.scheme} measurement never became stable within ${timeoutMs}ms ` +
-      `(expected body background != ${options.previousBodyBackground ?? '(any)'})`,
+      `(expected body background != ${options.previousBodyBackground ?? '(any)'}; running animations: ${JSON.stringify(running)})`,
   )
 }
 
@@ -136,6 +172,12 @@ export async function assertMeasured(measured, mode) {
   assert.ok(
     measured.buttons.length >= 2,
     `${mode}: expected the plugin's action buttons, found ${measured.buttons.length}`,
+  )
+  // A clean profile has no host cards, so `smallText` would be empty and the 4.5:1 loop below
+  // would never run (review nit 4). The fixtures seed one host; require it to be measured.
+  assert.ok(
+    (measured.smallText?.length ?? 0) > 0,
+    `${mode}: no 11-12px host-card metadata was measured; the contrast gate would be vacuous`,
   )
   for (const button of measured.buttons) {
     const name = `${button.testId ?? button.text ?? 'button'}`
@@ -155,8 +197,19 @@ export async function assertMeasured(measured, mode) {
       )
     }
   }
+  for (const item of measured.smallText ?? []) {
+    assert.ok(
+      item.ratio !== null && item.ratio >= 4.5,
+      `${mode}: small metadata "${item.text}" contrast ratio ${item.ratio} is below 4.5 (${item.color} at opacity ${item.opacity} on ${item.background})`,
+    )
+  }
   const primary = measured.buttons.filter((button) => PRIMARY_TEST_IDS.includes(button.testId))
-  assert.equal(primary.length, PRIMARY_TEST_IDS.length, `${mode}: the primary buttons under test are missing`)
+  // The fixtures now seed a host, so the empty-state button (`host-add-empty`) is not rendered;
+  // the normal `host-add` action must still be present and measured.
+  assert.ok(
+    primary.length >= 1,
+    `${mode}: the primary button under test is missing (found ${JSON.stringify(measured.buttons.map((button) => button.testId))})`,
+  )
   const worst = measured.buttons.reduce((low, button) => Math.min(low, button.ratio ?? 0), Number.POSITIVE_INFINITY)
   console.log(
     `[contrast] ${mode}: ${measured.buttons.length} button(s), worst ratio ${worst.toFixed(2)} ` +

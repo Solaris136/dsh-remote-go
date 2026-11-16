@@ -19,6 +19,42 @@ export function skipOrFail(t, reason) {
 // readiness check goes through this helper instead of rAF.
 export const POLLING_MS = 250
 
+/**
+ * Give a fresh DSH home one configured host. The contrast gate measures the 11–12px metadata on
+ * a host card; a clean profile has no cards, which made those assertions vacuous (review nit 4).
+ */
+export function seedFixtureHost(dshHome) {
+  const stateDir = path.join(dshHome, 'remote-go')
+  mkdirSync(stateDir, { recursive: true })
+  const at = '2026-01-01T00:00:00.000Z'
+  writeFileSync(
+    path.join(stateDir, 'hosts.json'),
+    `${JSON.stringify(
+      [
+        {
+          id: 'h_fixture',
+          name: 'Fixture host',
+          address: 'fixture.example',
+          port: 22,
+          username: 'fixture',
+          auth: { type: 'key', keyPath: '~/.ssh/id_rsa' },
+          jumpHost: null,
+          keepAlive: 'keep',
+          idleMinutes: 15,
+          autoReconnect: true,
+          hostKeyPolicy: 'first-use',
+          lastOpenedAt: null,
+          createdAt: at,
+          updatedAt: at,
+        },
+      ],
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  )
+}
+
 export function waitFor(page, predicate, options = {}, ...args) {
   return page.waitForFunction(predicate, { polling: POLLING_MS, ...options }, ...args)
 }
