@@ -6,6 +6,11 @@ coverage/
 .pnpm-store/
 .agents/
 
+# Build output of `pnpm build` (tsc emits next to each source, D1). Formatting it would fight
+# the emitter and turn every build into a diff. `index.js`/`client.js` join this list only when
+# they become artifacts (P1c/P3); until then they are still hand-written sources.
+src/**/*.js
+
 # Captured E2E output keeps its byte-level form.
 e2e/artifacts/
 

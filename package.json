@@ -66,13 +66,15 @@
   },
   "dependencies": {},
   "devDependencies": {
+    "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
     "js-yaml": "^5.5.0",
     "prettier": "^3.10.1",
     "puppeteer-core": "^25.17.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "ssh2": "1.17.0"
+    "ssh2": "1.17.0",
+    "typescript": "^5.9.3"
   },
   "scripts": {
     "test": "node --test \"test/unit/*.test.js\"",
@@ -91,11 +93,13 @@
     "check:pr-title": "node scripts/check-pr-title.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "gate": "node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/check-coverage.mjs",
-    "verify": "node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/check-coverage.mjs && node --test --test-concurrency=1 \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",
+    "gate": "node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/verify-artifacts.mjs && node scripts/check-coverage.mjs",
+    "verify": "node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/verify-artifacts.mjs && node scripts/check-coverage.mjs && node --test --test-concurrency=1 \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",
+    "build": "node scripts/build.mjs",
+    "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "build:vendor": "node scripts/build-vendor.mjs",
     "pack:check": "node scripts/pack-check.mjs",
     "pack:check:tarball": "node scripts/pack-check.mjs --find artifacts",
-    "prepack": "node scripts/build-vendor.mjs && git diff --exit-code -- vendor/"
+    "prepack": "node scripts/build-vendor.mjs && git diff --exit-code -- vendor/ && node scripts/verify-artifacts.mjs"
   }
 }

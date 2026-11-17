@@ -9,41 +9,40 @@
  * rebinding cannot forge, so it is checked for every request; when a browser does attach `Origin`
  * or `sec-fetch-site`, they must agree too.
  */
-
-const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
-
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 /** The port a URL actually names, counting an omitted default port. */
 function effectivePort(url) {
-  if (url.port !== '') return url.port
-  return url.protocol === 'https:' ? '443' : '80'
+    if (url.port !== '')
+        return url.port;
+    return url.protocol === 'https:' ? '443' : '80';
 }
-
 /**
  * Hostname/port match for a `Host` header (which carries no scheme). The suffix is the local
  * listener's origin; loopback spellings are interchangeable because a browser may dial either one.
- * @param {string | undefined} value - verbatim `Host` header.
- * @param {URL} origin - this listener's own origin.
- * @returns {boolean}
  */
 export function sameServerHost(value, origin) {
-  if (typeof value !== 'string' || value === '') return false
-  let candidate
-  try {
-    candidate = new URL(`${origin.protocol}//${value}`)
-  } catch {
-    return false
-  }
-  // WHATWG parsing rewrites anything that is not a bare authority: `user@host` drops its userinfo,
-  // a backslash becomes a path separator, `#`/`?` start the fragment/query, and a trailing dot or a
-  // zero-padded port is normalized away. A browser fills `Host` from the serialized URL, so a value
-  // the parser had to rewrite is not an authority this server answers to; comparing the rewritten
-  // hostname would let `attacker.example@127.0.0.1:port` pass as loopback.
-  if (candidate.host !== value.toLowerCase()) return false
-  if (effectivePort(candidate) !== effectivePort(origin)) return false
-  if (candidate.hostname === origin.hostname) return true
-  return LOOPBACK_HOSTNAMES.has(origin.hostname) && LOOPBACK_HOSTNAMES.has(candidate.hostname)
+    if (typeof value !== 'string' || value === '')
+        return false;
+    let candidate;
+    try {
+        candidate = new URL(`${origin.protocol}//${value}`);
+    }
+    catch {
+        return false;
+    }
+    // WHATWG parsing rewrites anything that is not a bare authority: `user@host` drops its userinfo,
+    // a backslash becomes a path separator, `#`/`?` start the fragment/query, and a trailing dot or a
+    // zero-padded port is normalized away. A browser fills `Host` from the serialized URL, so a value
+    // the parser had to rewrite is not an authority this server answers to; comparing the rewritten
+    // hostname would let `attacker.example@127.0.0.1:port` pass as loopback.
+    if (candidate.host !== value.toLowerCase())
+        return false;
+    if (effectivePort(candidate) !== effectivePort(origin))
+        return false;
+    if (candidate.hostname === origin.hostname)
+        return true;
+    return LOOPBACK_HOSTNAMES.has(origin.hostname) && LOOPBACK_HOSTNAMES.has(candidate.hostname);
 }
-
 /**
  * Full same-origin match for an `Origin` header (scheme included).
  *
@@ -51,39 +50,38 @@ export function sameServerHost(value, origin) {
  * A browser fills `Origin` from the serialized URL, so anything the URL parser had to rewrite —
  * `user@host`, a trailing dot, a zero-padded port — cannot have come from one, and letting the
  * rewritten form through would accept `http://attacker.example@127.0.0.1:port` as loopback.
- * @param {string | undefined} value - verbatim `Origin` header.
- * @param {URL} origin - this listener's own origin.
- * @returns {boolean}
  */
 export function sameServerOrigin(value, origin) {
-  if (typeof value !== 'string' || value === '') return false
-  // One trailing slash is tolerated (`Origin: http://host/` is not what a browser sends, but a
-  // hand-written caller may); no regex on this string, it is attacker-controlled.
-  const text = value.endsWith('/') ? value.slice(0, -1) : value
-  let candidate
-  try {
-    candidate = new URL(text)
-  } catch {
-    return false
-  }
-  // Drop the scheme without a regex: `scheme://rest` is the only shape left after URL parsing.
-  const schemeEnd = text.indexOf('://')
-  const authority = schemeEnd === -1 ? '' : text.slice(schemeEnd + 3)
-  if (authority.toLowerCase() !== candidate.host) return false
-  return candidate.protocol === origin.protocol && sameServerHost(candidate.host, origin)
+    if (typeof value !== 'string' || value === '')
+        return false;
+    // One trailing slash is tolerated (`Origin: http://host/` is not what a browser sends, but a
+    // hand-written caller may); no regex on this string, it is attacker-controlled.
+    const text = value.endsWith('/') ? value.slice(0, -1) : value;
+    let candidate;
+    try {
+        candidate = new URL(text);
+    }
+    catch {
+        return false;
+    }
+    // Drop the scheme without a regex: `scheme://rest` is the only shape left after URL parsing.
+    const schemeEnd = text.indexOf('://');
+    const authority = schemeEnd === -1 ? '' : text.slice(schemeEnd + 3);
+    if (authority.toLowerCase() !== candidate.host)
+        return false;
+    return candidate.protocol === origin.protocol && sameServerHost(candidate.host, origin);
 }
-
 /**
  * The fence applied to a browser navigation and its subresources: the request must name this
  * server, and any browser-announced relationship must be same-origin.
- * @param {{ headers: Record<string, string | string[] | undefined> }} req
- * @param {URL} origin - this listener's own origin.
- * @returns {boolean}
  */
 export function trustedRequest(req, origin) {
-  if (!sameServerHost(req.headers.host, origin)) return false
-  const originHeader = req.headers.origin
-  if (typeof originHeader === 'string' && originHeader !== '' && !sameServerOrigin(originHeader, origin)) return false
-  if (req.headers['sec-fetch-site'] === 'cross-site') return false
-  return true
+    if (!sameServerHost(req.headers.host, origin))
+        return false;
+    const originHeader = req.headers.origin;
+    if (typeof originHeader === 'string' && originHeader !== '' && !sameServerOrigin(originHeader, origin))
+        return false;
+    if (req.headers['sec-fetch-site'] === 'cross-site')
+        return false;
+    return true;
 }
