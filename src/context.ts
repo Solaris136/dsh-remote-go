@@ -39,7 +39,7 @@ import {
   waitForRemoteUi,
   writeRunRegistry,
 } from './webapp.js'
-import type { HostRuntime } from './host-runtime.js'
+import type { EpisodeSource, HostRuntime } from './host-runtime.js'
 // Type-only: the verdict shape of a tunnel rebuild. `host-lifecycle.ts` imports the slices from
 // this file by type as well, so the edge exists in the type graph only — nothing cycles at run time.
 import type { LifecycleVerdict } from './host-lifecycle.js'
@@ -208,7 +208,7 @@ export interface Reporter {
   /** The state model changed once: bump `rev` and broadcast. Only this publishes (DECISIONS B1). */
   emitState(): void
   onRemoteUnreachable?: (runtime: HostRuntime, info: RemoteUnreachableInfo) => void
-  noteRemoteUnreachable?: (runtime: HostRuntime, source: string) => void
+  noteRemoteUnreachable?: (runtime: HostRuntime, source: EpisodeSource) => void
   requestReattach?: (runtime: HostRuntime, info: ReattachRequest) => void
   repairTunnel?: (runtime: HostRuntime) => Promise<LifecycleVerdict>
 }

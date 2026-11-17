@@ -3,6 +3,7 @@
  */
 import { appendConnectLog, connectFailureLines, connectLogVisible } from './connect-log.js'
 import type { ConnectFailureView, ConnectLogEntry, ConnectLogInput, ConnectLogRuntime } from './connect-log.js'
+import type { ConnectPhase } from './host-runtime.js'
 import { logVisible, nowIso } from './util.js'
 import type { BilingualText } from './util.js'
 
@@ -31,7 +32,7 @@ export interface ConnectProgressState {
 /** The slice of a host runtime the connect progress writes (`host-runtime.ts`). */
 export interface ConnectProgressRuntime extends ConnectLogRuntime {
   status?: string
-  phase?: string | null
+  phase?: ConnectPhase | null
   progress?: ConnectProgressState
 }
 
@@ -128,12 +129,16 @@ export function createConnectProgress(options: ConnectProgressOptions) {
     flushTimer.unref?.()
   }
 
-  function set(runtime: ConnectProgressRuntime, patch: Record<string, unknown>): void {
-    Object.assign(runtime, patch)
-    options.emitState()
-  }
-
-  function phase(runtime: ConnectProgressRuntime, phaseName: string, code: string, params?: ProgressParams): void {
+  /**
+   * The staged progress line (pure UI): it never changes the host status, which is why it is not a
+   * transition. The connect pipeline is its only caller.
+   */
+  function phase(
+    runtime: ConnectProgressRuntime,
+    phaseName: ConnectPhase,
+    code: string,
+    params?: ProgressParams,
+  ): void {
     runtime.phase = phaseName
     runtime.progress = { code, ...(params ? { params } : {}) }
     options.emitState()
@@ -197,5 +202,5 @@ export function createConnectProgress(options: ConnectProgressOptions) {
     }
   }
 
-  return { log, logFailure, set, phase, nodeProgress, bootstrapReporter, dispose }
+  return { log, logFailure, phase, nodeProgress, bootstrapReporter, dispose }
 }

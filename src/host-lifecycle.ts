@@ -12,13 +12,16 @@ import {
 } from './constants.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'
-import type { HostRuntime } from './host-runtime.js'
+import type { Activity, EpisodeSource, HostRuntime } from './host-runtime.js'
 import { layoutForRuntime } from './layout.js'
 import type { RemoteLayout } from './layout.js'
 import { cancelConflict, cancelHostKeyPrompt } from './prompts.js'
 import { isUiUp } from './remote-proc.js'
 import type { ProcessIdentity } from './remote-proc.js'
 import { commandMatchesProfile } from './remote-web.js'
+import { dispatch, scopeFactsFor } from './runtime/dispatch.js'
+import type { DispatchHost } from './runtime/dispatch.js'
+import type { TeardownEffectOptions } from './runtime/events.js'
 import { isPid, messageOf, randomDelay } from './util.js'
 import type { Config, HostState, Reporter, TeardownCtx, Transport, WatchdogCtx } from './context.js'
 
@@ -50,7 +53,7 @@ export function cancelIdleStop(runtime: HostRuntime): void {
  * @param kind - `restart`, `reattach`, `repair` or `stop`.
  * @returns the token that owns the action.
  */
-export function beginLinkWork(runtime: HostRuntime, kind: string): number {
+export function beginLinkWork(runtime: HostRuntime, kind: Activity): number {
   runtime.linkToken = (Number(runtime.linkToken) || 0) + 1
   runtime.linkBusy = kind
   return runtime.linkToken
@@ -79,7 +82,7 @@ export function remoteHeartbeatIntervalSec(ctx: Config): number {
   return Math.min(REMOTE_HEARTBEAT_MAX_SEC, Math.max(REMOTE_HEARTBEAT_MIN_SEC, Math.round(seconds)))
 }
 
-function cancelRemoteCheck(runtime: HostRuntime): void {
+export function cancelRemoteCheck(runtime: HostRuntime): void {
   if (runtime.remoteCheckTimer) {
     clearTimeout(runtime.remoteCheckTimer)
     runtime.remoteCheckTimer = null
@@ -134,7 +137,7 @@ function watchable(ctx: HostState, runtime: HostRuntime): boolean {
  * cooldown window, so a flapping tunnel cannot emit suspected/recovered on every request.
  * Returns whether a new episode was opened.
  */
-function beginRemoteEpisode(ctx: Reporter, runtime: HostRuntime, source: string): boolean {
+function beginRemoteEpisode(ctx: Reporter, runtime: HostRuntime, source: EpisodeSource): boolean {
   if (runtime.remoteEpisode === true) return false
   const transient = source === 'proxy' || source === 'tunnel'
   if (transient && Date.now() < (Number(runtime.episodeCooldownUntil) || 0)) {
@@ -156,7 +159,7 @@ function beginRemoteEpisode(ctx: Reporter, runtime: HostRuntime, source: string)
 async function clearRemoteEpisode(
   ctx: HostState & Transport & Reporter,
   runtime: HostRuntime,
-  source: string,
+  source: EpisodeSource,
 ): Promise<void> {
   const wasOpen = runtime.remoteEpisode === true
   const transient = runtime.episodeSource === 'proxy' || runtime.episodeSource === 'tunnel'
@@ -194,7 +197,7 @@ async function clearRemoteEpisode(
   ctx.onRemoteUnreachable?.(runtime, { phase: 'recovered', source })
 }
 
-function scheduleRemoteCheck(ctx: WatchdogCtx, runtime: HostRuntime, source: string, delayMs: number): void {
+function scheduleRemoteCheck(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource, delayMs: number): void {
   if (runtime.remoteCheckTimer) return
   runtime.remoteCheckTimer = setTimeout(() => {
     runtime.remoteCheckTimer = null
@@ -208,7 +211,7 @@ function scheduleRemoteCheck(ctx: WatchdogCtx, runtime: HostRuntime, source: str
  * failed request is not a restart: the counter has to reach
  * {@link REMOTE_UNREACHABLE_FAILURES} before a re-attach is requested.
  */
-async function checkRemoteNow(ctx: WatchdogCtx, runtime: HostRuntime, source: string): Promise<void> {
+async function checkRemoteNow(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource): Promise<void> {
   if (!watchable(ctx, runtime) || typeof ctx.deps.remoteStatus !== 'function') return
   const ssh = runtime.ssh
   const port = runtime.remote.port
@@ -261,7 +264,7 @@ export async function remoteHeartbeatTick(ctx: WatchdogCtx, runtime: HostRuntime
  * A proxy or tunnel failure was observed: report the episode once and confirm it
  * with probes instead of treating one failed request as a remote restart.
  */
-export function noteRemoteUnreachable(ctx: WatchdogCtx, runtime: HostRuntime, source: string): void {
+export function noteRemoteUnreachable(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource): void {
   if (!watchable(ctx, runtime)) return
   if (!beginRemoteEpisode(ctx, runtime, source)) return
   scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteConfirmDelayMs)
@@ -269,59 +272,103 @@ export function noteRemoteUnreachable(ctx: WatchdogCtx, runtime: HostRuntime, so
 
 /**
  * Arm the next reconnect attempt, or give up once the configured budget is spent.
+ *
+ * The timer is created through `reconnect.scheduled`; that event is the **only** `arm(reconnect)`
+ * the executor turns into a timeout (the design's P2b hand-off: the connect-failure paths also ask
+ * for a retry, and honouring those would run a second loop). The rule decides whether the attempt
+ * is still wanted, the policy/budget/randomized delay stay here.
  */
 export function scheduleReconnect(ctx: WatchdogCtx, runtime: HostRuntime, onDue: () => void): void {
   cancelReconnect(runtime)
   // A retry only makes sense while the user still wants the link: a disconnect, a host
   // removal or a shutdown that raced the timer must not resurrect the connection.
   if (ctx.state.disposed === true || runtime.desired !== 'connected') {
-    ctx.progress.set(runtime, { status: 'disconnected' })
+    void dispatch(
+      effectsOf(ctx),
+      runtime,
+      { type: 'reconnect.skipped' },
+      scopeFactsFor(ctx, runtime, { type: 'reconnect.skipped' }),
+      {
+        caller: 'timer',
+      },
+    )
     return
   }
   const settings = ctx.settings()
   if (!runtime.entry.autoReconnect || !settings.autoReconnect.enabled) {
-    ctx.progress.set(runtime, { status: 'disconnected' })
+    void dispatch(
+      effectsOf(ctx),
+      runtime,
+      { type: 'reconnect.skipped' },
+      scopeFactsFor(ctx, runtime, { type: 'reconnect.skipped' }),
+      {
+        caller: 'timer',
+      },
+    )
     return
   }
   const maxAttempts = settings.autoReconnect.maxAttempts
   if (runtime.reconnectAttempts >= maxAttempts) {
-    runtime.status = 'error'
-    runtime.error = toErrorView(
-      errors.network({
-        zh: `连接已断开，自动重连 ${maxAttempts} 次均失败。远端任务可能仍在运行。`,
-        en: `The connection dropped and ${maxAttempts} automatic retries failed. Remote tasks may still be running.`,
-      }),
-    )
-    runtime.progress = null
-    ctx.emitState()
+    const event = {
+      type: 'reconnect.gaveup' as const,
+      maxAttempts,
+      view: toErrorView(
+        errors.network({
+          zh: `连接已断开，自动重连 ${maxAttempts} 次均失败。远端任务可能仍在运行。`,
+          en: `The connection dropped and ${maxAttempts} automatic retries failed. Remote tasks may still be running.`,
+        }),
+      ),
+    }
+    void dispatch(effectsOf(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'timer' })
     return
   }
-  runtime.reconnectAttempts += 1
+  const attempt = runtime.reconnectAttempts + 1
   const delay = randomDelay(
     settings.autoReconnect.baseDelayMs,
-    settings.autoReconnect.baseDelayMs * 2 ** Math.min(runtime.reconnectAttempts, 4),
+    settings.autoReconnect.baseDelayMs * 2 ** Math.min(attempt, 4),
   )
-  runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts, max: maxAttempts } }
   ctx.progress.log(
     runtime,
     'warn',
-    `link lost; retrying in ${Math.round(delay / 100) / 10}s (attempt ${runtime.reconnectAttempts}/${maxAttempts})`,
+    `link lost; retrying in ${Math.round(delay / 100) / 10}s (attempt ${attempt}/${maxAttempts})`,
   )
-  ctx.emitState()
-  runtime.reconnectTimer = setTimeout(() => {
-    runtime.reconnectTimer = null
-    onDue()
-  }, delay)
-  // A pending retry must never keep the host process alive on its own.
-  runtime.reconnectTimer.unref?.()
+  void dispatch(
+    effectsOf(ctx),
+    runtime,
+    { type: 'reconnect.scheduled', attempt, max: maxAttempts, delayMs: delay },
+    scopeFactsFor(ctx, runtime, { type: 'reconnect.scheduled', attempt, max: maxAttempts, delayMs: delay }),
+    {
+      caller: 'timer',
+      armReconnect: (ms) => {
+        runtime.reconnectTimer = setTimeout(() => {
+          runtime.reconnectTimer = null
+          onDue()
+        }, ms)
+        // A pending retry must never keep the host process alive on its own.
+        runtime.reconnectTimer.unref?.()
+      },
+    },
+  )
 }
 
-function scheduleIdleStop(ctx: WatchdogCtx, runtime: HostRuntime): void {
+/**
+ * The idle policy's timer. It is a *guard* first and a stop second: `idle.elapsed` is the FSM's
+ * statement that the host is no longer wanted (`stillWanted`), and a refusal — the user connected
+ * again while the timer was armed — is logged at debug by the event itself, never as a warning.
+ */
+export function scheduleIdleStop(ctx: WatchdogCtx, runtime: HostRuntime): void {
   cancelIdleStop(runtime)
   const minutes = Math.max(1, runtime.entry.idleMinutes ?? DEFAULT_IDLE_MINUTES)
   runtime.idleTimer = setTimeout(() => {
     runtime.idleTimer = null
-    void stopRemoteForIdle(ctx, runtime)
+    const event = { type: 'idle.elapsed' as const }
+    void dispatch(effectsOf(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'timer' }).then(
+      async (result) => {
+        // The rule allows the stop only while the host is idle; `stopRemoteForIdle` re-checks the
+        // same condition and remains the single implementation of the policy itself.
+        if (result.ok) await stopRemoteForIdle(ctx, runtime)
+      },
+    )
   }, minutes * 60_000)
   runtime.idleTimer.unref?.()
 }
@@ -587,6 +634,10 @@ export interface DisconnectOptions {
  * SSH round-trips earlier - a pid the action just proved is the right one (or that
  * it is already gone), so re-signalling it is at best redundant and at worst kills
  * an unrelated process after a pid reuse.
+ *
+ * The state write, the timer disarms, the prompt settlement, the teardown and the idle timer are
+ * one transition (`disconnect.requested`); this function only keeps the log line and the event
+ * arguments the API passes.
  */
 export async function disconnectHost(
   ctx: TeardownCtx,
@@ -594,26 +645,42 @@ export async function disconnectHost(
   options: DisconnectOptions = {},
 ): Promise<{ ok: boolean }> {
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
-  runtime.desired = 'idle'
-  cancelReconnect(runtime)
-  cancelLinkWork(runtime)
-  stopRemoteHeartbeat(runtime)
-  const policy = runtime.entry.keepAlive
-  const alreadyStopped = options.stopped === true
-  const stopRemote = alreadyStopped !== true && (options.stopRemote === true || policy === 'stop')
-  await teardownRuntime(ctx, runtime, {
-    stopRemote,
-    keepSshForIdle: policy === 'idle' && !stopRemote && !alreadyStopped,
-  })
-  runtime.status = 'disconnected'
-  runtime.phase = null
-  runtime.progress = null
-  runtime.remote.uiReady = false
-  runtime.remote.localPort = null
+  const event = {
+    type: 'disconnect.requested' as const,
+    ...(options.stopRemote === true ? { stopRemote: true } : {}),
+    ...(options.stopped === true ? { stopped: true } : {}),
+  }
+  await dispatch(effectsOf(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'script' })
+  // The explicit stop action may have kept the transport for its own teardown; the disconnect
+  // still releases the token (the teardown path already dropped it, this is the idempotent half).
   runtime.token = null
-  ctx.progress.set(runtime, {})
-  if (policy === 'idle' && !stopRemote && !alreadyStopped) scheduleIdleStop(ctx, runtime)
   return { ok: true }
+}
+
+/**
+ * Release one runtime during shutdown. This is today's shutdown branch: the `stop` policy stops
+ * the managed remote web through the idle-policy proof, every other policy just drops the
+ * listener and the transport (the remote keeps running, and the runtime keeps its facts).
+ * @param ctx - service context.
+ * @param runtime - host runtime being released.
+ * @param stopRemote - whether the keep-alive policy says "stop".
+ */
+export async function releaseRuntimeForShutdown(
+  ctx: TeardownCtx,
+  runtime: HostRuntime,
+  stopRemote: boolean,
+): Promise<void> {
+  await settleTunnelRepair(ctx, runtime)
+  try {
+    if (stopRemote) {
+      await stopRemoteForIdle(ctx, runtime, { shutdown: true })
+      return
+    }
+    await closeTunnel(runtime)
+    await disposeSsh(runtime)
+  } catch {
+    /* best effort on shutdown */
+  }
 }
 
 /**
@@ -622,26 +689,102 @@ export async function disconnectHost(
  */
 export async function shutdownAll(ctx: TeardownCtx): Promise<void> {
   for (const runtime of ctx.state.runtimes.values()) {
-    // Mark the link dead before the first await: a dependent action must not start (or
-    // retry) while shutdown is still walking the list (L).
-    runtime.closing = true
-    runtime.desired = 'idle'
-    cancelReconnect(runtime)
-    cancelIdleStop(runtime)
-    cancelLinkWork(runtime)
-    cancelHostKeyPrompt(runtime)
-    cancelConflict(runtime)
-    stopRemoteHeartbeat(runtime)
-    await settleTunnelRepair(ctx, runtime)
-    try {
-      if (runtime.entry.keepAlive === 'stop') {
-        await stopRemoteForIdle(ctx, runtime, { shutdown: true })
-      } else {
-        await closeTunnel(runtime)
-        await disposeSsh(runtime)
+    // One transition per runtime: it marks the link dead before the first await (a dependent
+    // action must not start, or retry, while shutdown is still walking the list) and then
+    // releases the transport through the same shutdown branch as before.
+    const event = { type: 'shutdown' as const }
+    await dispatch(effectsOf(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'silent' })
+  }
+}
+
+/**
+ * The effects of this module, bound to one context.
+ *
+ * `host-lifecycle` owns the timers and the teardown path, so it builds the effect object itself
+ * instead of importing `runtime/effects.ts` (which imports this module). `run`/`episode`/`bus`
+ * are never reached from here; they are declared because the interface requires them.
+ * @param ctx - the watchdog/teardown context.
+ * @returns the effect owner for one dispatch call.
+ */
+function effectsOf(ctx: TeardownCtx): DispatchHost {
+  return {
+    emit: () => ctx.emitState(),
+    log: (runtime, level, message) => ctx.progress.log(runtime, level, message),
+    logFailure: (runtime, phase, label, view) =>
+      ctx.progress.logFailure(runtime, view ?? runtime.error, { phase, label }),
+    arm: (runtime, timer) => {
+      if (timer === 'idle') {
+        scheduleIdleStop(ctx, runtime)
+        return
       }
-    } catch {
-      /* best effort on shutdown */
-    }
+      startRemoteHeartbeat(ctx, runtime)
+    },
+    disarm: (runtime, timer) => {
+      if (timer === 'reconnect') cancelReconnect(runtime)
+      else if (timer === 'idle') cancelIdleStop(runtime)
+      else stopRemoteHeartbeat(runtime)
+    },
+    settlePrompts: (runtime) => {
+      cancelHostKeyPrompt(runtime)
+      cancelConflict(runtime)
+    },
+    closeLink: (runtime) => {
+      void closeTunnel(runtime)
+    },
+    teardown: async (runtime, options: TeardownEffectOptions) => {
+      if (options.shutdown === true) {
+        await releaseRuntimeForShutdown(ctx, runtime, options.stopRemote === true)
+        return
+      }
+      await teardownRuntime(ctx, runtime, {
+        stopRemote: options.stopRemote === true,
+        ...(options.keepRemote === true ? { keepRemote: true } : {}),
+        ...(options.keepSshForIdle === true ? { keepSshForIdle: true } : {}),
+      })
+    },
+    apply: (runtime, patch) => {
+      if (patch.kind === 'mark-detached') {
+        runtime.remote.uiReady = false
+        runtime.remote.localPort = null
+        return
+      }
+      if (patch.kind === 'mark-ui-up') {
+        runtime.remote.uiReady = true
+        return
+      }
+      if (patch.kind === 'mark-attached') {
+        // Kept in step with `runtime/effects.ts#markAttached` (the two effect owners cannot share
+        // a module without an import cycle). `connect.succeeded` is the only producer.
+        runtime.remote.uiReady = true
+        runtime.remote.viewRev = (Number(runtime.remote.viewRev) || 0) + 1
+        runtime.tunnelRepairFailures = 0
+        runtime.nextTunnelRepairAt = 0
+        return
+      }
+      if (patch.kind === 'clear-conflict') {
+        runtime.conflict = null
+        return
+      }
+      if (patch.kind === 'publish-active-host') {
+        ctx.state.activeHostId = patch.hostId
+        return
+      }
+      runtime.remote.uiReady = patch.uiReady === true
+      runtime.remote.localPort = patch.localPort
+    },
+    episode: (runtime, info) => {
+      ctx.onRemoteUnreachable?.(runtime, info)
+    },
+    bus: (runtime, event) => {
+      if (event.kind === 'confirmed') {
+        ctx.requestReattach?.(runtime, { reason: event.reason, source: event.source })
+        return
+      }
+      const repair = ctx.repairTunnel
+      if (repair) void repair(runtime).catch(() => {})
+    },
+    flushLogs: () => {
+      // The coalescing flush belongs to `connect-progress`; no rule reached from this module emits it.
+    },
   }
 }

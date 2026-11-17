@@ -30,6 +30,8 @@ import type {
   Activity,
   Desired,
   EpisodeState,
+  ConnectPhase,
+  EpisodeSource,
   HostStatus,
   Progress,
   RuntimeSession,
@@ -50,7 +52,7 @@ export interface SessionState {
   status: HostStatus
   desired: Desired
   activity: Activity | null
-  phase: string | null
+  phase: ConnectPhase | null
   progress: Progress | null
   error: ErrorView | null
   warning: BilingualText | null
@@ -217,10 +219,13 @@ const closeLink = (): Effect => ({ type: 'closeLink' })
 const disarm = (timer: TimerName): Effect => ({ type: 'disarm', timer })
 const arm = (timer: TimerName, ms: number): Effect => ({ type: 'arm', timer, ms })
 const log = (level: 'error' | 'warn' | 'info' | 'debug', message: string): Effect => ({ type: 'log', level, message })
-const logFailure = (phase: string | null, label?: BilingualText): Effect => ({
+const logFailure = (phase: string | null, label?: BilingualText, view?: ErrorView): Effect => ({
   type: 'logFailure',
   phase,
   ...(label === undefined ? {} : { label }),
+  // Only a rule that restores a *previous* error needs to name the failure it reports: the
+  // executor otherwise logs the error the transition just wrote.
+  ...(view === undefined ? {} : { view }),
 })
 const apply = (patch: Extract<Effect, { type: 'apply' }>['patch']): Effect => ({ type: 'apply', patch })
 const teardown = (options: Extract<Effect, { type: 'teardown' }>['options']): Effect => ({ type: 'teardown', options })
@@ -270,7 +275,9 @@ const TABLE: RuleTable = {
         desired: 'connected',
         activity: 'connect',
         epoch: epochAfter(state, event.token),
-        reconnectAttempts: 0,
+        // A scheduled retry re-enters the pipeline without the user asking; only a user-requested
+        // connect gets a fresh budget (R5/H2, design-arch §2.4.5).
+        reconnectAttempts: event.retry === true ? state.reconnectAttempts : 0,
         connectCancelled: false,
         transportLost: false,
         error: null,
@@ -392,7 +399,15 @@ const TABLE: RuleTable = {
       if (!scope.promptsPending) return 'stale-prompt'
       return state.status === 'conflict-pending' ? true : 'prompt-not-pending'
     },
-    apply: (state) => move(state, { status: 'connecting', progress: progressOf('probing') }),
+    apply: (state, event) =>
+      move(state, {
+        status: 'connecting',
+        progress: progressOf('probing'),
+        // The user said "no": a retry would ask the same question, so the failure that follows must
+        // not schedule one (today's `resolveForeignConflict` sets this flag next to the throw; the
+        // decision itself is the transition that knows it).
+        connectCancelled: event.action === 'cancel' ? true : state.connectCancelled,
+      }),
     effects: () => [apply({ kind: 'clear-conflict' }), emit()],
   },
   'connect.succeeded': {
@@ -427,15 +442,20 @@ const TABLE: RuleTable = {
   'connect.cancelled': {
     guard: (state) => (state.activity === null ? 'illegal-transition' : true),
     apply: (state) => move(state, { status: 'disconnected', error: null, phase: null, progress: null, activity: null }),
-    effects: () => [teardown({ stopRemote: false, keepRemote: true }), emit()],
+    // Today's cancel branch published `uiReady:false`/`localPort:null` next to the status (the
+    // §2.4.2 row only names the teardown); a cancelled attempt that had already set `uiReady`
+    // must not leave a half-attached remote view behind.
+    effects: () => [teardown({ stopRemote: false, keepRemote: true }), apply({ kind: 'mark-detached' }), emit()],
   },
   'connect.failed': {
     // The one explicit idempotent self-transition: the host-key timeout and the pipeline catch both
     // report the same failure, so `error` → `error` must be allowed (§2.4.2).
-    guard: (state) => {
-      if (state.activity === null) return 'illegal-transition'
-      return state.status === 'connecting' || state.status === 'error' ? true : 'illegal-transition'
-    },
+    //
+    // Any status: the attempt can fail while it is parked on a prompt (`fingerprint-pending`,
+    // `conflict-pending`) — the transport closing under a parked host-key prompt is exactly H3's
+    // "dropped link", and today's pipeline catch reports it as a connection failure from there.
+    // `activity !== null` is the real guard: a failure belongs to the script that owns the link.
+    guard: (state) => (state.activity === null ? 'illegal-transition' : true),
     apply: (state, event) =>
       move(state, {
         status: 'error',
@@ -443,6 +463,9 @@ const TABLE: RuleTable = {
         phase: null,
         progress: null,
         activity: null,
+        // Today's pipeline clears the flag after it has made the retry decision; keeping the same
+        // storage means the next attempt (which may be a retry) starts with "not cancelled".
+        connectCancelled: false,
       }),
     effects: (state, event, scope) => [
       apply({ kind: 'mark-detached' }),
@@ -562,6 +585,9 @@ const TABLE: RuleTable = {
       disarm('heartbeat'),
       disarm('reconnect'),
       disarm('idle'),
+      // Today's request event emitted the new `connecting` card from `progress.set`; the rule owns
+      // that publication now (the design row listed only the disarms and `run`).
+      emit(),
       run('restart', epochAfter(state, event.token)),
     ],
   },
@@ -617,6 +643,8 @@ const TABLE: RuleTable = {
       disarm('heartbeat'),
       disarm('reconnect'),
       disarm('idle'),
+      // Today's `progress.set` published the "stopping" card; the rule owns it now.
+      emit(),
       run('stop', epochAfter(state, event.token)),
     ],
   },
@@ -644,11 +672,17 @@ const TABLE: RuleTable = {
         activity: null,
       })
     },
-    effects: (_state, event) => [
+    effects: (_state, event, scope) => [
       event.unrestorable === true
         ? apply({ kind: 'mark-detached' })
         : apply({ kind: 'restore-stop', uiReady: event.previous.uiReady, localPort: event.previous.localPort }),
-      logFailure(event.phase, STOP_FAILED_LABEL),
+      // A restored `connected` means the link is live again: today's `resumeConnected` restarted
+      // the heartbeat the stop had disarmed. The §2.4.2 row omits it; without it a host left in
+      // `connected` would never be probed again (behavior freeze wins).
+      ...(event.unrestorable === true || event.previous.status !== 'connected'
+        ? []
+        : [arm('heartbeat', scope.delays.heartbeatMs)]),
+      logFailure(event.phase, STOP_FAILED_LABEL, event.view),
       emit(),
     ],
   },
@@ -684,6 +718,8 @@ const TABLE: RuleTable = {
       disarm('heartbeat'),
       disarm('reconnect'),
       disarm('idle'),
+      // Today's `progress.set` published the "re-attaching" card; the rule owns it now.
+      emit(),
       run('reattach', epochAfter(state, event.token)),
     ],
   },
@@ -716,8 +752,12 @@ const TABLE: RuleTable = {
   'reconnect.skipped': {
     // The executor already took the policy decision (no auto-reconnect, or the user let go); the
     // machine only records the outcome the Client renders.
+    //
+    // `progress` is deliberately left alone: today's `scheduleReconnect` patched only the status
+    // here, so a dropped link that was not retried keeps the `reconnecting` line it had just
+    // published. The §2.4.2 row says `progress=null`; behaviour freeze wins.
     guard: () => true,
-    apply: (state) => move(state, { status: 'disconnected', progress: null }),
+    apply: (state) => move(state, { status: 'disconnected' }),
     effects: () => [emit()],
   },
   'link.cancelled': {
@@ -729,7 +769,10 @@ const TABLE: RuleTable = {
   },
   shutdown: {
     guard: () => true,
-    apply: (state) => move(state, { closing: true, desired: 'idle', epoch: state.epoch + 1 }),
+    // `activity: null` is today's `cancelLinkWork` (the shutdown walks the registry after marking
+    // every link dead); leaving an action name behind would make the block describe work that no
+    // longer runs.
+    apply: (state) => move(state, { closing: true, desired: 'idle', epoch: state.epoch + 1, activity: null }),
     effects: (_state, _event, scope) => [
       disarm('reconnect'),
       disarm('idle'),

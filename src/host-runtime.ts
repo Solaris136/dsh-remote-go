@@ -69,9 +69,28 @@ export type Progress = ConnectProgressState
 /** Why `warning` is set; a successful attach clears only the `restart-stop` one. */
 export type WarningSource = 'alongside' | 'restart-stop'
 
+/**
+ * Where a liveness episode was observed. The three reporters today: the heartbeat probe, the
+ * same-origin proxy and the tunnel's own error callback. The storage field is narrowed to them so
+ * a typo cannot silently disable the episode cooldown (the contract's `source` stays a string).
+ */
+export type EpisodeSource = 'heartbeat' | 'proxy' | 'tunnel'
+
+/** One bounded diagnostics entry of a restart / re-attach; never sent to the Client. */
+export interface RestartRecord {
+  at: string
+  kind: 'local-restart' | 'remote-reattach'
+  fromPort: number | null
+  toPort: number
+  pid: number | null
+  /** Re-attach only: why the watchdog asked for it, and which reporter saw the remote fail. */
+  reason?: string
+  source?: string
+}
+
 /** One open liveness episode (`heartbeat`/`tunnel`/`proxy` saw the remote UI fail). */
 export interface EpisodeState {
-  source: string
+  source: EpisodeSource
   phase: 'suspected' | 'confirmed'
   cooldownUntil: number
 }
@@ -157,7 +176,7 @@ export interface RuntimeIdentity {
  */
 export interface RuntimeSession {
   status: HostStatus
-  phase: string | null
+  phase: ConnectPhase | null
   progress: Progress | null
   error: ErrorView | null
   warning: BilingualText | null
@@ -186,17 +205,17 @@ export interface RuntimeSession {
   restartPromise: Promise<void> | null
   reattachPromise: Promise<void> | null
   /**
-   * `activity`'s storage form. Still `string` because `host-lifecycle.ts#beginLinkWork` takes a
-   * caller-supplied kind; `SessionState.activity` is the narrow `Activity | null`.
+   * `activity`'s storage form. Narrowed to the five activities: `beginLinkWork` is the only
+   * writer and it takes an `Activity`; `SessionState.activity` maps 1:1.
    */
-  linkBusy: string | null
+  linkBusy: Activity | null
   /** `epoch`: the token a one-shot action must still hold to be allowed to write (R4/R10). */
   linkToken: number
   /** Consecutive failed liveness probes; a confirmed episode is two of them. */
   remoteFailures: number
   remoteEpisode: boolean
-  /** `episodeSource`'s storage form; the watchdog's labels are free-form (`heartbeat`/`proxy`/`tunnel`). */
-  episodeSource: string | null
+  /** `episode`'s storage form: which reporter saw the remote fail (see `EpisodeSource`). */
+  episodeSource: EpisodeSource | null
   episodeCooldownUntil: number
 }
 
@@ -243,8 +262,8 @@ export interface RuntimeRemote {
   remotePid: number | null
   remoteProfile: string | null
   exchange: ExchangeResult | null
-  /** Bounded diagnostics trail; the writer spreads arbitrary `Record<string, unknown>` entries. */
-  restarts: Array<Record<string, unknown>>
+  /** Bounded diagnostics trail of restarts and re-attached ports (never sent to the Client). */
+  restarts: RestartRecord[]
 }
 
 /* ── 5/8 authz — writer: connect/ownership.ts (everyone else: read-only) ───────────────────── */

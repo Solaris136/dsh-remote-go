@@ -10,7 +10,7 @@
 import type { BilingualText } from '../util.js'
 import type { ErrorView } from '../errors.js'
 import type { ConnectProgressState } from '../connect-progress.js'
-import type { Activity, ConnectPhase, HostStatus } from '../host-runtime.js'
+import type { Activity, ConnectPhase, EpisodeSource, HostStatus } from '../host-runtime.js'
 import type { KeepAlive } from '../settings.js'
 import type { SshConnection } from '../ssh.js'
 
@@ -32,18 +32,18 @@ export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 /** One liveness episode as the SSE channel publishes it; structurally `RemoteUnreachableInfo`. */
 export interface EpisodeInfo {
   phase: 'suspected' | 'confirmed' | 'recovered'
-  source: string
+  source: EpisodeSource
   failures?: number
 }
 
 /** The watchdog bus message (§1.7 replaces the two reverse callbacks with it). */
 export type WatchdogEvent =
-  { kind: 'confirmed'; reason: string; source: string } | { kind: 'recovered'; source: string }
+  { kind: 'confirmed'; reason: string; source: EpisodeSource } | { kind: 'recovered'; source: EpisodeSource }
 
 /** What a failed stop has to put back exactly as it found it (`restoreStopState`). */
 export interface StopSnapshot {
   status: HostStatus
-  phase: string | null
+  phase: ConnectPhase | null
   progress: ConnectProgressState | null
   error: ErrorView | null
   uiReady: boolean
@@ -81,7 +81,7 @@ export type Effect =
   | { type: 'emit' }
   | { type: 'flushLogs' }
   | { type: 'log'; level: LogLevel; message: string }
-  | { type: 'logFailure'; phase: string | null; label?: BilingualText }
+  | { type: 'logFailure'; phase: string | null; label?: BilingualText; view?: ErrorView }
   | { type: 'arm'; timer: TimerName; ms: number }
   | { type: 'disarm'; timer: TimerName }
   | { type: 'settlePrompts' }
@@ -94,9 +94,19 @@ export type Effect =
 
 /* ── events ───────────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * The payload of an event that carries nothing. `Record<string, never>` — the obvious spelling —
+ * makes the intersection with `{ type }` uninhabitable (the literal discriminant is not `never`),
+ * so an empty payload is the empty record type instead.
+ */
+type NoPayload = Record<never, never>
+
 /** One payload per event type; the union below adds the discriminant. */
 export interface EventPayloads {
-  'connect.requested': { token: number }
+  // `retry` marks the re-entry a scheduled retry makes: the pipeline re-runs without a user
+  // asking, so the spent budget must survive it (R5: only a user connect resets). The design table
+  // has no separate retry event, and the budget reset is the only difference.
+  'connect.requested': { token: number; retry?: boolean }
   'step.entered': {
     phase: ConnectPhase
     code: string
@@ -105,7 +115,7 @@ export interface EventPayloads {
   'step.done': {
     step: 'probe' | 'bootstrap-node' | 'start-adopt' | 'bootstrap-npx' | 'start-launch' | 'tunnel' | 'verify'
   }
-  'transport.ready': Record<string, never>
+  'transport.ready': NoPayload
   // The transport that closed. The pure function cannot compare identity with `state.ssh` (the
   // link block is not part of SessionState), so `EventScope.transportIsCurrent` carries the verdict
   // and this payload documents which transport produced it.
@@ -118,14 +128,14 @@ export interface EventPayloads {
   'hostkey.timeout': { view: ErrorView }
   'conflict.pending': { count: number }
   'conflict.answered': { action: 'stop' | 'alongside' | 'cancel'; timedOut?: boolean }
-  'connect.succeeded': Record<string, never>
-  'connect.cancelled': Record<string, never>
-  'connect.failed': { view: ErrorView; phase: string | null }
+  'connect.succeeded': NoPayload
+  'connect.cancelled': NoPayload
+  'connect.failed': { view: ErrorView; phase: ConnectPhase | null }
   'disconnect.requested': { stopped?: boolean; stopRemote?: boolean }
-  'idle.elapsed': Record<string, never>
-  'remote.suspected': { source: string }
-  'remote.confirmed': { source: string; failures: number }
-  'remote.recovered': { source: string; needRepair: boolean }
+  'idle.elapsed': NoPayload
+  'remote.suspected': { source: EpisodeSource }
+  'remote.confirmed': { source: EpisodeSource; failures: number }
+  'remote.recovered': { source: EpisodeSource; needRepair: boolean }
   'repair.requested': { token: number }
   'repair.finished': { ok: boolean }
   'restart.requested': { token: number; pid: number | null; port: number | null }
@@ -133,19 +143,19 @@ export interface EventPayloads {
   // "the managed stop was not confirmed, so the old instance was kept" one warns; the flag keeps
   // that difference (see the §2.4.2 row, which describes that caller).
   'restart.resumed': { keptInstance?: boolean }
-  'restart.failed': { view: ErrorView; phase: string | null }
+  'restart.failed': { view: ErrorView; phase: ConnectPhase | null }
   'stop.requested': { token: number; pid: number | null; port: number | null }
   // `unrestorable` is §2.4.2's "恢复不了则落 error" branch: `resumeConnected` refused because the
   // link went away while the stop was failing, so the coded failure is published instead.
-  'stop.refused': { view: ErrorView; phase: string | null; previous: StopSnapshot; unrestorable?: boolean }
-  'stop.succeeded': Record<string, never>
+  'stop.refused': { view: ErrorView; phase: ConnectPhase | null; previous: StopSnapshot; unrestorable?: boolean }
+  'stop.succeeded': NoPayload
   'reattach.requested': { token: number; reason: string }
   'reattach.failed': { view: ErrorView }
   'reconnect.scheduled': { attempt: number; max: number; delayMs: number }
   'reconnect.gaveup': { maxAttempts: number; view: ErrorView }
-  'reconnect.skipped': Record<string, never>
-  'link.cancelled': Record<string, never>
-  shutdown: Record<string, never>
+  'reconnect.skipped': NoPayload
+  'link.cancelled': NoPayload
+  shutdown: NoPayload
   'host.removed': { keepAlive: KeepAlive }
 }
 

@@ -689,3 +689,148 @@ describe('client-compat', () => {
     assert.equal(hostOnly.length, 0, 'the client bundle must not import the host half at runtime')
   })
 })
+
+/* ── runtime-writer-guard (design-arch §2.3 / PLAN review item 2) ─────────────────────────────
+ *
+ * The session block of `HostRuntime` has exactly one writer: `runtime/fsm.ts`, through
+ * `writeBack()`. P2 step 4 moved the 16 direct + 7 indirect `status` writes onto `dispatch`, and
+ * this guard is what keeps a later catch from writing the block again ("a catch sets
+ * `runtime.status = 'error'` directly and the SSE frame sequence forks from the state machine").
+ *
+ * The allowlist is deliberately explicit per field, with the reason the staging still names a
+ * second writer. A field whose only owner is `fsm.ts` must never grow one:
+ *
+ *   status                  — fsm.ts only. The whole point of the step.
+ *   desired                 — fsm.ts only.
+ *   connectCancelled        — fsm.ts only.
+ *   transportLost           — fsm.ts only.
+ *   reconnectAttempts       — fsm.ts only (`reconnect.scheduled` adopted the budget).
+ *   error                   — fsm.ts only.
+ *   phase / progress        — the connect-progress line is pure UI (it never changes `status`);
+ *                             it keeps writing the two presentation fields until P2 step 7 moves
+ *                             `step.entered` into the pipeline.
+ *   warning / warningSource — two action-scoped facts have no event of their own: the `alongside`
+ *                             decision and the "managed stop was not confirmed" restart branch.
+ *                             `connect.succeeded` still owns clearing the stale restart warning.
+ *   closing                 — the teardown path marks the link dead before it releases the
+ *                             transport; shutdown is not an event the FSM owns yet.
+ *   linkBusy / linkToken    — the one-shot token API (`beginLinkWork`/`endLinkWork`/
+ *                             `cancelLinkWork`) is the token plumbing P2 step 7 moves onto
+ *                             `dispatch(activity.begin)`/`link.cancelled`; until then it is the
+ *                             storage form of `activity`/`epoch`.
+ *   remoteFailures / remoteEpisode / episodeSource / episodeCooldownUntil
+ *                           — the watchdog's liveness counters; P2 step 9 routes the watchdog
+ *                             through `remote.suspected`/`confirmed`/`recovered`.
+ *   connectPromise / restartPromise / reattachPromise
+ *                           — executor-held by design (§2.4.5); the pipeline owns the promises,
+ *                             the FSM owns `activity`.
+ */
+const SESSION_WRITERS = {
+  status: ['runtime/fsm.ts', 'host-runtime.ts'],
+  desired: ['runtime/fsm.ts', 'host-runtime.ts'],
+  connectCancelled: ['runtime/fsm.ts', 'host-runtime.ts'],
+  transportLost: ['runtime/fsm.ts', 'host-runtime.ts'],
+  reconnectAttempts: ['runtime/fsm.ts', 'host-runtime.ts'],
+  error: ['runtime/fsm.ts', 'host-runtime.ts'],
+  phase: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
+  progress: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
+  warning: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-pipeline.ts'],
+  warningSource: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-pipeline.ts'],
+  closing: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  linkBusy: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  linkToken: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  remoteFailures: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  remoteEpisode: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  episodeSource: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  episodeCooldownUntil: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  connectPromise: ['connect-pipeline.ts'],
+  restartPromise: ['connect-pipeline.ts'],
+  reattachPromise: ['connect-pipeline.ts'],
+}
+
+const SESSION_FIELDS = Object.keys(SESSION_WRITERS)
+
+/**
+ * One assignment to a session field of a runtime variable. Comparisons (`===`, `==`, `!==`) and
+ * arrow functions are excluded by the lookahead; `+=`/`-=` count as writes.
+ */
+const sessionWrite = (field) => new RegExp(`\\b(?:runtime|rt)\\.${field}\\s*(?:\\+=|-=|=(?!=))`, 'g')
+
+/** Every `runtime.<session field> = …` in one source text, as `[{ field, line }]`. */
+function sessionWrites(text) {
+  const stripped = stripComments(text)
+  const found = []
+  for (const field of SESSION_FIELDS) {
+    for (const match of stripped.matchAll(sessionWrite(field))) {
+      found.push({ field, line: stripped.slice(0, match.index).split('\n').length })
+    }
+  }
+  return found
+}
+
+describe('runtime-writer-guard', () => {
+  test('the session block has exactly one writer per field', async () => {
+    // Sources only: the emitted `.js` twins are the same text and would double every finding.
+    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+    assert.ok(files.includes(path.join(SRC, 'service.ts')), 'the scanner must cover src recursively')
+    const failures = []
+    for (const file of files) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      const text = await readFile(file, 'utf8')
+      for (const write of sessionWrites(text)) {
+        const owners = SESSION_WRITERS[write.field]
+        if (!owners.includes(relative)) {
+          failures.push(`${relative}:${write.line} — runtime.${write.field} is written outside ${owners.join(', ')}`)
+        }
+      }
+    }
+    assert.deepEqual(failures, [], 'a module writes the session block the FSM owns')
+  })
+
+  test('planted regression: a status write in a non-owner module is flagged', () => {
+    const fixture = ['export function mark(runtime) {', "  runtime.status = 'error'", '}'].join('\n')
+    assert.deepEqual(sessionWrites(fixture), [{ field: 'status', line: 2 }])
+    // Comparisons, arrow properties and other blocks stay clean.
+    assert.deepEqual(sessionWrites("if (runtime.status === 'error') return"), [])
+    assert.deepEqual(sessionWrites('const view = { status: runtime.status }'), [])
+    assert.deepEqual(sessionWrites("job.phase = 'ready'"), [])
+  })
+
+  test('the non-FFSM modules no longer write the status at all', async () => {
+    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+    const offenders = []
+    for (const file of files) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      if (SESSION_WRITERS.status.includes(relative)) continue
+      const text = stripComments(await readFile(file, 'utf8'))
+      const bare = [...text.matchAll(/\.status\s*=(?!=)/g)]
+      for (const match of bare) {
+        offenders.push(`${relative}:${text.slice(0, match.index).split('\n').length}`)
+      }
+    }
+    assert.deepEqual(offenders, [], 'a `status` assignment exists outside the FSM/factory')
+  })
+
+  test('the Reporter no longer assigns a whole patch onto the runtime', async () => {
+    // `Object.assign(runtime, { status, error, warning })` was the indirect writer `progress.set`
+    // used. The method is gone; a reintroduced whole-object write must fail this guard too.
+    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+    const offenders = []
+    for (const file of files) {
+      const text = stripComments(await readFile(file, 'utf8'))
+      if (/Object\.assign\(\s*(?:runtime|rt)\b/.test(text)) {
+        offenders.push(path.relative(SRC, file).split(path.sep).join('/'))
+      }
+      if (/\bprogress\.set\s*\(/.test(text)) {
+        offenders.push(`${path.relative(SRC, file).split(path.sep).join('/')} (progress.set)`)
+      }
+    }
+    assert.deepEqual(offenders, [], 'a whole-runtime patch writer came back')
+  })
+
+  test('warningSource is still declared on the runtime type', async () => {
+    // §2.3 item 4: the field that three modules wrote while it was undeclared must stay declared.
+    const source = await readFile(path.join(SRC, 'host-runtime.ts'), 'utf8')
+    assert.match(source, /warningSource:\s*WarningSource \| null/)
+  })
+})

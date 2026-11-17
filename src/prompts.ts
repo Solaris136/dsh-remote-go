@@ -1,10 +1,16 @@
 /**
  * The two prompts a connection can pause on (unknown host key, foreign DSH already running) and the answers the Client sends back; each settles exactly once.
+ *
+ * The status/phase/progress writes are transitions now (`hostkey.pending` / `hostkey.answered` /
+ * `hostkey.timeout` / `conflict.pending` / `conflict.answered`); this module only owns the two
+ * deferred slots and the fingerprint/conflict data.
  */
 import { errors, toErrorView } from './errors.js'
 import type { PromptCtx } from './context.js'
 import type { HostRuntime, RuntimeFingerprint } from './host-runtime.js'
 import type { RemoteProcessRef } from './remote-proc.js'
+import { dispatch, promptScopeFacts } from './runtime/dispatch.js'
+import type { DispatchHost } from './runtime/dispatch.js'
 import { createDecision, nowIso } from './util.js'
 
 /** Which security context a host-key answer belongs to: the saved target, or the jump host dialling it. */
@@ -71,6 +77,48 @@ export interface PendingConflict {
 }
 
 /**
+ * The effect owner of this module.
+ *
+ * A prompt transition publishes a frame and (for `conflict.answered`) clears the conflict card;
+ * it never arms a timer, touches the link or tears anything down. The heavy effects are declared so
+ * the interface stays one shape, and throw if a future rule ever asks this module to perform one
+ * (that would be a wiring bug: the prompt module has no deps slice).
+ * @param ctx - the prompt context (settings, reporter, store).
+ * @returns the effect owner for one prompt transition.
+ */
+function promptEffects(ctx: PromptCtx): DispatchHost {
+  const noEffect = (name: string): never => {
+    throw new Error(`dispatch: the prompt module cannot perform the ${name} effect`)
+  }
+  return {
+    emit: () => ctx.emitState(),
+    log: (runtime, level, message) => ctx.progress.log(runtime, level, message),
+    logFailure: (runtime, phase, label, view) =>
+      ctx.progress.logFailure(runtime, view ?? runtime.error, { phase, label }),
+    arm: () => noEffect('arm'),
+    disarm: () => noEffect('disarm'),
+    settlePrompts: (runtime) => {
+      cancelHostKeyPrompt(runtime)
+      cancelConflict(runtime)
+    },
+    closeLink: () => noEffect('closeLink'),
+    teardown: async () => noEffect('teardown'),
+    apply: (runtime, patch) => {
+      if (patch.kind === 'clear-conflict') {
+        runtime.conflict = null
+        return
+      }
+      noEffect('apply')
+    },
+    episode: () => noEffect('episode'),
+    bus: () => noEffect('bus'),
+    flushLogs: () => {
+      // No prompt rule flushes the log ring.
+    },
+  }
+}
+
+/**
  * Park the SSH handshake until the user answers the fingerprint prompt.
  *
  * A jump host and the target are different machines with different keys: the `role`
@@ -114,15 +162,17 @@ export function requestHostKey(
     () => {
       // A prompt whose link already went away must not overwrite the state of that teardown.
       if (runtime.pendingHostKey !== pending) return false
-      runtime.pendingHostKey = null
       if (runtime.desired !== 'connected' || runtime.closing === true) return false
-      runtime.connectCancelled = true
-      ctx.progress.set(runtime, {
-        status: 'error',
-        phase: null,
-        progress: null,
-        error: toErrorView(errors.hostKeyUnknown(info.sha256)),
-      })
+      // `hostkey.timeout` owns the `error` card and the "do not retry" flag; the slot itself is
+      // cleared here (the settle hook below is idempotent).
+      void dispatch(
+        promptEffects(ctx),
+        runtime,
+        { type: 'hostkey.timeout', view: toErrorView(errors.hostKeyUnknown(info.sha256)) },
+        promptScopeFacts(runtime),
+        { caller: 'timer' },
+      )
+      runtime.pendingHostKey = null
       return false
     },
     () => {
@@ -148,16 +198,20 @@ export function requestHostKey(
   } else {
     runtime.fingerprint = fingerprint
   }
-  runtime.status = 'fingerprint-pending'
-  runtime.phase = 'ssh'
-  // The role only travels for a jump host: the target prompt keeps its original shape.
-  runtime.progress = isJump
-    ? {
-        code: 'host-key-confirm',
-        params: { sha256: info.sha256, keyType: info.keyType, role: 'jump', host: pending.host },
-      }
-    : { code: 'host-key-confirm', params: { sha256: info.sha256, keyType: info.keyType } }
-  ctx.emitState()
+  // The dialog data is in place before the transition publishes the frame that shows it.
+  void dispatch(
+    promptEffects(ctx),
+    runtime,
+    {
+      type: 'hostkey.pending',
+      info: { sha256: info.sha256, keyType: info.keyType },
+      role,
+      host: pending.host,
+      port: pending.port,
+    },
+    promptScopeFacts(runtime),
+    { caller: 'callback' },
+  )
   return decision.promise
 }
 
@@ -196,7 +250,6 @@ export async function confirmHostKey(
       en: 'The confirmed fingerprint does not match the pending one.',
     })
   }
-  if (decision.accept !== true) runtime.connectCancelled = true
   if (decision.accept && decision.remember && pending.role !== 'jump') {
     await ctx.store.patchHost(runtime.id, { pinnedFingerprint: pending.sha256 })
     runtime.entry = { ...runtime.entry, pinnedFingerprint: pending.sha256 }
@@ -224,11 +277,17 @@ export async function confirmHostKey(
   } else {
     runtime.fingerprint = fingerprint
   }
+  // `hostkey.answered` owns the `connecting` card and the "user said no" flag. The slot is still
+  // installed here (the rule's guard reads it) and is cleared right after, as before.
+  void dispatch(
+    promptEffects(ctx),
+    runtime,
+    { type: 'hostkey.answered', accept: decision.accept === true },
+    promptScopeFacts(runtime),
+    { caller: 'callback' },
+  )
   runtime.pendingHostKey = null
-  runtime.status = 'connecting'
-  runtime.progress = { code: 'auth-checking' }
   pending.resolve(decision.accept === true)
-  ctx.emitState()
   return { ok: true }
 }
 
@@ -253,8 +312,7 @@ export function askConflict(
   runtime: HostRuntime,
   processes: RemoteProcessRef[],
 ): Promise<ConflictAnswer> {
-  runtime.status = 'conflict-pending'
-  runtime.progress = { code: 'remote-dsh-running', params: { count: processes.length } }
+  // The card data is in place before the transition publishes the frame that renders it.
   runtime.conflict = {
     detectedAt: nowIso(),
     processes: processes.slice(0, 20).map((process) => ({
@@ -262,20 +320,42 @@ export function askConflict(
       command: String(process.command ?? '').slice(0, 400),
     })),
   }
-  ctx.emitState()
+  // A prompt the user never sees (the link was cancelled in the same tick) must not throw into
+  // the pipeline; the refusal is logged and the caller's own guard reports the cancellation.
+  void dispatch(
+    promptEffects(ctx),
+    runtime,
+    { type: 'conflict.pending', count: processes.length },
+    promptScopeFacts(runtime),
+    { caller: 'callback' },
+  )
   const decision = createDecision<ConflictAnswer>(
     ctx.timers.conflictConfirmMs,
     () => ({ action: 'cancel', timedOut: true }),
-    () => {
-      // `unknown` on `host-runtime.ts`; this module is the slot's only writer (see PendingConflict).
-      if ((runtime.pendingConflict as PendingConflict | null)?.resolve === decision.settle)
-        runtime.pendingConflict = null
-      runtime.conflict = null
-      if (runtime.desired === 'connected') {
-        runtime.status = 'connecting'
-        runtime.progress = { code: 'probing' }
+    (value) => {
+      // The transition owns the `probing` card, the "user said no" flag and the conflict card.
+      // A settlement that arrives after the link was torn down has no state to publish (the
+      // teardown's own frame follows), so only the card is cleared here — the same guard today's
+      // `desired === 'connected'` test provided, expressed on the status the rule checks.
+      if (runtime.status === 'conflict-pending') {
+        void dispatch(
+          promptEffects(ctx),
+          runtime,
+          {
+            type: 'conflict.answered',
+            action: value.action,
+            ...(value.timedOut === true ? { timedOut: true } : {}),
+          },
+          promptScopeFacts(runtime),
+          { caller: 'silent' },
+        )
+      } else {
+        runtime.conflict = null
       }
-      ctx.emitState()
+      // `unknown` on `host-runtime.ts`; this module is the slot's only writer (see PendingConflict).
+      if ((runtime.pendingConflict as PendingConflict | null)?.resolve === decision.settle) {
+        runtime.pendingConflict = null
+      }
     },
   )
   runtime.pendingConflict = { processes, resolve: decision.settle }
@@ -312,7 +392,10 @@ export function confirmConflict(runtime: HostRuntime, decision?: ConflictDecisio
 export function cancelConflict(runtime: HostRuntime): void {
   // `unknown` on `host-runtime.ts`; this module is the slot's only writer (see PendingConflict).
   const pending = runtime.pendingConflict as PendingConflict | null
+  // The answer is delivered while the slot is still installed: the settlement hook's
+  // `conflict.answered` guard reads it. Both the hook and this function clear the slot, and both
+  // clears are idempotent (M1).
+  if (pending) pending.resolve({ action: 'cancel' })
   runtime.pendingConflict = null
   runtime.conflict = null
-  if (pending) pending.resolve({ action: 'cancel' })
 }

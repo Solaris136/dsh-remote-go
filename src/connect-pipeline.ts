@@ -19,26 +19,31 @@ import { runtimeOf } from './host-registry.js'
 import {
   beginLinkWork,
   cancelIdleStop,
-  cancelLinkWork,
-  cancelReconnect,
   closeTunnel,
   disconnectHost,
   disposeSsh,
   endLinkWork,
   isLinkWorkCurrent,
   scheduleReconnect,
-  startRemoteHeartbeat,
-  stopRemoteHeartbeat,
-  teardownRuntime,
 } from './host-lifecycle.js'
 import type { LifecycleVerdict } from './host-lifecycle.js'
-import type { HostRuntime, BoundProcess, LaunchedProcess } from './host-runtime.js'
+import { dispatch, scopeFactsFor } from './runtime/dispatch.js'
+import { createRuntimeEffects } from './runtime/effects.js'
+import { isRefusal } from './runtime/fsm.js'
+import type {
+  ConnectPhase,
+  HostRuntime,
+  BoundProcess,
+  LaunchedProcess,
+  HostStatus,
+  RestartRecord,
+} from './host-runtime.js'
 import { findKnownHostEntries, parseKnownHosts } from './known-hosts.js'
 import { layoutForRuntime } from './layout.js'
 import type { RemoteLayout } from './layout.js'
 import { applyManagedNodeFacts, managedNodeVersionFromEngine } from './node-runtime.js'
 import type { ManagedNode } from './node-runtime.js'
-import { askConflict, cancelConflict, cancelHostKeyPrompt, requestHostKey } from './prompts.js'
+import { askConflict, requestHostKey } from './prompts.js'
 import type { ExchangeResult, ProcessIdentity, RemoteProcessRef } from './remote-proc.js'
 import { buildRunRegistryRecord, commandMatchesProfile } from './remote-web.js'
 import type {
@@ -136,8 +141,8 @@ interface ForeignConflictOptions {
 
 /** The state a failed stop has to put back exactly as it found it. */
 interface StopState {
-  status: string
-  phase: string | null
+  status: HostStatus
+  phase: ConnectPhase | null
   progress: ConnectProgressState | null
   error: ErrorView | null
   uiReady: boolean
@@ -148,7 +153,7 @@ interface StopState {
 type ConnectLogWriter = (level: string, ...args: unknown[]) => void
 
 /** One progress-line update: the stage name, the code and its interpolation values. */
-type PhaseWriter = (name: string, code: string, params?: ProgressParams) => void
+type PhaseWriter = (name: ConnectPhase, code: string, params?: ProgressParams) => void
 
 function describeTarget(entry: HostEntry): string {
   const user = entry.username ? `${entry.username}@` : ''
@@ -254,12 +259,6 @@ export async function startConnect(
   if (runtime.connectPromise) return { accepted: false, reason: 'already-connecting' }
   if (runtime.linkBusy !== null) return { accepted: false, reason: 'already-restarting' }
   if (runtime.status === 'connected' && runtime.ssh?.connected) return { accepted: false, reason: 'already-connected' }
-  // A new connect owns the link from here on: any pending one-shot action is stale.
-  cancelLinkWork(runtime)
-  // An idle host keeps a timer that would stop the remote web; connecting again makes that
-  // policy stale (the timer used to fire into a live link: review blocker 1).
-  cancelIdleStop(runtime)
-  stopRemoteHeartbeat(runtime)
   runtime.alongsidePids = []
   const typedPassword = typeof options.password === 'string' && options.password !== '' ? options.password : null
   if (typedPassword !== null) runtime.password = typedPassword
@@ -270,14 +269,9 @@ export async function startConnect(
   // re-save what the store already holds.
   runtime.savePassword = typedPassword !== null && options.rememberPassword !== false
   runtime.forgetPassword = typedPassword !== null && options.rememberPassword === false
-  runtime.desired = 'connected'
-  cancelReconnect(runtime)
-  // A user-initiated connect gets a fresh retry budget and a fresh prompt history; a retry
-  // that the pipeline schedules itself must keep the budget it already spent (H2).
-  runtime.reconnectAttempts = 0
-  runtime.connectCancelled = false
   // This connection starts its own log: the previous attempt's lines are gone before the
   // first line of this one, so the panel and a copied log only ever show the live attempt.
+  // The line keeps the previous attempt's `phase`, exactly as it did before the FSM owned it.
   beginConnectLog(runtime)
   ctx.progress.log(
     runtime,
@@ -286,7 +280,19 @@ export async function startConnect(
       runtime.entry.jumpHost ? `, jump=${runtime.entry.jumpHost}` : ''
     })`,
   )
-  startConnectPromise(ctx, runtime)
+  // One transition owns the whole entry: the retry budget and prompt history reset (a *user*
+  // connect), the timer disarms, the desired flag and the pipeline start (`run`). The token
+  // invalidates any older one-shot action, the same way the old `cancelLinkWork` did.
+  const token = (Number(runtime.linkToken) || 0) + 1
+  const event = { type: 'connect.requested' as const, token }
+  const result = await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+    run: () => startConnectPromise(ctx, runtime),
+  })
+  if (isRefusal(result)) {
+    // The guards above are the API-visible ones; the machine refusing here means the two disagreed.
+    ctx.progress.log(runtime, 'warn', `connect refused: ${result.reason}`)
+    return { accepted: false, reason: result.reason === 'already-connecting' ? 'already-connecting' : 'busy' }
+  }
   return { accepted: true }
 }
 
@@ -325,13 +331,20 @@ export async function reconnectHost(ctx: ConnectCtx, runtime: HostRuntime): Prom
 /**
  * Re-enter the pipeline after a dropped link. Lives here rather than in the
  * lifecycle module so `scheduleReconnect` stays a pure timer with a callback.
+ *
+ * The retry is a `connect.requested` with `retry: true`: it must publish `connecting` and clear
+ * the previous failure, but it must **not** reset the retry budget the user's connect set (R5/H2),
+ * so the event carries the one difference.
  */
 async function reconnectNow(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   if (ctx.state.disposed || runtime.desired !== 'connected') return
   await disposeSsh(runtime)
   // A dropped link's retry is a new connection too: start from a clean log.
   beginConnectLog(runtime)
-  startConnectPromise(ctx, runtime)
+  const event = { type: 'connect.requested' as const, token: Number(runtime.linkToken) || 0, retry: true }
+  await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+    run: () => startConnectPromise(ctx, runtime),
+  })
 }
 
 /** A timer callback that starts a retry: report a throw instead of leaving it unhandled (L). */
@@ -342,63 +355,37 @@ function retryNow(ctx: ConnectCtx, runtime: HostRuntime): void {
 }
 
 /**
- * Watch a transport that is still being dialled. `SshConnection` attaches its client `close`
- * handling before the handshake, so a transport that dies while a host-key prompt is parked
- * reaches this listener: the prompt is settled at once (instead of waiting for its timeout)
- * and the loss is recorded so the pipeline classifies the failure as a dropped link, not a
- * key decision (H3/M1).
+ * Watch one transport for its close. A close is one `transport.closed` event, and the rule
+ * decides (design-arch §2.4.2) whether it was a stale listener, the teardown's own close, a
+ * handshake that died (record the loss, settle the parked prompts, log) or a live link that
+ * dropped (publish `disconnected`, close the listener, ask the retry policy for a timer).
+ *
+ * Attached as soon as the transport exists — before `connect()` — because a drop while the
+ * handshake waits on a host-key prompt must resolve that prompt instead of parking the pipeline
+ * until its 120 s timeout (H3/M1). This replaces the two listeners this module used to keep
+ * (a silent handshake one and the live/in-flight one); their work is the event's effects now.
+ * @param ctx - service context (the effect owner is bound to it).
  * @param runtime - host runtime.
  * @param ssh - the transport that was just created.
  */
-function watchHandshakeTransport(runtime: HostRuntime, ssh: SshConnection | null): void {
+function watchTransport(ctx: ConnectCtx, runtime: HostRuntime, ssh: SshConnection | null): void {
   if (!ssh || typeof ssh.on !== 'function') return
   ssh.on('close', () => {
     // A transport this runtime no longer dials (replaced, or disposed before a new attempt)
     // is not a lost link: its close is the teardown itself.
     if (runtime.ssh !== ssh && runtime.jumpSsh !== ssh) return
     if (runtime.closing || runtime.desired !== 'connected') return
-    runtime.transportLost = true
-    cancelHostKeyPrompt(runtime)
-  })
-}
-
-/**
- * Watch the transport that carries this connection. Attached as soon as the SSH session is
- * open (not only when the remote UI is ready): a drop during probe/bootstrap is still a
- * lost link and must be retried like any other (H3).
- */
-function attachDisconnectHandler(ctx: ConnectCtx, runtime: HostRuntime): void {
-  const ssh = runtime.ssh
-  if (!ssh) return
-  ssh.on('close', () => {
-    if (runtime.closing || runtime.desired !== 'connected') return
-    // A newer transport already owns the link; this one is the previous attempt's.
-    if (runtime.ssh !== ssh) return
-    runtime.transportLost = true
-    // A one-shot link action rides the same transport: losing it is the same event as a
-    // dropped connection, and the action that was in flight must not write state any more.
-    const live = runtime.status === 'connected' || runtime.linkBusy !== null
-    const inFlight = runtime.connectPromise !== null
-    if (!live && !inFlight) return
-    cancelLinkWork(runtime)
-    stopRemoteHeartbeat(runtime)
-    // A prompt parked on this transport can never be answered: resolve it now.
-    cancelHostKeyPrompt(runtime)
-    cancelConflict(runtime)
-    if (live) {
-      runtime.status = 'disconnected'
-      runtime.phase = null
-      runtime.remote.uiReady = false
-      runtime.remote.localPort = null
-      runtime.progress = { code: 'reconnecting', params: { attempt: runtime.reconnectAttempts + 1 } }
-      ctx.emitState()
-      void closeTunnel(runtime)
-      scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))
-      return
-    }
-    // The pipeline that owns the in-flight connect reports the drop as `network` and
-    // schedules the retry from one place, so it is not counted twice here (H2/H3).
-    ctx.progress.log(runtime, 'warn', 'the SSH transport closed while the connection was being set up')
+    const event = { type: 'transport.closed' as const, transport: ssh }
+    void dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+      caller: 'callback',
+    }).then((result) => {
+      // The rule said "a retry makes sense" (its `arm(reconnect)` effect); the randomized delay,
+      // the budget and the settings switch stay in `scheduleReconnect`, the single place that
+      // actually creates the retry timer (never a second loop here, P2b hand-off).
+      const wantsRetry =
+        result.ok && result.effects.some((effect) => effect.type === 'arm' && effect.timer === 'reconnect')
+      if (wantsRetry) scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))
+    })
   })
 }
 
@@ -474,7 +461,7 @@ async function openTransport(ctx: ConnectCtx, runtime: HostRuntime, target: Conn
   }
   if (!target.jumpHost) {
     runtime.ssh = ctx.deps.sshFactory(buildOptions(target, 'target'))
-    watchHandshakeTransport(runtime, runtime.ssh)
+    watchTransport(ctx, runtime, runtime.ssh)
     ctx.progress.phase(runtime, 'ssh', 'ssh-connecting', { host: target.host })
     captureFingerprint(ctx, runtime, await runtime.ssh.connect())
     return
@@ -502,7 +489,7 @@ async function openTransport(ctx: ConnectCtx, runtime: HostRuntime, target: Conn
     runtime.jumpFingerprint = null
   }
   runtime.jumpSsh = ctx.deps.sshFactory(buildOptions(jumpTarget, 'jump'))
-  watchHandshakeTransport(runtime, runtime.jumpSsh)
+  watchTransport(ctx, runtime, runtime.jumpSsh)
   await runtime.jumpSsh.connect()
   // The jump host's key is settled (its own context above); from here the fingerprint the host
   // card describes is the target's, which `captureFingerprint` fills once it answers.
@@ -510,7 +497,7 @@ async function openTransport(ctx: ConnectCtx, runtime: HostRuntime, target: Conn
   ctx.progress.phase(runtime, 'ssh', 'ssh-connecting', { host: target.host, via: target.jumpHost.host })
   const stream = await runtime.jumpSsh.forwardOut(target.host, target.port ?? 22)
   runtime.ssh = ctx.deps.sshFactory(buildOptions(target, 'target', stream))
-  watchHandshakeTransport(runtime, runtime.ssh)
+  watchTransport(ctx, runtime, runtime.ssh)
   captureFingerprint(ctx, runtime, await runtime.ssh.connect())
 }
 
@@ -598,8 +585,8 @@ async function resolveForeignConflict(
 
   const decision = await askConflict(ctx, runtime, processes)
   if (decision.action === 'cancel') {
-    // The user said no: retrying would ask the same question again.
-    runtime.connectCancelled = true
+    // The user said no: retrying would ask the same question again. The `conflict.answered`
+    // transition already recorded that (its rule owns `connectCancelled`); this is only the throw.
     throw errors.remoteDshRunning()
   }
   if (decision.action === 'alongside') {
@@ -923,35 +910,24 @@ async function verifyRemoteUi(
   return exchange
 }
 
-/** Publish the connected state and start watching the remote for its own restarts. */
-function markConnected(ctx: ConnectCtx, runtime: HostRuntime): void {
-  // A live link is not idle: no idle-stop timer may survive the attach (review blocker 1).
-  cancelIdleStop(runtime)
-  // Only a success resets the retry budget: a failed attempt must spend it (H2).
-  runtime.reconnectAttempts = 0
-  runtime.connectCancelled = false
-  runtime.status = 'connected'
-  runtime.phase = 'ready'
-  runtime.progress = { code: 'ready' }
-  runtime.error = null
-  runtime.remote.uiReady = true
-  // Every attach invalidates the previous launch URL / cookie: the Client re-navigates its carrier.
-  runtime.remote.viewRev = (Number(runtime.remote.viewRev) || 0) + 1
-  // A fresh attach is a new listener budget: an old rebuild failure must not keep it in backoff.
-  runtime.tunnelRepairFailures = 0
-  runtime.nextTunnelRepairAt = 0
-  // A successful attach makes a previous "stop not confirmed" warning stale. An alongside
-  // warning keeps describing a process that is still running, so it is not cleared here.
-  if (runtime.warningSource === 'restart-stop') {
-    runtime.warning = null
-    runtime.warningSource = null
-  }
-  startRemoteHeartbeat(ctx, runtime)
-  ctx.emitState()
+/**
+ * Publish the connected state and start watching the remote for its own restarts.
+ *
+ * The whole attach is one `connect.succeeded` transition: status/phase/progress/error, the
+ * retry-budget reset, the stale "stop not confirmed" warning, the idle disarm, the heartbeat arm,
+ * `uiReady`/`viewRev`, the link-block repair-budget reset and `activeHostId`.
+ * @param ctx - service context.
+ * @param runtime - the runtime that just reached `ready`.
+ */
+async function markConnected(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
+  const event = { type: 'connect.succeeded' as const }
+  await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+    caller: 'script',
+  })
 }
 
 /** Bounded diagnostics trail of restarts and re-attached ports (never sent to the client). */
-function recordRestart(runtime: HostRuntime, entry: Record<string, unknown>): void {
+function recordRestart(runtime: HostRuntime, entry: Omit<RestartRecord, 'at'>): void {
   const history = Array.isArray(runtime.restarts) ? runtime.restarts : []
   history.push({ at: nowIso(), ...entry })
   runtime.restarts = history.slice(-10)
@@ -986,21 +962,14 @@ async function settlePasswordStorage(ctx: ConnectCtx, runtime: HostRuntime, log:
 async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
-  runtime.closing = false
-  // NOTE: `reconnectAttempts` is deliberately NOT reset here. A retry re-enters this function
-  // and must keep spending the budget `scheduleReconnect` counts; only a user-initiated
-  // connect (startConnect) and a successful attach reset it (H2).
-  // The literal would narrow the property to `false` for the rest of this function, hiding the
-  // `true` `attachDisconnectHandler` may have set meanwhile: `as boolean` keeps the field's type.
-  runtime.transportLost = false as boolean
+  // Every attempt (a user connect or a scheduled retry) entered through `connect.requested`,
+  // which owns `closing`, `transportLost`, the timer disarms and the `connecting` card.
   runtime.alongsidePids = []
   // Kill rights belong to this connection: a fresh connect starts with no launched pids.
   runtime.launched = new Map()
   runtime.bound = null
   runtime.tunnelRepairFailures = 0
   runtime.nextTunnelRepairAt = 0
-  stopRemoteHeartbeat(runtime)
-  ctx.progress.set(runtime, { status: 'connecting', error: null, warning: null })
   let remoteStarted = false
   let layout: RemoteLayout | null = null
   // Whether the SSH transport ever came up during this attempt: a link that was up and then
@@ -1032,7 +1001,6 @@ async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<v
     await openTransport(ctx, runtime, target)
     // The transport is the link from here on: a drop during probe/bootstrap is a lost
     // connection too, so the close handler is attached before the remaining steps (H3).
-    attachDisconnectHandler(ctx, runtime)
     assertStillWanted(ctx, runtime)
     assertTransportOpen(runtime)
     transportUp = true
@@ -1233,8 +1201,8 @@ async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<v
     // or disconnected (H4), and never dereference a tunnel this pipeline no longer owns.
     assertStillWanted(ctx, runtime)
     assertTransportOpen(runtime)
-    ctx.state.activeHostId = runtime.id
-    markConnected(ctx, runtime)
+    // `connect.succeeded` publishes `activeHostId` (the `publish-active-host` patch).
+    await markConnected(ctx, runtime)
     const localPort = runtime.tunnel?.localPort ?? runtime.remote.localPort ?? '?'
     log('info', `connected: remote ${runtime.remote.version} on 127.0.0.1:${localPort}`)
   } catch (error) {
@@ -1244,37 +1212,35 @@ async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<v
     // is what the retry policy exists for, even while the remote was still being set up (H3).
     const droppedTransport = runtime.transportLost === true || (transportUp === true && runtime.ssh?.connected !== true)
     const cancelled = error instanceof LinkCancelled || linkTaken(ctx, runtime)
-    if (cancelled) {
-      // A user-initiated disconnect/teardown (or a host removal) resolved a pending prompt or
-      // cancelled the link while the pipeline was in flight: this is not a failure.
-      runtime.error = null
-      runtime.status = 'disconnected'
-      runtime.phase = null
-      runtime.progress = null
-      log('info', 'connect cancelled by disconnect')
-    } else {
-      const view = normalizeConnectFailure(runtime, error)
-      runtime.error = view
-      runtime.status = 'error'
-      runtime.phase = null
-      runtime.progress = null
-      // The log has to explain the failure on its own: every line the card shows, plus the
-      // redacted technical detail (and the remote log tail for a failed remote start).
-      ctx.progress.logFailure(runtime, view, { phase: failedPhase })
-    }
-    runtime.remote.uiReady = false
-    runtime.remote.localPort = null
-    await teardownRuntime(ctx, runtime, {
-      stopRemote: remoteStarted && runtime.entry.keepAlive === 'stop',
-      keepRemote: remoteStarted && runtime.entry.keepAlive !== 'stop',
+    // The user's "no" is read *before* the failure transition: `connect.failed` clears the flag
+    // for the next attempt (today's catch reset it right after the decision), and the decision
+    // itself still has to see it. This is the H2 "a refused prompt is final" rule.
+    const saidNo = runtime.connectCancelled === true
+    // The transition owns the state, the teardown and the failure lines; the caller only keeps
+    // its own publication point (the retry decision below emits exactly like the old code) and
+    // the one informational line the cancel branch used to write.
+    const event = cancelled
+      ? { type: 'connect.cancelled' as const }
+      : { type: 'connect.failed' as const, view: normalizeConnectFailure(runtime, error), phase: failedPhase }
+    await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+      caller: 'script',
+      emit: false,
+      // "A remote was started in this attempt" is this pipeline's own flag (it becomes true
+      // before the remote block is written, and survives a failure inside the registry write);
+      // the scope can only see the block. Pass the caller's verdict so a cancellation after the
+      // remote started still honours the `stop` keep-alive policy.
+      teardown: {
+        stopRemote: remoteStarted && runtime.entry.keepAlive === 'stop',
+        keepRemote: remoteStarted && runtime.entry.keepAlive !== 'stop',
+      },
     })
+    if (cancelled) log('info', 'connect cancelled by disconnect')
     // One place decides whether a failed attempt is retried, and the budget lives in
     // `scheduleReconnect` (H2). A user's "no" (host-key/conflict prompt) is final, and a
     // first manual connect that never reached the remote is reported instead of looping.
     if (!cancelled) {
-      const retryable = runtime.error?.retryable !== false && runtime.connectCancelled !== true
+      const retryable = runtime.error?.retryable !== false && !saidNo
       const repairAttempt = (Number(runtime.reconnectAttempts) || 0) > 0
-      runtime.connectCancelled = false
       if (retryable && (repairAttempt || droppedTransport)) scheduleConnectRetry(ctx, runtime)
     }
     ctx.emitState()
@@ -1327,18 +1293,22 @@ function planForRuntime(
   return { plan: ctx.deps.plan({ facts, targetVersion, profile }), targetVersion, facts }
 }
 
-/** Put a host back into its connected state without pretending the launch URL changed. */
-function resumeConnected(ctx: ConnectCtx, runtime: HostRuntime): boolean {
+/**
+ * Put a host back into its connected state without pretending the launch URL changed.
+ *
+ * One `restart.resumed` transition (`keptInstance` when the managed stop was not confirmed, which
+ * is what puts the "no new instance was started" warning back on the card).
+ * @param ctx - service context.
+ * @param runtime - the runtime the restart action owns.
+ * @param keptInstance - whether the old remote instance was kept on purpose.
+ * @returns whether the link was still there to resume.
+ */
+async function resumeConnected(ctx: ConnectCtx, runtime: HostRuntime, keptInstance = false): Promise<boolean> {
   // A late action must never resurrect a link that was torn down or replaced while it waited:
   // the token is checked by callers, and these are the other three proofs that it still exists.
   if (runtime.desired !== 'connected' || runtime.ssh?.connected !== true || runtime.tunnel === null) return false
-  runtime.status = 'connected'
-  runtime.phase = 'ready'
-  runtime.progress = { code: 'ready' }
-  runtime.error = null
-  runtime.remote.uiReady = true
-  startRemoteHeartbeat(ctx, runtime)
-  ctx.emitState()
+  const event = { type: 'restart.resumed' as const, ...(keptInstance ? { keptInstance: true } : {}) }
+  await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'script' })
   return true
 }
 
@@ -1371,12 +1341,27 @@ export async function restartHost(ctx: ConnectCtx, runtime: HostRuntime): Promis
   if (!connected && !recoverable) {
     throw errors.restartUnavailable()
   }
-  const token = beginLinkWork(runtime, 'restart')
-  const work = runRestart(ctx, runtime, token)
-  runtime.restartPromise = work
-  void work.finally(() => {
-    endLinkWork(runtime, token)
-    if (runtime.restartPromise === work) runtime.restartPromise = null
+  // One transition owns `activity`/`epoch`, the `connecting` card and the action start (`run`).
+  // The token is the old `beginLinkWork` one: the rule adopts it (`epochAfter`) and hands it to the
+  // script, so the late-write filter keeps the exact semantics it had.
+  const token = (Number(runtime.linkToken) || 0) + 1
+  const event = {
+    type: 'restart.requested' as const,
+    token,
+    pid: runtime.remote.pid,
+    port: runtime.remote.port,
+  }
+  await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+    caller: 'script',
+    run: (activity, started) => {
+      if (activity !== 'restart') return
+      const work = runRestart(ctx, runtime, started)
+      runtime.restartPromise = work
+      void work.finally(() => {
+        endLinkWork(runtime, started)
+        if (runtime.restartPromise === work) runtime.restartPromise = null
+      })
+    },
   })
   return { accepted: true }
 }
@@ -1394,11 +1379,9 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
   let started = false
   let tunnelCreated = false
   try {
-    stopRemoteHeartbeat(runtime)
-    cancelIdleStop(runtime)
+    // `restart.requested` already disarmed the heartbeat/reconnect/idle timers and published the
+    // `start`/`restarting-remote` card.
     log('info', `restart requested (pid=${runtime.remote.pid ?? 'unknown'}, remote port=${previousPort ?? 'unknown'})`)
-    ctx.progress.set(runtime, { status: 'connecting', error: null, phase: 'start' })
-    phase('start', 'restarting-remote', { pid: Number(runtime.remote.pid) || 0, port: Number(previousPort) || 0 })
 
     // Whether the running pid is ours to stop needs three independent proofs: the registry
     // names it, this connection launched it, and /proc still shows the same process. A pid that
@@ -1472,7 +1455,9 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
         if (runtime.launched instanceof Map) runtime.launched.delete(managedPid)
       } else {
         // Never start a second instance next to one whose stop was not confirmed. The old
-        // tunnel is still open, so the host stays usable and the user can retry.
+        // tunnel is still open, so the host stays usable and the user can retry. The warning is
+        // action-scoped data with no transition of its own: it is set here and cleared by
+        // `connect.succeeded` once a fresh attach replaces the stale instance.
         runtime.warning = {
           zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试，或先断开再重连。',
           en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly, or disconnect and reconnect.',
@@ -1484,23 +1469,24 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
             String(stopped?.output ?? '').slice(0, 300) || 'no output'
           })`,
         )
-        if (resumeConnected(ctx, runtime)) return
+        if (await resumeConnected(ctx, runtime, true)) return
         // The link changed under us, or there was no tunnel to keep (restart from the error
         // state): never publish a fake "connected" state; explain instead of staying stuck.
         if (isLinkWorkCurrent(runtime, token) && runtime.status === 'connecting') {
-          const view = toErrorView(
-            errors.restartUnavailable({
-              zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试。',
-              en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly.',
-            }),
-          )
-          runtime.error = view
-          runtime.status = 'error'
-          runtime.phase = null
-          runtime.progress = null
-          runtime.remote.uiReady = false
-          ctx.progress.logFailure(runtime, view, { phase: 'start' })
-          ctx.emitState()
+          const failure = {
+            type: 'restart.failed' as const,
+            phase: 'start' as const,
+            view: toErrorView(
+              errors.restartUnavailable({
+                zh: '远端受管 DSH 没有确认停止，本次没有启动新实例；请稍后重试。',
+                en: 'The managed remote DSH did not confirm its stop, so no new instance was started; retry shortly.',
+              }),
+            ),
+          }
+          await dispatch(createRuntimeEffects(ctx), runtime, failure, scopeFactsFor(ctx, runtime, failure), {
+            caller: 'script',
+            keepLink: true,
+          })
         }
         return
       }
@@ -1574,7 +1560,7 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
       toPort: webInfo.port,
       pid: webInfo.pid ?? null,
     })
-    markConnected(ctx, runtime)
+    await markConnected(ctx, runtime)
     log(
       'info',
       `restart: connected again on 127.0.0.1:${runtime.tunnel?.localPort ?? tunnel.localPort} (remote port ${previousPort} -> ${webInfo.port})`,
@@ -1588,7 +1574,7 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
     // valid: cancelling a conflict prompt (or a failed relaunch) keeps the host usable.
     if (!stoppedOwn && !started && hadTunnel && runtime.ssh?.connected === true && runtime.tunnel !== null) {
       log('warn', `restart cancelled: ${messageOf(error)}; keeping the current remote instance`)
-      resumeConnected(ctx, runtime)
+      await resumeConnected(ctx, runtime)
       return
     }
     const view =
@@ -1597,15 +1583,16 @@ async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number):
         : toErrorView(error)
     // Phase is cleared with the status; capture it first so the log says where it stopped.
     const failedPhase = runtime.phase
-    runtime.error = view
-    runtime.status = 'error'
-    runtime.phase = null
-    runtime.progress = null
-    runtime.remote.uiReady = false
-    runtime.remote.localPort = null
-    // #68: a failed restart explains itself (phase, code, reason, hints, redacted details).
-    ctx.progress.logFailure(runtime, view, { phase: failedPhase })
-    await teardownRuntime(ctx, runtime, { stopRemote: started && runtime.entry.keepAlive === 'stop' })
+    // The transition owns the error state, the failure lines and the teardown; the caller keeps
+    // its own publication point (`emit:false`, emitted below exactly where it always was).
+    const failure = { type: 'restart.failed' as const, view, phase: failedPhase }
+    await dispatch(createRuntimeEffects(ctx), runtime, failure, scopeFactsFor(ctx, runtime, failure), {
+      caller: 'script',
+      emit: false,
+      // Only a remote this restart launched is stopped; a restart that failed before the launch
+      // leaves the instance it never touched alone (the rule cannot tell the two apart).
+      teardown: { stopRemote: started && runtime.entry.keepAlive === 'stop' },
+    })
     ctx.emitState()
   } finally {
     // A listener this action created must never outlive the action: a disconnect (or a host
@@ -1753,7 +1740,8 @@ export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Pro
     runtime.ssh?.connected === true &&
     runtime.facts !== null
   if (!connected && !recoverable) throw errors.stopRemoteUnavailable()
-  const token = beginLinkWork(runtime, 'stop')
+  // The `previous` snapshot is what `stop.refused` restores; it is captured before the action
+  // writes anything.
   const previous: StopState = {
     status: runtime.status,
     phase: runtime.phase,
@@ -1762,25 +1750,47 @@ export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Pro
     uiReady: runtime.remote.uiReady,
     localPort: runtime.remote.localPort,
   }
+  // One transition owns `activity`/`epoch`, the `connecting` card and the action start (`run`).
+  // The token is the old `beginLinkWork` one (the rule adopts it), so `isLinkWorkCurrent` keeps
+  // the exact late-write semantics.
+  const token = (Number(runtime.linkToken) || 0) + 1
+  const event = { type: 'stop.requested' as const, token, pid: runtime.remote.pid, port: runtime.remote.port }
+  let started: Promise<StopRemoteResult> | null = null
   try {
-    return await runStopRemote(ctx, runtime, token)
+    await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+      caller: 'script',
+      run: (activity, actionToken) => {
+        if (activity !== 'stop') return
+        started = runStopRemote(ctx, runtime, actionToken)
+      },
+    })
+    return await started
   } catch (error) {
     const view = toErrorView(error)
     const phase = typeof runtime.phase === 'string' ? runtime.phase : previous.phase
     if (isLinkWorkCurrent(runtime, token)) {
-      if (!restoreStopState(ctx, runtime, previous) && runtime.status === 'connecting') {
-        // The transport went away (or the link was replaced) while the stop was failing:
-        // never publish a fake "connected" state, publish the coded failure instead.
-        runtime.error = view
-        runtime.status = 'error'
-        runtime.phase = null
-        runtime.progress = null
-        runtime.remote.uiReady = false
-        runtime.remote.localPort = null
-        ctx.emitState()
+      // The rule restores the previous state itself; `unrestorable` is the design's "link went
+      // away while the stop was failing" branch, which publishes the coded failure instead.
+      const restorable =
+        previous.status === 'error' ||
+        (runtime.desired === 'connected' && runtime.ssh?.connected === true && runtime.tunnel !== null)
+      const refusal = {
+        type: 'stop.refused' as const,
+        view,
+        phase,
+        previous: {
+          status: previous.status,
+          phase: previous.phase,
+          progress: previous.progress,
+          error: previous.error,
+          uiReady: previous.uiReady === true,
+          localPort: previous.localPort ?? null,
+        },
+        ...(restorable ? {} : { unrestorable: true }),
       }
-      // The failure explains itself in the log too (phase, code, reason, hints, details).
-      ctx.progress.logFailure(runtime, view, { phase, label: STOP_FAILED_LABEL })
+      await dispatch(createRuntimeEffects(ctx), runtime, refusal, scopeFactsFor(ctx, runtime, refusal), {
+        caller: 'script',
+      })
     }
     throw error
   } finally {
@@ -1788,32 +1798,8 @@ export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Pro
   }
 }
 
-/** The first log line a refused/failed stop prints; `logFailure` owns the rest. */
-const STOP_FAILED_LABEL: BilingualText = {
-  zh: '关闭远端 DSH 失败',
-  en: 'Stopping the remote DSH failed',
-}
-
-/** Put a host back the way it was when a stop did not happen. */
-function restoreStopState(ctx: ConnectCtx, runtime: HostRuntime, previous: StopState): boolean {
-  if (previous.status === 'error') {
-    runtime.status = 'error'
-    runtime.error = previous.error
-    runtime.phase = previous.phase
-    runtime.progress = previous.progress
-    runtime.remote.uiReady = previous.uiReady === true
-    runtime.remote.localPort = previous.localPort ?? null
-    ctx.emitState()
-    return true
-  }
-  // `resumeConnected` refuses to stage a connected state on a link that went away (or was
-  // replaced) while the stop was failing; the caller reports the coded failure instead.
-  return resumeConnected(ctx, runtime)
-}
-
 async function runStopRemote(ctx: ConnectCtx, runtime: HostRuntime, token: number): Promise<StopRemoteResult> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
-  const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)
   const profile = runtime.remote.profile ?? ctx.settings().bootstrap.profile
   const pid = Number(runtime.remote.pid ?? 0)
@@ -1822,15 +1808,8 @@ async function runStopRemote(ctx: ConnectCtx, runtime: HostRuntime, token: numbe
     'info',
     `stop remote requested (pid=${isPid(pid) ? pid : 'unknown'}, remote port=${isPid(port) ? port : 'unknown'})`,
   )
-  // One-shot link action: the card shows a progress line and no other action may interleave.
-  stopRemoteHeartbeat(runtime)
-  cancelReconnect(runtime)
-  cancelIdleStop(runtime)
-  ctx.progress.set(runtime, { status: 'connecting', error: null, phase: 'start' })
-  phase('start', 'stopping-remote', {
-    pid: isPid(pid) ? pid : 0,
-    port: isPid(port) ? port : 0,
-  })
+  // `stop.requested` already disarmed the heartbeat/reconnect/idle timers and published the
+  // `start`/`stopping-remote` card.
 
   const verdict = await closeAuthorized(ctx, runtime, pid, layout, profile)
   if (!isLinkWorkCurrent(runtime, token)) {
@@ -1870,8 +1849,12 @@ async function runStopRemote(ctx: ConnectCtx, runtime: HostRuntime, token: numbe
     return { ok: true, pid: isPid(pid) ? pid : null }
   }
   runtime.bound = null
-  // Reuse the single teardown path; `stopped` keeps the idle policy from arming a second stop.
-  await disconnectHost(ctx, runtime, { stopRemote: false, stopped: true })
+  // One transition ends the action: `stop.succeeded` is the explicit stop's disconnect (the
+  // `stopped:true` form keeps the idle policy from arming a second stop). The informational line
+  // today's `disconnectHost` wrote is part of the operator log, so it stays, in its old position.
+  ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
+  const done = { type: 'stop.succeeded' as const }
+  await dispatch(createRuntimeEffects(ctx), runtime, done, scopeFactsFor(ctx, runtime, done), { caller: 'script' })
   runtime.bound = null
   log('info', 'stop remote: the remote DSH is stopped; the host is kept and can be reconnected')
   return { ok: true, pid: isPid(pid) ? pid : null }
@@ -1896,12 +1879,22 @@ export async function reattachHost(
     return { accepted: false, reason: 'not-connected' }
   }
   if (runtime.connectPromise || runtime.linkBusy !== null) return { accepted: false, reason: 'busy' }
-  const token = beginLinkWork(runtime, 'reattach')
-  const work = runReattach(ctx, runtime, info, token)
-  runtime.reattachPromise = work
-  void work.finally(() => {
-    endLinkWork(runtime, token)
-    if (runtime.reattachPromise === work) runtime.reattachPromise = null
+  // One transition owns `activity`/`epoch`, the `connecting` card and the action start (`run`);
+  // the token is the old `beginLinkWork` one so the late-write filter keeps its semantics.
+  const token = (Number(runtime.linkToken) || 0) + 1
+  const reason = typeof info?.reason === 'string' && info.reason !== '' ? info.reason : 'remote-unreachable'
+  const event = { type: 'reattach.requested' as const, token, reason }
+  await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+    caller: 'script',
+    run: (activity, started) => {
+      if (activity !== 'reattach') return
+      const work = runReattach(ctx, runtime, info, started)
+      runtime.reattachPromise = work
+      void work.finally(() => {
+        endLinkWork(runtime, started)
+        if (runtime.reattachPromise === work) runtime.reattachPromise = null
+      })
+    },
   })
   return { accepted: true }
 }
@@ -1915,12 +1908,8 @@ async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: Reattach
   const reason = typeof info?.reason === 'string' && info.reason !== '' ? info.reason : 'remote-unreachable'
   let tunnelCreated = false
   try {
-    stopRemoteHeartbeat(runtime)
-    cancelReconnect(runtime)
-    cancelIdleStop(runtime)
+    // `reattach.requested` already disarmed the timers and published the `restarting-remote` card.
     log('info', `remote restart suspected: ${reason}; re-reading the remote state`)
-    ctx.progress.set(runtime, { status: 'connecting', error: null, phase: 'start' })
-    phase('start', 'restarting-remote', { reason })
 
     // A restart takes a moment to print its new readiness line: retry before giving up.
     const attempts = Math.max(1, Number(ctx.timers.reattachAttempts) || REMOTE_REATTACH_ATTEMPTS)
@@ -2042,7 +2031,7 @@ async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: Reattach
       reason,
       source: resolved.source,
     })
-    markConnected(ctx, runtime)
+    await markConnected(ctx, runtime)
     log(
       'info',
       `re-attached: remote ${runtime.remote.version ?? 'version unknown'} on 127.0.0.1:${
@@ -2058,18 +2047,13 @@ async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: Reattach
       error instanceof LinkCancelled
         ? toErrorView(errors.network(SSH_CLOSED_DETAIL, { technical: 'reason=ssh-closed during re-attach' }))
         : toErrorView(error)
-    // Phase is cleared with the status; capture it first so the log says where it stopped.
-    const failedPhase = runtime.phase
-    runtime.error = view
-    runtime.status = 'error'
-    runtime.phase = null
-    runtime.progress = null
-    runtime.remote.uiReady = false
-    runtime.remote.localPort = null
-    await closeTunnel(runtime)
-    stopRemoteHeartbeat(runtime)
-    // #68: a failed re-attach explains itself (phase, code, reason, hints, redacted details).
-    ctx.progress.logFailure(runtime, view, { phase: failedPhase })
+    // The transition owns the error state, the listener release, the heartbeat disarm, the
+    // failure lines (`logFailure` reads the phase it is about to clear) and the publication.
+    const failure = { type: 'reattach.failed' as const, view }
+    await dispatch(createRuntimeEffects(ctx), runtime, failure, scopeFactsFor(ctx, runtime, failure), {
+      caller: 'script',
+      emit: false,
+    })
     ctx.emitState()
   } finally {
     // A listener this action created must never outlive the action (see runRestart).

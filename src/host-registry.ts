@@ -12,13 +12,9 @@ import { listKeyFiles as listKeyFilesInHome, OUTSIDE_HOME } from './key-files.js
 import type { KeyFilesListing } from './key-files.js'
 import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import type { KnownHostsSummary } from './known-hosts.js'
-import {
-  cancelIdleStop,
-  cancelReconnect,
-  startRemoteHeartbeat,
-  stopRemoteHeartbeat,
-  teardownRuntime,
-} from './host-lifecycle.js'
+import { startRemoteHeartbeat, stopRemoteHeartbeat } from './host-lifecycle.js'
+import { dispatch, scopeFactsFor } from './runtime/dispatch.js'
+import { createRuntimeEffects } from './runtime/effects.js'
 import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from './ssh-config.js'
 import type { DiscoveredAlias } from './ssh-config.js'
 import type { HostEntry, Settings } from './settings.js'
@@ -173,11 +169,15 @@ export async function removeHost(ctx: Store & TeardownCtx, id: string): Promise<
     // A deleted host must not be resurrected by a timer scheduled before deletion, and a
     // connect pipeline still in flight must see that the user no longer wants it: it may
     // never publish a connected state or a fresh `activeHostId` afterwards (H4).
-    runtime.desired = 'idle'
-    cancelReconnect(runtime)
-    cancelIdleStop(runtime)
     if (ctx.state.activeHostId === id) ctx.state.activeHostId = null
-    await teardownRuntime(ctx, runtime, { stopRemote: runtime.entry.keepAlive === 'stop' })
+    // `host.removed` owns the desired flag, the token bump, the timer disarms, the prompt
+    // settlement and the teardown; the frame is published below with the host already gone, so
+    // this call must not emit on its own.
+    const event = { type: 'host.removed' as const, keepAlive: runtime.entry.keepAlive }
+    await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
+      caller: 'silent',
+      emit: false,
+    })
   }
   ctx.state.runtimes.delete(id)
   await ctx.store.removeHost(id)

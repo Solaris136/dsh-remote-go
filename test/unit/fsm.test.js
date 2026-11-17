@@ -185,7 +185,8 @@ const ALLOW_MATRIX = {
   'connect.succeeded': { statuses: ['connecting'], activities: ['connect', 'restart', 'reattach'] },
   'connect.cancelled': ONLY_ACTIVITY(ACTIVITIES.filter((activity) => activity !== null)),
   'connect.failed': {
-    statuses: ['connecting', 'error'],
+    // Any status: an attempt parked on a prompt reports the transport that dropped under it too.
+    statuses: [...STATUSES],
     activities: ACTIVITIES.filter((activity) => activity !== null),
   },
   'disconnect.requested': ALL,
@@ -571,7 +572,9 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
       code: 'restarting-remote',
       params: { pid: 100, port: 8080 },
     })
-    assert.deepEqual(effectsOf(requested), ['disarm', 'disarm', 'disarm', 'run'])
+    // The request rule publishes the new `connecting` card (today's `progress.set` did), then
+    // hands the action to the executor.
+    assert.deepEqual(effectsOf(requested), ['disarm', 'disarm', 'disarm', 'emit', 'run'])
 
     const resumed = transition(requested.state, { type: 'restart.resumed', keptInstance: true }, scopeOf())
     assert.equal(resumed.state.status, 'connected')
@@ -662,6 +665,9 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
       type: 'logFailure',
       phase: 'start',
       label: STOP_FAILED_LABEL,
+      // The restored state carries the *previous* error; the failure line must still explain the
+      // stop that just failed, so the rule names that view.
+      view: ERROR_VIEW,
     })
   })
 

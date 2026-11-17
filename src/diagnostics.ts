@@ -5,7 +5,7 @@ import { isNodeVersionSupported, versionParity } from './version.js'
 import { nowIso } from './util.js'
 import type { BilingualText } from './util.js'
 import { redactObject } from './redact.js'
-import type { HostRuntime } from './host-runtime.js'
+import type { HostRuntime, RestartRecord } from './host-runtime.js'
 
 /** One checklist row: a stable id, its label and the verdict. */
 export interface DiagnosticCheck {
@@ -21,7 +21,7 @@ export interface DiagnosticsReport {
   checks: DiagnosticCheck[]
   redacted: true
   generatedAt: string
-  restarts: Array<Record<string, unknown>>
+  restarts: RestartRecord[]
   logs: string[]
 }
 
