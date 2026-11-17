@@ -198,7 +198,7 @@ export interface RemoteDeps {
  *
  * The three trailing callbacks are the cycle-breaking injections this step deliberately leaves
  * alone (design-arch §1.7): `host-lifecycle` needs one-shot actions that live in
- * `connect-pipeline`, and injecting them keeps `lifecycle -> pipeline` at zero. P2's step 9
+ * `connect/pipeline.ts`, and injecting them keeps `lifecycle -> pipeline` at zero. P2's step 9
  * replaces two of them with a watchdog bus and turns the third into a forward import; until then
  * they stay on `ctx` (tests and `noteUpstreamFailure` call them directly).
  */

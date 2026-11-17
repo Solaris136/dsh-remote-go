@@ -24,7 +24,7 @@
  *
  * Deviation log for this stage (see the report): `phase`, `linkBusy`, `episodeSource`, `restarts`
  * and the three promise fields keep today's wider storage type, because narrowing them would force
- * edits in `connect-pipeline.ts`/`host-lifecycle.ts`, which this stage does not own. The FSM's own
+ * edits in `connect/pipeline.ts`/`host-lifecycle.ts`, which this stage does not own. The FSM's own
  * `SessionState` (`runtime/fsm.ts`) uses the narrow types; `writeBack` converts on the way out.
  */
 import type { BilingualText } from './util.js'

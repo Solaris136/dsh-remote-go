@@ -1,5 +1,5 @@
 /**
- * Orchestration service — the facade over host-registry, connect-pipeline, host-lifecycle, prompts and connect-progress; every external step is injected.
+ * Orchestration service — the facade over host-registry, the connect workflow (`connect/`), host-lifecycle, prompts and connect-progress; every external step is injected.
  */
 import { EventEmitter } from 'node:events'
 import { MIN_DSH_VERSION, REMOTE_VIEW_PREFIX } from './constants.js'
@@ -8,15 +8,13 @@ import { createCtx } from './context.js'
 import type { Ctx, ServiceHooks, ServiceLogger, ServiceOptions } from './context.js'
 import { createDownloadJobs } from './download-jobs.js'
 import type { DownloadJobView, DownloadJobs } from './download-jobs.js'
-import {
-  reattachHost,
-  reconnectHost,
-  repairTunnel,
-  restartHost,
-  startConnect,
-  stopRemoteHost,
-} from './connect-pipeline.js'
-import type { AcceptedResult, StartConnectOptions, StopRemoteResult } from './connect-pipeline.js'
+import { reconnectHost, startConnect } from './connect/links.js'
+import type { AcceptedResult, StartConnectOptions } from './connect/links.js'
+import { reattachHost } from './connect/reattach.js'
+import { repairTunnel } from './connect/repair.js'
+import { restartHost } from './connect/restart.js'
+import { stopRemoteHost } from './connect/stop.js'
+import type { StopRemoteResult } from './connect/stop.js'
 import { diagnoseHost } from './diagnostics.js'
 import type { DiagnosticsReport } from './diagnostics.js'
 import { errors } from './errors.js'

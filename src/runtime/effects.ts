@@ -1,10 +1,10 @@
 /**
- * The effect owner for the modules that hold a full service context (`connect-pipeline`,
+ * The effect owner for the modules that hold a full service context (`connect/pipeline.ts`,
  * `host-registry`): it binds every `DispatchHost` action to the function that already performed it
  * before the FSM was wired.
  *
  * It lives beside `dispatch.ts` (which imports nothing from the service) so the dependency arrow
- * points one way: `connect-pipeline.ts` → `runtime/effects.ts` → `host-lifecycle.ts`/`prompts.ts`.
+ * points one way: `connect/pipeline.ts` → `runtime/effects.ts` → `host-lifecycle.ts`/`prompts.ts`.
  * `host-lifecycle.ts` builds the same object from its own functions (it owns the timers and the
  * teardown path), which keeps the token plumbing in one module instead of an import cycle.
  */

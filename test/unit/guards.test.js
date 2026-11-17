@@ -734,8 +734,8 @@ const SESSION_WRITERS = {
   error: ['runtime/fsm.ts', 'host-runtime.ts'],
   phase: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
   progress: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
-  warning: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-pipeline.ts'],
-  warningSource: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-pipeline.ts'],
+  warning: ['runtime/fsm.ts', 'host-runtime.ts', 'connect/launch.ts', 'connect/restart.ts'],
+  warningSource: ['runtime/fsm.ts', 'host-runtime.ts', 'connect/launch.ts', 'connect/restart.ts'],
   closing: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   linkBusy: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   linkToken: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
@@ -743,9 +743,9 @@ const SESSION_WRITERS = {
   remoteEpisode: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   episodeSource: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   episodeCooldownUntil: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  connectPromise: ['connect-pipeline.ts'],
-  restartPromise: ['connect-pipeline.ts'],
-  reattachPromise: ['connect-pipeline.ts'],
+  connectPromise: ['connect/pipeline.ts'],
+  restartPromise: ['connect/restart.ts'],
+  reattachPromise: ['connect/reattach.ts'],
 }
 
 const SESSION_FIELDS = Object.keys(SESSION_WRITERS)

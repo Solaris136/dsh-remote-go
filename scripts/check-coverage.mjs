@@ -40,12 +40,17 @@ function runCoverage(label, args) {
 }
 
 /**
- * Parse the textual coverage table into `path -> line %`. Directory rows have no
- * percentage and set the current section (`src`, `e2e`, ...); file rows carry one.
+ * Parse the textual coverage table into `path -> line %`.
+ *
+ * The table is a tree: a directory row carries no percentage and is indented one space per level,
+ * and each of its files is indented one space deeper. Tracking "the last directory row" instead
+ * would mis-file every top-level source that sorts after a nested directory (`src/connect/` landed
+ * in P2, so `src/local-ssh.js` and `src/local-download.js` came after that subtree and lost their
+ * per-file floor silently), which is why the path is rebuilt from the indentation.
  */
 function parseCoverage(output) {
   const percentages = new Map()
-  let section = ''
+  const directories = []
   for (const line of output.split(/\r?\n/)) {
     if (!line.startsWith('ℹ')) continue
     const body = line.slice(1)
@@ -53,6 +58,7 @@ function parseCoverage(output) {
     if (separator === -1) continue
     const name = body.slice(0, separator).trim()
     if (name === '' || name === 'file') continue
+    const indent = body.length - body.trimStart().length
     const linePercent = Number.parseFloat(
       body
         .slice(separator + 1)
@@ -60,12 +66,14 @@ function parseCoverage(output) {
         .trim(),
     )
     if (!Number.isFinite(linePercent)) {
-      section = name
+      directories[indent] = name
+      directories.length = indent + 1
       continue
     }
-    // File rows are shown under their directory section; a row that already carries a
-    // path (some Node versions print the relative path) is used as-is.
-    const file = name.includes('/') ? name : section === '' ? name : `${section}/${name}`
+    // A row that already carries a path (some Node versions print the relative path) is used
+    // as-is; every other file row is joined with the directory rows above it.
+    const parents = directories.slice(1, indent).filter(Boolean)
+    const file = name.includes('/') || parents.length === 0 ? name : `${parents.join('/')}/${name}`
     percentages.set(file, linePercent)
   }
   return percentages

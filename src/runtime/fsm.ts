@@ -233,7 +233,7 @@ const run = (activity: Activity, token: number): Effect => ({ type: 'run', activ
 const episodeEffect = (info: Extract<Effect, { type: 'episode' }>['info']): Effect => ({ type: 'episode', info })
 const bus = (event: Extract<Effect, { type: 'bus' }>['event']): Effect => ({ type: 'bus', event })
 
-/** The `transport.closed` branches (§2.4.2): today's `connect-pipeline.ts:372-408`, verbatim. */
+/** The `transport.closed` branches (§2.4.2): today's `connect/pipeline.ts#watchTransport`, verbatim. */
 type TransportCloseBranch = 'ignored' | 'stale' | 'dropped' | 'handshake' | 'idle'
 
 function transportCloseBranch(state: SessionState, scope: EventScope): TransportCloseBranch {

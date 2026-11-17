@@ -333,7 +333,7 @@ describe('fsm: refusal reasons', () => {
       ).reason
     assert.equal(refused('connect'), 'already-connecting')
     assert.equal(refused('restart'), 'already-restarting')
-    // Today's `connect-pipeline.ts:255` returns `already-restarting` for *any* linkBusy kind.
+    // Today's `connect/links.ts#startConnect` returns `already-restarting` for *any* linkBusy kind.
     assert.equal(refused('reattach'), 'already-restarting')
     assert.equal(refused('stop'), 'already-restarting')
     assert.equal(refused('repair'), 'already-restarting')
