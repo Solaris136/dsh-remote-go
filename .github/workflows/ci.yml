@@ -103,7 +103,7 @@ jobs:
         uses: browser-actions/setup-chrome@v2
 
       # The single entry point release.yml also uses: repository conventions, formatting,
-      # syntax, workflows, market entry, packaging coverage and the coverage floors. The
+      # syntax, workflows, packaging and the coverage floors. The
       # granular steps above keep failures readable; this step guarantees a check added to
       # `gate` can never be absent from CI.
       - name: Repository gate (same entry point as release)
