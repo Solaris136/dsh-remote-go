@@ -23,6 +23,10 @@ import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 
+// `--noEmit` makes this the type check the gate runs: it keeps the pinned compiler but must not
+// delete the artifacts first, because a type check is not a build and the tree may be mid-phase.
+const noEmit = process.argv.includes('--noEmit')
+
 // The only generated paths in the repository: `src/` and the package root hold sources (`.ts`)
 // whose emitted twins (`.js`) live beside them. `src/` is walked recursively so a nested layout
 // (P2's `src/proxy/index.js`) is cleaned as well.
@@ -52,13 +56,18 @@ if (!existsSync(cli)) {
 }
 
 const stale = []
-for (const dir of CLEAN_DIRECTORIES) stale.push(...(await walk(dir, (name) => name.endsWith('.js'))))
-for (const file of CLEAN_ROOT_FILES) if (existsSync(path.join(root, file))) stale.push(file)
+if (!noEmit) {
+  for (const dir of CLEAN_DIRECTORIES) stale.push(...(await walk(dir, (name) => name.endsWith('.js'))))
+  for (const file of CLEAN_ROOT_FILES) if (existsSync(path.join(root, file))) stale.push(file)
 
-for (const file of stale) await rm(path.join(root, file))
-console.log(`[build] cleaned ${stale.length} generated artifact(s) before compiling`)
+  for (const file of stale) await rm(path.join(root, file))
+  console.log(`[build] cleaned ${stale.length} generated artifact(s) before compiling`)
+}
 
-const result = spawnSync(process.execPath, [cli, '-p', path.join(root, 'tsconfig.json')], {
+const tscArgs = ['-p', path.join(root, 'tsconfig.json')]
+if (noEmit) tscArgs.push('--noEmit')
+
+const result = spawnSync(process.execPath, [cli, ...tscArgs], {
   cwd: root,
   // inherit: tsc's own diagnostics are the useful output, and a wrapper must not reshape them.
   stdio: 'inherit',
@@ -74,4 +83,6 @@ if (result.status !== 0) {
   console.error(`[build] tsc failed with exit code ${result.status ?? 'unknown'}`)
   process.exit(result.status === null ? 1 : result.status)
 }
-console.log('[build] OK: tsc emitted the published layout')
+console.log(
+  noEmit ? '[build] OK: tsc type-checked the sources (no emit)' : '[build] OK: tsc emitted the published layout',
+)
