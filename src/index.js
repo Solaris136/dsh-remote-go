@@ -4,7 +4,6 @@
  */
 import { API_PREFIX, PLUGIN_ID, REMOTE_VIEW_PREFIX } from './constants.js'
 import { statSync } from 'node:fs'
-import path from 'node:path'
 import { createAdmission } from './admission.js'
 import { createApi } from './api.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
