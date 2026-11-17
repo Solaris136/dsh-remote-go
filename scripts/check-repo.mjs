@@ -54,7 +54,6 @@ const REQUIRED_FILES = `README.md LICENSE CHANGELOG.md
 .github/ISSUE_TEMPLATE/bug_report.yml .github/ISSUE_TEMPLATE/feature_request.yml
 .github/workflows/ci.yml .github/workflows/codeql.yml .github/workflows/release.yml
 docs/design.md docs/implementation.md docs/api.md docs/publish.md
-market/index.json market/plugin-entry.json
 vendor/ssh2-entry.mjs vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md`.split(/\s+/)
 
 for (const file of REQUIRED_FILES) check(exists(file), `missing required file: ${file}`)
@@ -162,28 +161,8 @@ if (pkg === null) {
     )
   }
 
-  // 3. Version parity with the market entry and the changelog
+  // 3. Version parity with the changelog and the reported runtime version
   if (version !== '') {
-    const pluginEntry = await readJson('market/plugin-entry.json')
-    if (pluginEntry === null) fail('market/plugin-entry.json: missing or not valid JSON')
-    else {
-      const published = pluginEntry.versions?.[0]?.version
-      check(
-        published === version,
-        `market/plugin-entry.json: versions[0].version is ${JSON.stringify(published)}, expected ${version}`,
-      )
-    }
-
-    const index = await readJson('market/index.json')
-    if (index === null) fail('market/index.json: missing or not valid JSON')
-    else {
-      const published = index.plugins?.[0]?.versions?.[0]?.version
-      check(
-        published === version,
-        `market/index.json: plugins[0].versions[0].version is ${JSON.stringify(published)}, expected ${version}`,
-      )
-    }
-
     const changelog = await readText('CHANGELOG.md')
     if (changelog === null) warnings.push('CHANGELOG.md: missing; skipped the version heading check')
     else {
@@ -251,7 +230,6 @@ const HYGIENE_SWEEP = [
   ['scripts', () => true],
   ['test', () => true],
   ['locale', (rel) => rel.endsWith('.json') && directChild(rel)],
-  ['market', (rel) => rel.endsWith('.json') && directChild(rel)],
 ]
 for (const [dir, accept] of HYGIENE_SWEEP) {
   for (const rel of await walk(dir, accept)) hygieneFiles.add(rel)
