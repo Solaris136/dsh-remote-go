@@ -12,7 +12,7 @@ export const API_PREFIX = '/dsh-remote-go/api'
 
 /**
  * Same-origin seat of the remote web UI used by the browser half: every request below
- * `<prefix><hostId>/` is proxied to that connected host's loopback tunnel (see remote-proxy.js).
+ * `<prefix><hostId>/` is proxied to that connected host's loopback tunnel (see proxy/index.ts).
  */
 export const REMOTE_VIEW_PREFIX = '/dsh-remote-go/remote/'
 

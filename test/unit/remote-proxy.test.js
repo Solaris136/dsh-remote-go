@@ -2,20 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
+import { createRemoteProxy } from '../../src/proxy/index.js'
 import {
-  cookieHeader,
-  createRemoteProxy,
-  filterResponseHead,
   MAX_COOKIE_VALUE,
   MAX_JAR_COOKIES,
+  cookieHeader,
   parseSetCookie,
-  parseViewPath,
-  responseHeaders,
-  safeLocation,
   storeCookies,
-  upgradePath,
-  upstreamHeaders,
-} from '../../src/remote-proxy.js'
+} from '../../src/proxy/cookies.js'
+import { filterResponseHead, responseHeaders, safeLocation, upstreamHeaders } from '../../src/proxy/headers.js'
+import { parseViewPath, upgradePath } from '../../src/proxy/routes.js'
 import { trustedRequest } from '../../src/request-trust.js'
 
 const LOCAL_ORIGIN = 'http://127.0.0.1:57442'

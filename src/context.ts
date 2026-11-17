@@ -21,24 +21,26 @@ import { createConnectProgress } from './connect-progress.js'
 import { loadLocalSshMaterial } from './local-ssh.js'
 import { ensureRemoteNode } from './node-runtime.js'
 import { probeRemote } from './probe.js'
-import { SshConnection } from './ssh.js'
-import type { SshConnectionOptions } from './ssh.js'
-import { createTunnel, probeLoopback } from './tunnel.js'
+import {
+  exchangeTokenOverTunnel,
+  findForeignDshProcesses,
+  remoteHttpStatus,
+  remoteProcessIdentity,
+  stopForeignDshProcesses,
+  waitForRemoteUi,
+} from './remote-proc.js'
 import {
   adoptRemoteWeb,
   clearRunRegistry,
-  exchangeTokenOverTunnel,
-  findForeignDshProcesses,
   readRunRegistry,
-  remoteHttpStatus,
-  remoteProcessIdentity,
   resolveRemoteWeb,
   startRemoteWeb,
-  stopForeignDshProcesses,
   stopRemoteWeb,
-  waitForRemoteUi,
   writeRunRegistry,
-} from './webapp.js'
+} from './remote-web.js'
+import { SshConnection } from './ssh.js'
+import type { SshConnectionOptions } from './ssh.js'
+import { createTunnel, probeLoopback } from './tunnel.js'
 import type { EpisodeSource, HostRuntime } from './host-runtime.js'
 import type { SecretStore } from './secrets.js'
 import type { Settings } from './settings.js'

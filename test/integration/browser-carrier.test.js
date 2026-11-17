@@ -7,7 +7,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { makeTempRoot, resolveBrowser, resolveDshCli, skipOrFail, stopChild, tail, waitFor } from './harness-support.js'
-import { createRemoteProxy } from '../../src/remote-proxy.js'
+import { createRemoteProxy } from '../../src/proxy/index.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const CLIENT_PATH = path.join(ROOT, 'client.js')

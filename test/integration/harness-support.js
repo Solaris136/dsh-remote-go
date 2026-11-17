@@ -213,7 +213,7 @@ const REQUIRED_PACKAGE_FILES = [
   'cordis.patch.yml',
   'src/index.js',
   'src/api.js',
-  'src/remote-proxy.js',
+  'src/proxy/index.js',
   'src/tools.js',
   'locale/en.json',
   'locale/zh.json',

@@ -15,9 +15,9 @@ dsh-remote-go
 │  ├─ admission.js          DSH 准入装配：把 `ctx.get('connection').requestRejection` 变成每请求闸门
 │  ├─ api.js                本地 HTTP + SSE 路由（契约实现）
 │  ├─ request-trust.js      本地 API 与同源代理共用的 Host/Origin 栅栏（单一实现）
-│  ├─ remote-proxy.js       浏览器半端的同源远端代理（前缀 HTTP + 每主机 WebSocket + cookie jar）
+│  ├─ proxy/                浏览器半端的同源远端代理（前缀 HTTP + 每主机 WebSocket + cookie jar）
 │  ├─ service.js            公共 facade：装配 ctx（依赖 + 可变状态）并委托给下面 6 个协作者
-│  ├─ connect-pipeline.js   连接管线：目标解析 → transport → probe → 托管 Node → 启动/收养 → 隧道 → 校验；本地重启与远端重挂也在这里
+│  ├─ connect/              连接管线：目标解析 → transport → probe → 托管 Node → 启动/收养 → 隧道 → 校验；本地重启与远端重挂也在这里
 │  ├─ host-registry.js      主机 CRUD、设置、快照、key-file 浏览与 ssh 别名发现
 │  ├─ host-lifecycle.js     重连/空闲计时器、轻量心跳与「连续两次失败」确认、一次性动作令牌、唯一 teardown 路径、shutdown
 │  ├─ connect-progress.js   日志环、/state 合并、进度码与 npx 行解析
@@ -33,7 +33,6 @@ dsh-remote-go
 │  ├─ probe.js              远端环境探测（单条 POSIX sh，key<TAB>value）
 │  ├─ bootstrap.js          npx 预检：环境判定、固定命令模板、版本回读
 │  ├─ node-runtime.js       托管 Node：engines.node 下限解析、下载校验、安装/复用
-│  ├─ webapp.js             远端 web 生命周期的公开再导出面（remote-web / remote-proc）
 │  ├─ remote-web.js         远端 dsh web 启动/停止/收养、启动脚本与 URL 解析、重挂时的状态重读与 run registry 重写
 │  ├─ remote-proc.js        进程扫描、foreign DSH、探活与 token 交换、监听端口与端口归属 pid
 │  ├─ remote-path.js        远端绝对路径校验/命名、本地文件名清洗
@@ -61,12 +60,12 @@ dsh-remote-go
 ├─ e2e/remote/              真实主机验收说明（无自举脚本）
 └─ scripts/                 仓库规范 / 打包 / 语法检查
 ```
-依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect-pipeline` / `host-lifecycle` / `connect-progress` / `prompts`。`connect-pipeline → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`（Host/Origin 栅栏与同源代理共用 `request-trust.js`，不复制实现）。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。
+依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect/` / `host-lifecycle` / `connect-progress` / `prompts`。`connect/ → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`（Host/Origin 栅栏与同源代理共用 `request-trust.js`，不复制实现）。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。
 
 ## 2. Host 入口与装配
 `src/index.js#apply(ctx, config)`：解析 `$DSH_HOME` 与插件状态目录 → `HostStore` → `SecretStore`（没有 `credentials` 服务时降级为仅内存）→ `RemoteGoService`（注入 store/home/logger/secrets/本地版本/指纹确认超时）→ 组装准入函数 `admit` → `createApi({ service, getOrigin, admit, logger, diagnostics })` 在 `ctx.effect` 内挂到 `webServer` 的 `/dsh-remote-go/api` 前缀 → `createRemoteProxy({ webServer, getOrigin, admit, resolveHost: service.webViewTarget })` 挂到 `/dsh-remote-go/remote/` 前缀，并在 service 的每次 `state` 上 `proxy.sync(service.hostIds())`（保持每主机一条升级路由）→ 异步 `service.init()` + `detectLocalVersion`/`detectLocalEnginesNode`（读不到版本记 warn）→ 卸载时 `api.dispose()`、`proxy.dispose()`、`service.shutdown()`、注销两条路由。
 
-`admit = createAdmission(ctx, logger)`（`admission.js`）是**两条路由唯一的准入入口**：`ctx.get('connection')?.requestRejection(req)`，返回内核的拒绝状态（401 浏览器会话未认证/失效，403 Host 或 Origin 不通过）或 `undefined` 表示放行。三条约束固定在这里，不在 `api.js`/`remote-proxy.js` 里各写一份：
+`admit = createAdmission(ctx, logger)`（`admission.js`）是**两条路由唯一的准入入口**：`ctx.get('connection')?.requestRejection(req)`，返回内核的拒绝状态（401 浏览器会话未认证/失效，403 Host 或 Origin 不通过）或 `undefined` 表示放行。三条约束固定在这里，不在 `api.js`/`proxy/` 里各写一份：
 
 - **`connection` 是 optional，且必须用 `ctx.get` 读**。Cordis 对插件 fiber 未 inject 的服务直接 `ctx.connection` 会抛错（`cannot get property "connection" without inject`），旧内核也可能没有这个服务；`ctx.get('connection')` 与 `SecretStore` 读 `credentials` 走同一条路径。服务缺失时 `admit` 返回 `undefined`，API 回落到 `x-dsh-remote-go` 标识头 + 同源栅栏，代理回落到 Host/Origin 栅栏——插件在旧内核上仍可用，不会因为准入不可用而全站 403。
 - **服务存在时每条请求先过准入，再进路由分发**。HTTP 侧拒绝时直接回该状态 + `{ ok:false, error:ErrorView }`；升级侧拒绝时回 `HTTP/1.1 <code>` 后关闭 socket（升级错误只能写在 socket 上）。
@@ -77,7 +76,7 @@ dsh-remote-go
 模型工具在同一条 `ctx.effect` 里装配：`registerHostTools(ctx, { service, logger })`（`tools.js`）。**`tools` 不进 `inject`**：它是可选服务，注册**总是**走 `ctx.inject(['tools'], (scoped) => registerOn(scoped, scoped.tools, …))`——cordis 在服务缺失时 park 那个子 fiber，服务出现**或被替换**时重新 apply，所以缺 `tools` 的宿主不会把整个插件停在 state 0（那会连主机条与 HTTP API 一起不可用），服务晚到或重载也不会永久丢工具；`ctx.inject` 返回的是 **fiber 不是 disposer**，本模块返回的清理函数对它调 `dispose()`（并在抛错时记 warn，`index.js` 的卸载还额外 try/catch 包一层，保证 proxy / api / SSH / 路由的清理照跑）。老内核没有 `ctx.inject` 时退回 `ctx.get('tools')`，取不到就记一条 info 并跳过注册；定义被内核拒绝也只记一条 warn。工具**没有写操作面**：没有 add / update / remove / connect，也就没有 confirm 门、没有 jobs、没有 `exec.agent.session.id`，维护主机仍走管理界面。它只注册在 Host 半端，`package.json` 的 `dsh.client` 与远端都没变。
 
 ## 3. 连接管线
-入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），交给 `connect-pipeline.js#startConnect`，把 `runtime.connectPromise` 设为 `connectPipeline(ctx, runtime)` 后立即返回；进度全走 `state` 事件。顺序：
+入口 `RemoteGoService#connect(id)` 只登记参数（密码、是否保存），交给 `connect/pipeline.js#startConnect`，把 `runtime.connectPromise` 设为 `connectPipeline(ctx, runtime)` 后立即返回；进度全走 `state` 事件。顺序：
 
 ```text
 1. 清空上次 error/warning/facts/exchange，status = connecting
@@ -148,7 +147,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
 
 ## 5. 本地 HTTP API 与同源远端代理
 `api.js`：`webServer.register({ kind:'prefix', path:API_PREFIX, handler })`；每条请求先过 `admit`（§2，`/health` 除外），再按路由走 `authorize()`（`x-dsh-remote-go: 1` + Host 自检 + Origin 同源 + 拒绝 cross-site）或 `/events` 的 `authorizeOrigin()`（EventSource 不能加头，Host 自检与同源栅栏照旧）；`/health` 免会话、但同样过 Host/Origin 栅栏。Host 自检就是 `request-trust.js#sameServerHost`（与代理侧同一份实现）：Host 必须指向本机监听 origin，loopback 拼写互换，省略默认端口按协议折算——DNS rebinding 下攻击页的 `Host` 是攻击者域名，这一条是唯一能拦下它的检查，`/events` 只有这一道。解析器需要改写的 authority 一律拒绝（`user@host`、反斜杠、`#`/`?`、尾点 `127.0.0.1.`、补零端口 `:057442` 等），因为浏览器只会送出序列化后的 authority，而按改写结果比对会把 `attacker.example@127.0.0.1:port` 当成回环。`getOrigin()` 在监听尚未绑定（或内核没有该方法）时返回 null，此时 Host 自检跳过、保留旧行为：受支持的 `engines.dsh` 范围都提供 `webServer.getOrigin`，这一边界只为不让内核差异把插件变成全 403。`Origin` 同源比较用 `request-trust.js#sameServerOrigin`（回环拼写互换、默认端口折算），不是字符串相等：用 `http://localhost:<port>` 打开 GUI 与内核给出的 `127.0.0.1:<port>` 是同一个 origin，字符串比较会把这类用户的写请求全判成 403。请求体上限 1 MiB，超出先回 **413**（JSON `ErrorView`）再结束，不 `req.destroy()`（否则客户端只看到 `ECONNRESET`）；错误统一 `{ ok:false, error:ErrorView }`，`invalid-input`→400、其余业务错误→409、`internal`→500，且 `ErrorView` 在 `toErrorView` 里统一脱敏并限长（审计 §A）；连接日志在 `appendConnectLog` 写入时脱敏并 `headTail` 限长（`remote-web.js` 的 `onLine` 首行就是带 token 的 launch URL，`HostView.logs` / SSE / 诊断导出读的都是这个 ring，所以 `/state` 与 `/events` 不含 token）；SSE 在 `service.on('state')`、`service.on('download')` 与 `service.on('remote-unreachable')` 上广播，连接先推一帧、15s 一次 `ping`，最多 8 个订阅者（第 9 个踢最旧）、慢消费者与超过 1 MiB 的帧直接丢弃。重启 / 关闭两个一次性动作的路由同样挂在同一 dispatcher 之后，自动继承 `admit`，不单独放行。路由与字段见 [api.md](api.md)；`/diagnostics/self` 额外返回 Host 入口、`engines.node` 与 client-module 图行（`home`/`stateDir` 已脱敏），用于验收/排障。下载任务由 `download-jobs.js` 管理：`POST /downloads` 启动、`/status` 轮询、`DELETE` 取消；Host 用同一条 SSH/SFTP 连接把文件或文件夹**流式写入用户选择的本地目录**，不返回二进制字节、不打包 ZIP、不在远端落盘（取消会清理由本次任务创建的文件/目录）。`destination` 由 `local-download.js#destinationPolicy` 校验：必须在用户主目录下，且不是系统 / 自启动（`Startup`、`autostart`、`systemd`、macOS `Library/LaunchAgents` 等）/ 凭据（`.ssh`、`.gnupg`）/ 登录脚本与配置（`.bashrc`、`.profile`、`.xsessionrc`、`.config`、`.local` 等）目录；**远端命名的最终路径**（`base/<远端名>`）再跑一次同一策略并拒绝受保护位置的上级目录（`assertCandidateAllowed`），拒绝时零写入。`POST /downloads` 在 `service.startRemoteDownload` 里同步校验 destination（坏路径直接 400，不创建任务、不占 job 槽）。主机 `id` 只由 `store.js#upsertHost` 签发，客户端传来的未知或畸形 id 一律换成新的 `h_*`；`POST /local-version` 只在探测失败时接受回填，且不低于 `engines.dsh` 下限。
-`remote-proxy.js` 是浏览器半端的远端界面承载面（契约「远端界面同源代理」）：`parseViewPath` 把
+`proxy/` 是浏览器半端的远端界面承载面（契约「远端界面同源代理」）：`parseViewPath` 把
 `/dsh-remote-go/remote/<hostId>/<rest>` 拆成主机与上游路径；`handle` 与 `handleUpgrade` 都先过 `admit`
 （代理后面是一台已连接主机的**远端会话 cookie**，只有通过 DSH 准入的调用方才能用它），再过
 `request-trust.js#trustedRequest` 的同源栅栏（Host/Origin 同源、非 cross-site）；请求经 `upstreamHeaders`
@@ -251,9 +250,9 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 
 ## 9. 维护约定
 - 文档引用**符号**，不写行号；重构后跑 `pnpm run verify` 发现断链。
-- 新增远端 shell 命令必须走 `webapp.js` 固定模板，不接受调用方拼接的任意 shell。
+- 新增远端 shell 命令必须走 `remote-web.js` 固定模板，不接受调用方拼接的任意 shell。
 - 远端下载只走 `remote-files.js` / `local-download.js` / `download-jobs.js`（绝对路径、文件或文件夹、SFTP）；不要把远端路径拼进 shell，也不要为“方便”开放任意目录浏览端点。不允许给文件大小、文件夹总字节或文件数量设上限：所有内容都从 SFTP 流式写进用户选择的本地目录，不打包 ZIP，也不写远端磁盘。
-- 浏览器承载只走 `remote-proxy.js`：不代理任意 URL、不读远端 `~/.dsh`、不把远端 cookie 交给浏览器；新增可代理路径必须先落在 `REMOTE_VIEW_PREFIX` 下，并继续要求主机 `connected`。
+- 浏览器承载只走 `proxy/`：不代理任意 URL、不读远端 `~/.dsh`、不把远端 cookie 交给浏览器；新增可代理路径必须先落在 `REMOTE_VIEW_PREFIX` 下，并继续要求主机 `connected`。
 - 新增可替换外部依赖从 `ServiceOptions` 注入（不要在 `service.js` 里直接 `new`）；新增 runtime 字段先改 `host-runtime.js`，新增对外字段先改 `host-view.js`，不要在管线里临时拼形状。
 - 新增设置项同时更新 `settings.js` 的默认值/清洗、`docs/api.md` 的 SettingsView 与 `docs/design.md` 的界面说明；日志 `#log(runtime, level, …)` 的 `level` 是真实级别，信息性 trace 用 `debug`，不要用 `info` 刷屏。
 - 重启 / 重挂必须复用已建立的 SSH 会话（不重跑 `[ssh]` / `[probe]` / `[bootstrap]`），只能停止 run registry 指向的本连接 pid；任何拿不准归属的进程都交给 `resolveForeignConflict`，不要用命令行模式匹配去 kill。远端端口是随机的，任何「换端口」路径都必须一起换隧道与 token，并把 `run/web.json` 刷新成真实值。

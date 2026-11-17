@@ -5,7 +5,8 @@ import { rmSync } from 'node:fs'
 import http from 'node:http'
 import net from 'node:net'
 import process from 'node:process'
-import { createRemoteProxy, upgradePath } from '../../src/remote-proxy.js'
+import { createRemoteProxy } from '../../src/proxy/index.js'
+import { upgradePath } from '../../src/proxy/routes.js'
 import { makeTempRoot, resolveDshCli, skipOrFail, sleep, stopChild, tail } from './harness-support.js'
 
 const timeout = { timeout: 120_000 }
