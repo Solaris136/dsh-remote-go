@@ -26,7 +26,9 @@ function loadClientPlugin(options = {}) {
     fetch: options.fetch,
     document: options.document,
     getComputedStyle: options.getComputedStyle,
-    URL: options.URL,
+    // `URL` is a browser/Node global the module uses for origin checks; a bare vm context has no
+    // such web API, so the sandbox models the browser unless a test injects its own constructor.
+    URL: options.URL || URL,
     EventSource: options.EventSource,
   }
   sandbox.window = {
@@ -870,11 +872,24 @@ test('openHost validates both carrier URLs (API-layer guard)', async () => {
   assert.equal(allowed.url, 'http://127.0.0.1:54321/?token=abc123')
   assert.equal(allowed.webUrl, '/dsh-remote-go/remote/h_test/?token=abc123')
   assert.equal(requests.at(-1), '/dsh-remote-go/api/hosts/h_test/open')
+  // The tightened check keeps the accepted shape exactly as it was, bare origin included.
+  for (const acceptedUrl of ['http://127.0.0.1:8080', 'http://127.0.0.1:8080/', 'http://127.0.0.1:8080/?token=abc']) {
+    answer = { url: acceptedUrl, webUrl: '/dsh-remote-go/remote/h_test/?token=abc' }
+    const opened = await client.api.openHost('h_test')
+    assert.equal(opened.url, acceptedUrl)
+    assert.equal(opened.webUrl, '/dsh-remote-go/remote/h_test/?token=abc')
+  }
   for (const refusedUrl of [
     'https://evil.example.com/?token=secret',
     'http://10.0.0.5:54321/?token=secret',
     'http://localhost:54321/?token=secret',
     'http://127.0.0.1.evil.example.com/?token=secret',
+    // A prefix match alone accepted both: `URL` reads `127.0.0.1:8080` as userinfo on a remote host.
+    'http://127.0.0.1:8080@evil.example/?token=secret',
+    'http://127.0.0.1:@evil.example/?token=secret',
+    'http://127.0.0.1/?token=secret',
+    'http://127.0.0.1:0/?token=secret',
+    'http://127.0.0.1:99999/?token=secret',
   ]) {
     answer = { url: refusedUrl, webUrl: '/dsh-remote-go/remote/h_test/?token=secret' }
     await assert.rejects(client.api.openHost('h_test'), (error) => {
@@ -898,6 +913,72 @@ test('openHost validates both carrier URLs (API-layer guard)', async () => {
       assert.equal(error?.view?.code, 'blocked-url', `unexpected error view for ${refusedView}`)
       return true
     })
+  }
+})
+
+test('isValidLoopbackUrl proves the parsed origin instead of trusting the prefix', () => {
+  const { isValidLoopbackUrl } = plugin.__test
+  for (const accepted of [
+    'http://127.0.0.1:8080',
+    'http://127.0.0.1:8080/',
+    'http://127.0.0.1:8080/?token=abc',
+    'http://127.0.0.1:65535/',
+  ]) {
+    assert.equal(isValidLoopbackUrl(accepted), true, `${accepted} must stay accepted`)
+  }
+  for (const refused of [
+    // Both start with the accepted prefix but parse to a remote host whose userinfo looks loopback.
+    'http://127.0.0.1:8080@evil.example/',
+    'http://127.0.0.1:@evil.example/',
+    // Shapes the old prefix check already refused must stay refused.
+    'https://127.0.0.1:8080/',
+    'HTTP://127.0.0.1:8080/',
+    'http://127.0.0.1/',
+    'http://localhost:8080/',
+    '127.0.0.1:8080',
+    // Ports: `URL` drops the http default port, `:0` parses, and > 65535 fails to parse.
+    'http://127.0.0.1:80/',
+    'http://127.0.0.1:0/',
+    'http://127.0.0.1:99999/',
+    // Non-strings and values that cannot name an origin at all.
+    '',
+    null,
+    42,
+    undefined,
+    {},
+  ]) {
+    assert.equal(isValidLoopbackUrl(refused), false, `${String(refused)} must be refused`)
+  }
+})
+
+test('the desktop carrier refuses a disguised loopback URL before it acquires a seat', async () => {
+  const doc = fakeDocument()
+  let acquired = 0
+  const takeover = loadClientPlugin({
+    document: doc,
+    desktop: {
+      protocolVersion: 1,
+      browser: {
+        acquire: async () => {
+          acquired += 1
+          return { lease: 'lease-1', partition: 'persist:dsh-remote-go:h_a' }
+        },
+        release: async () => {},
+      },
+    },
+  })
+  try {
+    for (const refused of ['http://127.0.0.1:8080@evil.example/', 'http://127.0.0.1:@evil.example/']) {
+      const opened = await takeover.carrier.open({ hostId: 'h_a', url: refused })
+      assert.deepEqual({ ok: opened.ok, reason: opened.reason }, { ok: false, reason: 'bad-url' })
+      assert.equal(acquired, 0, `a refused URL must not reach the guest: ${refused}`)
+      assert.equal(doc.body.children.length, 0, `no carrier may be mounted for ${refused}`)
+    }
+    const accepted = await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:8080/?token=abc' })
+    assert.equal(accepted.ok, true, 'the legal loopback origin must still open')
+    assert.equal(acquired, 1)
+  } finally {
+    await takeover.carrier.close()
   }
 })
 
@@ -1683,6 +1764,9 @@ test('a restarted attach re-navigates the warm carrier even when the URL repeats
     // Same attach again: showing the warm window must not reload it.
     await takeover.carrier.open({ hostId: 'h_a', url, viewRev: 2 })
     assert.deepEqual(loads, [url])
+    // The warm-reload path is the third caller: a disguised loopback URL must never navigate it.
+    await takeover.carrier.open({ hostId: 'h_a', url: 'http://127.0.0.1:8080@evil.example/', viewRev: 3 })
+    assert.deepEqual(loads, [url], 'the warm guest must keep its own loopback document')
   } finally {
     await takeover.carrier.close()
   }

@@ -64,7 +64,10 @@ window.__ModuleLoader__.load({
     const CAPTION_MENU_MAX = 200
     /** A guest reports its rail state through the same queue its row clicks use (mountSidebarMirror). */
     const CAPTION_SIDEBAR_INTENT = 'caption-sidebar'
-    /** Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). */
+    /**
+     * Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). The
+     * prefix is the outer shape check; `isValidLoopbackUrl` still verifies the parsed origin.
+     */
     const LOOPBACK_PREFIX = 'http://127.0.0.1:'
     /**
      * Same-origin seat of the remote UI used by the browser carrier. It is a path, not an origin:
@@ -606,8 +609,28 @@ window.__ModuleLoader__.load({
       return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
     }
 
+    /**
+     * A launch URL may only point at this machine's loopback origin. `startsWith` is not an origin
+     * check: `http://127.0.0.1:8080@evil.example/` starts with the prefix yet parses to a remote
+     * host with `127.0.0.1:8080` as userinfo. The prefix is kept first so every shape the old check
+     * refused stays refused, then the parsed URL must prove protocol, host, no credentials and port.
+     */
     function isValidLoopbackUrl(url) {
-      return typeof url === 'string' && url.startsWith(LOOPBACK_PREFIX)
+      if (typeof url !== 'string' || !url.startsWith(LOOPBACK_PREFIX)) return false
+      let parsed
+      try {
+        parsed = new URL(url)
+      } catch (_error) {
+        return false
+      }
+      // `URL` separates credentials from the host, so a disguised userinfo lands here, not in host.
+      if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') return false
+      if (parsed.username !== '' || parsed.password !== '') return false
+      // A missing port is an empty string; `URL` normalizes a default port away and rejects values
+      // above 65535 outright, but `:0` still parses, so the range is asserted here.
+      if (!/^[0-9]+$/.test(parsed.port)) return false
+      const port = Number(parsed.port)
+      return port >= 1 && port <= 65535
     }
 
     /**
@@ -8719,6 +8742,7 @@ window.__ModuleLoader__.load({
       sanitizeGuestIntent,
       createCarrierErrorLayer,
       createLoadGuard,
+      isValidLoopbackUrl,
       loadTimeoutMs: CARRIER_LOAD_TIMEOUT_MS,
       captionMenuStart,
       withTimeout,
