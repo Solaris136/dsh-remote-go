@@ -20,7 +20,7 @@ import { isUiUp } from './remote-proc.js'
 import type { ProcessIdentity } from './remote-proc.js'
 import { commandMatchesProfile } from './remote-web.js'
 import { isPid, messageOf, randomDelay } from './util.js'
-import type { ServiceContext } from './service.js'
+import type { Config, HostState, Reporter, TeardownCtx, Transport, WatchdogCtx } from './context.js'
 
 /** The verdict a best-effort action reports back to its caller (and to the connect log). */
 export interface LifecycleVerdict {
@@ -72,7 +72,7 @@ export function cancelLinkWork(runtime: HostRuntime): void {
 }
 
 /** Milliseconds between liveness probes, from settings (default 30s, disabled allowed). */
-export function remoteHeartbeatIntervalSec(ctx: ServiceContext): number {
+export function remoteHeartbeatIntervalSec(ctx: Config): number {
   const raw = ctx.settings()?.remoteHeartbeat
   const seconds = Number(raw?.intervalSec)
   if (!Number.isFinite(seconds)) return REMOTE_HEARTBEAT_DEFAULT_SEC
@@ -101,7 +101,7 @@ export function stopRemoteHeartbeat(runtime: HostRuntime): void {
 }
 
 /** Start the light liveness probe for a host that just became connected. */
-export function startRemoteHeartbeat(ctx: ServiceContext, runtime: HostRuntime): void {
+export function startRemoteHeartbeat(ctx: WatchdogCtx, runtime: HostRuntime): void {
   stopRemoteHeartbeat(runtime)
   const enabled = ctx.settings()?.remoteHeartbeat?.enabled !== false
   if (!enabled) {
@@ -117,7 +117,7 @@ export function startRemoteHeartbeat(ctx: ServiceContext, runtime: HostRuntime):
 }
 
 /** A host is watchable only while it is really up and no one-shot action owns the link. */
-function watchable(ctx: ServiceContext, runtime: HostRuntime): boolean {
+function watchable(ctx: HostState, runtime: HostRuntime): boolean {
   return (
     ctx.state.disposed !== true &&
     runtime.desired === 'connected' &&
@@ -134,7 +134,7 @@ function watchable(ctx: ServiceContext, runtime: HostRuntime): boolean {
  * cooldown window, so a flapping tunnel cannot emit suspected/recovered on every request.
  * Returns whether a new episode was opened.
  */
-function beginRemoteEpisode(ctx: ServiceContext, runtime: HostRuntime, source: string): boolean {
+function beginRemoteEpisode(ctx: Reporter, runtime: HostRuntime, source: string): boolean {
   if (runtime.remoteEpisode === true) return false
   const transient = source === 'proxy' || source === 'tunnel'
   if (transient && Date.now() < (Number(runtime.episodeCooldownUntil) || 0)) {
@@ -153,7 +153,11 @@ function beginRemoteEpisode(ctx: ServiceContext, runtime: HostRuntime, source: s
  * episode also rebuilds the local listener: the remote answering the probe while the page
  * got a 502 usually means the tunnel, not the remote, is what broke.
  */
-async function clearRemoteEpisode(ctx: ServiceContext, runtime: HostRuntime, source: string): Promise<void> {
+async function clearRemoteEpisode(
+  ctx: HostState & Transport & Reporter,
+  runtime: HostRuntime,
+  source: string,
+): Promise<void> {
   const wasOpen = runtime.remoteEpisode === true
   const transient = runtime.episodeSource === 'proxy' || runtime.episodeSource === 'tunnel'
   runtime.remoteEpisode = false
@@ -190,7 +194,7 @@ async function clearRemoteEpisode(ctx: ServiceContext, runtime: HostRuntime, sou
   ctx.onRemoteUnreachable?.(runtime, { phase: 'recovered', source })
 }
 
-function scheduleRemoteCheck(ctx: ServiceContext, runtime: HostRuntime, source: string, delayMs: number): void {
+function scheduleRemoteCheck(ctx: WatchdogCtx, runtime: HostRuntime, source: string, delayMs: number): void {
   if (runtime.remoteCheckTimer) return
   runtime.remoteCheckTimer = setTimeout(() => {
     runtime.remoteCheckTimer = null
@@ -204,7 +208,7 @@ function scheduleRemoteCheck(ctx: ServiceContext, runtime: HostRuntime, source: 
  * failed request is not a restart: the counter has to reach
  * {@link REMOTE_UNREACHABLE_FAILURES} before a re-attach is requested.
  */
-async function checkRemoteNow(ctx: ServiceContext, runtime: HostRuntime, source: string): Promise<void> {
+async function checkRemoteNow(ctx: WatchdogCtx, runtime: HostRuntime, source: string): Promise<void> {
   if (!watchable(ctx, runtime) || typeof ctx.deps.remoteStatus !== 'function') return
   const ssh = runtime.ssh
   const port = runtime.remote.port
@@ -247,7 +251,7 @@ async function checkRemoteNow(ctx: ServiceContext, runtime: HostRuntime, source:
 }
 
 /** One scheduled heartbeat tick. */
-export async function remoteHeartbeatTick(ctx: ServiceContext, runtime: HostRuntime): Promise<void> {
+export async function remoteHeartbeatTick(ctx: WatchdogCtx, runtime: HostRuntime): Promise<void> {
   if (!watchable(ctx, runtime)) return
   if (runtime.remoteCheckTimer) return
   await checkRemoteNow(ctx, runtime, 'heartbeat')
@@ -257,7 +261,7 @@ export async function remoteHeartbeatTick(ctx: ServiceContext, runtime: HostRunt
  * A proxy or tunnel failure was observed: report the episode once and confirm it
  * with probes instead of treating one failed request as a remote restart.
  */
-export function noteRemoteUnreachable(ctx: ServiceContext, runtime: HostRuntime, source: string): void {
+export function noteRemoteUnreachable(ctx: WatchdogCtx, runtime: HostRuntime, source: string): void {
   if (!watchable(ctx, runtime)) return
   if (!beginRemoteEpisode(ctx, runtime, source)) return
   scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteConfirmDelayMs)
@@ -266,7 +270,7 @@ export function noteRemoteUnreachable(ctx: ServiceContext, runtime: HostRuntime,
 /**
  * Arm the next reconnect attempt, or give up once the configured budget is spent.
  */
-export function scheduleReconnect(ctx: ServiceContext, runtime: HostRuntime, onDue: () => void): void {
+export function scheduleReconnect(ctx: WatchdogCtx, runtime: HostRuntime, onDue: () => void): void {
   cancelReconnect(runtime)
   // A retry only makes sense while the user still wants the link: a disconnect, a host
   // removal or a shutdown that raced the timer must not resurrect the connection.
@@ -312,7 +316,7 @@ export function scheduleReconnect(ctx: ServiceContext, runtime: HostRuntime, onD
   runtime.reconnectTimer.unref?.()
 }
 
-function scheduleIdleStop(ctx: ServiceContext, runtime: HostRuntime): void {
+function scheduleIdleStop(ctx: WatchdogCtx, runtime: HostRuntime): void {
   cancelIdleStop(runtime)
   const minutes = Math.max(1, runtime.entry.idleMinutes ?? DEFAULT_IDLE_MINUTES)
   runtime.idleTimer = setTimeout(() => {
@@ -340,7 +344,7 @@ function scheduleIdleStop(ctx: ServiceContext, runtime: HostRuntime): void {
  * @returns the stop verdict (best effort).
  */
 export async function stopRemoteForIdle(
-  ctx: ServiceContext,
+  ctx: WatchdogCtx,
   runtime: HostRuntime,
   options: { shutdown?: boolean } = {},
 ): Promise<LifecycleVerdict> {
@@ -408,7 +412,7 @@ export async function stopRemoteForIdle(
 
 /** The `/proc` identity proof for the process the idle policy is about to stop. */
 async function proveIdleStopTarget(
-  ctx: ServiceContext,
+  ctx: Transport,
   runtime: HostRuntime,
   pid: number,
   layout: RemoteLayout,
@@ -487,7 +491,7 @@ export async function disposeSsh(runtime: HostRuntime): Promise<void> {
  * @param ctx - service context.
  * @param runtime - host runtime.
  */
-async function settleTunnelRepair(ctx: ServiceContext, runtime: HostRuntime): Promise<void> {
+async function settleTunnelRepair(ctx: Config & Reporter, runtime: HostRuntime): Promise<void> {
   const repair = runtime.tunnelRepair
   if (!repair) return
   const timeoutMs = Number(ctx.timers?.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS)
@@ -519,7 +523,7 @@ export interface TeardownOptions {
 }
 
 export async function teardownRuntime(
-  ctx: ServiceContext,
+  ctx: TeardownCtx,
   runtime: HostRuntime,
   options: TeardownOptions = {},
 ): Promise<void> {
@@ -585,7 +589,7 @@ export interface DisconnectOptions {
  * an unrelated process after a pid reuse.
  */
 export async function disconnectHost(
-  ctx: ServiceContext,
+  ctx: TeardownCtx,
   runtime: HostRuntime,
   options: DisconnectOptions = {},
 ): Promise<{ ok: boolean }> {
@@ -616,7 +620,7 @@ export async function disconnectHost(
  * Stop every host's timers and release its transport. The `stop` keep-alive
  * policy also stops the remote web so nothing is left running unowned.
  */
-export async function shutdownAll(ctx: ServiceContext): Promise<void> {
+export async function shutdownAll(ctx: TeardownCtx): Promise<void> {
   for (const runtime of ctx.state.runtimes.values()) {
     // Mark the link dead before the first await: a dependent action must not start (or
     // retry) while shutdown is still walking the list (L).

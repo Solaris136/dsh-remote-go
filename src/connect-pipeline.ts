@@ -59,7 +59,7 @@ import type { LaunchPlan } from './bootstrap.js'
 import type { BilingualText } from './util.js'
 import { isPid, messageOf, nowIso, sleep } from './util.js'
 import { normalizeVersion, versionsEqual } from './version.js'
-import type { ServiceContext, ReattachRequest } from './service.js'
+import type { ConnectCtx, ReattachRequest } from './context.js'
 
 /** A thrown value: the pipeline reads its message to classify a dropped transport. */
 interface ThrownError {
@@ -177,7 +177,7 @@ class LinkCancelled extends Error {
 }
 
 /** Whether the link is no longer wanted: disconnect, host removal, teardown or shutdown. */
-function linkTaken(ctx: ServiceContext, runtime: HostRuntime): boolean {
+function linkTaken(ctx: ConnectCtx, runtime: HostRuntime): boolean {
   return (
     ctx.state.disposed === true ||
     runtime.closing === true ||
@@ -187,7 +187,7 @@ function linkTaken(ctx: ServiceContext, runtime: HostRuntime): boolean {
 }
 
 /** Throw unless this attempt may still write state (H4). */
-function assertStillWanted(ctx: ServiceContext, runtime: HostRuntime): void {
+function assertStillWanted(ctx: ConnectCtx, runtime: HostRuntime): void {
   if (linkTaken(ctx, runtime)) throw new LinkCancelled('the link is no longer wanted')
 }
 
@@ -245,7 +245,7 @@ function normalizeConnectFailure(runtime: HostRuntime, error: ThrownError | null
  * and start the pipeline in the background. Progress travels on `state`.
  */
 export async function startConnect(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   id: string,
   options: StartConnectOptions = {},
 ): Promise<AcceptedResult> {
@@ -297,7 +297,7 @@ export async function startConnect(
  * @param ctx - service context.
  * @param runtime - host runtime.
  */
-function startConnectPromise(ctx: ServiceContext, runtime: HostRuntime): void {
+function startConnectPromise(ctx: ConnectCtx, runtime: HostRuntime): void {
   const run = connectPipeline(ctx, runtime).catch((error) => {
     ctx.progress.log(runtime, 'debug', 'connect pipeline stopped outside its error path:', messageOf(error))
   })
@@ -308,7 +308,7 @@ function startConnectPromise(ctx: ServiceContext, runtime: HostRuntime): void {
 }
 
 /** Drop the current link and connect again from scratch (the "Reconnect" button). */
-export async function reconnectHost(ctx: ServiceContext, runtime: HostRuntime): Promise<AcceptedResult> {
+export async function reconnectHost(ctx: ConnectCtx, runtime: HostRuntime): Promise<AcceptedResult> {
   await disconnectHost(ctx, runtime, { stopRemote: false })
   cancelIdleStop(runtime)
   await disposeSsh(runtime)
@@ -326,7 +326,7 @@ export async function reconnectHost(ctx: ServiceContext, runtime: HostRuntime): 
  * Re-enter the pipeline after a dropped link. Lives here rather than in the
  * lifecycle module so `scheduleReconnect` stays a pure timer with a callback.
  */
-async function reconnectNow(ctx: ServiceContext, runtime: HostRuntime): Promise<void> {
+async function reconnectNow(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   if (ctx.state.disposed || runtime.desired !== 'connected') return
   await disposeSsh(runtime)
   // A dropped link's retry is a new connection too: start from a clean log.
@@ -335,7 +335,7 @@ async function reconnectNow(ctx: ServiceContext, runtime: HostRuntime): Promise<
 }
 
 /** A timer callback that starts a retry: report a throw instead of leaving it unhandled (L). */
-function retryNow(ctx: ServiceContext, runtime: HostRuntime): void {
+function retryNow(ctx: ConnectCtx, runtime: HostRuntime): void {
   void reconnectNow(ctx, runtime).catch((error) => {
     ctx.progress.log(runtime, 'warn', 'the automatic retry could not start:', messageOf(error))
   })
@@ -367,7 +367,7 @@ function watchHandshakeTransport(runtime: HostRuntime, ssh: SshConnection | null
  * open (not only when the remote UI is ready): a drop during probe/bootstrap is still a
  * lost link and must be retried like any other (H3).
  */
-function attachDisconnectHandler(ctx: ServiceContext, runtime: HostRuntime): void {
+function attachDisconnectHandler(ctx: ConnectCtx, runtime: HostRuntime): void {
   const ssh = runtime.ssh
   if (!ssh) return
   ssh.on('close', () => {
@@ -403,7 +403,7 @@ function attachDisconnectHandler(ctx: ServiceContext, runtime: HostRuntime): voi
 }
 
 /** Resolve the SSH destination from the entry + local ssh config, before dialling. */
-async function resolveTargetForRuntime(ctx: ServiceContext, runtime: HostRuntime): Promise<ConnectTarget> {
+async function resolveTargetForRuntime(ctx: ConnectCtx, runtime: HostRuntime): Promise<ConnectTarget> {
   const material = await ctx.deps.loadSshMaterial({ home: ctx.userHome() })
   const entry = runtime.entry
   const resolved = resolveDestination(entry.address, { configText: material.configText, home: ctx.userHome() })
@@ -432,7 +432,7 @@ async function resolveTargetForRuntime(ctx: ServiceContext, runtime: HostRuntime
  * options — its own policy, its own pin and its own `onHostKey` role — so a key confirmed
  * for one can never be checked against, or written into, the other (B1).
  */
-async function openTransport(ctx: ServiceContext, runtime: HostRuntime, target: ConnectTarget): Promise<void> {
+async function openTransport(ctx: ConnectCtx, runtime: HostRuntime, target: ConnectTarget): Promise<void> {
   const settings = ctx.settings()
   const auth = (): SshAuthConfig => ({
     type: runtime.entry.auth?.type ?? 'key',
@@ -516,7 +516,7 @@ async function openTransport(ctx: ServiceContext, runtime: HostRuntime, target: 
 
 /** Remember the session fingerprint so the host card shows it even without a pin. */
 function captureFingerprint(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   info: { fingerprint?: string; keyType?: string } | null,
 ): void {
@@ -544,7 +544,7 @@ function captureFingerprint(
  * @returns the decision, or null when no prompt was needed.
  */
 async function resolveForeignConflict(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   layout: RemoteLayout,
   profile: string,
@@ -629,7 +629,7 @@ async function resolveForeignConflict(
 }
 
 /** Open the loopback tunnel for one remote port; tunnel-level failures feed the liveness confirmation. */
-async function openTunnelFor(ctx: ServiceContext, runtime: HostRuntime, remotePort: number): Promise<Tunnel> {
+async function openTunnelFor(ctx: ConnectCtx, runtime: HostRuntime, remotePort: number): Promise<Tunnel> {
   // Never hand the tunnel factory a missing transport: a listener created with no SSH channel
   // would crash the host process on the first connection (see tunnel.js's own guard).
   assertTransportOpen(runtime)
@@ -669,7 +669,7 @@ async function openTunnelFor(ctx: ServiceContext, runtime: HostRuntime, remotePo
  * hosted and displayed, but never signalled.
  */
 async function rememberLaunched(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   pid: number,
   layout: RemoteLayout,
@@ -718,7 +718,7 @@ async function rememberLaunched(
  * @returns the recorded binding, or null when it cannot be proven.
  */
 async function rememberBound(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   pid: number,
   layout: RemoteLayout,
@@ -754,7 +754,7 @@ async function rememberBound(
  * alongside therefore never gets stopped silently.
  */
 async function killAuthorized(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   pid: number,
   layout: RemoteLayout,
@@ -790,7 +790,7 @@ async function killAuthorized(
  * @param runtime - connected host runtime.
  * @returns whether the listener was rebuilt.
  */
-export async function repairTunnel(ctx: ServiceContext, runtime: HostRuntime): Promise<LifecycleVerdict> {
+export async function repairTunnel(ctx: ConnectCtx, runtime: HostRuntime): Promise<LifecycleVerdict> {
   if (
     ctx.state.disposed === true ||
     runtime.desired !== 'connected' ||
@@ -887,7 +887,7 @@ export async function repairTunnel(ctx: ServiceContext, runtime: HostRuntime): P
 
 /** Prove the remote UI answers through the new tunnel and exchange this launch's token. */
 async function verifyRemoteUi(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   port: number,
   token: string,
@@ -924,7 +924,7 @@ async function verifyRemoteUi(
 }
 
 /** Publish the connected state and start watching the remote for its own restarts. */
-function markConnected(ctx: ServiceContext, runtime: HostRuntime): void {
+function markConnected(ctx: ConnectCtx, runtime: HostRuntime): void {
   // A live link is not idle: no idle-stop timer may survive the attach (review blocker 1).
   cancelIdleStop(runtime)
   // Only a success resets the retry budget: a failed attempt must spend it (H2).
@@ -965,7 +965,7 @@ function recordRestart(runtime: HostRuntime, entry: Record<string, unknown>): vo
  * @param runtime - host runtime.
  * @param log - connect log writer.
  */
-async function settlePasswordStorage(ctx: ServiceContext, runtime: HostRuntime, log: ConnectLogWriter): Promise<void> {
+async function settlePasswordStorage(ctx: ConnectCtx, runtime: HostRuntime, log: ConnectLogWriter): Promise<void> {
   const save = runtime.savePassword === true
   const forget = runtime.forgetPassword === true
   runtime.savePassword = false
@@ -983,7 +983,7 @@ async function settlePasswordStorage(ctx: ServiceContext, runtime: HostRuntime, 
   }
 }
 
-async function connectPipeline(ctx: ServiceContext, runtime: HostRuntime): Promise<void> {
+async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   runtime.closing = false
@@ -1289,14 +1289,14 @@ async function connectPipeline(ctx: ServiceContext, runtime: HostRuntime): Promi
  * @param {object} ctx - service context.
  * @param {object} runtime - host runtime.
  */
-function scheduleConnectRetry(ctx: ServiceContext, runtime: HostRuntime): void {
+function scheduleConnectRetry(ctx: ConnectCtx, runtime: HostRuntime): void {
   if (ctx.state.disposed === true || runtime.desired !== 'connected') return
   if (!runtime.entry.autoReconnect || !ctx.settings().autoReconnect.enabled) return
   scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))
 }
 
 async function readRegistryQuietly(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   layout: RemoteLayout,
 ): Promise<RunRegistryRecord | null> {
@@ -1315,7 +1315,7 @@ async function readRegistryQuietly(
  * `[probe]` and `[bootstrap]` are deliberately not run again.
  */
 function planForRuntime(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   profile: string,
 ): { plan: LaunchPlan; targetVersion: string; facts: RemoteFacts } {
@@ -1328,7 +1328,7 @@ function planForRuntime(
 }
 
 /** Put a host back into its connected state without pretending the launch URL changed. */
-function resumeConnected(ctx: ServiceContext, runtime: HostRuntime): boolean {
+function resumeConnected(ctx: ConnectCtx, runtime: HostRuntime): boolean {
   // A late action must never resurrect a link that was torn down or replaced while it waited:
   // the token is checked by callers, and these are the other three proofs that it still exists.
   if (runtime.desired !== 'connected' || runtime.ssh?.connected !== true || runtime.tunnel === null) return false
@@ -1359,7 +1359,7 @@ function resumeConnected(ctx: ServiceContext, runtime: HostRuntime): boolean {
  * @param runtime - host runtime with a live transport.
  * @returns whether the restart started.
  */
-export async function restartHost(ctx: ServiceContext, runtime: HostRuntime): Promise<AcceptedResult> {
+export async function restartHost(ctx: ConnectCtx, runtime: HostRuntime): Promise<AcceptedResult> {
   await ctx.init()
   if (runtime.connectPromise || runtime.linkBusy !== null) return { accepted: false, reason: 'busy' }
   const connected = runtime.status === 'connected' && runtime.ssh?.connected === true && runtime.tunnel !== null
@@ -1381,7 +1381,7 @@ export async function restartHost(ctx: ServiceContext, runtime: HostRuntime): Pr
   return { accepted: true }
 }
 
-async function runRestart(ctx: ServiceContext, runtime: HostRuntime, token: number): Promise<void> {
+async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)
@@ -1637,7 +1637,7 @@ async function runRestart(ctx: ServiceContext, runtime: HostRuntime, token: numb
  * @returns the verdict.
  */
 async function closeAuthorized(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   pid: number,
   layout: RemoteLayout,
@@ -1735,7 +1735,7 @@ function describeStopRefusal(reason: string, pid: number): BilingualText {
  * @param runtime - host runtime.
  * @returns the stopped pid (null when already gone).
  */
-export async function stopRemoteHost(ctx: ServiceContext, runtime: HostRuntime): Promise<StopRemoteResult> {
+export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Promise<StopRemoteResult> {
   await ctx.init()
   if (runtime.connectPromise || runtime.linkBusy !== null) {
     throw errors.stopRemoteUnavailable(
@@ -1795,7 +1795,7 @@ const STOP_FAILED_LABEL: BilingualText = {
 }
 
 /** Put a host back the way it was when a stop did not happen. */
-function restoreStopState(ctx: ServiceContext, runtime: HostRuntime, previous: StopState): boolean {
+function restoreStopState(ctx: ConnectCtx, runtime: HostRuntime, previous: StopState): boolean {
   if (previous.status === 'error') {
     runtime.status = 'error'
     runtime.error = previous.error
@@ -1811,7 +1811,7 @@ function restoreStopState(ctx: ServiceContext, runtime: HostRuntime, previous: S
   return resumeConnected(ctx, runtime)
 }
 
-async function runStopRemote(ctx: ServiceContext, runtime: HostRuntime, token: number): Promise<StopRemoteResult> {
+async function runStopRemote(ctx: ConnectCtx, runtime: HostRuntime, token: number): Promise<StopRemoteResult> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)
@@ -1888,7 +1888,7 @@ async function runStopRemote(ctx: ServiceContext, runtime: HostRuntime, token: n
  * @returns whether the re-attach started.
  */
 export async function reattachHost(
-  ctx: ServiceContext,
+  ctx: ConnectCtx,
   runtime: HostRuntime,
   info: ReattachRequest = {},
 ): Promise<AcceptedResult> {
@@ -1906,12 +1906,7 @@ export async function reattachHost(
   return { accepted: true }
 }
 
-async function runReattach(
-  ctx: ServiceContext,
-  runtime: HostRuntime,
-  info: ReattachRequest,
-  token: number,
-): Promise<void> {
+async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: ReattachRequest, token: number): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)

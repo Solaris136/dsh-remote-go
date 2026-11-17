@@ -22,7 +22,7 @@ import {
 import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from './ssh-config.js'
 import type { DiscoveredAlias } from './ssh-config.js'
 import type { HostEntry, Settings } from './settings.js'
-import type { ServiceContext } from './service.js'
+import type { Config, HostState, Reporter, Store, TeardownCtx, Transport, WatchdogCtx } from './context.js'
 
 /** The raw, unsanitized host entry a Client posts; `store.upsertHost` owns validating it. */
 export type RawHostEntry = Record<string, unknown> | null | undefined
@@ -51,7 +51,7 @@ export interface KeyFileListing extends KeyFilesListing {
   defaultDir: string
 }
 
-function ensureRuntime(ctx: ServiceContext, host: HostEntry): HostRuntime {
+function ensureRuntime(ctx: HostState, host: HostEntry): HostRuntime {
   const existing = ctx.state.runtimes.get(host.id)
   if (existing) {
     existing.entry = host
@@ -64,13 +64,13 @@ function ensureRuntime(ctx: ServiceContext, host: HostEntry): HostRuntime {
   return runtime
 }
 
-export function runtimeOf(ctx: ServiceContext, id: string): HostRuntime {
+export function runtimeOf(ctx: HostState, id: string): HostRuntime {
   const runtime = ctx.state.runtimes.get(id)
   if (!runtime) throw errors.invalidInput('id', { zh: `未知主机 ${id}`, en: `Unknown host ${id}` })
   return runtime
 }
 
-export async function initRegistry(ctx: ServiceContext): Promise<void> {
+export async function initRegistry(ctx: HostState & Store): Promise<void> {
   if (ctx.state.initialized) return
   await ctx.store.load()
   for (const host of ctx.store.listHosts()) ensureRuntime(ctx, host)
@@ -86,7 +86,7 @@ export async function initRegistry(ctx: ServiceContext): Promise<void> {
  * itself stays in the credential store until a connection actually needs it.
  * @param ctx - service context.
  */
-async function restoreSavedPasswords(ctx: ServiceContext): Promise<void> {
+async function restoreSavedPasswords(ctx: HostState & Store): Promise<void> {
   if (!ctx.secrets) return
   await Promise.all(
     [...ctx.state.runtimes.values()].map(async (runtime) => {
@@ -99,7 +99,7 @@ async function restoreSavedPasswords(ctx: ServiceContext): Promise<void> {
   )
 }
 
-function hostViewFor(ctx: ServiceContext, runtime: HostRuntime): HostView {
+function hostViewFor(ctx: Config & Store, runtime: HostRuntime): HostView {
   return hostView(runtime, {
     targetVersion: ctx.localVersion(),
     passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,
@@ -109,7 +109,7 @@ function hostViewFor(ctx: ServiceContext, runtime: HostRuntime): HostView {
 }
 
 /** Build the client-facing state snapshot (contract: docs/api.md). */
-export function snapshot(ctx: ServiceContext): StateSnapshot {
+export function snapshot(ctx: HostState & Config & Store): StateSnapshot {
   const localVersion = ctx.localVersion()
   const hosts = [...ctx.state.runtimes.values()].map((runtime) => hostViewFor(ctx, runtime))
   return {
@@ -127,7 +127,7 @@ export function snapshot(ctx: ServiceContext): StateSnapshot {
   }
 }
 
-export async function saveHost(ctx: ServiceContext, rawHost: RawHostEntry): Promise<HostView> {
+export async function saveHost(ctx: HostState & Config & Store & Reporter, rawHost: RawHostEntry): Promise<HostView> {
   await ctx.init()
   // The auth mode as it is stored now: a switch away from password must not leave its secret
   // behind as an orphaned credential record.
@@ -166,7 +166,7 @@ export async function saveHost(ctx: ServiceContext, rawHost: RawHostEntry): Prom
   return hostViewFor(ctx, runtime)
 }
 
-export async function removeHost(ctx: ServiceContext, id: string): Promise<{ ok: true }> {
+export async function removeHost(ctx: Store & TeardownCtx, id: string): Promise<{ ok: true }> {
   await ctx.init()
   const runtime = ctx.state.runtimes.get(id)
   if (runtime) {
@@ -188,13 +188,13 @@ export async function removeHost(ctx: ServiceContext, id: string): Promise<{ ok:
   return { ok: true }
 }
 
-export function setActiveHost(ctx: ServiceContext, id: string | null): void {
+export function setActiveHost(ctx: HostState & Reporter, id: string | null): void {
   if (id !== null && !ctx.state.runtimes.has(id)) throw errors.invalidInput('id')
   ctx.state.activeHostId = id
   ctx.emitState()
 }
 
-export async function saveSettings(ctx: ServiceContext, patch: unknown): Promise<Settings> {
+export async function saveSettings(ctx: Store & WatchdogCtx, patch: unknown): Promise<Settings> {
   await ctx.init()
   const settings = await ctx.store.saveSettings(patch)
   // The liveness switch applies to hosts that are already connected, not just the next one.
@@ -211,7 +211,7 @@ export async function saveSettings(ctx: ServiceContext, patch: unknown): Promise
  * Browse directories inside the user's home so the client can pick a private-key
  * file instead of typing an absolute path. Read-only and home-confined.
  */
-export async function listKeyFiles(ctx: ServiceContext, dir: unknown): Promise<KeyFileListing> {
+export async function listKeyFiles(ctx: Store, dir: unknown): Promise<KeyFileListing> {
   // The picker is rooted at the OS user home, not DSH_HOME: private keys live in
   // `~/.ssh` of the account, while the service's `home` is the DSH state root.
   const userHome = homedir()
@@ -235,7 +235,7 @@ export async function listKeyFiles(ctx: ServiceContext, dir: unknown): Promise<K
 }
 
 /** Read-only SSH discovery for the wizard (design §15.1). */
-export async function discoverSshAliases(ctx: ServiceContext): Promise<SshDiscovery> {
+export async function discoverSshAliases(ctx: Config & Transport): Promise<SshDiscovery> {
   const material = await ctx.deps.loadSshMaterial({ home: ctx.userHome() })
   const parsed = parseSshConfig(material.configText)
   const aliases = discoverAliasesFromConfig(parsed, { home: ctx.userHome() })

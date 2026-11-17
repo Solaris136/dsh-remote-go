@@ -2,18 +2,10 @@
  * Orchestration service — the facade over host-registry, connect-pipeline, host-lifecycle, prompts and connect-progress; every external step is injected.
  */
 import { EventEmitter } from 'node:events'
-import { planNpx, verifyNpxVersion } from './bootstrap.js'
-import {
-  MIN_DSH_VERSION,
-  REMOTE_CONFLICT_TIMEOUT_MS,
-  REMOTE_REATTACH_ATTEMPTS,
-  REMOTE_REATTACH_INTERVAL_MS,
-  REMOTE_TUNNEL_REPAIR_SETTLE_MS,
-  REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
-  REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
-  REMOTE_VIEW_PREFIX,
-} from './constants.js'
-import { createConnectProgress, describePreflightEvent } from './connect-progress.js'
+import { MIN_DSH_VERSION, REMOTE_VIEW_PREFIX } from './constants.js'
+import { describePreflightEvent } from './connect-progress.js'
+import { createCtx } from './context.js'
+import type { Ctx, ServiceHooks, ServiceLogger, ServiceOptions } from './context.js'
 import { createDownloadJobs } from './download-jobs.js'
 import type { DownloadJobView, DownloadJobs } from './download-jobs.js'
 import {
@@ -41,165 +33,24 @@ import {
 } from './host-registry.js'
 import type { KeyFileListing, RawHostEntry, SshDiscovery, StateSnapshot } from './host-registry.js'
 import { disconnectHost, noteRemoteUnreachable, shutdownAll } from './host-lifecycle.js'
-import type { DisconnectOptions, LifecycleVerdict } from './host-lifecycle.js'
+import type { DisconnectOptions } from './host-lifecycle.js'
 import type { HostRuntime } from './host-runtime.js'
 import type { HostView } from './host-view.js'
 import { requireDestination } from './local-download.js'
-import { loadLocalSshMaterial } from './local-ssh.js'
-import type { LocalSshMaterial } from './local-ssh.js'
-import { ensureRemoteNode } from './node-runtime.js'
 import { confirmConflict, confirmHostKey } from './prompts.js'
-import { probeRemote } from './probe.js'
-import type { RemoteFacts } from './probe.js'
+import type { ConflictDecision, FingerprintDecision } from './prompts.js'
 import type { SecretStore } from './secrets.js'
 import type { Settings } from './settings.js'
-import { SshConnection } from './ssh.js'
-import type { SshConnectionOptions } from './ssh.js'
 import type { HostStore } from './store.js'
-import { createTunnel, probeLoopback } from './tunnel.js'
-import type { Tunnel } from './tunnel.js'
 import { compareVersions, normalizeVersion, parseVersion } from './version.js'
 import { nowIso } from './util.js'
-import {
-  adoptRemoteWeb,
-  clearRunRegistry,
-  exchangeTokenOverTunnel,
-  findForeignDshProcesses,
-  readRunRegistry,
-  remoteHttpStatus,
-  remoteProcessIdentity,
-  resolveRemoteWeb,
-  startRemoteWeb,
-  stopForeignDshProcesses,
-  stopRemoteWeb,
-  waitForRemoteUi,
-  writeRunRegistry,
-} from './webapp.js'
 
 export { describePreflightEvent }
-
-/**
- * The Host-process logger this service reports through. Every method is optional: the plugin
- * entry passes `console`, tests pass a collector, and calling one that is absent must not throw.
- */
-export type ServiceLogger = {
-  info?: (...args: unknown[]) => void
-  warn?: (...args: unknown[]) => void
-  error?: (...args: unknown[]) => void
-  debug?: (...args: unknown[]) => void
-}
-
-/** Milliseconds a paused host-key handshake waits for the user. */
-const HOST_KEY_CONFIRM_TIMEOUT_MS = 120_000
-
-/**
- * The injected collaborators: every external step the pipeline can take, so a test can replace
- * any of them. Each signature is the production implementation's own — no looser stand-in.
- */
-export interface ServiceDeps {
-  sshFactory: (options: SshConnectionOptions) => SshConnection
-  tunnelFactory: typeof createTunnel
-  tunnelProbe: typeof probeLoopback
-  probe: typeof probeRemote
-  plan: typeof planNpx
-  ensureNode: typeof ensureRemoteNode
-  preflight: typeof verifyNpxVersion
-  startWeb: typeof startRemoteWeb
-  stopWeb: typeof stopRemoteWeb
-  waitUi: typeof waitForRemoteUi
-  exchange: typeof exchangeTokenOverTunnel
-  adopt: typeof adoptRemoteWeb
-  resolveRemote: typeof resolveRemoteWeb
-  writeRegistry: typeof writeRunRegistry
-  clearRegistry: typeof clearRunRegistry
-  remoteStatus: typeof remoteHttpStatus
-  processIdentity: typeof remoteProcessIdentity
-  findForeign: typeof findForeignDshProcesses
-  stopForeign: typeof stopForeignDshProcesses
-  readRegistry: typeof readRunRegistry
-  loadSshMaterial: typeof loadLocalSshMaterial
-}
-
-/** The two confirm-prompt deadlines, the liveness windows and the re-attach budget. */
-export interface ServiceTimers {
-  hostKeyConfirmMs: number
-  conflictConfirmMs: number
-  remoteConfirmDelayMs: number
-  remoteRecheckMs: number
-  reattachAttempts: number
-  reattachIntervalMs: number
-  tunnelRepairSettleMs: number
-}
-
-/** The mutable registry state: one runtime per configured host, plus the active one. */
-export interface ServiceState {
-  runtimes: Map<string, HostRuntime>
-  activeHostId: string | null
-  initialized: boolean
-  disposed: boolean
-}
-
-/** One liveness episode transition, as `remote-unreachable` listeners receive it. */
-export interface RemoteUnreachableInfo {
-  phase: 'suspected' | 'confirmed' | 'recovered'
-  source: string
-  failures?: number
-}
-
-/** Why a re-attach was requested (the watchdog's phase code and the source that saw it). */
-export interface ReattachRequest {
-  reason?: string
-  source?: string
-}
-
-/** The connect-progress writer this service owns (see `connect-progress.ts`). */
-export type ConnectProgress = ReturnType<typeof createConnectProgress>
-
-/**
- * The one context every orchestration module shares.
- *
- * It is a single object by design for now (P1 keeps the call graph frozen); P2 replaces these
- * god-`ctx` parameters with one narrow slice per module. Every field here is either assembled
- * below or read by `host-registry` / `host-lifecycle` / `connect-pipeline`, nothing else.
- */
-export interface ServiceContext {
-  deps: ServiceDeps
-  store: HostStore
-  home: string
-  logger: ServiceLogger
-  secrets: SecretStore | null
-  state: ServiceState
-  timers: ServiceTimers
-  /** Live readers, never cached: a setting or a detected version can change mid-connect. */
-  settings: () => Settings
-  localVersion: () => string | null
-  engineNodeRange: () => string | null
-  userHome: () => string
-  emitState: () => void
-  init: () => Promise<unknown>
-  onRemoteUnreachable?: (runtime: HostRuntime, info: RemoteUnreachableInfo) => void
-  noteRemoteUnreachable?: (runtime: HostRuntime, source: string) => void
-  requestReattach?: (runtime: HostRuntime, info: ReattachRequest) => void
-  repairTunnel?: (runtime: HostRuntime) => Promise<LifecycleVerdict>
-  progress: ConnectProgress
-}
 
 /** The published state frame: the snapshot plus its revision and the publishing instance. */
 export interface StateView extends StateSnapshot {
   rev: number
   instance: string
-}
-
-/** The Client's answer to the host-key prompt (see `prompts.ts`). */
-export interface FingerprintDecision {
-  accept?: boolean
-  remember?: boolean
-  sha256?: string
-}
-
-/** The Client's answer to the foreign-DSH conflict prompt. */
-export interface ConflictDecision {
-  action?: unknown
 }
 
 /** The wizard's plain "save"/"forget" action for one host's SSH password. */
@@ -233,23 +84,13 @@ export interface OpenInfo {
   address: string
 }
 
-/** Constructor input: the store and home the Host half resolved, plus every injectable step. */
-export interface RemoteGoServiceOptions extends Partial<ServiceDeps> {
-  store: HostStore
-  home: string
-  logger?: ServiceLogger
-  localVersion?: string | null
-  engineNodeRange?: string | null
-  secrets?: SecretStore | null
-  hostKeyConfirmTimeoutMs?: number
-  conflictConfirmTimeoutMs?: number
-  logLevel?: string
-  remoteConfirmDelayMs?: number
-  remoteRecheckMs?: number
-  reattachAttempts?: number
-  reattachIntervalMs?: number
-  tunnelRepairSettleMs?: number
-}
+/**
+ * Constructor input: the store and home the Host half resolved, plus every injectable step.
+ *
+ * The shape lives in `context.ts` beside the assembly that consumes it; this name is kept because
+ * it is how the facade's constructor has always been described (`index.ts` builds one).
+ */
+export type RemoteGoServiceOptions = ServiceOptions
 
 /**
  * One Host process can create several services (tests, a plugin reload in-process). The
@@ -271,9 +112,6 @@ export class RemoteGoService extends EventEmitter {
   /** `engines.node` of the local DSH package; the managed Node version is its lower bound. */
   declare engineNodeRange: string | null
   declare secrets: SecretStore | null
-  declare hostKeyConfirmTimeoutMs: number
-  declare conflictConfirmTimeoutMs: number
-  declare logLevel: string | null
   /** Monotonic revision of the published `/state` snapshot (StateView.rev). */
   declare stateRev: number
   /**
@@ -283,7 +121,7 @@ export class RemoteGoService extends EventEmitter {
    * accepts a frame from a different instance regardless of its `rev` (StateView.instance).
    */
   declare stateInstance: string
-  declare ctx: ServiceContext
+  declare ctx: Ctx
   declare downloads: DownloadJobs
 
   constructor(options: RemoteGoServiceOptions) {
@@ -296,90 +134,47 @@ export class RemoteGoService extends EventEmitter {
     // lower bound (see `managedNodeVersionFromEngine`). Null until detected.
     this.engineNodeRange = options.engineNodeRange ?? null
     this.secrets = options.secrets ?? null
-    this.hostKeyConfirmTimeoutMs = options.hostKeyConfirmTimeoutMs ?? HOST_KEY_CONFIRM_TIMEOUT_MS
-    this.conflictConfirmTimeoutMs = options.conflictConfirmTimeoutMs ?? REMOTE_CONFLICT_TIMEOUT_MS
-    this.logLevel = typeof options.logLevel === 'string' ? options.logLevel : null
     this.stateRev = 0
     this.stateInstance = stateInstanceId()
 
-    const deps: ServiceDeps = {
-      sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
-      tunnelFactory: options.tunnelFactory ?? createTunnel,
-      /** Local listener health: decides whether a transient proxy failure needs a rebuild. */
-      tunnelProbe: options.tunnelProbe ?? probeLoopback,
-      probe: options.probe ?? probeRemote,
-      plan: options.plan ?? planNpx,
-      ensureNode: options.ensureNode ?? ensureRemoteNode,
-      preflight: options.preflight ?? verifyNpxVersion,
-      startWeb: options.startWeb ?? startRemoteWeb,
-      stopWeb: options.stopWeb ?? stopRemoteWeb,
-      waitUi: options.waitUi ?? waitForRemoteUi,
-      exchange: options.exchange ?? exchangeTokenOverTunnel,
-      adopt: options.adopt ?? adoptRemoteWeb,
-      resolveRemote: options.resolveRemote ?? resolveRemoteWeb,
-      writeRegistry: options.writeRegistry ?? writeRunRegistry,
-      clearRegistry: options.clearRegistry ?? clearRunRegistry,
-      remoteStatus: options.remoteStatus ?? remoteHttpStatus,
-      processIdentity: options.processIdentity ?? remoteProcessIdentity,
-      findForeign: options.findForeign ?? findForeignDshProcesses,
-      stopForeign: options.stopForeign ?? stopForeignDshProcesses,
-      readRegistry: options.readRegistry ?? readRunRegistry,
-      loadSshMaterial: options.loadSshMaterial ?? loadLocalSshMaterial,
-    }
-    this.ctx = {
-      deps,
-      store: this.store,
-      home: this.home,
-      logger: this.logger,
-      secrets: this.secrets,
-      state: { runtimes: new Map(), activeHostId: null, initialized: false, disposed: false },
-      timers: {
-        hostKeyConfirmMs: this.hostKeyConfirmTimeoutMs,
-        conflictConfirmMs: this.conflictConfirmTimeoutMs,
-        // Liveness confirmation and the re-attach retry loop; tests shorten these.
-        remoteConfirmDelayMs: options.remoteConfirmDelayMs ?? REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
-        remoteRecheckMs: options.remoteRecheckMs ?? REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
-        reattachAttempts: options.reattachAttempts ?? REMOTE_REATTACH_ATTEMPTS,
-        reattachIntervalMs: options.reattachIntervalMs ?? REMOTE_REATTACH_INTERVAL_MS,
-        tunnelRepairSettleMs: options.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS,
-      },
-      // Live readers, never cached: a setting or a detected version can change
-      // while a connect is already in flight.
-      settings: () => this.store.getSettings(),
+    /**
+     * What only the facade can supply: the publish revision, the lazy load, the two adopted
+     * values (it owns them: `api.ts` and `index.ts` read the fields) and the episode event.
+     */
+    const hooks: ServiceHooks = {
+      publish: () => this.emitState(),
+      load: () => this.init(),
       localVersion: () => this.localVersion,
       engineNodeRange: () => this.engineNodeRange,
-      userHome: () => process.env.USERPROFILE || process.env.HOME || this.home,
-      emitState: () => this.emitState(),
-      init: () => this.init(),
       /**
        * The watchdog reports an episode (suspected -> confirmed -> recovered); the Client
        * contract gets the same transitions as one SSE event, and the state frames carry the
        * `restarting-remote` progress. Never let a listener failure break the probe.
        */
-      onRemoteUnreachable: (runtime, info) => {
+      onEpisode: (runtime, info) => {
         try {
           this.emit('remote-unreachable', { hostId: runtime.id, at: nowIso(), ...info })
         } catch (error) {
           this.logger.warn?.('[dsh-remote-go] remote-unreachable listener failed:', error)
         }
       },
-      /** A proxy or tunnel failure arrived: confirm it with probes instead of trusting one request. */
-      noteRemoteUnreachable: (runtime, source) => noteRemoteUnreachable(this.ctx, runtime, source),
-      /** Confirmed by probes: re-read the remote, rewrite the registry, rebuild the tunnel. */
-      requestReattach: (runtime, info) => {
-        void reattachHost(this.ctx, runtime, info)
-      },
-      /** The remote answers but proxied requests fail: rebuild the local listener (B8). */
-      repairTunnel: (runtime) => repairTunnel(this.ctx, runtime),
-      // `progress` is attached on the next statement: its writer needs `emitState`, which reads
-      // this very object. The cast restates the one field the literal cannot carry yet.
-    } as ServiceContext
-    this.ctx.progress = createConnectProgress({
-      logger: this.logger,
-      logLevel: this.logLevel,
-      getSettings: () => this.store.getSettings(),
-      emitState: () => this.emitState(),
-    })
+    }
+    // The assembly root is `context.ts` (P2/1): this class only owns the facade state above.
+    this.ctx = createCtx({ ...options, logger: this.logger }, hooks)
+    /**
+     * The three reverse callbacks of design-arch §1.7 are wired here and not in the assembly
+     * root: `context.ts` must not import the orchestration it assembles, and P2's step 9 replaces
+     * two of them with a watchdog bus. They stay on `ctx` until then because tests and
+     * `noteUpstreamFailure` call them directly (36 call sites, design-arch §1.6).
+     */
+    /** A proxy or tunnel failure arrived: confirm it with probes instead of trusting one request. */
+    this.ctx.noteRemoteUnreachable = (runtime, source) => noteRemoteUnreachable(this.ctx, runtime, source)
+    /** Confirmed by probes: re-read the remote, rewrite the registry, rebuild the tunnel. */
+    this.ctx.requestReattach = (runtime, info) => {
+      void reattachHost(this.ctx, runtime, info)
+    }
+    /** The remote answers but proxied requests fail: rebuild the local listener (B8). */
+    this.ctx.repairTunnel = (runtime) => repairTunnel(this.ctx, runtime)
     this.downloads = createDownloadJobs({
       logger: this.logger,
       emit: (job) => this.emit('download', job),

@@ -2,13 +2,25 @@
  * The two prompts a connection can pause on (unknown host key, foreign DSH already running) and the answers the Client sends back; each settles exactly once.
  */
 import { errors, toErrorView } from './errors.js'
+import type { PromptCtx } from './context.js'
 import type { HostRuntime, RuntimeFingerprint } from './host-runtime.js'
 import type { RemoteProcessRef } from './remote-proc.js'
-import type { ConflictDecision, FingerprintDecision, ServiceContext } from './service.js'
 import { createDecision, nowIso } from './util.js'
 
 /** Which security context a host-key answer belongs to: the saved target, or the jump host dialling it. */
 export type HostKeyRole = 'target' | 'jump'
+
+/** The Client's answer to the host-key prompt: accept it, remember it, or refuse it. */
+export interface FingerprintDecision {
+  accept?: boolean
+  remember?: boolean
+  sha256?: string
+}
+
+/** The Client's answer to the foreign-DSH conflict prompt. */
+export interface ConflictDecision {
+  action?: unknown
+}
 
 /** The host key a prompt is about; a caller that only saw a fingerprint may omit the type. */
 export interface AdvertisedHostKey {
@@ -68,7 +80,7 @@ export interface PendingConflict {
  * @returns whether the user accepted the key.
  */
 export function requestHostKey(
-  ctx: ServiceContext,
+  ctx: PromptCtx,
   runtime: HostRuntime,
   info: AdvertisedHostKey,
   options: HostKeyPromptOptions = {},
@@ -158,7 +170,7 @@ export function requestHostKey(
  * target to the wrong machine forever (B1).
  */
 export async function confirmHostKey(
-  ctx: ServiceContext,
+  ctx: PromptCtx,
   runtime: HostRuntime,
   decision: FingerprintDecision,
 ): Promise<{ ok: boolean }> {
@@ -237,7 +249,7 @@ export function cancelHostKeyPrompt(runtime: HostRuntime): void {
  * Mirrors the host-key prompt: a status, a promise, and a bounded timeout.
  */
 export function askConflict(
-  ctx: ServiceContext,
+  ctx: PromptCtx,
   runtime: HostRuntime,
   processes: RemoteProcessRef[],
 ): Promise<ConflictAnswer> {
