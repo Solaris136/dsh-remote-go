@@ -4151,7 +4151,7 @@ window.__ModuleLoader__.load({
     async function installHostRow(entry) {
       const view = entry && entry.view
       if (!view || typeof view.executeJavaScript !== 'function') return false
-      let status = 'error'
+      let status
       try {
         status = await view.executeJavaScript(HOST_ROW_SCRIPT)
       } catch (_error) {
@@ -6027,18 +6027,18 @@ window.__ModuleLoader__.load({
 
     /**
      * Plain-text diagnostic report for the clipboard. Redacted by contract;
-     * never includes a token or remote URL.
+     * never includes a token or remote URL. `report` is required: the only caller
+     * branches on it and calls this with a real report.
      */
     function formatDiagnoseText(report, host, t, locale) {
       const lines = ['dsh-remote-go · ' + t('diag.title')]
       const target = host || {}
       const address = displayAddress(target)
       lines.push(t('diag.host') + ': ' + (target.name || target.id || '') + (address ? ' (' + address + ')' : ''))
-      if (report && typeof report.summary === 'string') lines.push('summary: ' + report.summary)
-      if (report && typeof report.generatedAt === 'string')
-        lines.push(t('diag.generatedAt') + ': ' + report.generatedAt)
+      if (typeof report.summary === 'string') lines.push('summary: ' + report.summary)
+      if (typeof report.generatedAt === 'string') lines.push(t('diag.generatedAt') + ': ' + report.generatedAt)
       lines.push('')
-      const checks = sortDiagnoseChecks(report && report.checks)
+      const checks = sortDiagnoseChecks(report.checks)
       for (const check of checks) {
         const title = resolveText(check.title, locale) || String(check.id || '')
         const detail = resolveText(check.detail, locale)
@@ -7200,24 +7200,23 @@ window.__ModuleLoader__.load({
           }
           return
         }
-        const shown = showOverlay({
+        // `showOverlay` is async, so the acquire outcome only arrives through its promise; a
+        // failed acquire still has to reach the toast even though nothing awaits it here.
+        showOverlay({
           hostId: target,
           url: carrierUrl,
           message: t('viewportOverlayLoadFailed'),
           localLabel: t('carrierBackToLocal'),
           viewRev: remoteUrl.viewRev,
-        })
-        if (shown && typeof shown.then === 'function') {
-          shown.then(
-            (outcome) => {
-              if (!outcome || outcome.ok !== false || outcome.reason !== 'acquire-failed') return
-              if (noWindowNotified.current === target) return
-              noWindowNotified.current = target
-              notify(t('carrierUnavailable'), 'error')
-            },
-            () => {},
-          )
-        }
+        }).then(
+          (outcome) => {
+            if (!outcome || outcome.ok !== false || outcome.reason !== 'acquire-failed') return
+            if (noWindowNotified.current === target) return
+            noWindowNotified.current = target
+            notify(t('carrierUnavailable'), 'error')
+          },
+          () => {},
+        )
       }, [target, activeStatus, remoteUrl, activeViewRev])
 
       // When the host we asked for comes up, the window switches and the connect window gets

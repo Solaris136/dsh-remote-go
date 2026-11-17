@@ -341,7 +341,6 @@ export async function stopRemoteForIdle(ctx, runtime, options = {}) {
   // The transport this call owns: the identity proof below awaits, and the user may connect
   // in that window. Only this session may be released afterwards, never the new one.
   const capturedSsh = runtime.ssh
-  let released = false
   const stillWanted = () =>
     runtime.ssh !== capturedSsh ||
     runtime.desired === 'connected' ||

@@ -14,7 +14,6 @@ import {
   makeTempRoot,
   packPlugin,
   pollUntil,
-  sleep,
   resolveBrowser,
   resolveDshCli,
   resolvePnpm,
