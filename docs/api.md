@@ -1,4 +1,4 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.10）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.11）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
@@ -79,6 +79,15 @@
 > 下限；`POST /downloads` 的 `destination` 限用户主目录且拒绝系统/自启动/凭据目录；同源代理改为请求头白名单 +
 > 响应头阻止列表、`Location` 只允许折回远端自身、上游 30s 超时、cookie jar 有上限（`Secure` 不入 jar）；
 > `StateView` / `HostView` 增加 `storeCorrupt`（`hosts.json` **内容**不可解析时备份为 `.corrupt-<stamp>`；读取错误不改名，成功写回后标记清除）。
+>
+> **v2.11 变更**：SSH 密码默认保存，并在 DSH 重启后继续复用。`POST /hosts/:id/connect` 的
+> `rememberPassword` 默认 **true**：携带的密码在 SSH 认证通过后写入 DSH 凭据存储（不是 `hosts.json`），
+> 后续连接（含后台重连与 Host 重启后的首次连接）直接使用；`rememberPassword: false` 只用本次并删除该主机
+> 已保存的记录。新增 `POST /hosts/:id/password`（向导的「保存」不连接时也能记住/清除密码）。凭据记录的键
+> 改为 DSH 要求的 `<owner>/<id>` 形式（`dsh-remote-go/ssh-password-h-...`）：旧的冒号键会被 DSH 的凭据
+> 存储在下一次读取时拒绝，导致整个凭据文件不可用。`HostView.passwordSaved` 现在只表示凭据存储里确实有记录
+> （由 Host 启动时读取，内存中的一次性密码不再算已保存）；`StateView` 增加 `passwordStorageAvailable`
+> 供向导决定是否显示「记住密码」。切回密钥认证或删除主机时会删除该主机的密码记录。
 
 ## 0. 通用类型
 
@@ -162,8 +171,8 @@ interface HostView {
   port: number                  // 明文端口（默认 22，非秘密），编辑表单直接使用；旧 Host 没有该字段
   authType: 'key' | 'password'
   authKeyPath: string | null    // 已配置的私钥路径（不是秘密），供编辑表单预填
-  passwordSaved: boolean        // 凭据存储里是否有；永不返回值
-  passwordStorageAvailable: boolean
+  passwordSaved: boolean        // 凭据存储里确实有该主机的密码；永不返回值。Host 启动时从存储恢复，不因内存中的一次性密码变真
+  passwordStorageAvailable: boolean  // 本机是否有可用的凭据存储（HostView 与 StateView 同值）
   jumpHost: string | null
   status: HostStatus
   phase: ConnectPhase | null
@@ -259,6 +268,11 @@ interface StateView {
   targetVersion: string | null  // = 本机 DSH 版本
   hosts: HostView[]; settings: SettingsView
   activeHostId: string | null; firstRun: boolean  // hosts.length === 0
+  /**
+   * 本机是否有 DSH 凭据存储；`false` 时密码只能用于本次连接。与每个 `HostView` 上的同名字段一致，
+   * 新增主机（还没有 HostView）时由向导读这里决定是否显示「记住密码」。
+   */
+  passwordStorageAvailable: boolean
   storeCorrupt: boolean         // hosts.json 内容不可解析、已备份为 .corrupt-<stamp>，主机列表为恢复后的空列表；成功写回后清除
 }
 ```
@@ -327,7 +341,7 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.10", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.1.0", "apiVersion": "2.11", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
@@ -359,10 +373,11 @@ data: {}
 
 ### `POST /hosts`
 新增或更新主机（带**已存在的** `id` 为更新）。`id` 由 Host 签发（`h_*`）：客户端传来的未知 id 或格式
-不合法的 id 会被替换成一个新的 id，不会被采纳（`id` 同时是 secrets 键与代理路由的一部分，不能让调用方
+不合法的 id 会被替换成一个新的 id，不会被采纳（`id` 同时是代理路由与凭据记录键的一部分，不能让调用方
 伪造或占用别人的条目）。认证只有私钥文件或密码；`auth.type="key"` 省略 `keyPath` 时用
-`SettingsView.defaultKeyPath` 补齐；密码不经此接口传输。`keepAlive` / `idleMinutes` / `autoReconnect` /
-`hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
+`SettingsView.defaultKeyPath` 补齐；密码不经此接口传输（用 `POST /hosts/:id/password` 或 `connect` 的请求体）。
+把已保存密码的主机改成密钥认证时，Host 会删除该主机的密码记录；`DELETE /hosts/:id` 同理。
+`keepAlive` / `idleMinutes` / `autoReconnect` / `hostKeyPolicy` 也随主机条目一起保存（不再有单独的 keepalive 端点）。
 ```json
 { "host": { "id": "h_xxx", "name": "构建服务器", "address": "my-server", "port": 22, "username": "ubuntu",
   "auth": { "type": "key", "keyPath": "~/.ssh/id_rsa" }, "jumpHost": null, "keepAlive": "keep",
@@ -375,10 +390,22 @@ data: {}
 断开（按存活策略决定是否停远端）并删除记录，同时取消该主机所有计时器。响应 `{ "ok": true }`。
 
 ### `POST /hosts/:id/connect`
-异步发起连接：立即返回 `{ "ok": true, "accepted": true }`；已在连接 / 已连接 / 正在重启远端时返回 `{ "ok": true, "accepted": false, "reason": "already-connecting" | "already-connected" | "already-restarting" }`。进度经 `/events` 推送。`rememberPassword: true` 时密码在连接成功后写入 DSH 凭据存储（`passwordSaved` 只表示是否已保存，永不返回值）。
+异步发起连接：立即返回 `{ "ok": true, "accepted": true }`；已在连接 / 已连接 / 正在重启远端时返回 `{ "ok": true, "accepted": false, "reason": "already-connecting" | "already-connected" | "already-restarting" }`。进度经 `/events` 推送。
+
+`rememberPassword` 默认 **true**：请求里携带的密码在 SSH 认证通过后写入 DSH 凭据存储（主机删除、切回密钥认证或
+`rememberPassword: false` 时删除），之后包括后台重连和 Host 重启后的首次连接都直接使用，不再询问；成功、失败都
+不会把密码回传给 Client（`passwordSaved` 只表示是否已保存）。为 `false` 时密码只用于本次连接，并清除此前保存的记录。
+不携带密码时不改动已有记录（已保存的密码会由 Host 读取使用）。
 ```json
-{ "password": "仅本次连接使用", "rememberPassword": false }
+{ "password": "默认保存到 DSH 凭据存储", "rememberPassword": true }
 ```
+
+### `POST /hosts/:id/password`
+只记住或清除这台主机的 SSH 密码，不发起连接（向导的「保存」用它，因此不连接也不会丢掉刚输入的密码）。
+请求二选一：`{ "password": "..." }` 记住；`{ "clear": true }` 忘记。响应
+`{ "ok": true, "available": true, "saved": true }`；`available: false` 表示本机没有凭据存储、什么也不会保存
+（此时 `saved` 必为 false）。空密码返回 400 `invalid-input`（字段 `password`）。密码本身不写 `hosts.json`，
+也永不出现在响应、状态帧或诊断里。
 
 ### `POST /hosts/:id/disconnect`
 请求 `{ "stopRemote": false }`；`stopRemote=true` 或该主机策略为 `stop` 时同时停止远端 web。响应 `{ "ok": true }`。
@@ -387,7 +414,7 @@ data: {}
 `stop-remote`。
 
 ### `POST /hosts/:id/stop-remote`
-关闭本连接管理的远端 DSH（管理界面卡片上的「关闭远端 DSH」），无请求体，同步执行：
+关闭本连接管理的远端 DSH（管理界面卡片上的「关闭」），无请求体，同步执行：
 
 - 语义：在**同一条 SSH 会话**上停掉本连接绑定的那一个远端 web 进程（`stopRemoteWeb`：SIGTERM → 等待 →
   SIGKILL，并删除远端 `run/web.json`）→ 关闭隧道 → 释放 SSH → 主机状态转 `disconnected`；主机配置、凭据与
@@ -403,7 +430,7 @@ data: {}
   显式关闭走本端点（关闭前按 `/proc` 复验身份）；`POST /hosts/:id/restart` 遇到它时会并入冲突提示，由用户选择
   是否停止（那条路径走既有的 `stopForeign`，与本端点的授权是两条独立路径）。
 - 执行期间 `/events` 推送 `status: "connecting"` + 进度码 `stopping-remote`（`pid` / `port`），客户端据此禁用
-  卡片按钮并显示「正在关闭远端 DSH…」；结束后状态帧直接是 `disconnected`。
+  卡片按钮并显示「正在关闭远端 DSH…」进度；结束后状态帧直接是 `disconnected`。
 - 响应：`{ "ok": true, "pid": 4242 }`（进程在动作前已消失时为 `pid` 仍为该绑定值、实际只清理了 registry）。
   失败返回 409 `stop-unavailable`，连接保持原样以便重试或「重连」。这里的「失败」只表示 `stopRemoteWeb` 的 SSH
   退出码非 0（脚本内部 `kill||true` + `echo STOPPED`，D 状态进程等真正没死的情况仍会假成功；`kill -0` 复核是
@@ -579,7 +606,8 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 
 ## 3. 安全约束（客户端必须遵守）
 
-1. 密码只在 `connect` 请求体里出现，不写入客户端存储，不放到 URL。
+1. 密码只在 `connect` / `password` 请求体里出现，不写入客户端存储，不放到 URL；Host 默认在 SSH 认证通过后写入
+   DSH 凭据存储（不写 `hosts.json`），`rememberPassword: false` 时删除已有记录。
 2. `token` / 带 token 的 URL 只在内存中传递；`GET /open` 的 `url` 只交给桌面端 guest，`webUrl` 只交给同源 iframe。
    两者都只用于首次导航，客户端不得持久化、不得拼进其它请求。
 3. `saveTokens` 默认 false；为 true 时由 Host 在 `$DSH_HOME` 下以 0600 保存，客户端不接触。

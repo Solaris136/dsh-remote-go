@@ -44,7 +44,7 @@ dsh-remote-go
 │  ├─ store.js              hosts/settings/secrets 持久化与内存缓存
 │  ├─ atomic-json.js        原子 JSON 写（tmp + wx + fsync + rename 重试）
 │  ├─ settings.js           设置与主机条目的默认值/校验/清洗
-│  ├─ secrets.js            DSH 凭据存储适配（密码不落 hosts.json）
+│  ├─ secrets.js            DSH 凭据存储适配（`<owner>/<id>` 记录键；密码不落 hosts.json）
 │  ├─ layout.js             远端目录布局（~/.dsh 与插件状态目录）
 │  ├─ version.js            版本解析/比较/Node 门槛
 │  ├─ local-version.js      本机 DSH 版本探测（env → clientModules → package.json）
@@ -81,15 +81,15 @@ dsh-remote-go
 
 ```text
 1. 清空上次 error/warning/facts/exchange，status = connecting
-2. resolveTarget：本机 ssh 材料 → 别名解析 → known_hosts 指纹集合；已保存过密码则从 SecretStore 取回（后台重连无需弹窗）
-3. openTransport：直接 sshFactory(buildOptions) → connect → captureFingerprint；跳板机先连跳板再 forwardOut(target 22)，通道上建第二条 ssh；onHostKey 进入 prompts.requestHostKey（strict 直接拒绝，否则挂起等 UI）
+2. resolveTarget：本机 ssh 材料 → 别名解析 → known_hosts 指纹集合；已保存过密码则从 SecretStore 取回（后台重连无需弹窗）。`HostStore` 载入后 `initRegistry` 还会对有密码认证的主机做一次 `secrets.has`，把 `passwordSaved` 从凭据存储恢复——否则 DSH 重启后 Client 会再次弹密码框，已保存的密码永远不会被尝试
+3. openTransport：直接 sshFactory(buildOptions) → connect → captureFingerprint；跳板机先连跳板再 forwardOut(target 22)，通道上建第二条 ssh；onHostKey 进入 prompts.requestHostKey（strict 直接拒绝，否则挂起等 UI）。SSH 握手通过后立即结算密码存储：默认 `secrets.set`（写入凭据存储），`rememberPassword:false` 则 `secrets.remove`——放在这里而不是 connected 之后，后续自举失败也不必重输密码
 4. probeRemote：OS/Node/npm/npx/curl/磁盘/凭据/SSH 会话标记 → runtime.facts；ensureRemoteNode 按 engines.node 下限装/复用 ~/.dsh/remote-go/node/v<version>（失败即中止），applyManagedNodeFacts 写回 node/npm/npx 路径
 5. 本机版本未知则失败；planNpx 产出固定模板并绑定托管 Node 的 PATH
 6. adopt：读 run registry（dshHome/profile/pid/日志 URL/HTTP 探活），版本不符的本插件实例先 stop 再另起；未收养才继续：清掉不可收养的残留实例 → resolveForeignConflict 扫描外来 DSH（stop/alongside/cancel）
 7. npx 预检（前台，无超时）：verifyNpxVersion 回读必须精确相等；startRemoteWeb：setsid nohup 启动，轮询 `dsh web:` 行取 pid/port/token
 8. createTunnel：本地 127.0.0.1:0 → forwardOut(远端 port)
 9. waitForRemoteUi（远端 curl）→ exchangeTokenOverTunnel（token→cookie→干净首页）
-10. connected：记录 lastOpenedAt/activeHostId，按设置保存 token/密码，挂断线处理器（host-lifecycle.scheduleReconnect）
+10. connected：记录 lastOpenedAt/activeHostId，按设置保存 token，挂断线处理器（host-lifecycle.scheduleReconnect）；密码已在第 3 步结算，这里不再重复写入
 11. 失败：toErrorView，按 desired 判定「用户取消」/「连接失败」，统一 teardown
 ```
 
@@ -110,7 +110,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
   被加载包的 `package.json`，证明不了就保持未知且不写进 registry。通过后 `writeRunRegistry(origin:"reattach")`、
   关旧隧道、按新端口重建、换 token、`verifyRemoteUi`、`markConnected`，并写 `runtime.restarts`（诊断导出）。
   重挂失败报 `remote-unreachable`，保留 SSH 与主机配置。
-- `stopRemoteHost`：显式「关闭远端 DSH」，同步执行。状态机与 `restartHost` 相同（`connected` / `remote-unreachable`），
+- `stopRemoteHost`：显式关闭远端 DSH（卡片上的「关闭」），同步执行。状态机与 `restartHost` 相同（`connected` / `remote-unreachable`），
   其余与进行中的一次性动作一律抛 `stop-unavailable`（API 409）。授权是 `closeAuthorized`：pid 必须是
   `runtime.remote.pid`、不在 `alongsidePids`、本连接记录过（`runtime.launched` 或 `runtime.bound`）、
   `run/web.json` 仍命名它且 home/profile 一致、`/proc` starttime / cmdline / `DSH_HOME` 再证明一次；任一不满足
@@ -196,7 +196,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | `settings.json` | 设置（见契约 SettingsView） | 0600 |
 | `secrets.json` | 仅 `saveTokens=true` 时保存的 launch token | 0600 |
 
-全部走 `atomic-json.js`：目录 0700、文件 0600、临时文件 `wx`、fsync、rename 重试、失败清理临时文件。只有**解析失败**（内容不是 JSON）的文件先改名为 `<name>.corrupt-<stamp>` 再回落到默认值；读取错误（EACCES/IO）只回落、不改名（`readJsonFile` 返回 `unreadable` 与 `corrupt` 两种状态，`HostStore.corrupt` 只在后者置位，并随下一次成功写入清除）。`HostStore.corrupt` 经 `HostView.storeCorrupt` / `StateView.storeCorrupt` 与 `/diagnostics/self` 暴露，下一次写入不会覆盖那份字节；`saveSettings` 与**当前值**深合并（不是与默认值），`saveToken` 先 `load()` 再写。密码不进 `hosts.json`，保存时写 DSH 凭据存储。远端 `~/.dsh/remote-go/`：`logs/web.log`、`run/web.json`、`node/`、`downloads/`；远端 DSH 自己的数据始终在 `~/.dsh`，本插件不写它的插件、配置或凭据。
+全部走 `atomic-json.js`：目录 0700、文件 0600、临时文件 `wx`、fsync、rename 重试、失败清理临时文件。只有**解析失败**（内容不是 JSON）的文件先改名为 `<name>.corrupt-<stamp>` 再回落到默认值；读取错误（EACCES/IO）只回落、不改名（`readJsonFile` 返回 `unreadable` 与 `corrupt` 两种状态，`HostStore.corrupt` 只在后者置位，并随下一次成功写入清除）。`HostStore.corrupt` 经 `HostView.storeCorrupt` / `StateView.storeCorrupt` 与 `/diagnostics/self` 暴露，下一次写入不会覆盖那份字节；`saveSettings` 与**当前值**深合并（不是与默认值），`saveToken` 先 `load()` 再写。密码不进 `hosts.json`：保存时写 DSH 凭据存储，记录键必须是 DSH 的 `<owner>/<id>` 形式（`dsh-remote-go/ssh-password-h-<id>`，两段都只能是小写字母/数字/连字符）——旧的冒号键会在下次启动读取整个凭据文件时被拒绝，连其它插件的凭据一起失效；删除主机或把认证改成密钥时删除该记录。远端 `~/.dsh/remote-go/`：`logs/web.log`、`run/web.json`、`node/`、`downloads/`；远端 DSH 自己的数据始终在 `~/.dsh`，本插件不写它的插件、配置或凭据。
 
 ## 7. Client 半端
 `client.js` 是**单文件、无构建**的浏览器插件：`window.__ModuleLoader__.load({ id, factory(require) })`，只 `require('react')`。
@@ -210,11 +210,16 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 - 桌面接管：`showOverlay` 经 `window.dshDesktop.browser.acquire` 创建 guest，carrier 铺满整窗；`applyGuestCaption` 在每个 `dom-ready`/`did-stop-loading` 注入 `data-windows-titlebar`、高度与 `data-fullscreen`，`syncCarrierCaption` 决定让出标题栏或退回整体下移，并同步 `drg-carrier-grip` 拖拽条与 `html.drg-caption-live`；本地全屏状态由 `watchCaptionState` 的 MutationObserver 推给 guest；每次 `did-stop-loading` 在标题栏之后重注入主机条，`__drgBridgeQueue` 轮询用 `TAKE_INTENTS_SCRIPT` **一次取走并清空**（读/清分两次会吞掉落在中间的 intent），再把点击交回 `switcher.dispatch`。标题栏菜单的起点跟着**画这条带的那一页**走：`installSidebarMirror` 注入 `mountSidebarMirror`（`SIDEBAR_MIRROR_SCRIPT`），装载时返回 `{ collapsed, start }` 并在每次变化时把 `{ action:'caption-sidebar', collapsed, start }` 放进同一条队列——`start` 是 guest 里 DSH 自己解析出的 `--dsh-windows-menu-start`（收起 `84px`、展开为空），所以数值不靠复刻；`applyGuestSidebar` 记进 `entry.sidebarCollapsed` / `entry.sidebarStart`（`dom-ready` 时清空，新文档不继承旧 rail），`ownCaptionBand` 用 `setCaptionMenuStart` 把该值写成 `<html>` 内联变量，读不到时退回 48 / 84px 常量，回本地页时删掉、交还 DSH 自己的 `:has([data-sidebar-collapsed])` 规则（#63）。浏览器接管：`GET /hosts/:id/open` 的 `webUrl` 经 `isValidViewPath` 校验后赋给 iframe，`load` 事件里 `installWebCarrier` 设 `__drgBridgeSink`、调用 `mountHostRow` / `mountGuestTools` / `mountCapabilityBridge` / `mountGuestStorage`；桌面端在 `installGuestTools` 之后跑 `CAPABILITY_BRIDGE_SCRIPT`，安装成功也参与「要不要开始轮询」；没有标题栏与 caption 逻辑。
 - API 客户端：`openHost(id)` 同时返回并校验 `url`（桌面回环地址）与 `webUrl`（浏览器同源路径）；只校验存在的字段，旧 Host 的响应不会阻塞桌面路径。
 - 重启/重挂的承载：`RemoteView.viewRev` 变化（本地重启 / 远端重挂）后，热窗口重新取 `open`；即使 URL 相同也重新导航。`entry.viewRev` 只在**真正发生导航**后写入，旧 attach 的 URL 不会被重放。
-- 主机卡片：已连接时在「断开」旁提供「重启远端 DSH」（`host-restart`）与「关闭远端 DSH」（`host-stop-remote`），
+- 主机卡片：已连接时在「断开」旁提供「重启」（`host-restart`）与「关闭」（`host-stop-remote`），
   `restarting-remote` / `stopping-remote` 期间两个按钮都禁用、卡片显示对应进度文案；「关闭」先弹
-  `StopRemoteDialog`（破坏性确认，明示会停止远端进程并可重连），确认后走 `api.stopRemote`。重连按钮仍只出现在
+  `StopRemoteDialog`（一句说明的破坏性确认），确认后走 `api.stopRemote`。重连按钮仍只出现在
   可重试状态（`disconnected` / `error` / `limited`），因为重启/关闭只在 `connected` 与可解释的
   `remote-unreachable` 错误下有效。
+- 「重启」与「重连」都打开这台主机的**连接窗口**：`showConnectWindow(host)` 写 `connectHostId` 并把浮窗切到
+  `connect` 视图（`connectHostId` 单独存在，是因为重启的宿主可能不是当前填窗的那台）；进度、阶段与
+  `ConnectLog` 都来自同一份 `HostView`，重启时标题换成「正在重启「{name}」的远端 DSH…」。密码认证的「重连」
+  先弹密码框，提交后再切到连接窗口；动作结束（`connected` / `error`）后窗口回到主机清单，关窗只清
+  `connectHostId`、不中断链路。
 - 意图：`panelStore.requestIntent({ kind:'open'|'disconnect'|'manage'|'local' })` 与 `wizardStore.open({ mode, host })` 都由浮层宿主消费；`open` 走 `openHost`（未连接先连，清单留着看进度），`disconnect` 断开并释放窗口、Host 确认后交回本地，`manage` 开清单，`local` 隐藏远端窗口并清 Host 侧 active。意图订阅在挂载时建立，回调读不到最新窗口状态，「窗口在哪台」的收尾一律走 ref 或 `setState(fn)`。
 - 安全不变量（测试读源码断言）：客户端自己不开任何窗口——唯一的新窗口调用点是能力桥的 `openExternalUrl`，只接受 http(s) 且先经 `externalUrlOf` 收窄；桌面路径不渲染 iframe；浏览器 iframe 只接受 `/dsh-remote-go/remote/<hostId>/` 形状的同源路径（无绝对 URL、`//`、反斜杠或 `..`）；token/URL 不写 localStorage；桌面只用回环 URL。文件内分区（`//#region`）：常量 → i18n 字典/助手 → 工具 → 错误视图 → API → 图标/原语 → 主机列表 → 连接窗口（进度 + 连接日志）/远端窗口 → 主机条 → 远端下载桥（`mountGuestTools`）→ 能力桥（`externalUrlOf` / `openExternalUrl` / `mountCapabilityBridge` / `mountGuestStorage`）→ 载体池（桌面 guest + 浏览器 frame 两个后端）→ 密钥选择器 → 添加/编辑主机 → 诊断 → 设置 → 密码/冲突 → toast → 浮层宿主（`PluginOverlay`，含可拖动下载卡）→ 样式 → 注册。
 
@@ -225,7 +230,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 | 准入栅栏 | `request-trust`（经 `api` / `remote-proxy` 用例覆盖） | `Host` 同源（loopback 互换、默认端口折算）、`Origin` 同源、`cross-site` 拒绝 |
 | 运行时 | `node-runtime/bootstrap/remote-web/remote-proc/tunnel/ssh` | 托管 Node、npx 判定与命令模板、启动/收养、URL/token 握手、隧道、认证与指纹 |
 | 同源代理 | `remote-proxy` | 视图路径解析、cookie jar（路径与过期、按 remote authority 重置、64 条上限、`Secure` 不入 jar）、Host/Origin 栅栏、准入拒绝（HTTP 与升级）、请求头白名单（表驱动）、响应头阻止列表（表驱动）、`Location` 折回与绝对地址丢弃、HTTP 转发、升级转发、上游无响应 30s 超时（HTTP 与握手） |
-| 服务 | `service/api/store/secrets/key-files/host-key/download-jobs/remote-restart/stop-remote` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、关闭远端（状态机 + 归属授权 + registry 清理 + `keepAlive:"stop"` 不重复信号）、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权（含 8 个客户端上限）、`ErrorView` 脱敏与限长、状态码映射（400/409/413/500）、`localhost` 与 `127.0.0.1` 等价、畸形 id 与越界 keyfile 的 400、原子写与损坏文件隔离、设置深合并、token 落盘、主机 id 签发、下载任务 |
+| 服务 | `service/api/store/secrets/password/key-files/host-key/download-jobs/remote-restart/stop-remote` | 连接管线、指纹确认、冲突、重连/存活、重启状态机、关闭远端（状态机 + 归属授权 + registry 清理 + `keepAlive:"stop"` 不重复信号）、kill 授权与 `/proc` 身份校验、重挂后重启冲突、心跳确认、端口重解析与重挂、监听器重建（localProbe/先建后关/viewRev/退避/teardown 等待）、诊断、DSH 准入 / Host 自检 / SSE 鉴权（含 8 个客户端上限）、`ErrorView` 脱敏与限长、状态码映射（400/409/413/500）、`localhost` 与 `127.0.0.1` 等价、畸形 id 与越界 keyfile 的 400、原子写与损坏文件隔离、设置深合并、token 落盘、主机 id 签发、下载任务、密码默认保存 / 重启后恢复 / 取消勾选与删主机时清除 |
 | 浏览器 | `client.test.js` / `guards.test.js`（client-styles、client-compat） | 模块格式、slot 注册、双语对齐、安全不变量、两种载体、关键组件、重启/关闭按钮与 viewRev 重导航、CSS 卫生 |
 | 模拟远端 | `test/integration/sim.test.js` + `e2e/sim` | 真实 SSH 端点、探针、forwardOut、认证/隧道守卫；远端 stop 真正关闭监听器与 token |
 | 重启/重挂端到端 | `test/integration/remote-restart.test.js` | 真实 SSH + 真实隧道：本地重启换端口、远端自重启（stale registry）被重挂并刷新注册表；监听器重建与重挂后重启冲突在单测覆盖（含三种 keepAlive 的 disconnect 窗口与 removeHost/shutdown） |

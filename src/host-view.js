@@ -22,8 +22,12 @@ export function hostView(runtime, ctx) {
     authType: entry.auth?.type ?? 'key',
     /** The configured key file path (not a secret); lets the edit form prefill it. */
     authKeyPath: entry.auth?.type === 'key' && typeof entry.auth.keyPath === 'string' ? entry.auth.keyPath : null,
-    /** Whether a remembered password exists in the credential store (never the value). */
-    passwordSaved: entry.auth?.type === 'password' ? runtime.passwordSaved === true || runtime.password != null : false,
+    /**
+     * Whether a remembered password exists in the credential store (never the value). The
+     * runtime mirror is restored from the store on load, so this stays true across a DSH
+     * restart while a one-time password used for this connection alone stays false.
+     */
+    passwordSaved: entry.auth?.type === 'password' ? runtime.passwordSaved === true : false,
     passwordStorageAvailable: ctx.passwordStorageAvailable,
     jumpHost: entry.jumpHost ?? null,
     status: runtime.status,

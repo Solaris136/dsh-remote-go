@@ -229,9 +229,11 @@ window.ReactDOM = { createRoot }`,
     await waitFor(page, () => document.querySelector('[data-testid="host-stop-remote"]') !== null, {
       timeout: 15_000,
     })
+    assert.equal(await page.$eval('[data-testid="host-stop-remote"]', (node) => node.textContent.trim()), '关闭')
     assert.equal(
-      await page.$eval('[data-testid="host-stop-remote"]', (node) => node.textContent.trim()),
+      await page.$eval('[data-testid="host-stop-remote"]', (node) => node.getAttribute('aria-label')),
       '关闭远端 DSH',
+      'the short visible label keeps the full accessible name',
     )
 
     await t.test('the card action asks for confirmation and cancel is non-destructive', async () => {
@@ -239,7 +241,7 @@ window.ReactDOM = { createRoot }`,
       await waitFor(page, () => document.querySelector('[data-testid="stop-remote-dialog"]') !== null)
       const dialog = await page.$eval('[data-testid="stop-remote-dialog"]', (node) => node.textContent)
       assert.match(dialog, /关闭远端 DSH？/)
-      assert.match(dialog, /会停止远端 DSH 进程/)
+      assert.match(dialog, /会停止远端进程/)
       assert.match(dialog, /重连/)
       assert.equal(await page.evaluate(() => window.__stopCalls.length), 0, 'opening the dialog must not call the API')
       await page.click('[data-testid="stop-remote-cancel"]')
@@ -268,7 +270,7 @@ window.ReactDOM = { createRoot }`,
         page,
         () =>
           document.querySelector('[data-progress="stopping-remote"]') !== null &&
-          document.querySelector('[data-testid="host-stop-remote"]')?.textContent.includes('正在关闭远端 DSH'),
+          document.querySelector('[data-testid="host-stop-remote"]')?.textContent.includes('正在关闭'),
         { timeout: 10_000 },
       )
       assert.equal(
@@ -277,10 +279,7 @@ window.ReactDOM = { createRoot }`,
         'the stop action must be disabled while it runs',
       )
       assert.match(await page.$eval('[data-testid="stop-remote-dialog"]', (node) => node.textContent), /正在关闭…/)
-      assert.match(
-        await page.$eval('[data-testid="host-card"]', (node) => node.textContent),
-        /正在关闭远端 DSH（停止本连接管理的远端进程）…/,
-      )
+      assert.match(await page.$eval('[data-testid="host-card"]', (node) => node.textContent), /正在关闭远端 DSH…/)
     })
 
     await t.test('the finished stop leaves a disconnected card that can be reconnected', async () => {
@@ -310,7 +309,7 @@ window.ReactDOM = { createRoot }`,
       const card = await page.$eval('[data-testid="host-card"]', (node) => node.textContent)
       assert.match(card, /断线/)
       assert.match(card, /重连/)
-      assert.doesNotMatch(card, /关闭远端 DSH/)
+      assert.doesNotMatch(card, /关闭/)
     })
 
     const silent = errors.filter((text) => !/Failed to load resource/.test(text))

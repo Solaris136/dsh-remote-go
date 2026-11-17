@@ -250,8 +250,8 @@ export const errors = {
         ),
       [
         [
-          '点「重启远端 DSH」用同一份配置重新拉起远端进程',
-          'Use "Restart remote DSH" to start the remote process again with the same settings',
+          '点「重启」用同一份配置重新拉起远端进程',
+          'Use "Restart" to start the remote process again with the same settings',
         ],
         ['点「重连」按存活策略重新连接', 'Use Reconnect to connect again under the keep-alive policy'],
       ],
@@ -270,7 +270,7 @@ export const errors = {
           'The remote DSH can only be restarted while this host is connected, or after a remote-unreachable failure that kept the SSH session.',
         ),
       [
-        ['先连接这台主机，再点「重启远端 DSH」', 'Connect the host first, then use "Restart remote DSH"'],
+        ['先连接这台主机，再点「重启」', 'Connect the host first, then use "Restart"'],
         ['如果连接已断开，点「重连」重新建立连接', 'If the link dropped, use Reconnect to establish it again'],
       ],
       options,
@@ -289,7 +289,7 @@ export const errors = {
           'The remote DSH can only be stopped while this host is connected (or after a remote-unreachable failure that kept the SSH session), and only when it is the process this connection launched or took over.',
         ),
       [
-        ['先连接这台主机，再点「关闭远端 DSH」', 'Connect the host first, then use "Stop remote DSH"'],
+        ['先连接这台主机，再点「关闭」', 'Connect the host first, then use "Stop"'],
         [
           '如果强烈怀疑远端进程不属于本连接，点「重连」重建连接后再试',
           'If the remote process may not belong to this connection, use Reconnect and try again',

@@ -142,12 +142,15 @@ export async function startConnect(ctx, id, options = {}) {
   cancelIdleStop(runtime)
   stopRemoteHeartbeat(runtime)
   runtime.alongsidePids = []
-  runtime.password = options.password ?? runtime.password
-  // A password the user asked to remember is written to the credential store the
-  // moment it is known, so a failed first attempt still leaves it available.
-  if (options.rememberPassword === true && typeof runtime.password === 'string' && runtime.password !== '') {
-    runtime.savePassword = true
-  }
+  const typedPassword = typeof options.password === 'string' && options.password !== '' ? options.password : null
+  if (typedPassword !== null) runtime.password = typedPassword
+  // Remembering is the default for a password the user just typed (`POST /hosts/:id/connect`
+  // treats an absent `rememberPassword` as true). An explicit false means "this connection
+  // only" and also forgets a previously saved record, so an unchecked box cannot leave a stale
+  // secret behind. A retry or auto-reconnect carries no password of its own and must not
+  // re-save what the store already holds.
+  runtime.savePassword = typedPassword !== null && options.rememberPassword !== false
+  runtime.forgetPassword = typedPassword !== null && options.rememberPassword === false
   runtime.desired = 'connected'
   cancelReconnect(runtime)
   // A user-initiated connect gets a fresh retry budget and a fresh prompt history; a retry
@@ -800,6 +803,32 @@ function recordRestart(runtime, entry) {
   runtime.restarts = history.slice(-10)
 }
 
+/**
+ * Persist (or forget) the SSH password now that the transport accepted it. Doing this right
+ * after the handshake rather than after `connected` keeps a credential the server already
+ * proved even when a later bootstrap step fails, so the next attempt does not ask again.
+ * @param {object} ctx - service context.
+ * @param {object} runtime - host runtime.
+ * @param {(level: string, ...args: unknown[]) => void} log - connect log writer.
+ */
+async function settlePasswordStorage(ctx, runtime, log) {
+  const save = runtime.savePassword === true
+  const forget = runtime.forgetPassword === true
+  runtime.savePassword = false
+  runtime.forgetPassword = false
+  if (!ctx.secrets || typeof runtime.password !== 'string' || runtime.password === '') return
+  if (save) {
+    runtime.passwordSaved = await ctx.secrets.set(runtime.id, runtime.password)
+    if (runtime.passwordSaved) log('debug', 'saved the SSH password in the credential store')
+    else log('warn', 'could not save the SSH password in the credential store')
+    return
+  }
+  if (forget) {
+    const removed = await ctx.secrets.remove(runtime.id)
+    runtime.passwordSaved = !removed
+  }
+}
+
 async function connectPipeline(ctx, runtime) {
   const log = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
@@ -857,6 +886,10 @@ async function connectPipeline(ctx, runtime) {
         runtime.fingerprint?.sha256 ?? 'unknown'
       })`,
     )
+    // SSH accepted the credential: this is the point the password is proven, before any
+    // bootstrap step can fail and force the user to type it again.
+    await settlePasswordStorage(ctx, runtime, log)
+    assertStillWanted(ctx, runtime)
 
     phase('probe', 'probing')
     let facts = await ctx.deps.probe(runtime.ssh)
@@ -1036,11 +1069,6 @@ async function connectPipeline(ctx, runtime) {
     runtime.entry = ctx.store.getHost(runtime.id) ?? runtime.entry
     if (ctx.settings().saveTokens) {
       await ctx.store.saveToken(runtime.id, webInfo.token)
-      assertStillWanted(ctx, runtime)
-    }
-    // Remember the password now that it is proven, if the user asked for that.
-    if (runtime.savePassword === true && typeof runtime.password === 'string' && ctx.secrets) {
-      runtime.passwordSaved = await ctx.secrets.set(runtime.id, runtime.password)
       assertStillWanted(ctx, runtime)
     }
     // Last gate before publishing: never report a connected host that the user just removed
@@ -1737,8 +1765,8 @@ async function runReattach(ctx, runtime, info, token) {
       const detail =
         resolved?.reason === 'no-token'
           ? {
-              zh: '远端 DSH 仍在运行，但它这次重启没有留下可用的 launch token，无法自动重新挂载；请点「重启远端 DSH」或「重连」。',
-              en: 'The remote DSH is still running, but its restart left no usable launch token, so it cannot be re-attached; use "Restart remote DSH" or Reconnect.',
+              zh: '远端 DSH 仍在运行，但它这次重启没有留下可用的 launch token，无法自动重新挂载；请点「重启」或「重连」。',
+              en: 'The remote DSH is still running, but its restart left no usable launch token, so it cannot be re-attached; use "Restart" or Reconnect.',
             }
           : {
               zh: `远端 DSH 重启后没有找到可以重新挂载的实例（${resolved?.reason ?? 'unreadable'}）；主机与配置已保留。`,
@@ -1755,8 +1783,8 @@ async function runReattach(ctx, runtime, info, token) {
     if (typeof resolved.token !== 'string' || resolved.token === '') {
       throw errors.remoteUnreachable(
         {
-          zh: '远端 DSH 重启后没有留下可用的 launch token，无法自动重新挂载；请点「重启远端 DSH」或「重连」。',
-          en: 'The restarted remote DSH left no usable launch token, so it cannot be re-attached; use "Restart remote DSH" or Reconnect.',
+          zh: '远端 DSH 重启后没有留下可用的 launch token，无法自动重新挂载；请点「重启」或「重连」。',
+          en: 'The restarted remote DSH left no usable launch token, so it cannot be re-attached; use "Restart" or Reconnect.',
         },
         { technical: `reason=no-token source=${resolved.source ?? 'unknown'} port=${resolved.port ?? 'unknown'}` },
       )

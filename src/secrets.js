@@ -2,8 +2,29 @@
  * Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in `hosts.json`; with no credential service nothing is persisted.
  */
 
-const RECORD_PREFIX = 'dsh-remote-go:ssh-password:'
+import { HOST_ID_RE } from './settings.js'
+
+const RECORD_SCOPE = 'dsh-remote-go'
+const RECORD_ID_PREFIX = 'ssh-password-'
 const PAYLOAD_VERSION = 1
+
+/**
+ * DSH addresses a stored record as `<scope>/<id>`, and both segments must match
+ * `/^[a-z][a-z0-9-]*$/` (`parseCredentialKey` in `@deepseek-ai/dsh-credentials`). A colon-separated
+ * key such as `dsh-remote-go:ssh-password:h_1` is stored as given but rejected the next time the
+ * credential document is read — the whole file then fails to load, taking every other credential
+ * with it. A host id is `h_<base36>`: its only character outside the grammar is the underscore,
+ * which maps onto `-` without collisions because the issued suffix never contains one. Only an id
+ * this plugin issued is addressable, so an unexpected value never reaches the document.
+ * @param {string} hostId - the host whose password is addressed.
+ * @returns {string|null} the DSH credential key, or null when the id cannot be addressed.
+ */
+export function passwordRecordKey(hostId) {
+  if (typeof hostId !== 'string' || !HOST_ID_RE.test(hostId)) return null
+  const id = RECORD_ID_PREFIX + hostId.replace(/_/g, '-')
+  if (!/^[a-z][a-z0-9-]*$/.test(id)) return null
+  return `${RECORD_SCOPE}/${id}`
+}
 
 export function createSecretStore(options = {}) {
   const logger = options.logger ?? console
@@ -23,8 +44,12 @@ export function createSecretStore(options = {}) {
     }
   }
 
+  /**
+   * The address of one host's password, or null when the id is not addressable.
+   * @param {string} hostId
+   */
   function keyFor(hostId) {
-    return RECORD_PREFIX + String(hostId)
+    return passwordRecordKey(hostId)
   }
 
   return {
@@ -34,9 +59,10 @@ export function createSecretStore(options = {}) {
 
     async get(hostId) {
       const service = credentials()
-      if (!service || !hostId) return null
+      const key = keyFor(hostId)
+      if (!service || key === null) return null
       try {
-        const record = await service.readRecord(keyFor(hostId))
+        const record = await service.readRecord(key)
         const payload = record && record.kind === 'grant' ? record.payload : null
         if (!payload || typeof payload !== 'object') return null
         if (payload.version !== PAYLOAD_VERSION || typeof payload.password !== 'string') return null
@@ -53,9 +79,10 @@ export function createSecretStore(options = {}) {
 
     async set(hostId, password) {
       const service = credentials()
-      if (!service || !hostId || typeof password !== 'string' || password === '') return false
+      const key = keyFor(hostId)
+      if (!service || key === null || typeof password !== 'string' || password === '') return false
       try {
-        await service.modifyRecord(keyFor(hostId), async () => ({
+        await service.modifyRecord(key, async () => ({
           kind: 'grant',
           payload: { version: PAYLOAD_VERSION, password },
         }))
@@ -68,11 +95,14 @@ export function createSecretStore(options = {}) {
 
     async remove(hostId) {
       const service = credentials()
-      if (!service || typeof service.deleteRecord !== 'function' || !hostId) return
+      const key = keyFor(hostId)
+      if (!service || key === null || typeof service.deleteRecord !== 'function') return false
       try {
-        await service.deleteRecord(keyFor(hostId))
+        await service.deleteRecord(key)
+        return true
       } catch (error) {
         logger.warn?.('[dsh-remote-go] could not delete the saved password:', error)
+        return false
       }
     },
   }

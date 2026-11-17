@@ -91,7 +91,7 @@ dsh plugin --profile web add ./dsh-remote-go-<version>.tgz
   `locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、构建输入（`vendor/ssh2-entry.mjs`）与研究资料
   （`scripts/pack-check.mjs` 校验）。
 - 运行时依赖为空（`dependencies: {}`）；`ssh2` 以 vendored bundle 随包发布，安装不拉取任何依赖。
-- 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；令牌/密码/私钥绝不落盘（详见 README 安全节）。
+- 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；launch token 默认只在内存，SSH 密码默认写入 DSH 凭据存储（取消「记住密码」则不落盘），私钥只读取不上传（详见 README 安全节）。
 
 ## 6. 发布后检查清单
 - [ ] npm 页面展示 README、LICENSE、keywords 正确
