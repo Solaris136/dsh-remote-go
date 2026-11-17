@@ -6,7 +6,6 @@
  * is the one place that turns that service into a per-request function, so the local API and the
  * same-origin proxy share the gate and both failure modes stay testable.
  */
-
 /**
  * Build the admission gate for one plugin activation.
  *
@@ -15,29 +14,29 @@
  * both cases the gate returns `undefined`, which hands the request to the caller's own fence
  * instead of going dark. A gate that throws while judging a request returns `500` — failing closed,
  * because a check that cannot decide must never admit.
- *
- * @param {object} ctx - plugin context; only `ctx.get` is read, and it may be missing in tests.
- * @param {{ warn?: (...args: any[]) => void }} [logger]
- * @returns {(req: { headers: object }) => (number | undefined)} rejection status, or undefined to admit.
  */
 export function createAdmission(ctx, logger = console) {
-  const warn = typeof logger.warn === 'function' ? logger.warn.bind(logger) : () => {}
-
-  return (req) => {
-    let connection = null
-    try {
-      connection = typeof ctx?.get === 'function' ? ctx.get('connection') : null
-    } catch (error) {
-      // A failed lookup says nothing about this request, so the caller's own fence decides it.
-      warn('[dsh-remote-go] DSH connection lookup failed; the local fence stays the only gate:', error)
-      return undefined
-    }
-    if (!connection || typeof connection.requestRejection !== 'function') return undefined
-    try {
-      return connection.requestRejection(req)
-    } catch (error) {
-      warn('[dsh-remote-go] DSH connection admission failed; rejecting the request:', error)
-      return 500
-    }
-  }
+    const warn = typeof logger.warn === 'function' ? logger.warn.bind(logger) : () => { };
+    return (req) => {
+        let connection = null;
+        try {
+            // `ctx.get` is the kernel's untyped lookup: this one assertion names the shape the gate
+            // calls, and the `typeof` check below re-verifies the only member it reads before use.
+            connection = typeof ctx?.get === 'function' ? ctx.get('connection') : null;
+        }
+        catch (error) {
+            // A failed lookup says nothing about this request, so the caller's own fence decides it.
+            warn('[dsh-remote-go] DSH connection lookup failed; the local fence stays the only gate:', error);
+            return undefined;
+        }
+        if (!connection || typeof connection.requestRejection !== 'function')
+            return undefined;
+        try {
+            return connection.requestRejection(req);
+        }
+        catch (error) {
+            warn('[dsh-remote-go] DSH connection admission failed; rejecting the request:', error);
+            return 500;
+        }
+    };
 }

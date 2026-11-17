@@ -9,6 +9,7 @@ import { createAdmission } from './admission.js'
 import { createApi } from './api.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { createRemoteProxy } from './remote-proxy.js'
+import type { UpgradeRegistration } from './remote-proxy.js'
 import { RemoteGoService } from './service.js'
 import { createSecretStore } from './secrets.js'
 import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
@@ -53,6 +54,11 @@ interface WebRegistration {
 interface WebServerService {
   getOrigin?: () => string | null
   register: (registration: WebRegistration) => () => void
+  /**
+   * Exact-path upgrade routes: the same-origin proxy registers one per connected host. Optional
+   * because a kernel without it degrades to "no remote stream" instead of failing the plugin.
+   */
+  registerUpgrade?: (registration: UpgradeRegistration) => () => void
 }
 
 /** The loader fiber's own metadata, read for the diagnostics row only. */
