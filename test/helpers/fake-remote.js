@@ -121,7 +121,7 @@ export function managedNodeFixture(version = '24.9.0') {
 }
 
 export async function makeTestService(overrides = {}) {
-  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-'))
+  const dir = overrides.dir ?? (await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-')))
   tempDirs.add(dir)
   const store = new HostStore({ dir, logger: { warn() {}, info() {}, debug() {}, error() {} } })
   const events = []
@@ -141,6 +141,7 @@ export async function makeTestService(overrides = {}) {
     store,
     home: path.join(dir, 'home'),
     logger: overrides.logger ?? { warn() {}, info() {}, debug() {}, error() {} },
+    secrets: overrides.secrets ?? null,
     localVersion: overrides.localVersion === undefined ? '0.2.2-rc.1' : overrides.localVersion,
     engineNodeRange: overrides.engineNodeRange,
     sshFactory,
@@ -236,4 +237,32 @@ export async function createHost(service, overrides = {}) {
     keepAlive: 'keep',
     ...overrides,
   })
+}
+
+/**
+ * An in-memory stand-in for `src/secrets.js` (same surface, no credential store), so tests can
+ * assert exactly which password the pipeline and the wizard persist for a host.
+ * @param {Record<string, string>} [initial] - records present before the service starts.
+ */
+export function fakeSecretStore(initial = {}) {
+  const store = new Map(Object.entries(initial))
+  return {
+    store,
+    available: () => true,
+    async get(hostId) {
+      return store.get(hostId) ?? null
+    },
+    async has(hostId) {
+      return store.has(hostId)
+    },
+    async set(hostId, password) {
+      if (typeof hostId !== 'string' || typeof password !== 'string' || password === '') return false
+      store.set(hostId, password)
+      return true
+    },
+    async remove(hostId) {
+      store.delete(hostId)
+      return true
+    },
+  }
 }

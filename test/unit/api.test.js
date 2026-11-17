@@ -4,7 +4,7 @@ import http from 'node:http'
 import { createAdmission } from '../../src/admission.js'
 import { createApi } from '../../src/api.js'
 import { errors } from '../../src/errors.js'
-import { createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
+import { createHost, fakeSecretStore, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
 const HEADER = { 'x-dsh-remote-go': '1' }
 
@@ -230,6 +230,47 @@ test('host CRUD, connect, open and keep-alive work over HTTP', async () => {
     const removed = await call(api.base, `/hosts/${hostId}`, { method: 'DELETE' })
     assert.equal(removed.status, 200)
     assert.equal(service.snapshot().hosts.length, 0)
+  } finally {
+    await api.close()
+    await service.shutdown()
+  }
+})
+
+test('the password route remembers and clears a password without connecting', async () => {
+  const secrets = fakeSecretStore()
+  const { service } = await makeTestService({ secrets })
+  const api = await startApi(service)
+  try {
+    const host = await createHost(service, { auth: { type: 'password' } })
+    const saved = await call(api.base, `/hosts/${host.id}/password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: 's3cret' }),
+    })
+    assert.equal(saved.status, 200)
+    assert.deepEqual(saved.json, { ok: true, available: true, saved: true })
+    assert.equal(secrets.store.get(host.id), 's3cret')
+    assert.equal(service.snapshot().hosts[0].passwordSaved, true)
+
+    // The contract defaults remembering to true for a connect that carries a password, and the
+    // wizard's plain save uses this route so the value is not lost without a connection.
+    const cleared = await call(api.base, `/hosts/${host.id}/password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+    })
+    assert.equal(cleared.status, 200)
+    assert.deepEqual(cleared.json, { ok: true, available: true, saved: false })
+    assert.equal(secrets.store.has(host.id), false)
+
+    const empty = await call(api.base, `/hosts/${host.id}/password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: '' }),
+    })
+    assert.equal(empty.status, 400)
+    assert.equal(empty.json.ok, false)
+    assert.equal(empty.json.error.code, 'invalid-input')
   } finally {
     await api.close()
     await service.shutdown()
@@ -856,7 +897,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, '0.1.0')
-    assert.equal(result.json.apiVersion, '2.10')
+    assert.equal(result.json.apiVersion, '2.11')
   } finally {
     await api.close()
     await service.shutdown()

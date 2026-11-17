@@ -48,6 +48,14 @@ export function createHostRuntime(host) {
     tunnel: null,
     token: null,
     password: null,
+    /**
+     * What to do with `password` once SSH accepts it: write it to the credential store, or
+     * remove the stored record (an explicit "this connection only"). Both reset per attempt.
+     */
+    savePassword: false,
+    forgetPassword: false,
+    /** Mirrors the credential store for `HostView.passwordSaved` (restored on load). */
+    passwordSaved: false,
     facts: null,
     /**
      * The last known remote home, managed web pid and profile. `facts`/`remote` are cleared by

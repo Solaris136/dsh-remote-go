@@ -182,20 +182,24 @@ window.__ModuleLoader__.load({
       cardConnect: ['连接', 'Connect'],
       cardDisconnect: ['断开', 'Disconnect'],
       cardReconnect: ['重连', 'Reconnect'],
-      cardRestart: ['重启远端 DSH', 'Restart remote DSH'],
-      cardRestarting: ['正在重启远端 DSH…', 'Restarting the remote DSH…'],
+      cardRestart: ['重启', 'Restart'],
+      cardRestarting: ['正在重启…', 'Restarting…'],
+      // The visible action is short; the accessible name stays the full one, so a screen
+      // reader does not hear a bare "关闭" next to "断开" on the same card.
+      cardRestartName: ['重启远端 DSH', 'Restart the remote DSH'],
       remoteRestartBusy: [
         '远端链路正在重建隧道，请稍后再试。',
         'The remote link is rebuilding its tunnel; try again shortly.',
       ],
-      cardStopRemote: ['关闭远端 DSH', 'Stop remote DSH'],
-      cardStopping: ['正在关闭远端 DSH…', 'Stopping the remote DSH…'],
+      cardStopRemote: ['关闭', 'Stop'],
+      cardStopping: ['正在关闭…', 'Stopping…'],
+      cardStopRemoteName: ['关闭远端 DSH', 'Stop the remote DSH'],
       stopRemoteTitle: ['关闭远端 DSH？', 'Stop the remote DSH?'],
       stopRemoteBody: [
-        '会停止远端 DSH 进程（本连接管理的那个），然后断开本机连接：隧道关闭、SSH 会话释放，此主机变为「断线」，连接配置与凭据保留，之后可以点「重连」重新启动一个新的远端实例。',
-        'This stops the remote DSH process managed by this connection, then releases the link: the tunnel closes, the SSH session is released and the host becomes disconnected. Its settings and credentials are kept, and Reconnect starts a fresh remote instance later.',
+        '会停止远端进程并断开连接；配置与凭据保留，可随时重连。',
+        'Stops the remote process and disconnects. Settings and credentials are kept, so you can reconnect later.',
       ],
-      stopRemoteConfirm: ['关闭远端 DSH', 'Stop remote DSH'],
+      stopRemoteConfirm: ['关闭', 'Stop'],
       stopRemoteBusy: ['正在关闭…', 'Stopping…'],
       cardDiagnose: ['诊断', 'Diagnose'],
       cardEdit: ['编辑', 'Edit'],
@@ -288,10 +292,8 @@ window.__ModuleLoader__.load({
         '远端 DSH 正在重启，正在重新挂载界面…',
         'The remote DSH is restarting; re-attaching the remote UI…',
       ],
-      'progress.stopping-remote': [
-        '正在关闭远端 DSH（停止本连接管理的远端进程）…',
-        'Stopping the remote DSH process managed by this connection…',
-      ],
+      progressRestartingTitle: ['正在重启「{name}」的远端 DSH…', 'Restarting the remote DSH on "{name}"…'],
+      'progress.stopping-remote': ['正在关闭远端 DSH…', 'Stopping the remote DSH…'],
       'progress.default': ['正在连接…', 'Connecting…'],
       'phase.ssh': ['SSH', 'SSH'],
       'phase.probe': ['探测', 'Probe'],
@@ -318,10 +320,18 @@ window.__ModuleLoader__.load({
       fingerprintReject: ['取消', 'Cancel'],
       passwordPromptTitle: ['输入 SSH 密码', 'Enter the SSH password'],
       passwordPromptBody: [
-        '「{name}」使用密码认证。密码只用于本次连接；勾选后存进 DSH 的凭据存储（不写进主机配置）。',
-        '"{name}" uses password authentication. The password is used only for this connection and is never saved.',
+        '「{name}」使用密码认证。密码默认保存到 DSH 凭据存储，之后（包括 DSH 重启后）自动使用；取消勾选「记住密码」则只用于本次连接。',
+        '"{name}" uses password authentication. The password is saved in the DSH credential store by default and reused later, including after a DSH restart; clear "Remember password" to use it for this connection only.',
       ],
-      passwordPromptRemember: ['安全保存这个密码（DSH 凭据存储）', 'Remember this password (DSH credential store)'],
+      passwordPromptBodyNoStorage: [
+        '「{name}」使用密码认证。当前环境没有可用的凭据存储，密码只用于本次连接。',
+        '"{name}" uses password authentication. No credential store is available here, so the password is used for this connection only.',
+      ],
+      passwordPromptRemember: ['记住密码（保存到 DSH 凭据存储）', 'Remember the password (DSH credential store)'],
+      passwordPromptForgetHint: [
+        '取消勾选会同时清除这台主机已保存的密码。',
+        'Clearing the box also forgets the password already saved for this host.',
+      ],
       passwordPromptNoStorage: [
         '当前环境没有可用的凭据存储，密码只用于本次连接。',
         'No credential store is available here, so the password is used for this connection only.',
@@ -352,15 +362,27 @@ window.__ModuleLoader__.load({
       'wizard.usernamePlaceholder': ['例如：ubuntu', 'e.g. ubuntu'],
       'wizard.auth': ['认证方式', 'Authentication'],
       'wizard.authKey': ['密钥文件', 'Key file'],
-      'wizard.authPassword': ['密码（仅本次，不保存）', 'Password (this connection only)'],
+      'wizard.authPassword': ['密码（可保存）', 'Password (can be saved)'],
       'wizard.keyPath': ['密钥文件路径', 'Key file path'],
       'wizard.keyPathPlaceholder': ['例如：~/.ssh/id_rsa', 'e.g. ~/.ssh/id_rsa'],
       'wizard.keyPathPick': ['选择文件…', 'Choose file…'],
       'wizard.password': ['密码', 'Password'],
-      'wizard.passwordPlaceholder': ['仅用于本次连接，不会保存', 'Used for this connection only; never saved'],
+      'wizard.passwordPlaceholder': [
+        '保存到 DSH 凭据存储，之后自动复用',
+        'Saved in the DSH credential store and reused later',
+      ],
+      'wizard.passwordRemember': ['记住密码（保存到 DSH 凭据存储）', 'Remember the password (DSH credential store)'],
+      'wizard.passwordRememberHint': [
+        '取消勾选则只用于本次连接；已有保存的密码会一并清除。',
+        'Clear the box to use this password for this connection only; a saved password is forgotten as well.',
+      ],
+      'wizard.passwordSaveFailed': [
+        '主机已保存，但密码没能写入 DSH 凭据存储；下次连接时会再询问。',
+        'The host was saved, but the password could not be stored in the DSH credential store; the next connection asks again.',
+      ],
       'wizard.authHint': [
-        '使用私钥文件认证；也可以改用密码（仅本次连接）。',
-        'Authenticates with a private-key file; a password works too, for this connection only.',
+        '使用私钥文件认证；也可以改用密码，密码默认保存在 DSH 凭据存储。',
+        'Authenticates with a private-key file; a password also works and is saved in the DSH credential store by default.',
       ],
       'wizard.jumpHost': ['跳板机（可选）', 'Jump host (optional)'],
       'wizard.jumpHostPlaceholder': ['例如：另一台已添加主机的地址', 'e.g. another saved host address'],
@@ -413,7 +435,7 @@ window.__ModuleLoader__.load({
       'settings.defaultPort': ['默认端口', 'Default port'],
       'settings.defaultAuth': ['默认认证方式', 'Default authentication'],
       'settings.defaultAuthKey': ['密钥文件', 'Key file'],
-      'settings.defaultAuthPassword': ['密码（仅本次）', 'Password (this connection only)'],
+      'settings.defaultAuthPassword': ['密码（默认保存）', 'Password (saved by default)'],
       'settings.defaultKeyPath': ['默认密钥文件', 'Default key file'],
       'settings.defaultKeyPathHint': [
         '新增主机时预填这个路径；仍可在向导里改。',
@@ -474,8 +496,8 @@ window.__ModuleLoader__.load({
       ],
       'wizard.validationIdleMinutes': ['空闲分钟数应为 1-1440', 'Idle minutes must be 1–1440'],
       'wizard.passwordSavedHint': [
-        '已保存的密码不会被读取；连接时会再询问。',
-        'The saved password is never read; you will be asked again when connecting.',
+        '已保存的密码会在连接时自动使用；只有它失效时才会再询问。',
+        'A saved password is used automatically when connecting; you are asked only if it stops working.',
       ],
       liveStreamLostTitle: ['实时连接已断开，正在轮询', 'Live updates lost; polling instead'],
       liveStreamLostBody: [
@@ -1038,6 +1060,20 @@ window.__ModuleLoader__.load({
         const payload = await apiRequest('/hosts', { method: 'POST', body: { host } })
         return payload.host
       },
+      /**
+       * Remember (or forget) the SSH password without connecting. The Host keeps it in DSH's
+       * credential store, never in `hosts.json`; `available:false` means nothing can persist it.
+       */
+      async saveHostPassword(hostId, options) {
+        const body = options || {}
+        return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/password', {
+          method: 'POST',
+          body: {
+            password: typeof body.password === 'string' ? body.password : undefined,
+            clear: body.clear === true,
+          },
+        })
+      },
       async deleteHost(hostId) {
         return apiRequest('/hosts/' + encodeURIComponent(hostId), { method: 'DELETE' })
       },
@@ -1394,6 +1430,7 @@ window.__ModuleLoader__.load({
           onClick: typeof onClick === 'function' ? onClick : undefined,
           disabled: props.disabled === true || props.busy === true,
           title: props.title,
+          'aria-label': props.ariaLabel,
           'data-testid': props.testId,
           'data-busy': props.busy === true ? 'true' : undefined,
         },
@@ -1716,12 +1753,30 @@ window.__ModuleLoader__.load({
         }
         node.setAttribute(name, value)
       }
+      /**
+       * True when `node` is rendered inside `root`. A dialog opened *by* another dialog (the
+       * stop confirmation lives in the management window) is a DOM descendant of the layer
+       * below it, not a sibling of it.
+       */
+      const holds = (root, node) => {
+        if (!root || !node || root === node) return false
+        try {
+          return typeof root.contains === 'function' && root.contains(node) === true
+        } catch (_error) {
+          return false
+        }
+      }
       const sync = () => {
         const active = top()
+        const topDialog = active === null ? null : active.dialog
         for (const layer of layers) {
           const isTop = layer === active
           setAttr(layer.dialog, 'aria-modal', isTop ? 'true' : null)
-          if (isTop) {
+          // Making the hosting layer inert would make the nested top dialog inert with it:
+          // its buttons and backdrop would stop receiving clicks and focus, which reads as a
+          // frozen window. The top dialog's own backdrop is what covers the layer below.
+          const hostsTop = !isTop && holds(layer.layer, topDialog)
+          if (isTop || hostsTop) {
             if (layer.layer && typeof layer.layer.removeAttribute === 'function') layer.layer.removeAttribute('inert')
           } else {
             setAttr(layer.layer, 'inert', '')
@@ -1787,7 +1842,18 @@ window.__ModuleLoader__.load({
         savedOverflow = null
       }
       const focusInitial = (layer) => {
-        const node = firstFocusable(layer.dialog)
+        // A destructive confirmation names its safe action: focus lands on Cancel, not on the
+        // header × or the destructive button.
+        const preferred =
+          typeof layer.initialFocusTestId === 'string' && layer.initialFocusTestId !== ''
+            ? layer.dialog.querySelector(`[data-testid="${layer.initialFocusTestId}"]`)
+            : null
+        // A control the dialog disabled in this frame cannot take focus: fall back to the
+        // ordinary first-focusable rule instead of leaving focus outside the dialog.
+        const node =
+          preferred !== null && preferred !== undefined && preferred.disabled !== true
+            ? preferred
+            : firstFocusable(layer.dialog)
         if (node !== null) {
           focusNode(node)
           return
@@ -1866,6 +1932,7 @@ window.__ModuleLoader__.load({
         return dialogStack().push({
           layer,
           dialog,
+          initialFocusTestId: options.initialFocusTestId,
           dismissible: () => dismissibleRef.current,
           close: () => {
             const close = closeRef.current
@@ -2014,7 +2081,9 @@ window.__ModuleLoader__.load({
       // `dismissible:false` while the dialog's own request is in flight: Escape and the backdrop
       // are ignored so a busy connect/delete cannot be left running behind a closed UI (S2-5).
       const dismissible = typeof onClose === 'function' && props.dismissible !== false
-      useDialogLayer({ layerRef, dialogRef, onClose, dismissible })
+      // A destructive confirmation opens on its safe action instead of the header ×: the dialog
+      // names the button by test id, so the dialog stack can focus it without a second ref.
+      useDialogLayer({ layerRef, dialogRef, onClose, dismissible, initialFocusTestId: props.initialFocusTestId })
       // A dialog whose title is drawn by its own body (the host-management window) still
       // needs the close affordance, but not an empty header strip above the page title.
       const bare = !props.title && !props.subtitle
@@ -2077,6 +2146,8 @@ window.__ModuleLoader__.load({
           testId: props.testId,
           busy: props.busy === true,
           dismissible: props.busy !== true,
+          // A destructive confirmation focuses Cancel, so Enter cannot confirm it by accident.
+          initialFocusTestId: props.cancelTestId,
           footer: footerRow(
             h(
               Button,
@@ -2100,8 +2171,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The confirmation for the destructive "Stop remote DSH" action: it names the process
-     * that will be stopped and what survives (the host, its settings and credentials).
+     * The confirmation for the destructive stop action: one line on what happens, plus what
+     * survives (the host, its settings and credentials).
      */
     function StopRemoteDialog(props) {
       const t = translatorOf(props)
@@ -2281,6 +2352,7 @@ window.__ModuleLoader__.load({
                 {
                   variant: 'ghost',
                   testId: 'host-restart',
+                  ariaLabel: t('cardRestartName'),
                   onClick: () => props.onRestart && props.onRestart(host),
                   disabled: busy || restarting || stopping,
                 },
@@ -2293,6 +2365,7 @@ window.__ModuleLoader__.load({
                 {
                   variant: 'ghost',
                   testId: 'host-stop-remote',
+                  ariaLabel: t('cardStopRemoteName'),
                   onClick: () => props.onStopRemote && props.onStopRemote(host),
                   disabled: busy || restarting || stopping,
                 },
@@ -2541,7 +2614,7 @@ window.__ModuleLoader__.load({
           'div',
           'drg-progress-head',
           h(Spinner, { size: 22 }),
-          box('h2', 'drg-progress-title', t('viewportConnecting', { name })),
+          box('h2', 'drg-progress-title', props.title || t('viewportConnecting', { name })),
         ),
         h(
           'p',
@@ -2775,6 +2848,8 @@ window.__ModuleLoader__.load({
       const locale = localeOf(props)
       const host = props.host || {}
       const status = host.status
+      // A restart keeps the same host and link: its title says so instead of "connecting".
+      const restarting = status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
       return h(
         React.Fragment,
         null,
@@ -2811,7 +2886,11 @@ window.__ModuleLoader__.load({
                   onDiagnose: props.onDiagnose,
                   onBack: props.onBack,
                 })
-              : h(ConnectProgress, { t, host }),
+              : h(ConnectProgress, {
+                  t,
+                  host,
+                  title: restarting ? t('progressRestartingTitle', { name: host.name || host.id || '' }) : undefined,
+                }),
         ),
         h(ConnectLog, { t, host }),
       )
@@ -5471,7 +5550,7 @@ window.__ModuleLoader__.load({
       if (!hostId || draft.jumpHostKnown !== false) host.jumpHost = jumpHost
       if (hostId) host.id = hostId
       if (includeAuth) {
-        // Key files and one-time passwords are the only accepted methods; anything
+        // Key files and passwords are the only accepted methods; anything
         // else (a stale draft carrying the retired "agent" choice) falls back to a key.
         if (draft.authType === 'password') {
           host.auth = { type: 'password' }
@@ -5578,10 +5657,22 @@ window.__ModuleLoader__.load({
       const locale = localeOf(props)
       const mode = props.mode === 'edit' ? 'edit' : 'add'
       const initialHost = props.initialHost || null
+      const stateView = props.state && typeof props.state === 'object' ? props.state : null
+      // Whether a credential store exists here. StateView carries the fact; the per-Host field
+      // is the fallback for a Host from before that field existed, and for an edit opened
+      // before the first state frame arrived.
+      const storageAvailable =
+        stateView !== null
+          ? stateView.passwordStorageAvailable === true ||
+            (Array.isArray(stateView.hosts) &&
+              stateView.hosts.some((entry) => entry && entry.passwordStorageAvailable === true))
+          : initialHost !== null && initialHost.passwordStorageAvailable === true
       const [draft, setDraft] = useState(() =>
         initialDraft(mode, initialHost, props.state && props.state.settings ? props.state.settings : null),
       )
       const [password, setPassword] = useState('')
+      // Remembering is the default; the box lets a shared machine opt out for this connection.
+      const [remember, setRemember] = useState(true)
       const [authDirty, setAuthDirty] = useState(mode === 'add')
       const [nameTouched, setNameTouched] = useState(mode === 'edit')
       const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
@@ -5677,7 +5768,8 @@ window.__ModuleLoader__.load({
       const submit = async (intent) => {
         // An edit that does not touch authentication keeps the stored credential, so it does
         // not need (and must not demand) a password: the connection asks for it later
-        // (audit S2-2). A password typed into the wizard stays a one-time value.
+        // (audit S2-2). A password typed into the wizard is saved by default; the box below
+        // the field turns it into a one-time value.
         const requiresPassword = draft.authType === 'password' && (mode === 'add' || authDirty)
         const invalid = validateHostDraft(
           { ...draft, password },
@@ -5697,14 +5789,31 @@ window.__ModuleLoader__.load({
           const saved = await api.saveHost(buildHostInput(draft, hostId || undefined, includeAuth))
           const id = saved && typeof saved.id === 'string' ? saved.id : hostId
           onRefresh()
+          const typedPassword = draft.authType === 'password' && String(password).trim() !== '' ? password : null
+          const rememberPassword = typedPassword !== null && storageAvailable && remember
           if (intent === 'connect' && id) {
-            // The password typed here belongs to this one connection; the overlay starts it
-            // with that value, so the user is not asked for it a second time.
-            const oneTime = draft.authType === 'password' && String(password).trim() !== '' ? password : null
-            if (typeof props.onConnect === 'function') props.onConnect(saved && saved.id ? saved : { id }, oneTime)
+            // The connection carries the typed password (so the user is not asked again) and
+            // the remember decision; the Host persists it once SSH accepts it.
+            if (typeof props.onConnect === 'function') {
+              props.onConnect(saved && saved.id ? saved : { id }, typedPassword, rememberPassword)
+            }
             return
           }
-          if (typeof props.onSaved === 'function') props.onSaved(saved)
+          // "Save" does not connect, so the Host stores (or forgets) the password directly;
+          // otherwise the value would be lost and the next connect would ask for it again.
+          let warning = null
+          if (id && typedPassword !== null && storageAvailable) {
+            try {
+              const result = await api.saveHostPassword(
+                id,
+                rememberPassword ? { password: typedPassword } : { clear: true },
+              )
+              if (rememberPassword && result && result.saved !== true) warning = t('wizard.passwordSaveFailed')
+            } catch (_error) {
+              if (rememberPassword) warning = t('wizard.passwordSaveFailed')
+            }
+          }
+          if (typeof props.onSaved === 'function') props.onSaved(saved, warning)
           props.onClose()
         } catch (error) {
           setSaving(null)
@@ -5885,39 +5994,64 @@ window.__ModuleLoader__.load({
             )
           : null,
         draft.authType === 'password'
-          ? h(
-              Field,
-              {
-                label: t('wizard.password'),
-                // An edit that leaves auth alone does not need the password: the Host asks for it
-                // when the connection actually starts (audit S2-2).
-                hint: mode === 'edit' && !authDirty ? t('wizard.passwordSavedHint') : t('wizard.passwordPlaceholder'),
-                error: fieldErrors.password ? t(fieldErrors.password) : undefined,
-                errorId: fieldErrors.password ? 'wizard-password-error' : undefined,
-              },
-              h(TextInput, {
-                type: 'password',
-                value: password,
-                placeholder: t('wizard.passwordPlaceholder'),
-                ariaLabel: t('wizard.password'),
-                testId: 'wizard-password',
-                invalid: Boolean(fieldErrors.password),
-                describedBy: fieldErrors.password ? 'wizard-password-error' : undefined,
-                onChange: (value) => {
-                  setAuthDirty(true)
-                  // Clear the field error like every other input: the password has no draft
-                  // field, so `patchDraft` was not called and the error stuck (review feedback).
-                  setFieldErrors((current) => {
-                    if (current.password === undefined) return current
-                    const next = { ...current }
-                    delete next.password
-                    return next
-                  })
-                  if (formError !== null) setFormError(null)
-                  setPassword(value)
+          ? [
+              h(
+                Field,
+                {
+                  key: 'password',
+                  label: t('wizard.password'),
+                  // An edit that leaves auth alone does not need the password: the Host asks for it
+                  // when the connection actually starts (audit S2-2).
+                  hint:
+                    mode === 'edit' && !authDirty
+                      ? t('wizard.passwordSavedHint')
+                      : storageAvailable
+                        ? t('wizard.passwordPlaceholder')
+                        : t('passwordPromptNoStorage'),
+                  error: fieldErrors.password ? t(fieldErrors.password) : undefined,
+                  errorId: fieldErrors.password ? 'wizard-password-error' : undefined,
                 },
-              }),
-            )
+                h(TextInput, {
+                  type: 'password',
+                  value: password,
+                  placeholder: storageAvailable ? t('wizard.passwordPlaceholder') : t('passwordPromptNoStorage'),
+                  ariaLabel: t('wizard.password'),
+                  testId: 'wizard-password',
+                  invalid: Boolean(fieldErrors.password),
+                  describedBy: fieldErrors.password ? 'wizard-password-error' : undefined,
+                  onChange: (value) => {
+                    setAuthDirty(true)
+                    // Clear the field error like every other input: the password has no draft
+                    // field, so `patchDraft` was not called and the error stuck (review feedback).
+                    setFieldErrors((current) => {
+                      if (current.password === undefined) return current
+                      const next = { ...current }
+                      delete next.password
+                      return next
+                    })
+                    if (formError !== null) setFormError(null)
+                    setPassword(value)
+                  },
+                }),
+              ),
+              // A password typed into this form is saved by default. The choice only matters
+              // when the form will actually carry a password (add, or an auth change).
+              mode === 'add' || authDirty
+                ? storageAvailable
+                  ? h(
+                      'div',
+                      { key: 'remember', className: 'drg-remember' },
+                      h(CheckRow, {
+                        checked: remember,
+                        label: t('wizard.passwordRemember'),
+                        testId: 'wizard-password-remember',
+                        onChange: setRemember,
+                      }),
+                      h('p', { className: 'drg-field-hint' }, t('wizard.passwordRememberHint')),
+                    )
+                  : h('p', { key: 'no-storage', className: 'drg-field-hint' }, t('passwordPromptNoStorage'))
+                : null,
+            ]
           : null,
         h(CheckRow, {
           checked: draft.autoReconnect !== false,
@@ -6485,18 +6619,21 @@ window.__ModuleLoader__.load({
       )
     }
 
-    //#region 13. one-time password prompt
+    //#region 13. password prompt
 
     function PasswordPrompt(props) {
       const t = translatorOf(props)
       const host = props.host || {}
       const [password, setPassword] = useState('')
-      const [remember, setRemember] = useState(false)
+      // Remembering is the default: the user asked for a password they type once to be reused
+      // later. It stays escapable for a borrowed or shared machine.
+      const [remember, setRemember] = useState(props.storageAvailable === true)
       const [localError, setLocalError] = useState('')
       // A failure reported by the previous connect attempt is cleared as soon as the user
       // edits the password, like every other field error.
       const [serverErrorCleared, setServerErrorCleared] = useState(false)
       const canRemember = props.storageAvailable === true
+      const previouslySaved = host.passwordSaved === true
       const submit = () => {
         // Enter can fire faster than React disables the field: the guard lives in the handler
         // itself, so one prompt can never start two `POST /connect` requests (audit S2-2).
@@ -6528,7 +6665,13 @@ window.__ModuleLoader__.load({
             ),
           ),
         },
-        box('p', 'drg-paragraph', t('passwordPromptBody', { name: host.name || host.id || '' })),
+        box(
+          'p',
+          'drg-paragraph',
+          t(canRemember ? 'passwordPromptBody' : 'passwordPromptBodyNoStorage', {
+            name: host.name || host.id || '',
+          }),
+        ),
         h(
           Field,
           {
@@ -6557,15 +6700,20 @@ window.__ModuleLoader__.load({
           }),
         ),
         canRemember
-          ? h(
-              'label',
-              { className: 'drg-check', 'data-testid': 'password-remember' },
-              h('input', {
-                type: 'checkbox',
-                checked: remember,
-                onChange: (event) => setRemember(event.target.checked === true),
-              }),
-              h('span', null, t('passwordPromptRemember')),
+          ? box(
+              'div',
+              'drg-remember',
+              h(
+                'label',
+                { className: 'drg-check', 'data-testid': 'password-remember' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: remember,
+                  onChange: (event) => setRemember(event.target.checked === true),
+                }),
+                h('span', null, t('passwordPromptRemember')),
+              ),
+              previouslySaved ? box('p', 'drg-field-hint', t('passwordPromptForgetHint')) : null,
             )
           : box('p', 'drg-field-hint', t('passwordPromptNoStorage')),
       )
@@ -6842,6 +6990,12 @@ window.__ModuleLoader__.load({
       const [manageOpen, setManageOpen] = useState(false)
       /** Which body the floating window shows. Separate from the host status: 管理界面 always brings the list back. */
       const [manageView, setManageView] = useState('list')
+      /**
+       * Which host the connect window (progress + log) belongs to. Opening a host sets it, and so
+       * do reconnect and restart: those are the same kind of link work, and the window is where
+       * their progress and log are visible.
+       */
+      const [connectHostId, setConnectHostId] = useState(null)
       // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
       // one-shot launch token, so it is fetched on demand and never persisted.
       const [remoteUrl, setRemoteUrl] = useState(null)
@@ -7105,6 +7259,10 @@ window.__ModuleLoader__.load({
       const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
       const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
       const activeHost = target ? hosts.find((host) => host && host.id === target) || null : null
+      // The connect body names one host explicitly: a restart / reconnect of a host that is not
+      // the one filling the window must still show that host's progress and log.
+      const connectHost =
+        connectHostId !== null ? hosts.find((host) => host && host.id === connectHostId) || null : activeHost
       const activeStatus = activeHost ? activeHost.status : null
       /**
        * Which attach the remote window belongs to. `remote.viewRev` changes on every successful
@@ -7281,21 +7439,38 @@ window.__ModuleLoader__.load({
       }, [remote.mode])
 
       // A failed connect drops the prompt too; the toast carries the reason.
-      const performConnect = (host, password) =>
+      const performConnect = (host, password, rememberPassword) =>
         runAction(
           host,
-          () => api.connect(host.id, typeof password === 'string' ? { password } : {}),
+          () =>
+            api.connect(
+              host.id,
+              typeof password === 'string' ? { password, rememberPassword: rememberPassword !== false } : {},
+            ),
           () => setPasswordPrompt(null),
         )
 
       /**
-       * Start a connection, asking for the one-time password first when the
-       * host uses password auth (contract: password never persisted).
+       * Show this host's connect body (progress + log) in the management window. Used by every
+       * action that rebuilds a link in place: opening a host, reconnecting, restarting.
+       */
+      const showConnectWindow = (host) => {
+        if (!host || typeof host.id !== 'string') return
+        setConnectHostId(host.id)
+        setManageView('connect')
+        setManageOpen(true)
+      }
+
+      /**
+       * Start a connection, asking for the password first when the host uses password auth
+       * and none is remembered. A saved password is never read by the Client: the Host tries
+       * it, and the prompt only appears when the Host reports an auth failure.
        */
       const openHost = (host, options) => {
         if (!host) return
         const opts = options || {}
         const password = typeof opts.password === 'string' && opts.password !== '' ? opts.password : null
+        const rememberPassword = opts.rememberPassword !== false
         const needsConnect = statusOf(host.status).connect === true
         const ready = host.status === 'connected'
         if (needsConnect && host.authType === 'password' && password === null) {
@@ -7303,8 +7478,7 @@ window.__ModuleLoader__.load({
             // A remembered password is never read by the Client: try the connect without one,
             // and only ask when the Host says that password no longer works (audit S2-2).
             pendingSwitch.current = host.id
-            setManageView('connect')
-            setManageOpen(true)
+            showConnectWindow(host)
             setTarget(host.id)
             api.activate(host.id).catch(() => {})
             setBusyHostId(host.id)
@@ -7326,17 +7500,17 @@ window.__ModuleLoader__.load({
             return
           }
           pendingSwitch.current = host.id
-          setManageView('connect')
-          setManageOpen(true)
+          showConnectWindow(host)
           setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
           return
         }
         pendingSwitch.current = ready ? null : host.id
+        setConnectHostId(host.id)
         setManageView('connect')
         setManageOpen(!ready)
         setTarget(host.id)
         api.activate(host.id).catch(() => {})
-        if (needsConnect) performConnect(host, password)
+        if (needsConnect) performConnect(host, password, rememberPassword)
       }
 
       // The switcher and the Settings page name one target: open a host, leave one, show
@@ -7434,11 +7608,14 @@ window.__ModuleLoader__.load({
         const host = pending.host
         const intent = pending.intent
         if (intent === 'open') {
-          setManageView('connect')
-          setManageOpen(true)
+          showConnectWindow(host)
           setTarget(host.id)
         }
-        if (intent === 'reconnect') setRemoteUrl(null)
+        if (intent === 'reconnect') {
+          setRemoteUrl(null)
+          // The reconnect itself is the same link work the connect window explains.
+          showConnectWindow(host)
+        }
         setPasswordPrompt({ ...pending, busy: true, error: null })
         setBusyHostId(host.id)
         const connect =
@@ -7496,16 +7673,20 @@ window.__ModuleLoader__.load({
         }
         setRemoteUrl(null)
         closeCarrier(host.id).catch(() => {})
+        // Reconnect rebuilds the link: show its progress and log like a first connection.
+        showConnectWindow(host)
         runAction(host, () => api.reconnect(host.id))
       }
 
       /**
        * Restart the managed remote web. The Host stops the pid it launched on the same SSH
        * session and re-runs `[start]`; the state stream shows `restarting-remote` and the
-       * carrier navigates to the new launch URL once the host is connected again.
+       * carrier navigates to the new launch URL once the host is connected again. The connect
+       * window is what shows the restart's progress and the log it writes.
        */
       const restartHost = (host) => {
-        if (!host) return
+        if (!host) return undefined
+        showConnectWindow(host)
         return runAction(
           host,
           () => api.restart(host.id),
@@ -7636,7 +7817,9 @@ window.__ModuleLoader__.load({
           view: manageView,
           t,
           locale,
-          host: activeHost,
+          // The connect body names its own host, so restarting or reconnecting a host that is
+          // not the one filling the window still shows that host's progress and log.
+          host: connectHost,
           state,
           loading: remote.loading,
           error: remote.error,
@@ -7644,7 +7827,12 @@ window.__ModuleLoader__.load({
           mode: remote.mode,
           onRetryLive: remote.reconnectStream,
           fingerprintBusy,
-          onClose: () => setManageOpen(false),
+          onClose: () => {
+            // The connect body is per-visit: closing the window must not leave a stale host
+            // behind for the next one (the link work itself keeps running).
+            setManageOpen(false)
+            setConnectHostId(null)
+          },
           onShowList: () => setManageView('list'),
           onAdd: () => openWizard({ mode: 'add', host: null }),
           onRefresh: remote.refresh,
@@ -7675,13 +7863,13 @@ window.__ModuleLoader__.load({
               state,
               onClose: closeWizard,
               onRefresh: remote.refresh,
-              onSaved: () => notify(t('wizard.saved'), 'success'),
+              onSaved: (_saved, warning) => notify(warning || t('wizard.saved'), warning ? 'warn' : 'success'),
               // Connect from the dialog: it saved the entry, so hand the connection over here.
               // The window is the connect window from the first frame on — progress, host key
               // and log — and the remote takes over as soon as it is up.
-              onConnect: (host, password) => {
+              onConnect: (host, password, rememberPassword) => {
                 closeWizard()
-                openHost(host, password === null ? {} : { password })
+                openHost(host, password === null ? {} : { password, rememberPassword: rememberPassword === true })
               },
             })
           : null,
@@ -8178,6 +8366,10 @@ window.__ModuleLoader__.load({
     .drg-input::-webkit-calendar-picker-indicator { display: none; opacity: 0; }
     .drg-check { display: flex; align-items: center; gap: 8px; margin: 8px 0; color: var(--dsw-alias-label-primary); font-size: 13px; cursor: pointer; }
     .drg-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--dsw-alias-brand-primary); cursor: pointer; }
+    /* The remember choice and its consequence sit together, apart from the field above. */
+    .drg-remember { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+    .drg-remember .drg-check { margin: 0; }
+    .drg-remember .drg-field-hint { margin: 0 0 0 23px; }
     .drg-advanced { margin: 8px 0; border-top: 0.5px solid var(--dsw-alias-border-l1); padding-top: 8px; }
     .drg-advanced > summary { margin-bottom: 4px; font-size: 13px; cursor: pointer; }
     .drg-advanced-body { display: grid; gap: 4px; }

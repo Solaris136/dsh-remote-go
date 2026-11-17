@@ -945,6 +945,13 @@ test('host list renders the empty state and a connected card', () => {
   }
 })
 
+/** One rendered `Button` by its test id, so a label can be asserted exactly (not by substring). */
+function buttonOf(markup, testId) {
+  const found = new RegExp(`<button[^>]*data-testid="${testId}"[^>]*>[\\s\\S]*?</button>`).exec(markup)
+  assert.ok(found, `the card must render a ${testId} button`)
+  return found[0]
+}
+
 test('a connected host card offers a remote restart and a restarting one shows its progress', () => {
   const noop = () => {}
   const listOf = (host) =>
@@ -966,8 +973,12 @@ test('a connected host card offers a remote restart and a restarting one shows i
       }),
     )
   const connected = listOf(hostView())
-  assert.match(connected, /data-testid="host-restart"/)
-  assert.match(connected, /重启远端 DSH/)
+  assert.match(buttonOf(connected, 'host-restart'), />重启</, 'the restart action reads "重启"')
+  assert.match(
+    buttonOf(connected, 'host-restart'),
+    /aria-label="重启远端 DSH"/,
+    'the short label keeps the full accessible name',
+  )
   assert.doesNotMatch(connected, /data-progress="restarting-remote"/)
 
   const restarting = listOf(
@@ -979,7 +990,7 @@ test('a connected host card offers a remote restart and a restarting one shows i
     }),
   )
   assert.match(restarting, /data-progress="restarting-remote"/)
-  assert.match(restarting, /正在重启远端 DSH…/)
+  assert.match(buttonOf(restarting, 'host-restart'), />正在重启…</)
   assert.match(restarting, /远端 DSH 正在重启，正在重新挂载界面…/)
   // The card action is disabled while the restart runs.
   const restartButton = /<button[^>]*data-testid="host-restart"[^>]*>/.exec(restarting)
@@ -1025,8 +1036,12 @@ test('a connected host card offers stopping the remote DSH and a stopping one sh
       }),
     )
   const connected = listOf(hostView())
-  assert.match(connected, /data-testid="host-stop-remote"/)
-  assert.match(connected, /关闭远端 DSH/)
+  assert.match(buttonOf(connected, 'host-stop-remote'), />关闭</, 'the stop action reads "关闭"')
+  assert.match(
+    buttonOf(connected, 'host-stop-remote'),
+    /aria-label="关闭远端 DSH"/,
+    'the short label keeps the full accessible name',
+  )
   assert.doesNotMatch(connected, /data-progress="stopping-remote"/)
   const stopButton = /<button[^>]*data-testid="host-stop-remote"[^>]*>/.exec(connected)
   assert.ok(stopButton, 'the connected card must offer the stop action')
@@ -1047,8 +1062,8 @@ test('a connected host card offers stopping the remote DSH and a stopping one sh
     }),
   )
   assert.match(stopping, /data-progress="stopping-remote"/)
+  assert.match(buttonOf(stopping, 'host-stop-remote'), />正在关闭…</)
   assert.match(stopping, /正在关闭远端 DSH…/)
-  assert.match(stopping, /正在关闭远端 DSH（停止本连接管理的远端进程）…/)
   const busyStop = /<button[^>]*data-testid="host-stop-remote"[^>]*>/.exec(stopping)
   assert.ok(busyStop, 'the stop button stays on the card while it runs')
   assert.match(busyStop[0], /disabled=""/)
@@ -1076,15 +1091,65 @@ test('a connected host card offers stopping the remote DSH and a stopping one sh
   assert.match(unreachable, /data-testid="host-reconnect"/)
 })
 
+test('the connect window titles a restart or a reconnect and prints its log', () => {
+  const restarting = render(
+    React.createElement(plugin.components.ConnectWindow, {
+      t,
+      host: hostView({
+        status: 'connecting',
+        phase: 'start',
+        progress: { code: 'restarting-remote' },
+        logs: [
+          {
+            seq: 1,
+            at: '2026-11-17T12:00:00.000Z',
+            level: 'info',
+            phase: 'start',
+            message: 'restart requested (pid=1234)',
+          },
+        ],
+      }),
+    }),
+  )
+  assert.match(restarting, /正在重启「测试机」的远端 DSH/)
+  assert.match(restarting, /远端 DSH 正在重启，正在重新挂载界面…/)
+  assert.match(restarting, /data-testid="connect-log"/)
+  assert.match(restarting, /restart requested \(pid=1234\)/)
+
+  const reconnecting = render(
+    React.createElement(plugin.components.ConnectWindow, {
+      t,
+      host: hostView({
+        status: 'connecting',
+        phase: 'ssh',
+        progress: { code: 'ssh-connecting' },
+        logs: [
+          {
+            seq: 2,
+            at: '2026-11-17T12:00:01.000Z',
+            level: 'info',
+            phase: 'ssh',
+            message: 'reconnect requested',
+          },
+        ],
+      }),
+    }),
+  )
+  assert.match(reconnecting, /正在连接「测试机」/)
+  assert.match(reconnecting, /正在连接 SSH…/)
+  assert.match(reconnecting, /reconnect requested/)
+})
+
 test('the stop confirmation names the destructive action and its consequences in both languages', () => {
   const noop = () => {}
   const zh = render(React.createElement(plugin.components.StopRemoteDialog, { t, onConfirm: noop, onCancel: noop }))
   assert.match(zh, /data-testid="stop-remote-dialog"/)
   assert.match(zh, /关闭远端 DSH？/)
-  assert.match(zh, /会停止远端 DSH 进程/)
-  assert.match(zh, /重连/)
+  assert.match(zh, /会停止远端进程/)
+  assert.match(zh, /可随时重连/)
   assert.match(zh, /data-testid="stop-remote-confirm"/)
   assert.match(zh, /data-testid="stop-remote-cancel"/)
+  assert.match(buttonOf(zh, 'stop-remote-confirm'), />关闭</, 'the confirmation action reads "关闭"')
   const zhConfirm = /<button[^>]*data-testid="stop-remote-confirm"[^>]*>/.exec(zh)
   assert.ok(zhConfirm, 'the confirmation needs its own confirm button')
   assert.match(zhConfirm[0], /drg-btn-danger|danger/, 'stopping the remote process is a destructive action')
@@ -1113,8 +1178,8 @@ test('the stop confirmation names the destructive action and its consequences in
     }),
   )
   assert.match(en, /Stop the remote DSH\?/)
-  assert.match(en, /This stops the remote DSH process/)
-  assert.match(en, /Reconnect/)
+  assert.match(en, /Stops the remote process/)
+  assert.match(en, /reconnect later/)
 })
 
 test('api.stopRemote posts the stop-remote route and returns the Host answer', async () => {
@@ -3250,6 +3315,43 @@ test('a single dialog stack sends Escape to the top layer and restores focus', (
   assert.equal(doc.activeElement, doc.opener, 'focus returns to the element that opened the stack')
 
   removeUpper()
+  removeLower()
+})
+
+test('a dialog rendered inside the dialog below it keeps the layer it lives in awake', () => {
+  const stack = plugin.__test.createDialogStack()
+  const doc = fakeDialogDocument()
+  const lowerDialog = fakeDialogNode(doc, { focusables: [] })
+  const nestedButton = fakeDialogNode(doc, { tagName: 'BUTTON' })
+  const nestedDialog = fakeDialogNode(doc, { focusables: [nestedButton] })
+  // The confirmation is rendered inside the management window: the lower *layer* contains the
+  // top *dialog*, which is what used to make both of them inert (and the dialog unclickable).
+  const lowerLayer = fakeDialogNode(doc, { focusables: [nestedDialog] })
+  const removeLower = stack.push({
+    layer: lowerLayer,
+    dialog: lowerDialog,
+    dismissible: () => true,
+    close: () => {},
+  })
+  const nestedLayer = fakeDialogNode(doc, { focusables: [nestedDialog] })
+  const closed = []
+  const removeNested = stack.push({
+    layer: nestedLayer,
+    dialog: nestedDialog,
+    dismissible: () => true,
+    close: () => closed.push('nested'),
+  })
+
+  assert.equal(nestedDialog.getAttribute('aria-modal'), 'true', 'the nested confirmation owns the modality')
+  assert.equal(lowerDialog.getAttribute('aria-modal'), null)
+  assert.equal(nestedLayer.attributes.inert, undefined)
+  assert.equal(lowerLayer.attributes.inert, undefined, 'the hosting layer must stay interactive')
+  assert.equal(doc.activeElement, nestedButton, 'focus enters the nested confirmation')
+
+  pressKey(doc, 'Escape')
+  assert.deepEqual(closed, ['nested'], 'Escape still belongs to the nested confirmation')
+
+  removeNested()
   removeLower()
 })
 

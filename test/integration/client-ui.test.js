@@ -139,6 +139,10 @@ function harnessPage() {
       await delay(window.__connectMode === 'slow' ? 1200 : 150)
       return json({ ok: true })
     }
+    const password = /^\\/dsh-remote-go\\/api\\/hosts\\/([^/]+)\\/password$/.exec(url)
+    if (password && method === 'POST') {
+      return json({ ok: true, available: true, saved: !(body && body.clear === true) })
+    }
     if (url === '/dsh-remote-go/api/settings' && method === 'POST') {
       if (window.__settingsMode === 'slow') await delay(1200)
       return json({ ok: true, settings: window.__state.settings })
@@ -414,6 +418,156 @@ window.ReactDOM = { createRoot }`,
         await page.waitForFunction(() => !document.querySelector('[data-testid="manage-window"]'), { timeout: 5000 })
       })
 
+      await t.test('the manage window can confirm stopping its remote DSH', async () => {
+        // The confirmation is rendered inside the management window. While it is on top, the
+        // layer that hosts it gets `inert` - and a nested dialog inherits that, so every button
+        // and its backdrop used to accept no input at all (the window read as frozen).
+        await openManage()
+        await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-stop-remote"]')
+        await page.waitForSelector('[data-testid="stop-remote-dialog"]', { visible: true, timeout: 5000 })
+        const nested = await page.evaluate(() => {
+          const button = document.querySelector('[data-testid="stop-remote-confirm"]')
+          const dialog = document.querySelector('[data-testid="stop-remote-dialog"]')
+          const rect = button.getBoundingClientRect()
+          const at = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          const inertAncestors = []
+          let node = dialog
+          while (node && node !== document.body) {
+            if (node.hasAttribute('inert')) inertAncestors.push(node.className)
+            node = node.parentElement
+          }
+          return { inertAncestors, hitTest: Boolean(at && at.closest('[data-testid="stop-remote-confirm"]')) }
+        })
+        assert.deepEqual(nested.inertAncestors, [], 'the confirmation must not sit inside an inert layer')
+        assert.equal(nested.hitTest, true, 'the confirmation button must receive the click')
+
+        // The hosting layer is no longer inert, so the nested backdrop is what has to shield the
+        // window below: a click on a card action must cancel the confirmation, not reach the card.
+        const behind = await page.evaluate(() => {
+          const card = document
+            .querySelector('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-open"]')
+            .getBoundingClientRect()
+          const dialog = document.querySelector('[data-testid="stop-remote-dialog"]').getBoundingClientRect()
+          const x = card.left + card.width / 2
+          const y = card.top + card.height / 2
+          const insideDialog = x >= dialog.left && x <= dialog.right && y >= dialog.top && y <= dialog.bottom
+          return { x, y, insideDialog }
+        })
+        assert.equal(behind.insideDialog, false, 'the probe point must be behind the confirmation, not on it')
+        await page.mouse.click(behind.x, behind.y)
+        await page.waitForFunction(() => !document.querySelector('[data-testid="stop-remote-dialog"]'), {
+          timeout: 5000,
+        })
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="manage-window"]'))),
+          true,
+          'a click behind the confirmation must not reach the window below',
+        )
+
+        // Reopen it for the confirmed path (the cancel above left the card untouched).
+        await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-stop-remote"]')
+        await page.waitForSelector('[data-testid="stop-remote-dialog"]', { visible: true, timeout: 5000 })
+        await page
+          .waitForFunction(() => document.activeElement?.getAttribute('data-testid') === 'stop-remote-cancel', {
+            timeout: 3000,
+          })
+          .catch((error) => {
+            throw new Error(`the safe action did not take focus in the stop confirmation: ${error.message}`)
+          })
+        const before = await page.evaluate(
+          () => window.__calls.filter((call) => /\/stop-remote$/.test(call.url)).length,
+        )
+        await page.click('[data-testid="stop-remote-confirm"]')
+        await page.waitForFunction(
+          (count) => window.__calls.filter((call) => /\/stop-remote$/.test(call.url)).length > count,
+          { timeout: 5000 },
+          before,
+        )
+        await page.waitForFunction(() => !document.querySelector('[data-testid="stop-remote-dialog"]'), {
+          timeout: 5000,
+        })
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="manage-window"]'))),
+          true,
+          'the management window stays usable after the stop',
+        )
+        await closeManage()
+      })
+
+      await t.test('restart and reconnect open the connect window with their progress and log', async () => {
+        const patchHost = (hostId, patch) =>
+          page.evaluate(
+            ({ hostId, patch }) => {
+              window.__pushState({
+                ...window.__state,
+                rev: window.__state.rev + 1,
+                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
+              })
+            },
+            { hostId, patch },
+          )
+        const logLine = (seq, message) => ({
+          seq,
+          at: new Date().toISOString(),
+          level: 'info',
+          phase: 'start',
+          message,
+        })
+        await openManage()
+
+        // Restart: the connect window carries the restart title, progress and log.
+        await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-restart"]')
+        await page.waitForFunction(() => window.__calls.some((call) => /\/restart$/.test(call.url)), { timeout: 5000 })
+        await patchHost('h_a', {
+          status: 'connecting',
+          phase: 'start',
+          progress: { code: 'restarting-remote', params: { pid: 1, port: 1 } },
+          logs: [logLine(1, 'restart requested (pid=1)')],
+        })
+        await page.waitForSelector('[data-testid="manage-live"] [data-progress="restarting-remote"]', {
+          timeout: 5000,
+        })
+        assert.match(
+          await page.$eval('[data-testid="manage-live"]', (node) => node.textContent),
+          /正在重启「host-a」的远端 DSH/,
+          'the restart opens the connect body with its own title',
+        )
+        assert.match(
+          await page.$eval('[data-testid="connect-log"]', (node) => node.textContent),
+          /restart requested \(pid=1\)/,
+          'the restart log is printed in the connect window',
+        )
+        await patchHost('h_a', { status: 'connected', phase: 'ready', progress: null })
+        await page.waitForFunction(() => !document.querySelector('[data-testid="connect-log"]'), { timeout: 5000 })
+        await page.waitForSelector('[data-testid="host-list"]', { timeout: 5000 })
+
+        // Reconnect: a host that is not the window's target still gets its own connect window.
+        await page.click('[data-testid="host-card"][data-host-id="h_v6"] [data-testid="host-reconnect"]')
+        await page.waitForFunction(() => window.__calls.some((call) => /\/reconnect$/.test(call.url)), {
+          timeout: 5000,
+        })
+        await patchHost('h_v6', {
+          status: 'connecting',
+          phase: 'ssh',
+          progress: { code: 'ssh-connecting' },
+          logs: [logLine(2, 'reconnect requested')],
+        })
+        await page.waitForSelector('[data-testid="manage-live"] [data-progress="ssh-connecting"]', {
+          timeout: 5000,
+        })
+        assert.match(
+          await page.$eval('[data-testid="manage-live"]', (node) => node.textContent),
+          /正在连接「ipv6-host」/,
+          'the connect window names the reconnecting host, not the one filling the window',
+        )
+        assert.match(await page.$eval('[data-testid="connect-log"]', (node) => node.textContent), /reconnect requested/)
+
+        // Put the harness hosts back for the scenarios that follow.
+        await patchHost('h_v6', { status: 'disconnected', phase: null, progress: null, logs: [] })
+        await page.waitForSelector('[data-testid="host-list"]', { timeout: 5000 })
+        await closeManage()
+      })
+
       await t.test('Tab stays inside the dialog', async () => {
         await openWizard('add')
         const inside = await page.evaluate(async () => {
@@ -479,6 +633,43 @@ window.ReactDOM = { createRoot }`,
         await page.waitForFunction(() => !document.querySelector('[data-testid="host-wizard"]'))
       })
 
+      await t.test('the wizard saves a password by default and can turn it off', async () => {
+        await openWizard('add')
+        await page.type('[data-testid="wizard-address"]', 'host-password')
+        await page.select('[data-testid="wizard-auth"]', 'password')
+        await page.waitForSelector('[data-testid="wizard-password"]', { visible: true, timeout: 5000 })
+        await page.type('[data-testid="wizard-password"]', 'secret')
+        const remembered = await page.evaluate(
+          () => document.querySelector('[data-testid="wizard-password-remember"]')?.checked,
+        )
+        assert.equal(remembered, true, 'the wizard remembers a typed password by default')
+        await page.click('[data-testid="wizard-save"]')
+        await page.waitForFunction(() => !document.querySelector('[data-testid="host-wizard"]'), { timeout: 5000 })
+        const stored = await page.evaluate(
+          () => window.__calls.filter((call) => /\/password$/.test(call.url)).at(-1) ?? null,
+        )
+        assert.ok(stored, 'the plain save action also stores the password in the credential store')
+        assert.equal(stored.body.password, 'secret')
+        assert.equal(stored.body.clear, false)
+
+        // The connect action hands the password and the decision to the connection instead.
+        await page.evaluate(() => {
+          window.__calls = []
+        })
+        await openWizard('add')
+        await page.type('[data-testid="wizard-address"]', 'host-password-2')
+        await page.select('[data-testid="wizard-auth"]', 'password')
+        await page.waitForSelector('[data-testid="wizard-password"]', { visible: true, timeout: 5000 })
+        await page.type('[data-testid="wizard-password"]', 'secret2')
+        await page.click('[data-testid="wizard-password-remember"]')
+        await page.click('[data-testid="wizard-connect"]')
+        await page.waitForFunction(() => window.__calls.some((call) => /\/connect$/.test(call.url)), { timeout: 5000 })
+        const connect = await page.evaluate(() => window.__calls.filter((call) => /\/connect$/.test(call.url)).at(-1))
+        assert.equal(connect.body.password, 'secret2')
+        assert.equal(connect.body.rememberPassword, false)
+        await page.waitForFunction(() => !document.querySelector('[data-testid="host-wizard"]'), { timeout: 5000 })
+      })
+
       await t.test('a saved password is tried first and a double Enter posts once', async () => {
         await openManage()
         await page.evaluate(() => {
@@ -501,6 +692,10 @@ window.ReactDOM = { createRoot }`,
           window.__connectAttempts = 0
         })
         await page.type('[data-testid="password-input"]', 'secret')
+        const rememberDefault = await page.evaluate(
+          () => document.querySelector('[data-testid="password-remember"] input')?.checked,
+        )
+        assert.equal(rememberDefault, true, 'remember is on by default')
         await page.evaluate(() => {
           const input = document.querySelector('[data-testid="password-input"]')
           // Two Enter events in the same tick: the synchronous guard must let one request out.
@@ -515,8 +710,34 @@ window.ReactDOM = { createRoot }`,
           prompt: Boolean(document.querySelector('[data-testid="password-prompt"]')),
         }))
         assert.equal(submitted.attempts, 1, 'a double Enter must not post twice')
-        assert.deepEqual(submitted.last.body, { password: 'secret', rememberPassword: false })
+        assert.deepEqual(submitted.last.body, { password: 'secret', rememberPassword: true })
         assert.equal(submitted.prompt, false)
+        await closeManage()
+      })
+
+      await t.test('unchecking remember sends a connection-only password', async () => {
+        await openManage()
+        await page.evaluate(() => {
+          window.__connectMode = 'auth-error'
+          window.__connectAttempts = 0
+        })
+        await page.click('[data-testid="host-card"][data-host-id="h_pw"] [data-testid="host-open"]')
+        await page.waitForSelector('[data-testid="password-prompt"]', { visible: true, timeout: 5000 })
+        await page.evaluate(() => {
+          window.__connectMode = 'ok'
+        })
+        await page.type('[data-testid="password-input"]', 'secret')
+        await page.click('[data-testid="password-remember"] input')
+        await page.click('[data-testid="password-submit"]')
+        await page.waitForFunction(
+          () => window.__calls.some((call) => /\/connect$/.test(call.url) && call.body?.password === 'secret'),
+          { timeout: 5000 },
+        )
+        const last = await page.evaluate(() => window.__calls.filter((call) => /\/connect$/.test(call.url)).at(-1))
+        assert.deepEqual(last.body, { password: 'secret', rememberPassword: false })
+        await page.waitForFunction(() => !document.querySelector('[data-testid="password-prompt"]'), {
+          timeout: 5000,
+        })
         await closeManage()
       })
 

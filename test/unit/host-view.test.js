@@ -101,3 +101,18 @@ test('HostView carries the warning and version parity the Client renders', () =>
   assert.equal(view.versionParity.status, 'different')
   assert.equal(view.targetVersion, '0.2.2-rc.3')
 })
+
+test('passwordSaved reflects the credential store, never a one-time password in memory', () => {
+  const passwordEntry = { entry: { auth: { type: 'password' } } }
+  assert.equal(
+    hostView(runtimeOf({ ...passwordEntry, password: 's3cret', passwordSaved: false }), ctx).passwordSaved,
+    false,
+    'a password used for this connection alone is not a saved one',
+  )
+  assert.equal(
+    hostView(runtimeOf({ ...passwordEntry, passwordSaved: true }), ctx).passwordSaved,
+    true,
+    'the runtime mirror of the store is what the Client reads',
+  )
+  assert.equal(hostView(runtimeOf({ passwordSaved: true }), ctx).passwordSaved, false, 'key auth never has one')
+})

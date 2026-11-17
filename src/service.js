@@ -291,6 +291,42 @@ export class RemoteGoService extends EventEmitter {
     return startConnect(this.ctx, id, options)
   }
 
+  /**
+   * Remember (or forget) the SSH password without opening a connection. The wizard's plain
+   * "save" action uses this, and it is the only way to refresh a saved password that does not
+   * require a successful connect first. The value never enters `hosts.json`; `available:false`
+   * means no credential store can persist it here.
+   * @param {string} id - host id.
+   * @param {{ password?: string, clear?: boolean }} [options]
+   * @returns {Promise<{ available: boolean, saved: boolean }>}
+   */
+  async saveHostPassword(id, options = {}) {
+    await this.init()
+    const runtime = runtimeOf(this.ctx, id)
+    const available = this.secrets ? this.secrets.available() === true : false
+    if (!available) return { available: false, saved: false }
+    if (options.clear === true) {
+      const removed = await this.secrets.remove(id)
+      // The password in memory belonged to the record just removed: a later connect must ask
+      // instead of silently reusing a credential the user asked to forget.
+      runtime.password = null
+      runtime.passwordSaved = !removed
+      this.emitState()
+      return { available, saved: false }
+    }
+    const password = typeof options.password === 'string' ? options.password : ''
+    if (password === '') {
+      throw errors.invalidInput('password', { zh: '密码不能为空。', en: 'The password must not be empty.' })
+    }
+    const saved = await this.secrets.set(id, password)
+    // An explicit save also arms the in-memory copy, so clicking "connect" next does not ask
+    // again for a password this process just proved and stored.
+    runtime.password = password
+    runtime.passwordSaved = saved
+    this.emitState()
+    return { available, saved }
+  }
+
   async disconnect(id, options = {}) {
     await this.init()
     return disconnectHost(this.ctx, runtimeOf(this.ctx, id), options)

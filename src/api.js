@@ -326,7 +326,20 @@ export function createApi(options) {
       const body = await readJson(req)
       const result = await service.connect(id, {
         password: typeof body.password === 'string' ? body.password : undefined,
-        rememberPassword: body.rememberPassword === true,
+        // Remembering is the default for a password that is actually supplied; the Client
+        // sends false only when its "remember" box is unchecked.
+        rememberPassword: body.rememberPassword !== false,
+      })
+      return { ok: true, ...result }
+    },
+    // Remember (or forget) the SSH password without connecting: the wizard's save action and
+    // an explicit credential refresh. The value never enters hosts.json; `available:false`
+    // means nothing can be persisted here.
+    'POST password': async (id, req) => {
+      const body = await readJson(req)
+      const result = await service.saveHostPassword(id, {
+        password: typeof body.password === 'string' ? body.password : undefined,
+        clear: body.clear === true,
       })
       return { ok: true, ...result }
     },

@@ -38,7 +38,29 @@ export async function initRegistry(ctx) {
   if (ctx.state.initialized) return
   await ctx.store.load()
   for (const host of ctx.store.listHosts()) ensureRuntime(ctx, host)
+  // `passwordSaved` is a fact about the credential store, not about this process: without this
+  // read the Client would ask again after every DSH restart even though the password is saved,
+  // and the saved value would never be tried.
+  await restoreSavedPasswords(ctx)
   ctx.state.initialized = true
+}
+
+/**
+ * Re-read which password-auth hosts have a saved password. Only presence is loaded; the secret
+ * itself stays in the credential store until a connection actually needs it.
+ * @param {object} ctx - service context.
+ */
+async function restoreSavedPasswords(ctx) {
+  if (!ctx.secrets) return
+  await Promise.all(
+    [...ctx.state.runtimes.values()].map(async (runtime) => {
+      if (runtime.entry.auth?.type !== 'password') {
+        runtime.passwordSaved = false
+        return
+      }
+      runtime.passwordSaved = await ctx.secrets.has(runtime.id)
+    }),
+  )
 }
 
 function hostViewFor(ctx, runtime) {
@@ -61,6 +83,8 @@ export function snapshot(ctx) {
     settings: ctx.store.getSettings(),
     activeHostId: ctx.state.activeHostId,
     firstRun: hosts.length === 0,
+    /** Whether a password typed for any host can be persisted at all (the Client hides the choice). */
+    passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,
     // Store-wide, and deliberately not per host: a quarantined hosts.json leaves this list
     // empty, which is exactly the case the user has to be told about.
     storeCorrupt: ctx.store?.hostsCorrupt === true,
@@ -69,6 +93,12 @@ export function snapshot(ctx) {
 
 export async function saveHost(ctx, rawHost) {
   await ctx.init()
+  // The auth mode as it is stored now: a switch away from password must not leave its secret
+  // behind as an orphaned credential record.
+  const previousAuth =
+    rawHost && typeof rawHost === 'object' && typeof rawHost.id === 'string'
+      ? (ctx.store.getHost(rawHost.id)?.auth?.type ?? null)
+      : null
   let entry
   try {
     entry = await ctx.store.upsertHost(rawHost, { settings: ctx.store.getSettings() })
@@ -90,9 +120,14 @@ export async function saveHost(ctx, rawHost) {
       en: `Invalid host entry: ${message}`,
     })
   }
-  ensureRuntime(ctx, entry)
+  const runtime = ensureRuntime(ctx, entry)
+  if (previousAuth === 'password' && entry.auth?.type !== 'password') {
+    await ctx.secrets?.remove(entry.id)
+    runtime.passwordSaved = false
+    runtime.password = null
+  }
   ctx.emitState()
-  return hostViewFor(ctx, runtimeOf(ctx, entry.id))
+  return hostViewFor(ctx, runtime)
 }
 
 export async function removeHost(ctx, id) {
@@ -110,6 +145,8 @@ export async function removeHost(ctx, id) {
   }
   ctx.state.runtimes.delete(id)
   await ctx.store.removeHost(id)
+  // The host is gone: its saved password must not outlive it in the credential store.
+  await ctx.secrets?.remove(id)
   if (ctx.state.activeHostId === id) ctx.state.activeHostId = null
   ctx.emitState()
   return { ok: true }
