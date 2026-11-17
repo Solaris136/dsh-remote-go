@@ -360,7 +360,7 @@ for (const name of workflowNames) {
 }
 
 // 7. No build artifact in the index. The `.js` twins of the TypeScript sources and the composed
-// browser half (`client.js`, built from `client/src/main.ts` + `client/template.js` since P3a) are
+// browser half (`client.js`, built from the modules under `client/src/` + `client/template.js`) are
 // generated output (`.gitignore`, decision I in .agents/refactor/DECISIONS.md): `pnpm build`
 // recreates them for every consumer, so a tracked one is a stale copy or a `git add -f` accident -
 // and an accidental commit would resurrect the two-mode layout the decision retired.

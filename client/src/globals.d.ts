@@ -1,5 +1,6 @@
 // Names that exist inside the factory written by `client/template.js` — never imported from a
-// module. `client/src/main.ts` is the implementation; the loader shell around it is what supplies
+// module. The modules under `client/src/` are the implementation (one script scope, concatenated in
+// the order `scripts/build-client.mjs` lists them); the loader shell around them is what supplies
 // these three bindings, so a type check of the implementation alone needs them declared here.
 import type * as ReactNamespace from 'react'
 
@@ -27,16 +28,16 @@ declare global {
   const React: typeof ReactNamespace
 
   /**
-   * The stylesheet: `const CSS = \`…\`` in `client/src/main.ts`. Declared here because the value is
-   * contract data (the `<style>` body) rather than code, and P3c will hand it to the template.
-   * Until then `main.ts` declares the same name (the P3a move is verbatim), so `tsc` reports one
-   * expected redeclaration: the diagnostic marks the hand-off, not a behaviour problem.
+   * The stylesheet: `const CSS = \`…\`` in `client/src/styles.ts`. Declared here because the value
+   * is contract data (the `<style>` body) rather than code, and P3c will hand it to the template.
+   * Until then `styles.ts` declares the same name, so `tsc` reports one expected redeclaration: the
+   * diagnostic marks the hand-off, not a behaviour problem.
    */
   const CSS: string
 
   /**
-   * The plugin face. `client/src/main.ts` assembles it as its last statement; the template returns
-   * it to the loader exactly as written. Same expected redeclaration as `CSS` until P3b makes the
+   * The plugin face. `client/src/plugin.ts` assembles it as its last statement; the template returns
+   * it to the loader exactly as written. Same expected redeclaration as `CSS` until P3c makes the
    * template own this binding.
    */
   const __drgExport: unknown

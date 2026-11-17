@@ -116,9 +116,9 @@ if (build.status !== 0)
 const problems = []
 
 // The browser half is a single composed artifact, not part of the tsconfig program above: it uses
-// the DOM lib while `src/` uses Node's, and its sources are `client/src/main.ts` plus the loader
-// shell in `client/template.js` (P3a, design-client.md C1). Same one-way rule: hash it, let its
-// build run, and require that the build had nothing to rewrite.
+// the DOM lib while `src/` uses Node's, and its sources are the modules under `client/src/` plus
+// the loader shell in `client/template.js` (P3a, design-client.md C1). Same one-way rule: hash it,
+// let its build run, and require that the build had nothing to rewrite.
 const CLIENT_ARTIFACT = 'client.js'
 const clientBefore = await hashFile(CLIENT_ARTIFACT)
 const clientBuild = spawnSync(process.execPath, [path.join(root, 'scripts', 'build-client.mjs')], {
@@ -165,5 +165,5 @@ if (problems.length > 0) {
 console.log(
   `[verify-artifacts] OK: ${artifacts.length} artifact(s) freshly produced from ${sources.length} source(s)` +
     (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : '') +
-    `; ${CLIENT_ARTIFACT} freshly composed from client/src/main.ts + client/template.js; no orphan artifacts`,
+    `; ${CLIENT_ARTIFACT} freshly composed from the client/src modules + client/template.js; no orphan artifacts`,
 )
