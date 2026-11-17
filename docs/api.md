@@ -341,14 +341,14 @@ data: {}
 
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.1.0", "apiVersion": "2.11", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.2.0", "apiVersion": "2.11", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
 返回插件入口与 client-module 图行，用于验收/排障（`home` / `stateDir` 等机器路径与用户名同样过脱敏，
 `storeCorrupt` 表示 `hosts.json` 被隔离过）：
 ```json
-{ "ok": true, "plugin": { "id": "dsh-remote-go", "version": "0.1.0" }, "at": "…",
+{ "ok": true, "plugin": { "id": "dsh-remote-go", "version": "0.2.0" }, "at": "…",
   "home": "C:\\Users\\<user>", "stateDir": "C:\\Users\\<user>\\.dsh\\remote-go", "storeCorrupt": false,
   "hostVersion": "0.2.2-rc.3", "engineNodeRange": ">=24.9.0",
   "entry": { "id": "dsh-remote-go", "name": "dsh-remote-go" },

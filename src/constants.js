@@ -19,7 +19,7 @@ export const REMOTE_VIEW_PREFIX = '/dsh-remote-go/remote/'
 export const API_HEADER = 'x-dsh-remote-go'
 
 export const PLUGIN_ID = 'dsh-remote-go'
-export const PLUGIN_VERSION = '0.1.0'
+export const PLUGIN_VERSION = '0.2.0'
 
 /**
  * DSH's own lower bound, mirrored from this package's `engines.dsh`. The client may only

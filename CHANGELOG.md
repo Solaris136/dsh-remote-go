@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-17
+
+第二个版本：把远端 DSH 从「能连上」推进到「日常可用」——连接窗口贯穿首次连接、重连与重启，SSH 密码默认
+记忆，远端 DSH 可在卡片上重启或关闭并在自重启后自动重挂；浏览器端（`dsh web`）也能在同源 iframe 里整窗
+使用远端界面。同时完成一轮独立安全审计（Host/Origin 准入、同源代理白名单、下载目标加固、错误与日志脱敏等）。
+
 ### 新增
 
 - **SSH 密码默认保存并跨重启复用**：密码认证的主机在 SSH 认证通过后把密码写入 DSH 凭据存储（密码弹窗与
@@ -16,6 +22,56 @@
   询问；取消勾选则只用于本次连接并清除已有记录。新增 `POST /hosts/:id/password`，添加主机时点「保存」而
   不连接也会记住密码。`HostView.passwordSaved` 在 Host 启动时从凭据存储恢复，`StateView` 增加
   `passwordStorageAvailable`，契约升到 **2.11**（只增字段）。
+
+- **远端 DSH 关闭**：主机清单里已连接的卡片（以及在 `remote-unreachable` 错误状态上）新增「关闭远端 DSH」，
+  与「重连」「重启远端 DSH」并列。它是破坏性操作，先弹确认框；确认后 Host 在同一条 SSH 会话上停掉**本连接
+  绑定的那一个**远端 web 进程，然后关隧道、释放 SSH，主机落到 `disconnected`（配置与凭据保留，不会自动重连），
+  之后点「重连」就能起一个全新的实例。停掉时复用重启的授权：run registry 命名该 pid、`/proc` starttime 仍是
+  同一进程且 profile/home 一致；重挂接管的实例不会被自动或静默停止——显式关闭按当时记录的 `/proc` 身份只关
+  那一个 pid（重启时它会并入冲突提示由用户选择）；`alongside` 保留的进程、pid 复用与无法证明归属的进程一律
+  不杀（返回可解释的 `stop-unavailable`，409）。pid 已消失时只清理 registry、不发任何信号；`keepAlive:"stop"`
+  也不会在收尾时补发第二次停止。
+  `run/web.json` 随停止被清掉，下一次连接不会误弹「远端已有手工启动的 DSH」。API 契约升到 **2.9**：新增
+  `POST /hosts/:id/stop-remote`、进度码 `stopping-remote` 与错误码 `stop-unavailable`。
+- **远端 DSH 重启**：主机清单里已连接的卡片新增「重启远端 DSH」。Host 用同一条 SSH 会话停掉自己拉起的
+  远端进程，重新 `npx` 启动、刷新 `run/web.json`、按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，
+  不会再次索要密码或主机指纹。只有同时满足「run registry 命名」「本连接启动过」「`/proc` starttime 仍是同一
+  进程且 profile/home 一致」才会 kill；重挂发现的 pid、pid 复用与 `alongside` 保留的进程一律不杀。冲突提示在
+  kill 之前，取消不做任何破坏；动作内新建的隧道在取消/断开/删主机时关闭，不留持有已释放 SSH 的监听器。
+- **远端自重启（插件市场更新等）自动恢复**：新增 `POST /hosts/:id/restart`、`remote-unreachable` SSE 事件
+  （疑似 / 确认 / 恢复，带 15s 冷却）、`RemoteView.viewRev`（承载方据此重新导航）与 `remoteHeartbeat` 设置
+  （默认 30s 可关，保存即生效）。同源代理与隧道不再把一次 `ECONNREFUSED` 当成进程重启；连续两次探活失败后
+  才重读远端真实状态——候选必须能证明「同一 profile、同一 `~/.dsh`、端口属于该 pid，且最新就绪行给出 launch
+  token」，`/proc` 进程扫描只用于解释失败；拿不到 token 不会假装重挂，而是报可解释的 `remote-unreachable` 并
+  保留主机与配置。版本来自 npx pin 或被加载包的 `package.json`，证明不了就保持未知、不写进 registry。远端健康
+  但隧道坏时重建本地监听器（先建新、再关旧；重建后 `viewRev` 自增让承载方重新 `open` 并导航，关闭旧 listener
+  会短暂断开现有 WebSocket/下载，属预期），而不是误判进程重启。重挂发现的监听进程没有 kill 权，点「重启远端
+  DSH」会先弹 stop/alongside/cancel 提示，用户选择前不会静默启动第二个实例。重挂期间显示 `restarting-remote`
+  进度码而不是「连接断开」；诊断报告新增最近 10 次重启 / 重挂记录。
+- **本地 LLM 会话能看到主机列表与连接状态**：Host 半端向 DSH 的 `tools` 服务注册一个**只读**工具
+  `remote_hosts_list`，本地会话不必再让用户先去点主机条就能回答「我有几台主机 / 哪台连着 / 那台为什么失败」。
+  参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，
+  超出时带 `truncated`），每行是 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH
+  版本。返回值是**字段白名单投影**（再用 `redactText` 脱敏、按字段限长）：连接失败的原因原文里带的
+  `SHA256:…` 主机指纹与密钥文件路径（`.ssh` 下路径，以及 `.pem` / `.key` / `.ppk` 或 `id_*` 命名的密钥文件）
+  会分别替换成 `<fingerprint redacted>` / `<private-key path>`，因此结果里既没有密码、token、cookie，也没有
+  指纹原文或私钥路径；`output.schema` 也声明为 `additionalProperties: false`，投影里多一个字段会让调用失败而
+  不是漏出去。**维护主机仍然在主机条的「添加主机 / 管理界面」里**——工具没有写操作面（没有 add / update / remove / connect / disconnect），因此也不需要审批或
+  确认门；它只注册在本地 Host 半端，远端 DSH 不加载本插件，远端会话看不到它。`tools` 是可选服务：注册走
+  `ctx.inject`，宿主没有它时只少这一个工具，主机条与本地 API 照常工作，服务晚到或被替换时会重新注册。
+- **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
+  本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
+  HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端
+  自己的回环 authority；远端的 session cookie 保存在 Host 侧 per-host jar，浏览器既拿不到远端 cookie，
+  本地 cookie 也不会被转发出去。主机条与远端文件桥用同一份 `mountHostRow` / `mountGuestTools` 注入
+  iframe（同源直接调用，不依赖 `unsafe-eval`），点「本地」仍走同一条意图通道。
+- 客户端载体拆成 `desktop`（Chromium guest）与 `web`（同源 frame）两个后端，共用同一个窗口池、热窗口、
+  切换、抢占与释放语义；`carrierSurface()` 是唯一的载体选择点。
+- `GET /hosts/:id/open` 增加同源 `webUrl`；API 契约升到 **2.7**。桌面端继续只用回环 `url`，旧 Host 响应
+  不会阻塞桌面路径。
+- 测试：`remote-proxy` 单测（路径 / cookie jar / 同一源栅栏 / 头部与 Location 改写 / HTTP 与升级转发）；
+  隔离 `dsh web` 的同源代理端到端（真实首页、插件资源、WebSocket 101）；真实浏览器的载体验收
+  （iframe 里跑起真实远端页面、注入主机条、点「本地」回到本地）。
 
 ### 变更
 
@@ -69,118 +125,6 @@
   所有分支统一检查；主机条/能力桥注入失败按 1.5s 起退避重试（桌面与浏览器载体都接）；`executeJavaScript`
   失败与 intent drain 超时不再静默卡死；`localStorage` 分区不可被 `delete` 绕过；`findSlot`、重装幂等、
   `readStart` 单位、`disposeCarrier` 清理 launch URL 等低危项一并修正。审计来源见 PR #63。
-
-### 安全
-
-- **`ErrorView` 统一脱敏并限长**（独立安全审计 A）。失败连接会把远端进程输出塞进 `ErrorView.technical`，
-  而远端 `web.log` 的第一行就是带会话 token 的 launch URL。错误视图此前没有脱敏；连接日志此前也没有——
-  `remote-web.js` 的 `onLine` 把同一行写进连接 ring，`HostView.logs`、SSE 状态帧与诊断导出都读它，所以
-  **成功连接进行中**的 `/state` / `/events` 就带 token。现在两处都封住：`toErrorView` 在返回前跑
-  `redactObject`（`technical` / `detail` / `nextSteps` 里的 token、`Authorization`、cookie、私钥与家目录
-  全部替换，`technical` 与单条日志都截断到 1200 个字符），`appendConnectLog` 在写入 ring 时先 `redactText`。
-  `redactText` 同时补上裸 `token=`/`#token=`、`x-*-token` 头与
-  `/Users/` 路径，并且不再把 `ssh -p 2222` 的端口当成密码脱掉。
-- **同源栅栏按回环等价比较 `Origin`**（审计 B）。本地 API 用字符串比较 `Origin` 与内核给的
-  `127.0.0.1:<port>`，用 `localhost` 打开 GUI 时 `/state`、`/health`、`/events` 全 403，表现为「能读不能写」。
-  改用 `request-trust.js` 的 `sameServerOrigin`：`127.0.0.1` / `localhost` / `[::1]` 与默认端口折算视为同一
-  origin，外部域、其它端口、其它协议仍然拒绝；`Origin` 的 authority 按原样（大小写不敏感）比较，
-  `user@host`、尾点、补零端口这类被解析器改写的值不会被当成回环。
-- **同源代理收紧为双向白名单**（审计 C）。请求头从黑名单改成白名单，本机会话的 `authorization`、`cookie`、
-  `x-dsh-*`、`forwarded` / `x-forwarded-*`、`sec-fetch-*` 不再发给远端（只有 `accept*` / `content-*` /
-  `range` / `if-*` / `cache-control` / `user-agent` / `x-requested-with` 与 WebSocket 握手头通过）；响应头按名
-  丢弃 `clear-site-data`、`access-control-*`、`refresh`、`content-location`、`report-to`、`nel`、
-  `permissions-policy`、`alt-svc`，远端不能再借此清本机 cookie 或改写浏览器策略；`Location` 只折回远端自身
-  listener，其它绝对地址（外部域、`//host`、含反斜杠的「相对」引用如 `/\evil`、其它 loopback 端口）直接
-  丢弃；上游 30s 无响应即 502 并销毁两侧；**WebSocket 的 101 响应头也过同一套策略**（此前原样透传，
-  `Set-Cookie` / 策略头可借握手绕过）；`accept-encoding` 作为内容协商头转发；per-host cookie jar 限 64 条 /
-  值 4 KiB，`Secure` cookie 不进明文 jar。
-- **数据层不再静默丢配置**（审计 D）。`hosts.json` / `settings.json` / `secrets.json` **内容不可解析**时
-  先改名为 `<name>.corrupt-<stamp>` 再回落到默认值，避免下一次写入把全部主机（含 pinned 指纹）永久覆盖；只是
-  读不了（EACCES/IO）的文件只回落、不改名，避免把权限问题变成空主机列表。损坏标记通过
-  `StateView.storeCorrupt` / `HostView.storeCorrupt` 与 `/diagnostics/self` 暴露，并在下一次成功写回后清除
-  （不会永远提示）。`POST /settings` 改为与
-  **当前值**深合并（嵌套 patch 不再把 `autoReconnect.baseDelayMs` 从 5000 重置成 800）；`saveToken` 先
-  `load()`，不会再以 `{}` 覆盖已有 secrets。
-- **下载目标加固**（审计 F）。`POST /downloads` 的 `destination` 只允许本机用户主目录之下，并拒绝
-  `Startup` / `autostart` / `systemd` / `Start Menu\Programs` 等自启动位置、macOS 的
-  `Library/LaunchAgents` / `LaunchDaemons` / `StartupItems`、`.ssh` / `.gnupg` 等凭据目录、
-  `.bashrc` / `.profile` / `.zshrc` / `.xsessionrc` / `.config` / `.local` 等登录脚本与配置目录、系统目录与
-  `shell:startup` 一类路径（Windows / macOS 的路径比较按大小写不敏感处理）；校验是同步的（坏路径直接 400，
-  不再先建 `preparing` 任务再异步报错），并且 API 预检与写入用**同一个 home 根**（job 携带 `home`，不再回落到
-  `os.homedir()`）。**远端命名的最终路径同样
-  过关**：`destination=~/.config` + 远端文件夹名 `autostart`、`~` + 远端文件名 `.bash_login`，以及会在其下
-  生成受保护路径的上级目录都在创建前被拒绝（零写入）。主机 `id` 只由 Host 签发（客户端传来的未知/畸形 id
-  一律替换成新的 `h_*`）；`POST /local-version` 只在探测失败时接受回填、不得低于 `engines.dsh` 下限，格式
-  不合法返回 400。
-- **错误与契约修正**（审计 E）。`internal` 由 409 改为 500；畸形主机 id 与越界的 `keyfile/list` 由 500 改为
-  400 `invalid-input`（且不回显路径）；>1 MiB 请求体先回 413 JSON 再结束，不再让客户端看到 `ECONNRESET`；
-  SSE 限 8 个客户端、慢消费者与超大帧有上限；`/health` 收敛为 `{ "ok": true }`；`/diagnostics/self` 的
-  `home` / `stateDir` 脱敏。
-- **本地 HTTP API 与同源代理补上 DSH 的 Host/Origin 准入**（#65）。每条请求在进入路由前先过本机 DSH 自己的
-  `ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话认证，与 DSH 自带路由同一套检查；服务不存在
-  的旧内核退回本插件原本的标识头 / 同源栅栏，升级后仍可用。此前 API 只看 `Origin` 与 `sec-fetch-site`，
-  不看 `Host`——DNS rebinding 下攻击页与被 rebind 的主机名同源，请求没有 `Origin`、`Sec-Fetch-Site` 是
-  `same-origin`、`Host` 是攻击者域名，`GET /dsh-remote-go/api/events` 这条只走 Origin 栅栏的 SSE 状态流
-  （主机清单、状态、诊断字段）可被读走。现在：
-  - API 与代理共用 `request-trust.js` 的同一份 Host/Origin 栅栏；`Host` 必须是本机 origin，`/events` 同样受检。
-  - 没有浏览器会话的调用方（包括只带 `x-dsh-remote-go` 标识头的直连）在 `/events` 与普通 JSON 路由上一律
-    401/403，拒绝发生在 SSE 开流之前与代理建立上游连接之前。
-  - `GET /health` 仍无需浏览器会话（存活探针，不返回状态数据），但同样过 Host/Origin 栅栏；API 契约见
-    [docs/api.md](docs/api.md)。
-
-### 新增
-
-- **远端 DSH 关闭**：主机清单里已连接的卡片（以及在 `remote-unreachable` 错误状态上）新增「关闭远端 DSH」，
-  与「重连」「重启远端 DSH」并列。它是破坏性操作，先弹确认框；确认后 Host 在同一条 SSH 会话上停掉**本连接
-  绑定的那一个**远端 web 进程，然后关隧道、释放 SSH，主机落到 `disconnected`（配置与凭据保留，不会自动重连），
-  之后点「重连」就能起一个全新的实例。停掉时复用重启的授权：run registry 命名该 pid、`/proc` starttime 仍是
-  同一进程且 profile/home 一致；重挂接管的实例不会被自动或静默停止——显式关闭按当时记录的 `/proc` 身份只关
-  那一个 pid（重启时它会并入冲突提示由用户选择）；`alongside` 保留的进程、pid 复用与无法证明归属的进程一律
-  不杀（返回可解释的 `stop-unavailable`，409）。pid 已消失时只清理 registry、不发任何信号；`keepAlive:"stop"`
-  也不会在收尾时补发第二次停止。
-  `run/web.json` 随停止被清掉，下一次连接不会误弹「远端已有手工启动的 DSH」。API 契约升到 **2.9**：新增
-  `POST /hosts/:id/stop-remote`、进度码 `stopping-remote` 与错误码 `stop-unavailable`。
-- **远端 DSH 重启**：主机清单里已连接的卡片新增「重启远端 DSH」。Host 用同一条 SSH 会话停掉自己拉起的
-  远端进程，重新 `npx` 启动、刷新 `run/web.json`、按新端口重建隧道并重新换 token；**不重跑** SSH / 探测 / 自举，
-  不会再次索要密码或主机指纹。只有同时满足「run registry 命名」「本连接启动过」「`/proc` starttime 仍是同一
-  进程且 profile/home 一致」才会 kill；重挂发现的 pid、pid 复用与 `alongside` 保留的进程一律不杀。冲突提示在
-  kill 之前，取消不做任何破坏；动作内新建的隧道在取消/断开/删主机时关闭，不留持有已释放 SSH 的监听器。
-- **远端自重启（插件市场更新等）自动恢复**：新增 `POST /hosts/:id/restart`、`remote-unreachable` SSE 事件
-  （疑似 / 确认 / 恢复，带 15s 冷却）、`RemoteView.viewRev`（承载方据此重新导航）与 `remoteHeartbeat` 设置
-  （默认 30s 可关，保存即生效）。同源代理与隧道不再把一次 `ECONNREFUSED` 当成进程重启；连续两次探活失败后
-  才重读远端真实状态——候选必须能证明「同一 profile、同一 `~/.dsh`、端口属于该 pid，且最新就绪行给出 launch
-  token」，`/proc` 进程扫描只用于解释失败；拿不到 token 不会假装重挂，而是报可解释的 `remote-unreachable` 并
-  保留主机与配置。版本来自 npx pin 或被加载包的 `package.json`，证明不了就保持未知、不写进 registry。远端健康
-  但隧道坏时重建本地监听器（先建新、再关旧；重建后 `viewRev` 自增让承载方重新 `open` 并导航，关闭旧 listener
-  会短暂断开现有 WebSocket/下载，属预期），而不是误判进程重启。重挂发现的监听进程没有 kill 权，点「重启远端
-  DSH」会先弹 stop/alongside/cancel 提示，用户选择前不会静默启动第二个实例。重挂期间显示 `restarting-remote`
-  进度码而不是「连接断开」；诊断报告新增最近 10 次重启 / 重挂记录。
-- **本地 LLM 会话能看到主机列表与连接状态**：Host 半端向 DSH 的 `tools` 服务注册一个**只读**工具
-  `remote_hosts_list`，本地会话不必再让用户先去点主机条就能回答「我有几台主机 / 哪台连着 / 那台为什么失败」。
-  参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，
-  超出时带 `truncated`），每行是 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH
-  版本。返回值是**字段白名单投影**（再用 `redactText` 脱敏、按字段限长）：连接失败的原因原文里带的
-  `SHA256:…` 主机指纹与密钥文件路径（`.ssh` 下路径，以及 `.pem` / `.key` / `.ppk` 或 `id_*` 命名的密钥文件）
-  会分别替换成 `<fingerprint redacted>` / `<private-key path>`，因此结果里既没有密码、token、cookie，也没有
-  指纹原文或私钥路径；`output.schema` 也声明为 `additionalProperties: false`，投影里多一个字段会让调用失败而
-  不是漏出去。**维护主机仍然在主机条的「添加主机 / 管理界面」里**——工具没有写操作面（没有 add / update / remove / connect / disconnect），因此也不需要审批或
-  确认门；它只注册在本地 Host 半端，远端 DSH 不加载本插件，远端会话看不到它。`tools` 是可选服务：注册走
-  `ctx.inject`，宿主没有它时只少这一个工具，主机条与本地 API 照常工作，服务晚到或被替换时会重新注册。
-- **浏览器端（`dsh web`）也能整窗打开远端界面**：没有桌面 guest 时，远端 UI 在**同源 iframe** 里呈现。
-  本机 DSH 新增 `/dsh-remote-go/remote/<hostId>/` 反向代理：只服务已连接主机的回环隧道，去掉前缀后转发
-  HTTP 与远端唯一的 WebSocket（`/api/remote.mux`，每主机一条精确升级路由），把 `Host`/`Origin` 改写为远端
-  自己的回环 authority；远端的 session cookie 保存在 Host 侧 per-host jar，浏览器既拿不到远端 cookie，
-  本地 cookie 也不会被转发出去。主机条与远端文件桥用同一份 `mountHostRow` / `mountGuestTools` 注入
-  iframe（同源直接调用，不依赖 `unsafe-eval`），点「本地」仍走同一条意图通道。
-- 客户端载体拆成 `desktop`（Chromium guest）与 `web`（同源 frame）两个后端，共用同一个窗口池、热窗口、
-  切换、抢占与释放语义；`carrierSurface()` 是唯一的载体选择点。
-- `GET /hosts/:id/open` 增加同源 `webUrl`；API 契约升到 **2.7**。桌面端继续只用回环 `url`，旧 Host 响应
-  不会阻塞桌面路径。
-- 测试：`remote-proxy` 单测（路径 / cookie jar / 同一源栅栏 / 头部与 Location 改写 / HTTP 与升级转发）；
-  隔离 `dsh web` 的同源代理端到端（真实首页、插件资源、WebSocket 101）；真实浏览器的载体验收
-  （iframe 里跑起真实远端页面、注入主机条、点「本地」回到本地）。
-
-### 修复
 
 - **连接链路的一组生命周期缺陷**（独立审计 B1 / H1–H4 / M1–M6，均带复现）：
   - **跳板机与目标机的指纹串台**：过去跳板与目标共用同一份 host-key 上下文（策略、pin、确认回调），
@@ -253,6 +197,64 @@
   在**84px（收起）/ 48px（展开）** 之间切换，回本地页时把这个覆盖删掉、交还本地侧边栏自己的规则。
   展开与收起两种状态下的顶部间距都与本地窗口一致；切换瞬间（最多一个 400ms 轮询周期）仍会短暂
   重叠一下再归位。
+
+### 安全
+
+- **`ErrorView` 统一脱敏并限长**（独立安全审计 A）。失败连接会把远端进程输出塞进 `ErrorView.technical`，
+  而远端 `web.log` 的第一行就是带会话 token 的 launch URL。错误视图此前没有脱敏；连接日志此前也没有——
+  `remote-web.js` 的 `onLine` 把同一行写进连接 ring，`HostView.logs`、SSE 状态帧与诊断导出都读它，所以
+  **成功连接进行中**的 `/state` / `/events` 就带 token。现在两处都封住：`toErrorView` 在返回前跑
+  `redactObject`（`technical` / `detail` / `nextSteps` 里的 token、`Authorization`、cookie、私钥与家目录
+  全部替换，`technical` 与单条日志都截断到 1200 个字符），`appendConnectLog` 在写入 ring 时先 `redactText`。
+  `redactText` 同时补上裸 `token=`/`#token=`、`x-*-token` 头与
+  `/Users/` 路径，并且不再把 `ssh -p 2222` 的端口当成密码脱掉。
+- **同源栅栏按回环等价比较 `Origin`**（审计 B）。本地 API 用字符串比较 `Origin` 与内核给的
+  `127.0.0.1:<port>`，用 `localhost` 打开 GUI 时 `/state`、`/health`、`/events` 全 403，表现为「能读不能写」。
+  改用 `request-trust.js` 的 `sameServerOrigin`：`127.0.0.1` / `localhost` / `[::1]` 与默认端口折算视为同一
+  origin，外部域、其它端口、其它协议仍然拒绝；`Origin` 的 authority 按原样（大小写不敏感）比较，
+  `user@host`、尾点、补零端口这类被解析器改写的值不会被当成回环。
+- **同源代理收紧为双向白名单**（审计 C）。请求头从黑名单改成白名单，本机会话的 `authorization`、`cookie`、
+  `x-dsh-*`、`forwarded` / `x-forwarded-*`、`sec-fetch-*` 不再发给远端（只有 `accept*` / `content-*` /
+  `range` / `if-*` / `cache-control` / `user-agent` / `x-requested-with` 与 WebSocket 握手头通过）；响应头按名
+  丢弃 `clear-site-data`、`access-control-*`、`refresh`、`content-location`、`report-to`、`nel`、
+  `permissions-policy`、`alt-svc`，远端不能再借此清本机 cookie 或改写浏览器策略；`Location` 只折回远端自身
+  listener，其它绝对地址（外部域、`//host`、含反斜杠的「相对」引用如 `/\evil`、其它 loopback 端口）直接
+  丢弃；上游 30s 无响应即 502 并销毁两侧；**WebSocket 的 101 响应头也过同一套策略**（此前原样透传，
+  `Set-Cookie` / 策略头可借握手绕过）；`accept-encoding` 作为内容协商头转发；per-host cookie jar 限 64 条 /
+  值 4 KiB，`Secure` cookie 不进明文 jar。
+- **数据层不再静默丢配置**（审计 D）。`hosts.json` / `settings.json` / `secrets.json` **内容不可解析**时
+  先改名为 `<name>.corrupt-<stamp>` 再回落到默认值，避免下一次写入把全部主机（含 pinned 指纹）永久覆盖；只是
+  读不了（EACCES/IO）的文件只回落、不改名，避免把权限问题变成空主机列表。损坏标记通过
+  `StateView.storeCorrupt` / `HostView.storeCorrupt` 与 `/diagnostics/self` 暴露，并在下一次成功写回后清除
+  （不会永远提示）。`POST /settings` 改为与
+  **当前值**深合并（嵌套 patch 不再把 `autoReconnect.baseDelayMs` 从 5000 重置成 800）；`saveToken` 先
+  `load()`，不会再以 `{}` 覆盖已有 secrets。
+- **下载目标加固**（审计 F）。`POST /downloads` 的 `destination` 只允许本机用户主目录之下，并拒绝
+  `Startup` / `autostart` / `systemd` / `Start Menu\Programs` 等自启动位置、macOS 的
+  `Library/LaunchAgents` / `LaunchDaemons` / `StartupItems`、`.ssh` / `.gnupg` 等凭据目录、
+  `.bashrc` / `.profile` / `.zshrc` / `.xsessionrc` / `.config` / `.local` 等登录脚本与配置目录、系统目录与
+  `shell:startup` 一类路径（Windows / macOS 的路径比较按大小写不敏感处理）；校验是同步的（坏路径直接 400，
+  不再先建 `preparing` 任务再异步报错），并且 API 预检与写入用**同一个 home 根**（job 携带 `home`，不再回落到
+  `os.homedir()`）。**远端命名的最终路径同样
+  过关**：`destination=~/.config` + 远端文件夹名 `autostart`、`~` + 远端文件名 `.bash_login`，以及会在其下
+  生成受保护路径的上级目录都在创建前被拒绝（零写入）。主机 `id` 只由 Host 签发（客户端传来的未知/畸形 id
+  一律替换成新的 `h_*`）；`POST /local-version` 只在探测失败时接受回填、不得低于 `engines.dsh` 下限，格式
+  不合法返回 400。
+- **错误与契约修正**（审计 E）。`internal` 由 409 改为 500；畸形主机 id 与越界的 `keyfile/list` 由 500 改为
+  400 `invalid-input`（且不回显路径）；>1 MiB 请求体先回 413 JSON 再结束，不再让客户端看到 `ECONNRESET`；
+  SSE 限 8 个客户端、慢消费者与超大帧有上限；`/health` 收敛为 `{ "ok": true }`；`/diagnostics/self` 的
+  `home` / `stateDir` 脱敏。
+- **本地 HTTP API 与同源代理补上 DSH 的 Host/Origin 准入**（#65）。每条请求在进入路由前先过本机 DSH 自己的
+  `ctx.connection.requestRejection`：Host/Origin 栅栏 + 浏览器会话认证，与 DSH 自带路由同一套检查；服务不存在
+  的旧内核退回本插件原本的标识头 / 同源栅栏，升级后仍可用。此前 API 只看 `Origin` 与 `sec-fetch-site`，
+  不看 `Host`——DNS rebinding 下攻击页与被 rebind 的主机名同源，请求没有 `Origin`、`Sec-Fetch-Site` 是
+  `same-origin`、`Host` 是攻击者域名，`GET /dsh-remote-go/api/events` 这条只走 Origin 栅栏的 SSE 状态流
+  （主机清单、状态、诊断字段）可被读走。现在：
+  - API 与代理共用 `request-trust.js` 的同一份 Host/Origin 栅栏；`Host` 必须是本机 origin，`/events` 同样受检。
+  - 没有浏览器会话的调用方（包括只带 `x-dsh-remote-go` 标识头的直连）在 `/events` 与普通 JSON 路由上一律
+    401/403，拒绝发生在 SSE 开流之前与代理建立上游连接之前。
+  - `GET /health` 仍无需浏览器会话（存活探针，不返回状态数据），但同样过 Host/Origin 栅栏；API 契约见
+    [docs/api.md](docs/api.md)。
 
 ### 构建 / CI
 
@@ -349,5 +351,6 @@
   命令模板，下载校验 SHA-256。
 - **脱敏**：诊断导出默认屏蔽 token、密码、私钥与家目录。
 
-[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.1.0

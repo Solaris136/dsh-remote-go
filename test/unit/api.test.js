@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import { createAdmission } from '../../src/admission.js'
 import { createApi } from '../../src/api.js'
+import { PLUGIN_VERSION } from '../../src/constants.js'
 import { errors } from '../../src/errors.js'
 import { createHost, fakeSecretStore, makeTestService, waitFor } from '../helpers/fake-remote.js'
 
@@ -880,7 +881,7 @@ test('GET /diagnostics/self proves host activation and client-module registratio
     assert.equal(result.status, 200)
     assert.equal(result.json.ok, true)
     assert.equal(result.json.plugin.id, 'dsh-remote-go')
-    assert.equal(result.json.plugin.version, '0.1.0')
+    assert.equal(result.json.plugin.version, PLUGIN_VERSION)
     assert.equal(typeof result.json.stateDir, 'string')
   } finally {
     await api.close()
@@ -896,7 +897,7 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.status, 200)
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
-    assert.equal(result.json.version, '0.1.0')
+    assert.equal(result.json.version, PLUGIN_VERSION)
     assert.equal(result.json.apiVersion, '2.11')
   } finally {
     await api.close()
