@@ -7,8 +7,9 @@ coverage/
 .agents/
 
 # Build output of `pnpm build` (tsc emits next to each source, D1). Formatting it would fight
-# the emitter and turn every build into a diff. `client.js` joins this list only when it becomes
-# an artifact (P3); until then it is still hand-written source.
+# the emitter and turn every build into a diff. `client.js` is deliberately NOT here: its build
+# (scripts/build-client.mjs) ends with prettier using this same config, so keeping it in the
+# checked set proves the artifact's style instead of exempting it.
 src/**/*.js
 /index.js
 

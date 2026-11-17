@@ -359,12 +359,12 @@ for (const name of workflowNames) {
   }
 }
 
-// 7. No build artifact in the index. Since P1e the `.js` twins of the TypeScript sources are
+// 7. No build artifact in the index. The `.js` twins of the TypeScript sources and the composed
+// browser half (`client.js`, built from `client/src/main.ts` + `client/template.js` since P3a) are
 // generated output (`.gitignore`, decision I in .agents/refactor/DECISIONS.md): `pnpm build`
 // recreates them for every consumer, so a tracked one is a stale copy or a `git add -f` accident -
-// and an accidental commit would resurrect the two-mode layout the decision retired. `client.js`
-// is still hand-written source until P3 and is deliberately not covered here.
-const isArtifact = (rel) => rel === 'index.js' || (rel.startsWith('src/') && rel.endsWith('.js'))
+// and an accidental commit would resurrect the two-mode layout the decision retired.
+const isArtifact = (rel) => rel === 'index.js' || rel === 'client.js' || (rel.startsWith('src/') && rel.endsWith('.js'))
 
 function gitTrackedFiles() {
   const result = spawnSync('git', ['ls-files', '-z'], {

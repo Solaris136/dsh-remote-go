@@ -12,8 +12,9 @@
 //
 // Clean before compiling: deleting or renaming a `.ts` leaves its old `.js` behind, and that
 // stale artifact would be packed as a module that no longer exists. The cleanup therefore
-// removes exactly what this build generates and nothing else — `client.js` is still hand-written
-// source (P3 turns it into an artifact) and `vendor/`, `types/` and `test/` are never touched.
+// removes exactly what this build generates and nothing else — `client.js` belongs to
+// `scripts/build-client.mjs` (P3a), which composes it from `client/src/main.ts` and
+// `client/template.js`, and `vendor/`, `types/` and `test/` are never touched.
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readdir, rm } from 'node:fs/promises'

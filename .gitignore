@@ -14,12 +14,13 @@ coverage/
 .pnpm-store/
 *.tmp
 
-# `pnpm build` emits index.js and src/**/*.js next to their .ts sources (decision D1); since P1e
-# they are generated output, not source, and are no longer committed. The published tarball still
-# ships them: `files[]` in package.json is honoured regardless of .gitignore by pnpm pack.
-# client.js is deliberately absent here - it is still hand-written source until P3 builds it.
+# `pnpm build` emits index.js and src/**/*.js next to their .ts sources (decision D1), and composes
+# client.js from client/src/main.ts + client/template.js (P3a). Since P1e they are generated output,
+# not source, and are no longer committed. The published tarball still ships them: `files[]` in
+# package.json is honoured regardless of .gitignore by pnpm pack.
 /index.js
 /src/**/*.js
+/client.js
 
 # Local environment and secrets (never commit credentials)
 .env

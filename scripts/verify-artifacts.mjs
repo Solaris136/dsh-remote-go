@@ -1,5 +1,6 @@
-// One-way artifact gate: every TypeScript source must have a fresh `.js` next to it, and `src/`
-// must not contain a `.js` that no `.ts` produces.
+// One-way artifact gate: every TypeScript source must have a fresh `.js` next to it, `src/` must
+// not contain a `.js` that no `.ts` produces, and the composed browser half (`client.js`, P3a) must
+// still be what its sources produce.
 //
 // Since P1e the artifacts are not committed (decision I in .agents/refactor/DECISIONS.md), so
 // there is nothing in git to compare against. "Fresh" therefore means "a build of the current
@@ -113,6 +114,29 @@ if (build.status !== 0)
   )
 
 const problems = []
+
+// The browser half is a single composed artifact, not part of the tsconfig program above: it uses
+// the DOM lib while `src/` uses Node's, and its sources are `client/src/main.ts` plus the loader
+// shell in `client/template.js` (P3a, design-client.md C1). Same one-way rule: hash it, let its
+// build run, and require that the build had nothing to rewrite.
+const CLIENT_ARTIFACT = 'client.js'
+const clientBefore = await hashFile(CLIENT_ARTIFACT)
+const clientBuild = spawnSync(process.execPath, [path.join(root, 'scripts', 'build-client.mjs')], {
+  cwd: root,
+  stdio: 'inherit',
+  windowsHide: true,
+})
+if (clientBuild.status !== 0)
+  fail(
+    `the client build failed (${clientBuild.status ?? clientBuild.error?.message ?? 'no exit code'}); ${CLIENT_ARTIFACT} cannot be trusted until it passes`,
+  )
+const clientAfter = await hashFile(CLIENT_ARTIFACT)
+if (clientAfter === null) problems.push(`${CLIENT_ARTIFACT}: missing; scripts/build-client.mjs did not produce it`)
+else if (clientBefore === null)
+  problems.push(`${CLIENT_ARTIFACT}: missing before the build; scripts/build-client.mjs created it, so run pnpm build`)
+else if (clientBefore !== clientAfter)
+  problems.push(`${CLIENT_ARTIFACT}: stale; scripts/build-client.mjs rewrote it, so run pnpm build`)
+
 for (const { artifact, source } of orphans)
   problems.push(
     `${artifact}: orphan; no ${source} twin exists, so this .js is not build output (pnpm build removed it)`,
@@ -141,5 +165,5 @@ if (problems.length > 0) {
 console.log(
   `[verify-artifacts] OK: ${artifacts.length} artifact(s) freshly produced from ${sources.length} source(s)` +
     (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : '') +
-    '; no orphan artifacts',
+    `; ${CLIENT_ARTIFACT} freshly composed from client/src/main.ts + client/template.js; no orphan artifacts`,
 )
