@@ -1,7 +1,9 @@
 // Repository conventions the release process depends on: required files, package metadata,
-// version parity, line hygiene, secret hygiene and workflow hygiene. Node built-ins only.
+// version parity, line hygiene, secret hygiene, workflow hygiene and the rule that generated
+// artifacts never re-enter the index. Node built-ins only.
 import { existsSync } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -357,7 +359,40 @@ for (const name of workflowNames) {
   }
 }
 
-// 7. Report
+// 7. No build artifact in the index. Since P1e the `.js` twins of the TypeScript sources are
+// generated output (`.gitignore`, decision I in .agents/refactor/DECISIONS.md): `pnpm build`
+// recreates them for every consumer, so a tracked one is a stale copy or a `git add -f` accident -
+// and an accidental commit would resurrect the two-mode layout the decision retired. `client.js`
+// is still hand-written source until P3 and is deliberately not covered here.
+const isArtifact = (rel) => rel === 'index.js' || (rel.startsWith('src/') && rel.endsWith('.js'))
+
+function gitTrackedFiles() {
+  const result = spawnSync('git', ['ls-files', '-z'], {
+    cwd: root,
+    encoding: 'utf8',
+    // windowsHide keeps a console from flashing for every child the gates start.
+    windowsHide: true,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  if (result.error || result.status !== 0) return null
+  return result.stdout.split('\0').filter(Boolean)
+}
+
+const tracked = gitTrackedFiles()
+if (tracked === null) {
+  // A missing git is an environment limitation, not a repository defect: warn instead of failing.
+  warnings.push('git is not available; skipped the "build artifacts are not tracked" check')
+} else {
+  const artifacts = tracked.filter(isArtifact).sort()
+  if (artifacts.length === 0) pass()
+  for (const artifact of artifacts) {
+    fail(
+      `${artifact}: tracked build artifact (产物不得进版本库, P1e 决策); it is generated output - unstage it with "git rm --cached ${artifact}" (pnpm build recreates it)`,
+    )
+  }
+}
+
+// 8. Report
 for (const message of warnings) console.warn(`[check-repo] WARN: ${message}`)
 if (problems.length > 0) {
   for (const message of problems) console.error(`[check-repo] FAIL: ${message}`)
