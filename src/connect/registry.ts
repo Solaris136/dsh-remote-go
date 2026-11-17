@@ -6,7 +6,7 @@
 import type { RemoteDeps, Reporter } from '../context.js'
 import type { HostRuntime } from '../host-runtime.js'
 import type { RemoteLayout } from '../layout.js'
-import type { RunRegistryRecord } from '../remote-web.js'
+import type { RunRegistryRecord } from '../remote-web/registry.js'
 import { messageOf } from '../util.js'
 
 export async function readRegistryQuietly(

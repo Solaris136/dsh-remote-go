@@ -1,16 +1,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  MANAGED_NODE_VERSION_FALLBACK,
   NODE_DIST_BASES,
-  applyManagedNodeFacts,
   buildNodeChecksumScript,
   buildNodeInstallScript,
+  parseNodeChecksumOutput,
+} from '../../src/node/download.js'
+import {
+  MANAGED_NODE_VERSION_FALLBACK,
+  applyManagedNodeFacts,
   buildNodeScanScript,
   ensureRemoteNode,
   managedNodeVersionFromEngine,
   nodeDistArch,
-  parseNodeChecksumOutput,
   parseNodeScanOutput,
 } from '../../src/node-runtime.js'
 import { remoteLayout } from '../../src/layout.js'

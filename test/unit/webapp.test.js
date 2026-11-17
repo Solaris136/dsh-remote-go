@@ -2,27 +2,31 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import {
-  BROWSER_CARRIER_PATCH_FILE,
   LAUNCH_MARKER,
-  adoptRemoteWeb,
-  buildBrowserCarrierProbe,
   buildRunRegistryRecord,
-  buildStartCommand,
-  buildStartScript,
+  parseRunRegistry,
+  readRunRegistry,
+  writeRunRegistry,
+} from '../../src/remote-web/registry.js'
+import {
+  adoptRemoteWeb,
   commandMatchesProfile,
   dshPackageDirFromCommand,
-  ensureBrowserCarrier,
-  parseRunRegistry,
   parseWebLine,
-  readRunRegistry,
   readWebLineFromLog,
   remoteDshVersion,
   resolveRemoteWeb,
-  startRemoteWeb,
-  stopRemoteWeb,
   versionFromCommand,
-  writeRunRegistry,
-} from '../../src/remote-web.js'
+} from '../../src/remote-web/resolve.js'
+import {
+  BROWSER_CARRIER_PATCH_FILE,
+  buildBrowserCarrierProbe,
+  buildStartCommand,
+  buildStartScript,
+  ensureBrowserCarrier,
+  startRemoteWeb,
+} from '../../src/remote-web/start.js'
+import { stopRemoteWeb } from '../../src/remote-web/stop.js'
 import {
   buildForeignDshCommand,
   exchangeTokenOverTunnel,

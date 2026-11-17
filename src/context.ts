@@ -29,15 +29,10 @@ import {
   stopForeignDshProcesses,
   waitForRemoteUi,
 } from './remote-proc.js'
-import {
-  adoptRemoteWeb,
-  clearRunRegistry,
-  readRunRegistry,
-  resolveRemoteWeb,
-  startRemoteWeb,
-  stopRemoteWeb,
-  writeRunRegistry,
-} from './remote-web.js'
+import { clearRunRegistry, readRunRegistry, writeRunRegistry } from './remote-web/registry.js'
+import { adoptRemoteWeb, resolveRemoteWeb } from './remote-web/resolve.js'
+import { startRemoteWeb } from './remote-web/start.js'
+import { stopRemoteWeb } from './remote-web/stop.js'
 import { SshConnection } from './ssh.js'
 import type { SshConnectionOptions } from './ssh.js'
 import { createTunnel, probeLoopback } from './tunnel.js'

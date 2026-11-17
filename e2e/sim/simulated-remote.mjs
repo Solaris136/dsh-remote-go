@@ -555,19 +555,19 @@ async function respond(command, sim) {
     return ok(`${SIM.dshVersion}\n`)
   }
 
-  // 2b. Browser-carrier probe (src/webapp.js buildBrowserCarrierProbe): the simulated profile
+  // 2b. Browser-carrier probe (src/remote-web/start.js buildBrowserCarrierProbe): the simulated profile
   //     does not disable api-remotes, so the launch stays patch-free (unit tests cover PATCH).
   if (cmd.includes('--dump-config')) {
     return ok('CLEAR\n')
   }
 
-  // 2. Detached remote web start (src/webapp.js buildStartScript): every relaunch binds a
+  // 2. Detached remote web start (src/remote-web/start.js buildStartScript): every relaunch binds a
   //    new random port, like the real `--port 0`.
   if (cmd.startsWith('set -eu\n') && cmd.includes('dsh web:') && cmd.includes('DONE:')) {
     return ok(await startScriptAnswer(sim))
   }
 
-  // 2c. Run registry rewrite after a restart / re-attach (src/webapp.js writeRunRegistry).
+  // 2c. Run registry rewrite after a restart / re-attach (src/remote-web/registry.js writeRunRegistry).
   //     The script creates its directories under `umask 077` and renames a temp file into
   //     place, so match it structurally instead of by its first line.
   if (cmd.startsWith('set -eu\n') && cmd.includes('REGISTRY-WRITTEN') && cmd.includes('mv -f "$TMP" "$RUN"')) {
@@ -612,7 +612,7 @@ async function respond(command, sim) {
     return ok(port === sim.remotePort ? `PID:${sim.pid}\n` : '')
   }
 
-  // 3. Remote web stop (src/webapp.js stopRemoteWeb). The simulated process really goes away:
+  // 3. Remote web stop (src/remote-web/stop.js stopRemoteWeb). The simulated process really goes away:
   //    its listener is closed, its pid stops answering and run/web.json is left empty, which is
   //    what a stopped remote DSH looks like to the next connect. The script also reports
   //    NO-TARGET / GONE / ALIVE, so match it structurally and mirror those branches.
@@ -704,19 +704,19 @@ async function respond(command, sim) {
     return ok('')
   }
 
-  // 5. Run registry read (src/webapp.js readRunRegistry).
+  // 5. Run registry read (src/remote-web/registry.js readRunRegistry).
   if (/^cat '[^']*\/run\/web\.json'/.test(cmd)) {
     return ok(sim.started ? `${runRegistry(sim)}\n` : '')
   }
 
-  // 6. Remote loopback HTTP status (src/webapp.js remoteHttpStatus): curl first, wget as the
+  // 6. Remote loopback HTTP status (src/remote-proc.js remoteHttpStatus): curl first, wget as the
   //    fallback, so the script does not necessarily start with `curl `.
   if (cmd.includes("-w '%{http_code}'") || cmd.includes('--server-response')) {
     const port = Number(/127\.0\.0\.1:(\d+)/.exec(cmd)?.[1] ?? 0)
     return ok(port === sim.remotePort ? '200' : '000')
   }
 
-  // 7. Last readiness line from the remote log (src/webapp.js readWebLineFromLog).
+  // 7. Last readiness line from the remote log (src/remote-web/resolve.js readWebLineFromLog).
   if (cmd.startsWith("grep 'dsh web:'")) {
     return ok(sim.started ? `${webLine(sim)}\n` : '')
   }
@@ -726,7 +726,7 @@ async function respond(command, sim) {
     return ok(sim.started ? `${webLine(sim)}\n` : '')
   }
 
-  // 9. Liveness check (src/webapp.js remotePidAlive).
+  // 9. Liveness check (src/remote-web/resolve.js remotePidAlive).
   const pidProbe = /^kill -0 (\d+) 2>\/dev\/null && echo alive/.exec(cmd)
   if (pidProbe) {
     const alive = sim.started && Number(pidProbe[1]) === sim.pid

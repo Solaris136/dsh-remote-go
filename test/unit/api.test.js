@@ -1167,8 +1167,8 @@ test('the SSE fan-out is bounded: a ninth stream evicts the oldest', async () =>
 test('the connect log is redacted at its producer: a start line never reaches /state, SSE or diagnostics', async () => {
   const tokenLine = 'LINE:dsh web: http://127.0.0.1:38123/?token=SUPERSECRET-TOKEN'
   const { service } = await makeTestService({
-    // The real `remote-web.js` hands every start line to `options.onLine`, including the launch
-    // URL with its token; the old fake threw before calling it, so the leak had no coverage.
+    // The real `remote-web/start.js` hands every start line to `options.onLine`, including the
+    // launch URL with its token; the old fake threw before calling it, so the leak had no coverage.
     startWeb: async (_ssh, options) => {
       options.onLine(tokenLine)
       throw errors.remoteDshStartFailed(tokenLine)
