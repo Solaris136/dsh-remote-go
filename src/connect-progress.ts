@@ -16,10 +16,16 @@ const LOG_FLUSH_MS = 150
 /** Throttle for the npx reporter: one progress frame per 700 ms at most. */
 const REPORT_MIN_INTERVAL_MS = 700
 
+/**
+ * One interpolation value of a progress code, rendered verbatim by the Client. Booleans are
+ * part of the contract: the `ssh` phase already carries `{ jump: true }` for a jump-host dial.
+ */
+export type ProgressParams = Record<string, string | number | boolean>
+
 /** The progress line the Client renders: a code plus its interpolation values. */
 export interface ConnectProgressState {
   code: string
-  params?: Record<string, string | number>
+  params?: ProgressParams
 }
 
 /** The slice of a host runtime the connect progress writes (`host-runtime.ts`). */
@@ -127,12 +133,7 @@ export function createConnectProgress(options: ConnectProgressOptions) {
     options.emitState()
   }
 
-  function phase(
-    runtime: ConnectProgressRuntime,
-    phaseName: string,
-    code: string,
-    params?: Record<string, string | number>,
-  ): void {
+  function phase(runtime: ConnectProgressRuntime, phaseName: string, code: string, params?: ProgressParams): void {
     runtime.phase = phaseName
     runtime.progress = { code, ...(params ? { params } : {}) }
     options.emitState()

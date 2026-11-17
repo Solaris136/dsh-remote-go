@@ -117,6 +117,12 @@ export class RemoteGoError extends Error {
   declare nextSteps: BilingualText[]
   declare technical?: string
   declare retryable: boolean
+  /**
+   * The HTTP status a producer overrides for this refusal. Only the API dispatcher reads it
+   * (a body that crossed the size limit is a 413, not the code table's 400/409), and nothing
+   * else sets it, so it stays optional.
+   */
+  declare httpStatus?: number
 
   constructor(code: string, detail: BilingualText, options: RemoteGoErrorOptions = {}) {
     super(`${code}: ${detail.en}`)

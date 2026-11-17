@@ -36,12 +36,20 @@ export interface LaunchedProcess {
   dshHome: string
 }
 
-/** The host-key context a runtime carries (target and, separately, its jump host). */
+/**
+ * The host-key context a runtime carries (target and, separately, its jump host).
+ *
+ * `host`/`port` are only set on the jump context: a remembered jump pin is valid for exactly one
+ * machine, so it has to carry the identity it was confirmed for (see `prompts.ts`); the target
+ * context is addressed by the host entry itself and leaves them unset.
+ */
 export interface RuntimeFingerprint {
   sha256: string
   keyType: string
   status: string
   pinned: string
+  host?: string | null
+  port?: number
 }
 
 /** The process this connection is bound to, with the `/proc` identity that proved it. */
@@ -64,6 +72,12 @@ export interface HostRuntime {
   progress: ConnectProgressState | null
   error: ErrorView | null
   warning: BilingualText | null
+  /**
+   * Why `warning` is set (`alongside` | `restart-stop`): a successful attach clears a stale
+   * "stop not confirmed" warning but must keep describing a process that is still running, so
+   * the reason has to travel with the text. Absent on a runtime that never warned.
+   */
+  warningSource?: string | null
   fingerprint: RuntimeFingerprint | null
   /**
    * The jump host's own host key context: `{ sha256, keyType, status, pinned }`. Kept apart
@@ -133,7 +147,7 @@ export interface HostRuntime {
    */
   bound: BoundProcess | null
   /** Current tunnel repair (a broken local listener under a healthy remote). */
-  tunnelRepair: boolean | null
+  tunnelRepair: Promise<{ ok: boolean; reason?: string }> | null
   tunnelRepairFailures: number
   nextTunnelRepairAt: number
   /** Liveness probes: a confirmed episode is two consecutive failed probes. */
