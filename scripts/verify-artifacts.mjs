@@ -44,7 +44,11 @@ async function walkSources(dir, out) {
 /** Expand one `tsconfig.json` include entry into repository-relative source paths. */
 async function expandInclude(pattern) {
   const text = pattern.replace(/\\/g, '/')
-  // The shapes this tsconfig uses: `<dir>/**/*.ts` and an exact file.
+  // The shapes this tsconfig uses: `<dir>/**/*.ts`, `<dir>/**/*.d.ts` and an exact file.
+  // The declaration suffix is tested first: it also ends in `.ts`, and the directory before
+  // it has to be walked the same way (`types/**/*.d.ts`).
+  const declarationRecursive = '/**/*.d.ts'
+  if (text.endsWith(declarationRecursive)) return walkSources(text.slice(0, -declarationRecursive.length), [])
   const recursive = '/**/*.ts'
   if (text.endsWith(recursive)) return walkSources(text.slice(0, -recursive.length), [])
   if (!text.includes('*') && !text.includes('?')) {
@@ -60,17 +64,22 @@ async function expectedSources() {
   const patterns = Array.isArray(tsconfig.include) ? tsconfig.include : []
   if (patterns.length === 0) throw new Error('tsconfig.json: "include" must list the TypeScript sources')
   const sources = new Set()
+  // A declaration file is type-only: it produces no artifact, so it is skipped and counted
+  // rather than compared (the `types/**/*.d.ts` include exists for typing, not emission).
+  let declarations = 0
   for (const pattern of patterns) {
     for (const source of await expandInclude(pattern)) {
-      // A declaration file has no emitted artifact, and a `.mts`/`.tsx` source would map to a
-      // different path than the one this gate asserts; both must be handled explicitly.
-      if (source.endsWith('.d.ts'))
-        throw new Error(`${source}: declaration-only sources are not supported by this gate`)
+      if (source.endsWith('.d.ts')) {
+        declarations += 1
+        continue
+      }
+      // A `.mts`/`.tsx` source would map to a different path than the one this gate asserts,
+      // so it must be handled explicitly.
       if (!source.endsWith('.ts')) throw new Error(`${source}: only ".ts" sources are supported by this gate`)
       sources.add(source)
     }
   }
-  return [...sources].sort()
+  return { sources: [...sources].sort(), declarations }
 }
 
 async function hashArtifact(file) {
@@ -83,7 +92,7 @@ async function hashArtifact(file) {
   }
 }
 
-const sources = await expectedSources().catch((error) => fail(error.message))
+const { sources, declarations } = await expectedSources().catch((error) => fail(error.message))
 if (sources.length === 0) fail('no TypeScript sources matched tsconfig.json "include"; nothing would be verified')
 const artifacts = sources.map((source) => source.replace(/\.ts$/, '.js'))
 
@@ -141,4 +150,7 @@ if (problems.length > 0) {
   for (const problem of problems) console.error(`[verify-artifacts] FAIL: ${problem}`)
   fail(`${problems.length} problem(s) found; run pnpm build and commit the emitted artifacts with their source`)
 }
-console.log(`[verify-artifacts] OK: ${artifacts.length} artifact(s) match the build output`)
+console.log(
+  `[verify-artifacts] OK: ${artifacts.length} artifact(s) match the build output` +
+    (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : ''),
+)

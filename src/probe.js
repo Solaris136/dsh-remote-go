@@ -1,12 +1,11 @@
 /**
  * One read-only remote probe: a single POSIX `sh` script prints `key<TAB>value` lines that become the facts used by the planner, the Node installer and diagnostics.
  */
-import { headTail } from './util.js'
-import { errors } from './errors.js'
-import { normalizeVersion } from './version.js'
-
+import { headTail } from './util.js';
+import { errors } from './errors.js';
+import { normalizeVersion } from './version.js';
 export function buildProbeScript() {
-  return `set -u
+    return `set -u
 echo "os\t$(uname -s 2>/dev/null || echo unknown)"
 echo "arch\t$(uname -m 2>/dev/null || echo unknown)"
 echo "os_name\t$(sed -n 's/^PRETTY_NAME="\\(.*\\)"$/\\1/p' /etc/os-release 2>/dev/null | head -n 1)"
@@ -33,69 +32,65 @@ if [ -n "\${SSH_CONNECTION:-}" ] || [ -n "\${SSH_TTY:-}" ]; then echo "ssh_conne
 [ -f "$HOME/.dsh/.credentials.yaml" ] && echo "credentials_file\tyes" || echo "credentials_file\tno"
 if [ -n "\${DEEPSEEK_API_KEY:-}" ]; then echo "deepseek_key_env\tyes"; else echo "deepseek_key_env\tno"; fi
 echo "provider_env_keys\t$(env 2>/dev/null | sed -n 's/^\\([A-Z0-9_]*\\)_API_KEY=.*/\\1/p' | tr '\\n' ',' | sed 's/,$//')"
-`
+`;
 }
-
 export function parseProbeOutput(stdout) {
-  const values = {}
-  for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
-    const tab = rawLine.indexOf('\t')
-    if (tab < 0) continue
-    const key = rawLine.slice(0, tab).trim()
-    const value = rawLine.slice(tab + 1).trim()
-    if (key !== '') values[key] = value
-  }
-  return values
+    const values = {};
+    for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
+        const tab = rawLine.indexOf('\t');
+        if (tab < 0)
+            continue;
+        const key = rawLine.slice(0, tab).trim();
+        const value = rawLine.slice(tab + 1).trim();
+        if (key !== '')
+            values[key] = value;
+    }
+    return values;
 }
-
 export function toProbeFacts(values) {
-  const num = (/** @type {string} */ value) => {
-    const n = Number(value)
-    return Number.isFinite(n) ? n : null
-  }
-  return {
-    os: values.os || 'unknown',
-    arch: values.arch || 'unknown',
-    osName: values.os_name || '',
-    user: values.user || '',
-    home: values.home || '',
-    shell: values.shell || '',
-    nodePath: values.node_path || null,
-    nodeVersion: values.node_version ? normalizeVersion(values.node_version) : null,
-    npmPath: values.npm_path || null,
-    npxPath: values.npx_path || null,
-    curlPath: values.curl_path || null,
-    wgetPath: values.wget_path || null,
-    libc: values.libc === 'musl' ? 'musl' : values.libc === 'glibc' ? 'glibc' : 'unknown',
-    glibcVersion: values.glibc_version ? String(values.glibc_version).trim() : null,
-    diskFreeKb: num(values.disk_free_kb),
-    sshConnection: values.ssh_connection === 'yes',
-    credentialsFile: values.credentials_file === 'yes',
-    deepseekKeyEnv: values.deepseek_key_env === 'yes',
-    providerEnvKeys: values.provider_env_keys ? values.provider_env_keys.split(',').filter(Boolean) : [],
-  }
+    const num = (value) => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
+    };
+    return {
+        os: values.os || 'unknown',
+        arch: values.arch || 'unknown',
+        osName: values.os_name || '',
+        user: values.user || '',
+        home: values.home || '',
+        shell: values.shell || '',
+        nodePath: values.node_path || null,
+        nodeVersion: values.node_version ? normalizeVersion(values.node_version) : null,
+        npmPath: values.npm_path || null,
+        npxPath: values.npx_path || null,
+        curlPath: values.curl_path || null,
+        wgetPath: values.wget_path || null,
+        libc: values.libc === 'musl' ? 'musl' : values.libc === 'glibc' ? 'glibc' : 'unknown',
+        glibcVersion: values.glibc_version ? String(values.glibc_version).trim() : null,
+        diskFreeKb: num(values.disk_free_kb),
+        sshConnection: values.ssh_connection === 'yes',
+        credentialsFile: values.credentials_file === 'yes',
+        deepseekKeyEnv: values.deepseek_key_env === 'yes',
+        providerEnvKeys: values.provider_env_keys ? values.provider_env_keys.split(',').filter(Boolean) : [],
+    };
 }
-
 export async function probeRemote(ssh, options = {}) {
-  const script = buildProbeScript()
-  const timeoutMs = options.timeoutMs ?? 60_000
-  const result = await ssh.exec(script, { timeoutMs })
-  // A probe that ran out of time says nothing about the remote's DSH: report a timeout
-  // (retryable network), not a missing remote runtime (L).
-  if (result.timedOut === true) {
-    throw errors.network(
-      {
-        zh: `远端环境探测超过 ${Math.round(timeoutMs / 1000)} 秒没有完成，可能是链路很慢或远端负载过高。`,
-        en: `The remote environment probe did not finish within ${Math.round(timeoutMs / 1000)}s; the link may be slow or the remote overloaded.`,
-      },
-      { technical: `reason=probe-timeout timeoutMs=${timeoutMs}` },
-    )
-  }
-  if (result.code !== 0) {
-    throw errors.remoteDshMissing({
-      zh: `远端环境探测失败（退出码 ${result.code}）：${headTail(result.stderr || result.stdout, 400)}`,
-      en: `Remote probe failed (exit ${result.code}): ${headTail(result.stderr || result.stdout, 400)}`,
-    })
-  }
-  return toProbeFacts(parseProbeOutput(result.stdout))
+    const script = buildProbeScript();
+    const timeoutMs = options.timeoutMs ?? 60_000;
+    const result = await ssh.exec(script, { timeoutMs });
+    // A probe that ran out of time says nothing about the remote's DSH: report a timeout
+    // (retryable network), not a missing remote runtime (L).
+    if (result.timedOut === true) {
+        throw errors.network({
+            zh: `远端环境探测超过 ${Math.round(timeoutMs / 1000)} 秒没有完成，可能是链路很慢或远端负载过高。`,
+            en: `The remote environment probe did not finish within ${Math.round(timeoutMs / 1000)}s; the link may be slow or the remote overloaded.`,
+        }, { technical: `reason=probe-timeout timeoutMs=${timeoutMs}` });
+    }
+    if (result.code !== 0) {
+        throw errors.remoteDshMissing({
+            zh: `远端环境探测失败（退出码 ${result.code}）：${headTail(result.stderr || result.stdout, 400)}`,
+            en: `Remote probe failed (exit ${result.code}): ${headTail(result.stderr || result.stdout, 400)}`,
+        });
+    }
+    return toProbeFacts(parseProbeOutput(result.stdout));
 }

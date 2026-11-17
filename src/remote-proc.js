@@ -1,21 +1,19 @@
 /**
  * Remote process and reachability primitives: find, stop and probe DSH processes on the remote, plus the one HTTP round-trip that proves the remote UI answers.
  */
-import http from 'node:http'
-import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
-import { isPid, messageOf } from './util.js'
-
+import http from 'node:http';
+import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js';
+import { isPid, messageOf } from './util.js';
 /** A listener answering 200, 302 or 401 is up: 401 without the launch cookie still proves it serves. */
 export function isUiUp(status) {
-  return status === 200 || status === 302 || status === 401
+    return status === 200 || status === 302 || status === 401;
 }
-
 export function buildForeignDshCommand(ignorePids = []) {
-  const ignore = (Array.isArray(ignorePids) ? ignorePids : [])
-    .map((pid) => Number(pid))
-    .filter((pid) => isPid(pid))
-    .join(' ')
-  return `set -u
+    const ignore = (Array.isArray(ignorePids) ? ignorePids : [])
+        .map((pid) => Number(pid))
+        .filter((pid) => isPid(pid))
+        .join(' ');
+    return `set -u
 IGNORE=" ${ignore} "
 PS_OUT=$(ps -eww -o pid=,comm=,args= 2>/dev/null || ps -eo pid=,comm=,args= 2>/dev/null || true)
 printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
@@ -38,22 +36,22 @@ printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
   ENV_HOME=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
   if [ -n "\${ENV_HOME:-}" ] && [ "$ENV_HOME" != "$HOME/.dsh" ]; then continue; fi
   printf '%s\\t%s\\n' "$PID" "$ARGS"
-done`
+done`;
 }
-
 export function parseForeignDshOutput(stdout) {
-  const processes = []
-  for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
-    const tab = rawLine.indexOf('\t')
-    if (tab <= 0) continue
-    const pid = Number(rawLine.slice(0, tab).trim())
-    const command = rawLine.slice(tab + 1).trim()
-    if (!isPid(pid) || command === '') continue
-    processes.push({ pid, command })
-  }
-  return processes
+    const processes = [];
+    for (const rawLine of String(stdout ?? '').split(/\r?\n/)) {
+        const tab = rawLine.indexOf('\t');
+        if (tab <= 0)
+            continue;
+        const pid = Number(rawLine.slice(0, tab).trim());
+        const command = rawLine.slice(tab + 1).trim();
+        if (!isPid(pid) || command === '')
+            continue;
+        processes.push({ pid, command });
+    }
+    return processes;
 }
-
 /**
  * Find DSH processes on the remote that this plugin did not start.
  *
@@ -61,34 +59,33 @@ export function parseForeignDshOutput(stdout) {
  * proceeds without a conflict prompt (a broken scan must not block connecting).
  */
 export async function findForeignDshProcesses(ssh, options = {}) {
-  try {
-    const result = await ssh.exec(buildForeignDshCommand(options.ignorePids ?? []), {
-      timeoutMs: options.timeoutMs ?? 20_000,
-      maxBytes: 200_000,
-    })
-    if (result.code !== 0) {
-      return { ok: false, processes: [], reason: 'exec-failed', technical: String(result.stderr ?? '').slice(0, 500) }
+    try {
+        const result = await ssh.exec(buildForeignDshCommand(options.ignorePids ?? []), {
+            timeoutMs: options.timeoutMs ?? 20_000,
+            maxBytes: 200_000,
+        });
+        if (result.code !== 0) {
+            return { ok: false, processes: [], reason: 'exec-failed', technical: String(result.stderr ?? '').slice(0, 500) };
+        }
+        return { ok: true, processes: parseForeignDshOutput(result.stdout) };
     }
-    return { ok: true, processes: parseForeignDshOutput(result.stdout) }
-  } catch (error) {
-    // swallow-ok: a scan failure is surfaced as ok:false and the caller proceeds without a prompt
-    return {
-      ok: false,
-      processes: [],
-      reason: 'exec-failed',
-      technical: messageOf(error),
+    catch (error) {
+        // swallow-ok: a scan failure is surfaced as ok:false and the caller proceeds without a prompt
+        return {
+            ok: false,
+            processes: [],
+            reason: 'exec-failed',
+            technical: messageOf(error),
+        };
     }
-  }
 }
-
 export async function stopForeignDshProcesses(ssh, processes, options = {}) {
-  const pids = [
-    ...new Set(
-      (Array.isArray(processes) ? processes : []).map((process) => Number(process?.pid)).filter((pid) => isPid(pid)),
-    ),
-  ]
-  if (pids.length === 0) return { ok: true, alive: [], output: '' }
-  const script = `set -u
+    const pids = [
+        ...new Set((Array.isArray(processes) ? processes : []).map((process) => Number(process?.pid)).filter((pid) => isPid(pid))),
+    ];
+    if (pids.length === 0)
+        return { ok: true, alive: [], output: '' };
+    const script = `set -u
 PIDS="${pids.join(' ')}"
 for PID in $PIDS; do kill -TERM "$PID" 2>/dev/null || true; done
 i=0
@@ -109,29 +106,30 @@ for PID in $PIDS; do
   if kill -0 "$PID" 2>/dev/null; then echo "ALIVE:$PID"; fi
 done
 echo "STOPPED"
-`
-  try {
-    const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 30_000 })
-    const output = String(result.stdout ?? '')
-    const alive = [...output.matchAll(/ALIVE:(\d+)/g)].map((match) => Number(match[1]))
-    return { ok: result.code === 0 && alive.length === 0, alive, output }
-  } catch (error) {
-    // swallow-ok: a stop failure is returned to the caller with the original message
-    return { ok: false, alive: pids, output: messageOf(error) }
-  }
+`;
+    try {
+        const result = await ssh.exec(script, { timeoutMs: options.timeoutMs ?? 30_000 });
+        const output = String(result.stdout ?? '');
+        const alive = [...output.matchAll(/ALIVE:(\d+)/g)].map((match) => Number(match[1]));
+        return { ok: result.code === 0 && alive.length === 0, alive, output };
+    }
+    catch (error) {
+        // swallow-ok: a stop failure is returned to the caller with the original message
+        return { ok: false, alive: pids, output: messageOf(error) };
+    }
 }
-
 /**
  * TCP ports a pid is listening on, read from its own `/proc` network tables and
  * matched against the socket inodes it holds. Used after a remote restart: the
  * process may be the same pid with a new random port, or a new pid entirely.
- * @param {object} ssh - SSH transport.
- * @param {number} pid - remote process id.
- * @returns {Promise<number[]>} listening ports, ascending and unique.
+ * @param ssh - SSH transport.
+ * @param pid - remote process id.
+ * @returns listening ports, ascending and unique.
  */
 export async function remoteListenPorts(ssh, pid) {
-  if (!isPid(pid)) return []
-  const script = `set -u
+    if (!isPid(pid))
+        return [];
+    const script = `set -u
 PID=${pid}
 [ -d "/proc/$PID" ] || exit 0
 ls -l "/proc/$PID/fd" 2>/dev/null | sed -n 's/.*socket:\\[\\([0-9][0-9]*\\)\\].*/INODE:\\1/p' | sort -u
@@ -139,47 +137,47 @@ for NET in "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6"; do
   [ -r "$NET" ] || continue
   awk 'NR > 1 && $4 == "0A" { print "LISTEN:" $2 ":" $10 }' "$NET" 2>/dev/null
 done
-`
-  try {
-    const result = await ssh.exec(script, { timeoutMs: 15_000 })
-    return parseListenPorts(result.stdout)
-  } catch {
-    // swallow-ok: an unreadable /proc directory yields no candidate ports
-    return []
-  }
+`;
+    try {
+        const result = await ssh.exec(script, { timeoutMs: 15_000 });
+        return parseListenPorts(result.stdout);
+    }
+    catch {
+        // swallow-ok: an unreadable /proc directory yields no candidate ports
+        return [];
+    }
 }
-
 /** Decode the `INODE:` / `LISTEN:<addr-hex>:<port-hex>:<inode>` lines of {@link remoteListenPorts}. */
 export function parseListenPorts(stdout) {
-  const inodes = new Set()
-  const ports = []
-  for (const line of String(stdout ?? '').split(/\r?\n/)) {
-    const inode = /^INODE:(\d+)$/.exec(line)
-    if (inode) {
-      inodes.add(inode[1])
-      continue
+    const inodes = new Set();
+    const ports = [];
+    for (const line of String(stdout ?? '').split(/\r?\n/)) {
+        const inode = /^INODE:(\d+)$/.exec(line);
+        if (inode) {
+            inodes.add(inode[1]);
+            continue;
+        }
+        const listen = /^LISTEN:[0-9A-Fa-f]+:([0-9A-Fa-f]{1,4}):(\d+)$/.exec(line);
+        if (!listen)
+            continue;
+        const port = Number.parseInt(listen[1], 16);
+        if (isPid(port) && port <= 65535)
+            ports.push({ port, inode: listen[2] });
     }
-    const listen = /^LISTEN:[0-9A-Fa-f]+:([0-9A-Fa-f]{1,4}):(\d+)$/.exec(line)
-    if (!listen) continue
-    const port = Number.parseInt(listen[1], 16)
-    if (isPid(port) && port <= 65535) ports.push({ port, inode: listen[2] })
-  }
-  return [...new Set(ports.filter((entry) => inodes.has(entry.inode)).map((entry) => entry.port))].sort(
-    (left, right) => left - right,
-  )
+    return [...new Set(ports.filter((entry) => inodes.has(entry.inode)).map((entry) => entry.port))].sort((left, right) => left - right);
 }
-
 /**
  * The pid behind one listening loopback port, found by matching the port's socket
  * inode against every `/proc/<pid>/fd`. Needed when the remote restarted into a new
  * pid that the run registry does not know yet.
- * @param {object} ssh - SSH transport.
- * @param {number} port - TCP port on the remote's loopback.
- * @returns {Promise<number | null>} the owning pid, or null when it cannot be read.
+ * @param ssh - SSH transport.
+ * @param port - TCP port on the remote's loopback.
+ * @returns the owning pid, or null when it cannot be read.
  */
 export async function remotePortOwnerPid(ssh, port) {
-  if (!isPid(port) || port > 65535) return null
-  const script = `set -u
+    if (!isPid(port) || port > 65535)
+        return null;
+    const script = `set -u
 PORT_HEX=$(printf '%04X' ${port})
 INODE=$(awk -v p=":$PORT_HEX" '$2 ~ p"$" && $4 == "0A" { print $10; exit }' /proc/net/tcp 2>/dev/null)
 [ -n "\${INODE:-}" ] || exit 0
@@ -189,18 +187,18 @@ for D in /proc/[0-9]*; do
     exit 0
   fi
 done
-`
-  try {
-    const result = await ssh.exec(script, { timeoutMs: 20_000 })
-    const match = /^PID:(\d+)$/m.exec(String(result.stdout ?? ''))
-    const pid = match ? Number(match[1]) : 0
-    return isPid(pid) ? pid : null
-  } catch {
-    // swallow-ok: an unreadable /proc scan means the pid is unknown, the caller falls back
-    return null
-  }
+`;
+    try {
+        const result = await ssh.exec(script, { timeoutMs: 20_000 });
+        const match = /^PID:(\d+)$/m.exec(String(result.stdout ?? ''));
+        const pid = match ? Number(match[1]) : 0;
+        return isPid(pid) ? pid : null;
+    }
+    catch {
+        // swallow-ok: an unreadable /proc scan means the pid is unknown, the caller falls back
+        return null;
+    }
 }
-
 /**
  * The identity of one remote process, read from `/proc` before the plugin ever signals it.
  * The kernel start time is stable across `exec` (so an in-place DSH restart keeps it) and
@@ -208,14 +206,13 @@ done
  * must rule out. The command line and `DSH_HOME` prove the process is the DSH the plugin
  * thinks it is.
  *
- * @param {object} ssh - SSH transport.
- * @param {number} pid - remote process id.
- * @returns {Promise<{ ok: true, startTime: string, command: string, dshHome: string } |
- *   { ok: false, reason: 'invalid-pid' | 'missing' | 'unreadable' }>}
+ * @param ssh - SSH transport.
+ * @param pid - remote process id.
  */
 export async function remoteProcessIdentity(ssh, pid) {
-  if (!isPid(pid)) return { ok: false, reason: 'invalid-pid' }
-  const script = `set -u
+    if (!isPid(pid))
+        return { ok: false, reason: 'invalid-pid' };
+    const script = `set -u
 PID=${pid}
 [ -d "/proc/$PID" ] || { echo "MISSING"; exit 0; }
 RAW=$(cat "/proc/$PID/stat" 2>/dev/null || true)
@@ -227,117 +224,116 @@ CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null || true)
 printf 'CMD:%s\\n' "$CMD"
 HOME_LINE=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
 printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
-`
-  try {
-    const result = await ssh.exec(script, { timeoutMs: 10_000, maxBytes: 32_000 })
-    return parseProcessIdentity(result.stdout)
-  } catch {
-    // swallow-ok: an unreadable /proc means the pid cannot be proven, and callers fail closed
-    return { ok: false, reason: 'unreadable' }
-  }
+`;
+    try {
+        const result = await ssh.exec(script, { timeoutMs: 10_000, maxBytes: 32_000 });
+        return parseProcessIdentity(result.stdout);
+    }
+    catch {
+        // swallow-ok: an unreadable /proc means the pid cannot be proven, and callers fail closed
+        return { ok: false, reason: 'unreadable' };
+    }
 }
-
 /** Decode the `START:` / `CMD:` / `DSH_HOME:` lines of {@link remoteProcessIdentity}. */
 export function parseProcessIdentity(stdout) {
-  const text = String(stdout ?? '')
-  // The markers below are matched anywhere in the output, deliberately: a command line that
-  // happens to contain MISSING/NO-STAT must not be mistaken for a readable identity (fail closed).
-  if (text.includes('MISSING')) return { ok: false, reason: 'missing' }
-  if (text.includes('NO-STAT')) return { ok: false, reason: 'unreadable' }
-  const start = /^START:(\d+)$/m.exec(text)
-  const command = /^CMD:(.*)$/m.exec(text)
-  if (!start || !command) return { ok: false, reason: 'unreadable' }
-  const home = /^DSH_HOME:(.*)$/m.exec(text)
-  return {
-    ok: true,
-    startTime: start[1],
-    command: command[1].trim(),
-    dshHome: home === null ? '' : home[1].trim(),
-  }
+    const text = String(stdout ?? '');
+    // The markers below are matched anywhere in the output, deliberately: a command line that
+    // happens to contain MISSING/NO-STAT must not be mistaken for a readable identity (fail closed).
+    if (text.includes('MISSING'))
+        return { ok: false, reason: 'missing' };
+    if (text.includes('NO-STAT'))
+        return { ok: false, reason: 'unreadable' };
+    const start = /^START:(\d+)$/m.exec(text);
+    const command = /^CMD:(.*)$/m.exec(text);
+    if (!start || !command)
+        return { ok: false, reason: 'unreadable' };
+    const home = /^DSH_HOME:(.*)$/m.exec(text);
+    return {
+        ok: true,
+        startTime: start[1],
+        command: command[1].trim(),
+        dshHome: home === null ? '' : home[1].trim(),
+    };
 }
-
 export async function remoteHttpStatus(ssh, port) {
-  if (!isPid(port)) return null
-  const script = `URL="http://127.0.0.1:${port}/"
+    if (!isPid(port))
+        return null;
+    const script = `URL="http://127.0.0.1:${port}/"
 if command -v curl >/dev/null 2>&1; then
   curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true
 elif command -v wget >/dev/null 2>&1; then
   wget -S -O /dev/null --max-time 5 "$URL" 2>&1 | sed -n 's/.*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' | head -n 1
 fi
-`
-  try {
-    const result = await ssh.exec(script, { timeoutMs: 15_000 })
-    const code = Number(String(result.stdout ?? '').trim())
-    return Number.isInteger(code) && code > 0 ? code : null
-  } catch {
-    return null
-  }
+`;
+    try {
+        const result = await ssh.exec(script, { timeoutMs: 15_000 });
+        const code = Number(String(result.stdout ?? '').trim());
+        return Number.isInteger(code) && code > 0 ? code : null;
+    }
+    catch {
+        return null;
+    }
 }
-
 export async function waitForRemoteUi(ssh, port, options = {}) {
-  const attempts = options.attempts ?? 20
-  const intervalMs = options.intervalMs ?? 500
-  let last = null
-  for (let i = 0; i < attempts; i += 1) {
-    last = await remoteHttpStatus(ssh, port)
-    if (isUiUp(last)) return { ok: true, status: last }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs))
-  }
-  return { ok: false, status: last }
+    const attempts = options.attempts ?? 20;
+    const intervalMs = options.intervalMs ?? 500;
+    let last = null;
+    for (let i = 0; i < attempts; i += 1) {
+        last = await remoteHttpStatus(ssh, port);
+        if (isUiUp(last))
+            return { ok: true, status: last };
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+    return { ok: false, status: last };
 }
-
 export async function exchangeTokenOverTunnel(localPort, token, options = {}) {
-  const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS
-  const basePath = options.path ?? '/'
-  const tokenPath = `/?token=${encodeURIComponent(token)}`
-  const first = await httpRequest({
-    port: localPort,
-    path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`,
-    timeoutMs,
-  })
-  const setCookies = first.headers['set-cookie'] ?? []
-  const cookieHeader = setCookies.map((cookie) => String(cookie).split(';')[0]).join('; ')
-  const location = first.headers.location ?? null
-  const second = await httpRequest({
-    port: localPort,
-    path: location && location.startsWith('/') ? location : '/',
-    timeoutMs,
-    headers: cookieHeader ? { cookie: cookieHeader } : {},
-  })
-  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(second.body)
-  return {
-    ok: second.status === 200 && second.body.length > 0,
-    firstStatus: first.status,
-    status: second.status,
-    title: titleMatch ? titleMatch[1].trim().slice(0, 200) : null,
-  }
+    const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS;
+    const basePath = options.path ?? '/';
+    const tokenPath = `/?token=${encodeURIComponent(token)}`;
+    const first = await httpRequest({
+        port: localPort,
+        path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`,
+        timeoutMs,
+    });
+    const setCookies = first.headers['set-cookie'] ?? [];
+    const cookieHeader = setCookies.map((cookie) => String(cookie).split(';')[0]).join('; ');
+    const location = first.headers.location ?? null;
+    const second = await httpRequest({
+        port: localPort,
+        path: location && location.startsWith('/') ? location : '/',
+        timeoutMs,
+        headers: cookieHeader ? { cookie: cookieHeader } : {},
+    });
+    const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(second.body);
+    return {
+        ok: second.status === 200 && second.body.length > 0,
+        firstStatus: first.status,
+        status: second.status,
+        title: titleMatch ? titleMatch[1].trim().slice(0, 200) : null,
+    };
 }
-
 function httpRequest(options) {
-  return new Promise((resolve, reject) => {
-    const request = http.request(
-      {
-        host: '127.0.0.1',
-        port: options.port,
-        path: options.path,
-        method: 'GET',
-        headers: { 'user-agent': 'dsh-remote-go', ...options.headers },
-        timeout: options.timeoutMs,
-      },
-      (response) => {
-        const chunks = []
-        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-        response.on('end', () => {
-          resolve({
-            status: response.statusCode ?? 0,
-            headers: response.headers,
-            body: Buffer.concat(chunks).toString('utf8'),
-          })
-        })
-      },
-    )
-    request.on('timeout', () => request.destroy(new Error('local tunnel probe timed out')))
-    request.on('error', reject)
-    request.end()
-  })
+    return new Promise((resolve, reject) => {
+        const request = http.request({
+            host: '127.0.0.1',
+            port: options.port,
+            path: options.path,
+            method: 'GET',
+            headers: { 'user-agent': 'dsh-remote-go', ...options.headers },
+            timeout: options.timeoutMs,
+        }, (response) => {
+            const chunks = [];
+            response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+            response.on('end', () => {
+                resolve({
+                    status: response.statusCode ?? 0,
+                    headers: response.headers,
+                    body: Buffer.concat(chunks).toString('utf8'),
+                });
+            });
+        });
+        request.on('timeout', () => request.destroy(new Error('local tunnel probe timed out')));
+        request.on('error', reject);
+        request.end();
+    });
 }

@@ -15,5 +15,5 @@
     "sourceMap": false,
     "noEmit": false
   },
-  "include": ["src/**/*.ts", "index.ts"]
+  "include": ["src/**/*.ts", "index.ts", "types/**/*.d.ts"]
 }
