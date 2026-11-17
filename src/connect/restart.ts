@@ -21,7 +21,7 @@ import type { ConnectLogWriter, PhaseWriter } from './guards.js'
 import type { KnownProcess } from './launch.js'
 import { resolveForeignConflict } from './launch.js'
 import type { AcceptedResult } from './links.js'
-import { killAuthorized, rememberLaunched } from './ownership.js'
+import { OWNERSHIP_OPTIONS, proveOwnership, rememberLaunched } from './ownership.js'
 import { readRegistryQuietly } from './registry.js'
 import { openTunnelFor } from './transport.js'
 import { verifyRemoteUi } from './verify.js'
@@ -101,9 +101,10 @@ async function runRestart(
     // `start`/`restarting-remote` card.
     log('info', `restart requested (pid=${runtime.remote.pid ?? 'unknown'}, remote port=${previousPort ?? 'unknown'})`)
 
-    // Whether the running pid is ours to stop needs three independent proofs: the registry
-    // names it, this connection launched it, and /proc still shows the same process. A pid that
-    // a re-attach discovered (or one kept alongside) is hosted, never killed.
+    // Whether the running pid is ours to stop needs two independent proofs here: the registry
+    // names it (below) and this connection launched it with the same /proc identity
+    // (`OWNERSHIP_OPTIONS.restart`). A pid that a re-attach discovered, or one kept alongside, is
+    // hosted, never killed.
     const registry = await readRegistryQuietly(ctx, runtime, layout)
     const managedPid = Number(runtime.remote.pid ?? 0)
     const registeredPid = Number(registry?.pid ?? 0)
@@ -114,9 +115,14 @@ async function runRestart(
       isPid(managedPid) &&
       registeredPid === managedPid
     if (registered) {
-      const verdict = await killAuthorized(ctx, runtime, managedPid, layout, profile)
+      const verdict = await proveOwnership(ctx, runtime, {
+        ...OWNERSHIP_OPTIONS.restart,
+        pid: managedPid,
+        layout,
+        profile,
+      })
       killable = verdict.ok === true
-      if (!killable) {
+      if (verdict.ok !== true) {
         log(
           'warn',
           `restart: not stopping pid ${managedPid} (${verdict.reason}); only a process this connection launched is stopped`,

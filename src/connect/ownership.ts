@@ -3,14 +3,18 @@
  * pid it is merely bound to) and the `/proc` identity proofs that re-authorize them before any
  * signal. A reused pid, an adopted-only pid or a process kept alongside is never stopped silently.
  *
- * The two surfaces stay separate functions on purpose: merging them into `proveOwnership` is
- * design-arch §4 / P2 step 8 (P2e), not this stage's scope.
+ * There is exactly one decision here — `proveOwnership` — and three authorization shapes on top of
+ * it (`OWNERSHIP_OPTIONS`): the restart's narrow "only what I launched", the explicit stop's
+ * "the instance I am bound to, if the run registry still names it", and the idle timer's
+ * "whatever this connection still has a record for, nobody pointed at it". Every difference is a
+ * parameter; no caller re-implements the checks (design-arch §4, review item 4).
  */
 import type { RemoteDeps, Reporter, Transport } from '../context.js'
 import type { BoundProcess, HostRuntime, LaunchedProcess } from '../host-runtime.js'
-import type { LifecycleVerdict } from '../host-lifecycle.js'
 import type { RemoteLayout } from '../layout.js'
+import type { ProcessIdentity } from '../remote-proc.js'
 import { commandMatchesProfile } from '../remote-web.js'
+import type { RunRegistryRecord } from '../remote-web.js'
 import { isPid } from '../util.js'
 import { readRegistryQuietly } from './registry.js'
 
@@ -99,90 +103,225 @@ export async function rememberBound(
   return runtime.bound
 }
 
-/**
- * The only gate that authorizes a kill. All three must hold: the registry names the pid,
- * this connection launched it, and `/proc` still proves the same process (kernel start time)
- * with the same home and profile. A reused pid, an adopted-only pid, or a process kept
- * alongside therefore never gets stopped silently.
- */
-export async function killAuthorized(
-  ctx: Transport,
-  runtime: HostRuntime,
-  pid: number,
-  layout: RemoteLayout,
-  profile: string,
-): Promise<LifecycleVerdict> {
-  const record = runtime.launched instanceof Map ? runtime.launched.get(pid) : undefined
-  if (!record) return { ok: false, reason: 'not-launched-by-this-connection' }
-  if ((Array.isArray(runtime.alongsidePids) ? runtime.alongsidePids : []).includes(pid)) {
-    return { ok: false, reason: 'kept-alongside' }
-  }
-  const identity = await ctx.deps.processIdentity(runtime.ssh, pid)
-  if (identity.ok !== true) return { ok: false, reason: `identity-${identity.reason}` }
-  if (identity.startTime !== record.startTime) return { ok: false, reason: 'pid-reused' }
-  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
-    return { ok: false, reason: 'dsh-home-mismatch' }
-  }
-  if (!commandMatchesProfile(identity.command, profile)) return { ok: false, reason: 'profile-mismatch' }
-  return { ok: true }
-}
+/* ── proveOwnership: the single authorization gate (design-arch §4) ───────────────────────── */
+
+/** Which of the two records authorized (or failed to authorize) a pid. */
+export type OwnershipSource = 'launched' | 'bound'
 
 /**
- * The explicit "stop remote DSH" authorization. A restart must never stop a process this
- * plugin did not launch; here the user is pointing at the instance this connection is bound
- * to, so a re-attached pid is stoppable too - with the same `/proc` proofs, re-read now:
+ * Every reason the gate may refuse with. The literals are frozen (DECISIONS H5): they are the
+ * `technical: reason=<code> pid=<n>` payload of the stop error, the `(reason)` tail of the
+ * restart log line and the `reason` of the idle policy's verdict.
  *
- * - the pid must be the one this connection is bound to (`remote.pid`);
- * - it must stay out of `alongsidePids` (the user asked to keep it);
- * - this connection must have recorded it: launched it, or bound to it after a re-attach;
- * - `run/web.json` must still name that pid with the same DSH home and profile;
- * - `/proc/<pid>` must still be the same process (kernel start time), same home, same profile.
- *
- * A pid that is already gone is not an error for this action: the caller clears the stale
- * registry and releases the link, which is exactly what "stop" means in that state.
- *
- * @param ctx - service context.
- * @param runtime - connected (or remote-unreachable) host runtime.
- * @param pid - the bound remote web pid.
- * @param layout - remote layout.
- * @param profile - remote DSH profile.
- * @returns the verdict.
+ * `identity-${string}` carries any other `/proc` read failure verbatim, exactly like the three
+ * implementations this replaced did.
  */
-export async function closeAuthorized(
+export type OwnershipReason =
+  | 'pid-unknown'
+  | 'not-the-bound-instance'
+  | 'kept-alongside'
+  /** The restart/stop shape's "no record": keeps each caller's historic wording. */
+  | 'not-launched-by-this-connection'
+  /** The idle shape's "no record". */
+  | 'not-owned'
+  | 'registry-mismatch'
+  | 'identity-missing'
+  | 'identity-unreadable'
+  | `identity-${string}`
+  | 'pid-reused'
+  | 'dsh-home-mismatch'
+  | 'profile-mismatch'
+
+/** What the gate looked at, so a caller can log why it decided. */
+export interface OwnershipEvidence {
+  pid: number
+  /** The record that matched, or null when none did. */
+  source: OwnershipSource | null
+  /** The start time that record remembered, or null when there was no record. */
+  recordedStartTime: string | null
+  /** The `/proc` identity that was read (null when the gate refused before reading it). */
+  identity: ProcessIdentity | null
+  /** The run registry record, read only when `requireRegistry` asked for it. */
+  registry: RunRegistryRecord | null
+  layout: RemoteLayout
+  profile: string
+}
+
+export type OwnershipVerdict =
+  { ok: true; evidence: OwnershipEvidence } | { ok: false; reason: OwnershipReason; evidence: OwnershipEvidence }
+
+/** The options of one authorization shape; everything except the two caller-specific strings. */
+export interface ProveOwnershipOptions {
+  /** The pid to prove. */
+  pid: number
+  /** The remote layout the identity must match (`dshHome`). */
+  layout: RemoteLayout
+  /**
+   * The profile the command line must carry. An empty string means "this caller has no profile to
+   * compare" (the idle policy after a teardown that forgot it): the check is then skipped.
+   */
+  profile: string
+  /** Which records may authorize the pid; default `['launched']` (the restart shape). */
+  sources?: readonly OwnershipSource[]
+  /** The pid must be the instance this connection is bound to (`remote.pid`); default false. */
+  requireBoundPid?: boolean
+  /**
+   * Refuse a pid the user asked to keep alongside; default true. The idle policy never targets
+   * such a pid, so the check is a no-op there — it is passed for every caller so a future one
+   * cannot be looser by omission.
+   */
+  forbidAlongside?: boolean
+  /** `run/web.json` must name this pid with the same home and profile; default false. */
+  requireRegistry?: boolean
+  /**
+   * `strict`: the record's start time must equal the live one (a record without one is a
+   * contradiction, so the pid is not signalled); `when-recorded`: compare when it carries one.
+   */
+  startTime?: 'strict' | 'when-recorded'
+  /** The reason for "no record authorizes this pid"; keeps each caller's frozen wording. */
+  noProofReason?: 'not-launched-by-this-connection' | 'not-owned'
+  /** Which record wins when both could authorize the pid; default `'launched-first'`. */
+  prefer?: 'launched-first' | 'bound-first'
+}
+
+/** One authorization shape: the options minus the two caller-specific strings. */
+export type OwnershipShape = Omit<ProveOwnershipOptions, 'pid' | 'layout' | 'profile'>
+
+/**
+ * The three call sites' option sets (design-arch §4.3). They live here so the differences are a
+ * table the tests can read instead of three copies of the same nine checks:
+ *
+ * - `restart` is an *implicit* kill: only a process this connection launched may be stopped. The
+ *   registry check belongs to the caller, because a registry mismatch is a conflict prompt, not a
+ *   refusal (design.md §5.5). `strict` because a `launched` record always carries the `/proc`
+ *   start time; one without it is a broken record, and an unprovable pid must not be stopped.
+ * - `stop` is the user pointing at the instance this connection is bound to: it may stop a
+ *   re-attached pid (design.md §5.7), but only that exact pid, and only while `run/web.json` still
+ *   names it with the same home and profile — the written evidence of "the instance this
+ *   connection manages".
+ * - `idle` has nobody pointing at anything, only a timer: no registry (it may be stale by then),
+ *   but it needs a record of its own; `bound-first` preserves the order the timer always used.
+ *
+ * `noProofReason` and `prefer` exist only to keep the existing wording and order (DECISIONS H5);
+ * a fourth call site must be registered here with its reason.
+ */
+export const OWNERSHIP_OPTIONS = {
+  restart: {
+    sources: ['launched'],
+    startTime: 'strict',
+    noProofReason: 'not-launched-by-this-connection',
+  },
+  stop: {
+    sources: ['launched', 'bound'],
+    requireBoundPid: true,
+    requireRegistry: true,
+    startTime: 'when-recorded',
+    prefer: 'launched-first',
+    noProofReason: 'not-launched-by-this-connection',
+  },
+  idle: {
+    sources: ['launched', 'bound'],
+    startTime: 'when-recorded',
+    prefer: 'bound-first',
+    noProofReason: 'not-owned',
+  },
+} as const satisfies Record<'restart' | 'stop' | 'idle', OwnershipShape>
+
+/**
+ * Prove that this connection may signal `pid`, and say why not when it may not.
+ *
+ * The judgment order is itself part of the contract (§4.2), and every step is a refusal that
+ * never signals anything:
+ *
+ * ```
+ * 1 pid is a pid                                                   → pid-unknown
+ * 2 requireBoundPid && remote.pid !== pid                           → not-the-bound-instance
+ * 3 forbidAlongside && alongsidePids includes pid                   → kept-alongside
+ * 4 no record of the allowed sources                                → noProofReason
+ * 5 requireRegistry && the registry does not name it               → registry-mismatch
+ * 6 /proc identity unreadable                                       → identity-unreadable
+ *   /proc says it is gone                                           → identity-missing
+ *   any other read failure                                          → identity-<reason>
+ * 7 start time differs                                             → pid-reused
+ * 8 the process runs under another DSH home                        → dsh-home-mismatch
+ * 9 the command line carries another profile                       → profile-mismatch
+ * ```
+ *
+ * @param ctx - transport (the `/proc` reader) and, when `requireRegistry` is set, the registry.
+ * @param runtime - host runtime the records live on.
+ * @param options - one of {@link OWNERSHIP_OPTIONS} plus the pid, layout and profile.
+ * @returns `{ ok: true }` with the evidence, or the frozen reason it refused.
+ */
+export async function proveOwnership(
   ctx: Transport & RemoteDeps & Reporter,
   runtime: HostRuntime,
-  pid: number,
-  layout: RemoteLayout,
-  profile: string,
-): Promise<LifecycleVerdict> {
-  if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
-  if (Number(runtime.remote.pid) !== pid) return { ok: false, reason: 'not-the-bound-instance' }
-  if ((Array.isArray(runtime.alongsidePids) ? runtime.alongsidePids : []).includes(pid)) {
-    return { ok: false, reason: 'kept-alongside' }
+  options: ProveOwnershipOptions,
+): Promise<OwnershipVerdict> {
+  const { pid, layout, profile } = options
+  const sources: readonly OwnershipSource[] = options.sources ?? ['launched']
+  const prefer = options.prefer ?? 'launched-first'
+  const startTimeMode = options.startTime ?? 'when-recorded'
+  const noProofReason: OwnershipReason = options.noProofReason ?? 'not-launched-by-this-connection'
+  const forbidAlongside = options.forbidAlongside !== false
+  const alongside = Array.isArray(runtime.alongsidePids) ? runtime.alongsidePids : []
+  const launched =
+    sources.includes('launched') && runtime.launched instanceof Map ? runtime.launched.get(pid) : undefined
+  const bound: BoundProcess | null =
+    sources.includes('bound') &&
+    runtime.bound !== null &&
+    runtime.bound !== undefined &&
+    Number(runtime.bound.pid) === pid
+      ? runtime.bound
+      : null
+  const launchedProof = launched ?? null
+  const proof = prefer === 'bound-first' ? (bound ?? launchedProof) : (launchedProof ?? bound)
+  const source: OwnershipSource | null = proof === null ? null : proof === launchedProof ? 'launched' : 'bound'
+  const evidence: OwnershipEvidence = {
+    pid,
+    source,
+    recordedStartTime: proof === null ? null : typeof proof.startTime === 'string' ? proof.startTime : null,
+    identity: null,
+    registry: null,
+    layout,
+    profile,
   }
-  const launched = runtime.launched instanceof Map ? runtime.launched.get(pid) : undefined
-  const bound = runtime.bound !== null && Number(runtime.bound?.pid) === pid ? runtime.bound : null
-  const proof = launched ?? bound
-  if (!proof) return { ok: false, reason: 'not-launched-by-this-connection' }
-  const registry = await readRegistryQuietly(ctx, runtime, layout)
-  const registered =
-    registry !== null &&
-    registry.dshHome === layout.dshHome &&
-    registry.profile === profile &&
-    Number(registry.pid) === pid
-  if (!registered) return { ok: false, reason: 'registry-mismatch' }
-  const identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  const refuse = (reason: OwnershipReason): OwnershipVerdict => ({ ok: false, reason, evidence })
+
+  if (!isPid(pid)) return refuse('pid-unknown')
+  if (options.requireBoundPid === true && Number(runtime.remote.pid) !== pid) return refuse('not-the-bound-instance')
+  if (forbidAlongside && alongside.includes(pid)) return refuse('kept-alongside')
+  if (proof === null) return refuse(noProofReason)
+
+  if (options.requireRegistry === true) {
+    const registry = await readRegistryQuietly(ctx, runtime, layout)
+    evidence.registry = registry
+    const registered =
+      registry !== null &&
+      registry.dshHome === layout.dshHome &&
+      registry.profile === profile &&
+      Number(registry.pid) === pid
+    if (!registered) return refuse('registry-mismatch')
+  }
+
+  let identity: ProcessIdentity
+  try {
+    identity = await ctx.deps.processIdentity(runtime.ssh, pid)
+  } catch {
+    // swallow-ok: an identity read that throws cannot prove ownership either, so nothing is signalled
+    return refuse('identity-unreadable')
+  }
+  evidence.identity = identity
   if (identity.ok !== true) {
-    // The process is gone: there is nothing to signal, only a stale registry to clear.
-    if (identity.reason === 'missing') return { ok: false, reason: 'identity-missing' }
-    return { ok: false, reason: `identity-${identity.reason}` }
+    // "The process is gone" and "the process could not be read" are different refusals: the
+    // explicit stop clears a stale registry only for the first one.
+    return refuse(identity.reason === 'missing' ? 'identity-missing' : `identity-${identity.reason}`)
   }
-  if (typeof proof.startTime === 'string' && identity.startTime !== proof.startTime) {
-    return { ok: false, reason: 'pid-reused' }
+  if (startTimeMode === 'strict') {
+    if (identity.startTime !== proof.startTime) return refuse('pid-reused')
+  } else if (typeof proof.startTime === 'string' && identity.startTime !== proof.startTime) {
+    return refuse('pid-reused')
   }
-  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
-    return { ok: false, reason: 'dsh-home-mismatch' }
-  }
-  if (!commandMatchesProfile(identity.command, profile)) return { ok: false, reason: 'profile-mismatch' }
-  return { ok: true }
+  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) return refuse('dsh-home-mismatch')
+  if (profile !== '' && !commandMatchesProfile(identity.command, profile)) return refuse('profile-mismatch')
+  return { ok: true, evidence }
 }

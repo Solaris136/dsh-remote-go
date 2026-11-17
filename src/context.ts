@@ -40,12 +40,11 @@ import {
   writeRunRegistry,
 } from './webapp.js'
 import type { EpisodeSource, HostRuntime } from './host-runtime.js'
-// Type-only: the verdict shape of a tunnel rebuild. `host-lifecycle.ts` imports the slices from
-// this file by type as well, so the edge exists in the type graph only — nothing cycles at run time.
-import type { LifecycleVerdict } from './host-lifecycle.js'
 import type { SecretStore } from './secrets.js'
 import type { Settings } from './settings.js'
 import type { HostStore } from './store.js'
+import { createWatchdogBus } from './watchdog-bus.js'
+import type { WatchdogBus } from './watchdog-bus.js'
 
 /**
  * The Host-process logger this service reports through. Every method is optional: the plugin
@@ -196,11 +195,15 @@ export interface RemoteDeps {
  * (phase/progress) and the runtime itself, and P2's FSM work moves the last status writes out of
  * here (design-arch §2.2).
  *
- * The three trailing callbacks are the cycle-breaking injections this step deliberately leaves
- * alone (design-arch §1.7): `host-lifecycle` needs one-shot actions that live in
- * `connect/pipeline.ts`, and injecting them keeps `lifecycle -> pipeline` at zero. P2's step 9
- * replaces two of them with a watchdog bus and turns the third into a forward import; until then
- * they stay on `ctx` (tests and `noteUpstreamFailure` call them directly).
+ * `noteRemoteUnreachable` is a *compatibility alias*, not a capability: the liveness code lives in
+ * `watchdog.ts` and every production caller imports it forward. The alias stays on this slice
+ * because 13 test call sites drive a proxy/tunnel failure through `service.ctx` (design-arch
+ * §1.7); the facade assigns the same function reference the forward import gives anybody else.
+ *
+ * `bus` is the watchdog's action channel (design-arch §1.7): a detection publishes there, and
+ * `connect/watchdog.ts` — its only subscriber — runs the action. P2's step 9 replaced the two
+ * reverse callbacks this slice used to carry with it, so it no longer reaches into the
+ * orchestration it belongs to.
  */
 export interface Reporter {
   readonly logger: ServiceLogger
@@ -208,9 +211,10 @@ export interface Reporter {
   /** The state model changed once: bump `rev` and broadcast. Only this publishes (DECISIONS B1). */
   emitState(): void
   onRemoteUnreachable?: (runtime: HostRuntime, info: RemoteUnreachableInfo) => void
+  /** Test/API compatibility alias of `watchdog.ts#noteRemoteUnreachable` (see above). */
   noteRemoteUnreachable?: (runtime: HostRuntime, source: EpisodeSource) => void
-  requestReattach?: (runtime: HostRuntime, info: ReattachRequest) => void
-  repairTunnel?: (runtime: HostRuntime) => Promise<LifecycleVerdict>
+  /** The watchdog action bus: the liveness detector publishes, `connect/watchdog.ts` subscribes. */
+  readonly bus: WatchdogBus
 }
 
 /** 6/6 — persistence: hosts/settings/token plus the credential store. */
@@ -352,6 +356,9 @@ export function createCtx(options: ServiceOptions, hooks: ServiceHooks): Ctx {
     getSettings: () => options.store.getSettings(),
     emitState: () => hooks.publish(),
   })
+  // One bus per service instance: a test (or a plugin reload) that builds a second service must
+  // not inherit the first one's subscriber.
+  const bus = createWatchdogBus({ warn: logger.warn })
   const state: ServiceState = {
     runtimes: new Map<string, HostRuntime>(),
     activeHostId: null,
@@ -375,6 +382,7 @@ export function createCtx(options: ServiceOptions, hooks: ServiceHooks): Ctx {
     logger,
     progress,
     emitState: () => hooks.publish(),
+    bus,
     onRemoteUnreachable: (runtime: HostRuntime, info: RemoteUnreachableInfo) => {
       hooks.onEpisode(runtime, info)
     },

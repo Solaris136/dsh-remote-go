@@ -9,7 +9,7 @@
  * (P2d acceptance: no cycles between `src/connect/*`). Everything below is acyclic: it imports
  * `guards` and the service leaves only.
  */
-import type { Config, HostState, Reporter, Store, Transport } from '../context.js'
+import type { Config, Reporter, Store, Transport, WatchdogCtx } from '../context.js'
 import { errors } from '../errors.js'
 import type { HostRuntime } from '../host-runtime.js'
 import { findKnownHostEntries, parseKnownHosts } from '../known-hosts.js'
@@ -18,6 +18,7 @@ import { resolveDestination } from '../ssh-config.js'
 import type { ResolvedDestination } from '../ssh-config.js'
 import type { Tunnel } from '../tunnel.js'
 import { isPid } from '../util.js'
+import { noteRemoteUnreachable } from '../watchdog.js'
 import { assertStillWanted, assertTransportOpen } from './guards.js'
 import type { ConnectLogWriter } from './guards.js'
 
@@ -85,18 +86,15 @@ export function captureFingerprint(
 }
 
 /** Open the loopback tunnel for one remote port; tunnel-level failures feed the liveness confirmation. */
-export async function openTunnelFor(
-  ctx: HostState & Transport & Reporter,
-  runtime: HostRuntime,
-  remotePort: number,
-): Promise<Tunnel> {
+export async function openTunnelFor(ctx: WatchdogCtx, runtime: HostRuntime, remotePort: number): Promise<Tunnel> {
   // Never hand the tunnel factory a missing transport: a listener created with no SSH channel
   // would crash the host process on the first connection (see tunnel.js's own guard).
   assertTransportOpen(runtime)
   if (!isPid(remotePort) || remotePort > 65535) {
     throw errors.internal(new Error(`invalid remote port for the tunnel: ${remotePort}`))
   }
-  const onError = () => ctx.noteRemoteUnreachable?.(runtime, 'tunnel')
+  // Forward import, not a `ctx` callback: the liveness watchdog is a plain module now (§1.7).
+  const onError = () => noteRemoteUnreachable(ctx, runtime, 'tunnel')
   const tunnel = await ctx.deps.tunnelFactory({ ssh: runtime.ssh, remotePort, onError })
   const localPort = Number(tunnel?.localPort)
   if (!Number.isInteger(localPort) || !isPid(localPort) || localPort > 65535) {

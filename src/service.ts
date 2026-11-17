@@ -10,11 +10,10 @@ import { createDownloadJobs } from './download-jobs.js'
 import type { DownloadJobView, DownloadJobs } from './download-jobs.js'
 import { reconnectHost, startConnect } from './connect/links.js'
 import type { AcceptedResult, StartConnectOptions } from './connect/links.js'
-import { reattachHost } from './connect/reattach.js'
-import { repairTunnel } from './connect/repair.js'
 import { restartHost } from './connect/restart.js'
 import { stopRemoteHost } from './connect/stop.js'
 import type { StopRemoteResult } from './connect/stop.js'
+import { installWatchdog } from './connect/watchdog.js'
 import { diagnoseHost } from './diagnostics.js'
 import type { DiagnosticsReport } from './diagnostics.js'
 import { errors } from './errors.js'
@@ -30,7 +29,7 @@ import {
   snapshot,
 } from './host-registry.js'
 import type { KeyFileListing, RawHostEntry, SshDiscovery, StateSnapshot } from './host-registry.js'
-import { disconnectHost, noteRemoteUnreachable, shutdownAll } from './host-lifecycle.js'
+import { disconnectHost, shutdownAll } from './host-lifecycle.js'
 import type { DisconnectOptions } from './host-lifecycle.js'
 import type { HostRuntime } from './host-runtime.js'
 import type { HostView } from './host-view.js'
@@ -42,6 +41,7 @@ import type { Settings } from './settings.js'
 import type { HostStore } from './store.js'
 import { compareVersions, normalizeVersion, parseVersion } from './version.js'
 import { nowIso } from './util.js'
+import { noteRemoteUnreachable } from './watchdog.js'
 
 export { describePreflightEvent }
 
@@ -121,6 +121,8 @@ export class RemoteGoService extends EventEmitter {
   declare stateInstance: string
   declare ctx: Ctx
   declare downloads: DownloadJobs
+  /** The watchdog bus subscription this instance installed; `shutdown()` removes it. */
+  declare uninstallWatchdog: (() => void) | null
 
   constructor(options: RemoteGoServiceOptions) {
     super()
@@ -160,19 +162,17 @@ export class RemoteGoService extends EventEmitter {
     // The assembly root is `context.ts` (P2/1): this class only owns the facade state above.
     this.ctx = createCtx({ ...options, logger: this.logger }, hooks)
     /**
-     * The three reverse callbacks of design-arch §1.7 are wired here and not in the assembly
-     * root: `context.ts` must not import the orchestration it assembles, and P2's step 9 replaces
-     * two of them with a watchdog bus. They stay on `ctx` until then because tests and
-     * `noteUpstreamFailure` call them directly (36 call sites, design-arch §1.6).
+     * The watchdog: one bus (assembled in `context.ts`), one subscriber (`connect/watchdog.ts`),
+     * installed here because the facade owns the lifecycle — it subscribes now and unsubscribes on
+     * shutdown, exactly where the three reverse callbacks of design-arch §1.7 used to be wired.
      */
-    /** A proxy or tunnel failure arrived: confirm it with probes instead of trusting one request. */
+    this.uninstallWatchdog = installWatchdog(this.ctx)
+    /**
+     * `noteRemoteUnreachable` is not a capability: `watchdog.ts` is imported forward by every
+     * production caller. The alias exists because 13 test call sites drive a proxy/tunnel failure
+     * through `service.ctx` (design-arch §1.7, §1.6).
+     */
     this.ctx.noteRemoteUnreachable = (runtime, source) => noteRemoteUnreachable(this.ctx, runtime, source)
-    /** Confirmed by probes: re-read the remote, rewrite the registry, rebuild the tunnel. */
-    this.ctx.requestReattach = (runtime, info) => {
-      void reattachHost(this.ctx, runtime, info)
-    }
-    /** The remote answers but proxied requests fail: rebuild the local listener (B8). */
-    this.ctx.repairTunnel = (runtime) => repairTunnel(this.ctx, runtime)
     this.downloads = createDownloadJobs({
       logger: this.logger,
       emit: (job) => this.emit('download', job),
@@ -442,6 +442,10 @@ export class RemoteGoService extends EventEmitter {
   }
 
   async shutdown(): Promise<void> {
+    // Stop reacting to watchdog events before the hosts are torn down: a re-attach or a listener
+    // rebuild started by a closing episode has nowhere to land. Idempotent.
+    this.uninstallWatchdog?.()
+    this.uninstallWatchdog = null
     this.ctx.state.disposed = true
     this.ctx.progress.dispose()
     this.downloads.dispose()

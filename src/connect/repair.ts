@@ -10,6 +10,7 @@ import type { LifecycleVerdict } from '../host-lifecycle.js'
 import type { HostRuntime } from '../host-runtime.js'
 import type { Tunnel } from '../tunnel.js'
 import { isPid, messageOf } from '../util.js'
+import { noteRemoteUnreachable } from '../watchdog.js'
 
 /**
  * Rebuild the local listener for a host whose remote UI answers the SSH probe but whose
@@ -60,7 +61,7 @@ export async function repairTunnel(ctx: ConnectCtx, runtime: HostRuntime): Promi
       const next = await ctx.deps.tunnelFactory({
         ssh: runtime.ssh,
         remotePort: port,
-        onError: () => ctx.noteRemoteUnreachable?.(runtime, 'tunnel'),
+        onError: () => noteRemoteUnreachable(ctx, runtime, 'tunnel'),
       })
       created = next
       const nextPort = Number(next?.localPort)

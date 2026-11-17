@@ -8,8 +8,9 @@ import {
   managedNodeFixture,
   waitFor,
 } from '../helpers/fake-remote.js'
+import { repairTunnel } from '../../src/connect/repair.js'
 import { errors } from '../../src/errors.js'
-import { remoteHeartbeatTick } from '../../src/host-lifecycle.js'
+import { remoteHeartbeatTick } from '../../src/watchdog.js'
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -1321,17 +1322,17 @@ test('a failed tunnel rebuild backs off instead of rebuilding in a storm', async
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   const runtime = service.runtimes.get(host.id)
-  const first = await service.ctx.repairTunnel(runtime)
+  const first = await repairTunnel(service.ctx, runtime)
   assert.equal(first.ok, false)
   assert.equal(first.reason, 'rebuild-failed')
   assert.ok(runtime.nextTunnelRepairAt > Date.now())
-  const second = await service.ctx.repairTunnel(runtime)
+  const second = await repairTunnel(service.ctx, runtime)
   assert.equal(second.reason, 'backoff')
   assert.equal(calls, 2, 'no second listener attempt inside the backoff window')
   // The old listener was never closed: a failed rebuild leaves the connection usable.
   assert.notEqual(runtime.tunnel, null)
   runtime.nextTunnelRepairAt = 0
-  const third = await service.ctx.repairTunnel(runtime)
+  const third = await repairTunnel(service.ctx, runtime)
   assert.equal(third.ok, true)
   assert.equal(calls, 3)
   await service.shutdown()

@@ -1,29 +1,21 @@
 /**
- * Per-host lifecycle: the reconnect backoff, the idle-stop timer and the single teardown path; the reconnect timer gets a callback, so this never imports the pipeline.
+ * Per-host lifecycle: the reconnect backoff, the idle-stop timer and the single teardown path; the
+ * reconnect timer gets a callback, so this never imports the pipeline. The liveness watchdog that
+ * used to live here moved to `watchdog.ts` (P2 step 9); only the timer primitives it disarms stay,
+ * because this module owns the runtime's timer block.
  */
-import {
-  DEFAULT_IDLE_MINUTES,
-  REMOTE_EPISODE_COOLDOWN_MS,
-  REMOTE_HEARTBEAT_DEFAULT_SEC,
-  REMOTE_HEARTBEAT_MAX_SEC,
-  REMOTE_HEARTBEAT_MIN_SEC,
-  REMOTE_TUNNEL_REPAIR_SETTLE_MS,
-  REMOTE_UNREACHABLE_FAILURES,
-} from './constants.js'
+import { DEFAULT_IDLE_MINUTES, REMOTE_TUNNEL_REPAIR_SETTLE_MS } from './constants.js'
+import { OWNERSHIP_OPTIONS, proveOwnership } from './connect/ownership.js'
 import { errors, toErrorView } from './errors.js'
 import { emptyRemote } from './host-runtime.js'
-import type { Activity, EpisodeSource, HostRuntime } from './host-runtime.js'
+import type { Activity, HostRuntime } from './host-runtime.js'
 import { layoutForRuntime } from './layout.js'
-import type { RemoteLayout } from './layout.js'
 import { cancelConflict, cancelHostKeyPrompt } from './prompts.js'
-import { isUiUp } from './remote-proc.js'
-import type { ProcessIdentity } from './remote-proc.js'
-import { commandMatchesProfile } from './remote-web.js'
 import { dispatch, scopeFactsFor } from './runtime/dispatch.js'
 import type { DispatchHost } from './runtime/dispatch.js'
 import type { TeardownEffectOptions } from './runtime/events.js'
 import { isPid, messageOf, randomDelay } from './util.js'
-import type { Config, HostState, Reporter, TeardownCtx, Transport, WatchdogCtx } from './context.js'
+import type { Config, Reporter, TeardownCtx, WatchdogCtx } from './context.js'
 
 /** The verdict a best-effort action reports back to its caller (and to the connect log). */
 export interface LifecycleVerdict {
@@ -74,14 +66,6 @@ export function cancelLinkWork(runtime: HostRuntime): void {
   runtime.linkBusy = null
 }
 
-/** Milliseconds between liveness probes, from settings (default 30s, disabled allowed). */
-export function remoteHeartbeatIntervalSec(ctx: Config): number {
-  const raw = ctx.settings()?.remoteHeartbeat
-  const seconds = Number(raw?.intervalSec)
-  if (!Number.isFinite(seconds)) return REMOTE_HEARTBEAT_DEFAULT_SEC
-  return Math.min(REMOTE_HEARTBEAT_MAX_SEC, Math.max(REMOTE_HEARTBEAT_MIN_SEC, Math.round(seconds)))
-}
-
 export function cancelRemoteCheck(runtime: HostRuntime): void {
   if (runtime.remoteCheckTimer) {
     clearTimeout(runtime.remoteCheckTimer)
@@ -101,173 +85,6 @@ export function stopRemoteHeartbeat(runtime: HostRuntime): void {
   runtime.episodeSource = null
   // A new attach starts a new episode budget; the cooldown only exists to damp one connection.
   runtime.episodeCooldownUntil = 0
-}
-
-/** Start the light liveness probe for a host that just became connected. */
-export function startRemoteHeartbeat(ctx: WatchdogCtx, runtime: HostRuntime): void {
-  stopRemoteHeartbeat(runtime)
-  const enabled = ctx.settings()?.remoteHeartbeat?.enabled !== false
-  if (!enabled) {
-    ctx.progress.log(runtime, 'debug', 'remote heartbeat: disabled by settings')
-    return
-  }
-  const intervalSec = remoteHeartbeatIntervalSec(ctx)
-  runtime.heartbeatTimer = setInterval(() => {
-    void remoteHeartbeatTick(ctx, runtime)
-  }, intervalSec * 1000)
-  runtime.heartbeatTimer.unref?.()
-  ctx.progress.log(runtime, 'debug', `remote heartbeat: probing every ${intervalSec}s`)
-}
-
-/** A host is watchable only while it is really up and no one-shot action owns the link. */
-function watchable(ctx: HostState, runtime: HostRuntime): boolean {
-  return (
-    ctx.state.disposed !== true &&
-    runtime.desired === 'connected' &&
-    runtime.status === 'connected' &&
-    runtime.linkBusy === null &&
-    runtime.ssh?.connected === true &&
-    runtime.tunnel !== null
-  )
-}
-
-/**
- * Open a liveness episode at most once. Transient reports (a proxy/tunnel failure) are
- * coalesced: after a confirmed-healthy episode the same kind of report is ignored for a
- * cooldown window, so a flapping tunnel cannot emit suspected/recovered on every request.
- * Returns whether a new episode was opened.
- */
-function beginRemoteEpisode(ctx: Reporter, runtime: HostRuntime, source: EpisodeSource): boolean {
-  if (runtime.remoteEpisode === true) return false
-  const transient = source === 'proxy' || source === 'tunnel'
-  if (transient && Date.now() < (Number(runtime.episodeCooldownUntil) || 0)) {
-    ctx.progress.log(runtime, 'debug', `remote-unreachable reported again (${source}); episode cooldown, ignoring`)
-    return false
-  }
-  runtime.remoteEpisode = true
-  runtime.episodeSource = source
-  ctx.progress.log(runtime, 'debug', `remote-unreachable suspected (${source}); confirming with probes`)
-  ctx.onRemoteUnreachable?.(runtime, { phase: 'suspected', source })
-  return true
-}
-
-/**
- * Reset the failure streak; report the recovery once when an episode was open. A transient
- * episode also rebuilds the local listener: the remote answering the probe while the page
- * got a 502 usually means the tunnel, not the remote, is what broke.
- */
-async function clearRemoteEpisode(
-  ctx: HostState & Transport & Reporter,
-  runtime: HostRuntime,
-  source: EpisodeSource,
-): Promise<void> {
-  const wasOpen = runtime.remoteEpisode === true
-  const transient = runtime.episodeSource === 'proxy' || runtime.episodeSource === 'tunnel'
-  runtime.remoteEpisode = false
-  runtime.remoteFailures = 0
-  if (!wasOpen) return
-  runtime.episodeSource = null
-  if (transient) {
-    runtime.episodeCooldownUntil = Date.now() + REMOTE_EPISODE_COOLDOWN_MS
-    // The SSH probe only proves the remote side answers. Ask the local listener first: if it
-    // still serves, a single failed upstream connection is not a broken tunnel and rebuilding
-    // would drop live WebSockets for nothing.
-    let healthy = false
-    try {
-      healthy = (await ctx.deps.tunnelProbe?.(runtime.tunnel?.localPort ?? null)) === true
-    } catch {
-      // swallow-ok: a probe error means "not healthy"; the rebuild path reports its own failure
-    }
-    if (healthy) {
-      ctx.progress.log(runtime, 'debug', 'the local tunnel still answers; keeping the listener')
-    } else {
-      try {
-        const repaired = await ctx.repairTunnel?.(runtime)
-        if (repaired && repaired.ok !== true) {
-          ctx.progress.log(runtime, 'debug', `tunnel rebuild skipped (${repaired.reason ?? 'unknown'})`)
-        }
-      } catch (error) {
-        // swallow-ok: a failed repair is reported by the helper; the episode still recovers
-        ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
-      }
-    }
-  }
-  ctx.progress.log(runtime, 'info', `remote heartbeat: the remote UI answers again (${source})`)
-  if (!watchable(ctx, runtime)) return
-  ctx.onRemoteUnreachable?.(runtime, { phase: 'recovered', source })
-}
-
-function scheduleRemoteCheck(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource, delayMs: number): void {
-  if (runtime.remoteCheckTimer) return
-  runtime.remoteCheckTimer = setTimeout(() => {
-    runtime.remoteCheckTimer = null
-    void checkRemoteNow(ctx, runtime, source)
-  }, delayMs)
-  runtime.remoteCheckTimer.unref?.()
-}
-
-/**
- * Probe the connected host once and feed the consecutive-failure counter. One
- * failed request is not a restart: the counter has to reach
- * {@link REMOTE_UNREACHABLE_FAILURES} before a re-attach is requested.
- */
-async function checkRemoteNow(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource): Promise<void> {
-  if (!watchable(ctx, runtime) || typeof ctx.deps.remoteStatus !== 'function') return
-  const ssh = runtime.ssh
-  const port = runtime.remote.port
-  let status: number | null = null
-  try {
-    status = await ctx.deps.remoteStatus(ssh, port)
-  } catch {
-    // swallow-ok: an unreachable probe is a failed probe, handled by the same counter
-    status = null
-  }
-  // The transport may have gone away while the probe was in flight; the close handler owns that.
-  if (!watchable(ctx, runtime) || runtime.ssh !== ssh) return
-  if (isUiUp(status)) {
-    await clearRemoteEpisode(ctx, runtime, source)
-    return
-  }
-  runtime.remoteFailures = (Number(runtime.remoteFailures) || 0) + 1
-  ctx.progress.log(
-    runtime,
-    'debug',
-    `remote heartbeat: probe failed (HTTP ${status ?? 'none'}), ${runtime.remoteFailures}/${REMOTE_UNREACHABLE_FAILURES} (${source})`,
-  )
-  beginRemoteEpisode(ctx, runtime, source)
-  if (runtime.remoteFailures < REMOTE_UNREACHABLE_FAILURES) {
-    scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteRecheckMs)
-    return
-  }
-  ctx.progress.log(
-    runtime,
-    'warn',
-    `remote-unreachable: ${runtime.remoteFailures} consecutive probes failed (${source}); re-attaching`,
-  )
-  ctx.onRemoteUnreachable?.(runtime, {
-    phase: 'confirmed',
-    source,
-    failures: runtime.remoteFailures,
-  })
-  cancelRemoteCheck(runtime)
-  ctx.requestReattach?.(runtime, { reason: `probe-failed-${runtime.remoteFailures}`, source })
-}
-
-/** One scheduled heartbeat tick. */
-export async function remoteHeartbeatTick(ctx: WatchdogCtx, runtime: HostRuntime): Promise<void> {
-  if (!watchable(ctx, runtime)) return
-  if (runtime.remoteCheckTimer) return
-  await checkRemoteNow(ctx, runtime, 'heartbeat')
-}
-
-/**
- * A proxy or tunnel failure was observed: report the episode once and confirm it
- * with probes instead of treating one failed request as a remote restart.
- */
-export function noteRemoteUnreachable(ctx: WatchdogCtx, runtime: HostRuntime, source: EpisodeSource): void {
-  if (!watchable(ctx, runtime)) return
-  if (!beginRemoteEpisode(ctx, runtime, source)) return
-  scheduleRemoteCheck(ctx, runtime, source, ctx.timers.remoteConfirmDelayMs)
 }
 
 /**
@@ -422,9 +239,15 @@ export async function stopRemoteForIdle(
     // Without a pid there is nothing this policy may signal: `stopRemoteWeb` would fall back
     // to the run registry and could stop an instance this connection did not launch.
     if (!isPid(pid)) return { ok: false, reason: 'pid-unknown' }
-    // Same `/proc` identity proof the explicit stop uses: a reused pid, another DSH home or
-    // another profile is not this connection's process and must not be signalled.
-    const proof = await proveIdleStopTarget(ctx, runtime, pid, layout)
+    // Same `/proc` identity proof the explicit stop uses (`OWNERSHIP_OPTIONS.idle`): a reused
+    // pid, another DSH home or another profile is not this connection's process and must not be
+    // signalled — and unlike the stop, nobody pointed at it, only the timer fired.
+    const proof = await proveOwnership(ctx, runtime, {
+      ...OWNERSHIP_OPTIONS.idle,
+      pid,
+      layout,
+      profile: runtime.remote.profile ?? runtime.remoteProfile ?? '',
+    })
     if (proof.ok !== true) {
       ctx.progress.log(runtime, 'warn', `idle stop skipped: ${proof.reason}`)
       return { ok: false, reason: proof.reason }
@@ -455,43 +278,6 @@ export async function stopRemoteForIdle(
     // now, its session is not ours to dispose.
     if (runtime.ssh === capturedSsh) await disposeSsh(runtime)
   }
-}
-
-/** The `/proc` identity proof for the process the idle policy is about to stop. */
-async function proveIdleStopTarget(
-  ctx: Transport,
-  runtime: HostRuntime,
-  pid: number,
-  layout: RemoteLayout,
-): Promise<LifecycleVerdict> {
-  const bound = Number(runtime.bound?.pid) === pid ? runtime.bound : null
-  const launched = runtime.launched instanceof Map ? runtime.launched.get(pid) : null
-  const proof = bound ?? launched
-  if (!proof) return { ok: false, reason: 'not-owned' }
-  let identity: ProcessIdentity | null = null
-  try {
-    identity = await ctx.deps.processIdentity(runtime.ssh, pid)
-  } catch {
-    // swallow-ok: an unreadable identity means "cannot prove it is ours", so no signal
-    return { ok: false, reason: 'identity-unreadable' }
-  }
-  if (identity?.ok !== true) {
-    return {
-      ok: false,
-      reason: identity?.reason === 'missing' ? 'identity-missing' : `identity-${identity?.reason ?? 'unknown'}`,
-    }
-  }
-  if (typeof proof.startTime === 'string' && proof.startTime !== '' && identity.startTime !== proof.startTime) {
-    return { ok: false, reason: 'pid-reused' }
-  }
-  if (identity.dshHome !== '' && identity.dshHome !== layout.dshHome) {
-    return { ok: false, reason: 'dsh-home-mismatch' }
-  }
-  const profile = runtime.remote.profile ?? runtime.remoteProfile ?? null
-  if (typeof profile === 'string' && profile !== '' && !commandMatchesProfile(identity.command, profile)) {
-    return { ok: false, reason: 'profile-mismatch' }
-  }
-  return { ok: true }
 }
 
 export async function closeTunnel(runtime: HostRuntime): Promise<void> {
@@ -717,7 +503,11 @@ function effectsOf(ctx: TeardownCtx): DispatchHost {
         scheduleIdleStop(ctx, runtime)
         return
       }
-      startRemoteHeartbeat(ctx, runtime)
+      // No rule reachable from this module arms the heartbeat: the events that do
+      // (`connect.succeeded`, `restart.resumed`, `stop.refused`) are dispatched by `connect/*`,
+      // whose effect owner is `runtime/effects.ts`. Importing `watchdog.ts` from here would close
+      // the `host-lifecycle -> connect` edge the design forbids, so the branch stays a no-op —
+      // declared because the interface requires it, like `run`/`flushLogs` below.
     },
     disarm: (runtime, timer) => {
       if (timer === 'reconnect') cancelReconnect(runtime)
@@ -776,12 +566,15 @@ function effectsOf(ctx: TeardownCtx): DispatchHost {
       ctx.onRemoteUnreachable?.(runtime, info)
     },
     bus: (runtime, event) => {
+      // The FSM's watchdog requests go to the same bus the liveness detector publishes on;
+      // `connect/watchdog.ts` is the only subscriber. No rule reachable from this module emits
+      // one, so this branch is currently unreachable as well — it exists so a future transition
+      // cannot quietly reintroduce a reverse callback.
       if (event.kind === 'confirmed') {
-        ctx.requestReattach?.(runtime, { reason: event.reason, source: event.source })
+        ctx.bus.publish({ kind: 'confirmed', hostId: runtime.id, reason: event.reason, source: event.source })
         return
       }
-      const repair = ctx.repairTunnel
-      if (repair) void repair(runtime).catch(() => {})
+      ctx.bus.publish({ kind: 'recovered', hostId: runtime.id, source: event.source })
     },
     flushLogs: () => {
       // The coalescing flush belongs to `connect-progress`; no rule reached from this module emits it.

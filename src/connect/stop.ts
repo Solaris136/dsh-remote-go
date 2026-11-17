@@ -15,7 +15,7 @@ import { createRuntimeEffects } from '../runtime/effects.js'
 import type { BilingualText } from '../util.js'
 import { isPid } from '../util.js'
 import type { ConnectLogWriter } from './guards.js'
-import { closeAuthorized } from './ownership.js'
+import { OWNERSHIP_OPTIONS, proveOwnership } from './ownership.js'
 
 /** The remote web this connection stopped (null when it was already gone). */
 export interface StopRemoteResult {
@@ -186,18 +186,21 @@ async function runStopRemote(
   // `stop.requested` already disarmed the heartbeat/reconnect/idle timers and published the
   // `start`/`stopping-remote` card.
 
-  const verdict = await closeAuthorized(ctx, runtime, pid, layout, profile)
+  const verdict = await proveOwnership(ctx, runtime, { ...OWNERSHIP_OPTIONS.stop, pid, layout, profile })
   if (!isLinkWorkCurrent(runtime, token)) {
     log('debug', 'stop remote aborted: the link was replaced by a disconnect or reconnect')
     return { ok: true, pid: null }
   }
-  if (verdict.ok !== true && verdict.reason !== 'identity-missing') {
+  // A pid that is already gone is not a refusal for this action: there is nothing to signal, only
+  // a stale registry to clear. Every other refusal is the coded error the card explains.
+  const gone = verdict.ok !== true && verdict.reason === 'identity-missing'
+  if (verdict.ok !== true && !gone) {
     throw errors.stopRemoteUnavailable(describeStopRefusal(verdict.reason, pid), {
       technical: `reason=${verdict.reason} pid=${isPid(pid) ? pid : 'unknown'}`,
     })
   }
 
-  if (verdict.reason === 'identity-missing') {
+  if (gone) {
     // Nothing to signal: the process is already gone. Only its stale record remains, and it
     // must go away or the next connect would try to stop/adopt a dead pid.
     log('info', `stop remote: the bound remote process pid=${pid} is already gone; clearing its run registry`)

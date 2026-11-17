@@ -12,11 +12,12 @@ import { listKeyFiles as listKeyFilesInHome, OUTSIDE_HOME } from './key-files.js
 import type { KeyFilesListing } from './key-files.js'
 import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
 import type { KnownHostsSummary } from './known-hosts.js'
-import { startRemoteHeartbeat, stopRemoteHeartbeat } from './host-lifecycle.js'
+import { stopRemoteHeartbeat } from './host-lifecycle.js'
 import { dispatch, scopeFactsFor } from './runtime/dispatch.js'
 import { createRuntimeEffects } from './runtime/effects.js'
 import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from './ssh-config.js'
 import type { DiscoveredAlias } from './ssh-config.js'
+import { startRemoteHeartbeat } from './watchdog.js'
 import type { HostEntry, Settings } from './settings.js'
 import type { Config, HostState, Reporter, Store, TeardownCtx, Transport, WatchdogCtx } from './context.js'
 

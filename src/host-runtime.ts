@@ -269,9 +269,10 @@ export interface RuntimeRemote {
 /* ── 5/8 authz — writer: connect/ownership.ts (everyone else: read-only) ───────────────────── */
 
 /**
- * The kill rights this connection proved. `connect/ownership.ts` maintains the block and only
- * exposes `authorizeLaunch()`/`authorizeBind()`/`keepAlongside()`/`proveOwnership()`; restart/stop/
- * lifecycle may read it *through* `proveOwnership` and never by poking these maps directly.
+ * The kill rights this connection proved. `connect/ownership.ts` maintains the block and is the
+ * only module that decides with it: every authorization read goes through `proveOwnership()`.
+ * `restart`/`stop`/`reattach` still prune a record they just retired (a confirmed stop deletes the
+ * pid, a re-attach drops the wrapper pid), but none of them re-implements the proof.
  */
 export interface RuntimeAuthz {
   /**

@@ -719,8 +719,11 @@ describe('client-compat', () => {
  *                             `dispatch(activity.begin)`/`link.cancelled`; until then it is the
  *                             storage form of `activity`/`epoch`.
  *   remoteFailures / remoteEpisode / episodeSource / episodeCooldownUntil
- *                           — the watchdog's liveness counters; P2 step 9 routes the watchdog
- *                             through `remote.suspected`/`confirmed`/`recovered`.
+ *                           — the watchdog's liveness counters. P2 step 9 moved the liveness
+ *                             machine out of `host-lifecycle.ts` into `watchdog.ts`, which now
+ *                             owns every policy write; `host-lifecycle.ts` keeps only the timer
+ *                             primitive `stopRemoteHeartbeat` (it owns the timer block) and its
+ *                             counter reset.
  *   connectPromise / restartPromise / reattachPromise
  *                           — executor-held by design (§2.4.5); the pipeline owns the promises,
  *                             the FSM owns `activity`.
@@ -739,10 +742,10 @@ const SESSION_WRITERS = {
   closing: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   linkBusy: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
   linkToken: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  remoteFailures: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  remoteEpisode: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  episodeSource: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  episodeCooldownUntil: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
+  remoteFailures: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
+  remoteEpisode: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
+  episodeSource: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
+  episodeCooldownUntil: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
   connectPromise: ['connect/pipeline.ts'],
   restartPromise: ['connect/restart.ts'],
   reattachPromise: ['connect/reattach.ts'],
@@ -832,5 +835,50 @@ describe('runtime-writer-guard', () => {
     // §2.3 item 4: the field that three modules wrote while it was undeclared must stay declared.
     const source = await readFile(path.join(SRC, 'host-runtime.ts'), 'utf8')
     assert.match(source, /warningSource:\s*WarningSource \| null/)
+  })
+})
+
+/* ── watchdog-bus-guard (design-arch §1.7 / P2 step 9) ────────────────────────────────────────
+ *
+ * The watchdog used to reach its two one-shot actions back through `ctx` (`requestReattach`,
+ * `repairTunnel`). P2 step 9 replaced them with a synchronous bus whose subscriber is a single
+ * module, so "who reacts to a confirmed/recovered episode" has exactly one answer. These scans keep
+ * that property from silently growing a second wiring point:
+ *
+ *   - `ctx.bus.subscribe(` exists only in `connect/watchdog.ts`;
+ *   - the two retired reverse callbacks are gone from `src/`;
+ *   - the liveness machine lives in `watchdog.ts`, and `host-lifecycle.ts` (which may not import
+ *     `connect/*` except `connect/ownership`) does not import it.
+ */
+describe('watchdog-bus-guard', () => {
+  test('the bus has exactly one subscriber', async () => {
+    const subscribers = []
+    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      const text = stripComments(await readFile(file, 'utf8'))
+      if (/\bbus\s*\.\s*subscribe\s*\(/.test(text)) subscribers.push(relative)
+    }
+    assert.deepEqual(subscribers, ['connect/watchdog.ts'], 'a second module subscribed to the watchdog bus')
+  })
+
+  test('the two reverse callbacks are gone from the sources', async () => {
+    const offenders = []
+    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      const text = stripComments(await readFile(file, 'utf8'))
+      // `requestReattach` is retired entirely. `repairTunnel` stays as the action's own name, but
+      // it must never be reached again as a member of the context (`ctx.repairTunnel?.(…)`).
+      if (/\brequestReattach\b/.test(text)) offenders.push(`${relative} names requestReattach`)
+      if (/\.\s*repairTunnel\s*\??\.?\s*\(/.test(text)) offenders.push(`${relative} calls ctx.repairTunnel`)
+    }
+    assert.deepEqual(offenders, [], 'a retired reverse callback came back')
+  })
+
+  test('host-lifecycle does not import the watchdog it used to contain', async () => {
+    const source = await readFile(path.join(SRC, 'host-lifecycle.ts'), 'utf8')
+    assert.doesNotMatch(source, /from '\.\/watchdog\.js'/)
+    assert.doesNotMatch(source, /noteRemoteUnreachable|remoteHeartbeatTick/)
+    // The module that owns the timer block keeps only the two primitives.
+    assert.match(source, /export function stopRemoteHeartbeat/)
   })
 })

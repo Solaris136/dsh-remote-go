@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { FakeTunnel, createHost, makeTestService, waitFor } from '../helpers/fake-remote.js'
-import { remoteHeartbeatTick } from '../../src/host-lifecycle.js'
+import { remoteHeartbeatTick } from '../../src/watchdog.js'
 
 const LAYOUT_HOME = '/home/ubuntu/.dsh'
 

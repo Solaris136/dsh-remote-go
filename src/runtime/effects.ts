@@ -19,10 +19,10 @@ import {
   closeTunnel,
   releaseRuntimeForShutdown,
   scheduleIdleStop,
-  startRemoteHeartbeat,
   stopRemoteHeartbeat,
   teardownRuntime,
 } from '../host-lifecycle.js'
+import { startRemoteHeartbeat } from '../watchdog.js'
 
 /**
  * `mark-attached` also resets the link block's repair budget: today's `markConnected` owns both
@@ -109,14 +109,13 @@ export function createRuntimeEffects(ctx: WatchdogCtx): DispatchHost {
       ctx.onRemoteUnreachable?.(runtime, info)
     },
     bus: (runtime, event) => {
-      // The two reverse callbacks the watchdog still calls directly; P2 step 9 routes the
-      // watchdog through these events instead.
+      // The FSM's two watchdog requests reach the same bus the liveness detector publishes on;
+      // `connect/watchdog.ts` is the only subscriber (P2 step 9 retired both reverse callbacks).
       if (event.kind === 'confirmed') {
-        ctx.requestReattach?.(runtime, { reason: event.reason, source: event.source })
+        ctx.bus.publish({ kind: 'confirmed', hostId: runtime.id, reason: event.reason, source: event.source })
         return
       }
-      const repair = ctx.repairTunnel
-      if (repair) void repair(runtime).catch(() => {})
+      ctx.bus.publish({ kind: 'recovered', hostId: runtime.id, source: event.source })
     },
     flushLogs: () => {
       // `connect-progress` owns the coalescing flush timer; `log()` already scheduled it. No rule
