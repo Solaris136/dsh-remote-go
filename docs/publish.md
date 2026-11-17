@@ -10,6 +10,10 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
 ```
 端到端（非必需门禁，需要本机浏览器/桌面端）：`pnpm run test:web` / `pnpm run test:desktop`。
 
+运行时 JS（`index.js`、`src/**/*.js`）不是仓库里的源码：源码是 `.ts`，产物由 `pnpm build` 生成、不进版本库。
+`pnpm test` / `pnpm run gate` / `pnpm run verify` 会先自动构建；`pnpm pack` 由 `prepack` 构建并校验，
+发布包里的 `index.js` / `src/**/*.js` 由这一步产生（`files[]` 命中时 pnpm 不理会 `.gitignore`）。
+
 `package.json` 关键字段（缺一不可）：
 
 | 字段 | 作用 |
@@ -18,7 +22,7 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
 | `dsh.bundle.patch` | 作为 DSH bundle 被安装/启用的入口 |
 | `dsh.client` | 浏览器半端声明（platform: web） |
 | `engines.dsh` / `engines.node` | 兼容区间；安装与启动都用运行版本校验 |
-| `files[]` | 必须含 `index.js`、`client.js`、`src`、`locale`、`cordis.patch.yml`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、`README.md`、`LICENSE` |
+| `files[]` | 必须含 `index.js`、`client.js`、`src`、`locale`、`cordis.patch.yml`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、`README.md`、`LICENSE`；并用 `!src/**/*.ts` 把 TypeScript 源码（含 `.d.ts`）排除出包 |
 | `license` / `repository` / `homepage` / `bugs` / `keywords` | 市场展示、收录与问题反馈入口 |
 | `packageManager` | 固定 pnpm 版本，CI 与本地一致 |
 
@@ -38,7 +42,8 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
    完全相同的门禁：`pnpm run gate`（仓库规范 / 格式 / 语法 / workflow / 打包 / 覆盖率）+ 无外部依赖组
    `pnpm run test:integration:local` + 严格模式（`DSH_E2E_STRICT=1`）的 `pnpm run test:integration:external`。
 2. 从 `package.json` 读取版本；`npm view <name>@<version>` 已存在则跳过发布（只补 tag / Release）。
-3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）。
+3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）：`pack` 的 `prepack` 会先 `pnpm build` 并跑
+   `verify-artifacts`，所以 tarball 里的 `.js` 一定是本次构建产物，且不含任何 `.ts`。
 4. `npm publish --access public`：npm CLI 用工作流的 OIDC 身份完成认证（`id-token: write`），provenance 自动生成，**不需要任何 token**。
 5. 自动创建并推送 `v<x.y.z>` 标签，`gh release create` 生成 notes 并附上 `.tgz`。
 
@@ -88,8 +93,8 @@ dsh plugin --profile web add ./dsh-remote-go-<version>.tgz
 
 ## 5. 发布物内容与安全性
 - tarball 只含运行时文件（`index.js`、`client.js`、`src/`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、
-  `locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、构建输入（`vendor/ssh2-entry.mjs`）与研究资料
-  （`scripts/pack-check.mjs` 校验）。
+  `locale/`、`cordis.patch.yml`、`README.md`、`LICENSE`），不含测试、E2E、构建输入（`vendor/ssh2-entry.mjs`）、
+  研究资料与任何 `.ts` 源码（`scripts/pack-check.mjs` 校验）。
 - 运行时依赖为空（`dependencies: {}`）；`ssh2` 以 vendored bundle 随包发布，安装不拉取任何依赖。
 - 无 postinstall / build 脚本，安装不会执行任意代码；Host 半端只用 Node 内置模块 + vendored `ssh2`，不 import DSH 内部包；launch token 默认只在内存，SSH 密码默认写入 DSH 凭据存储（取消「记住密码」则不落盘），私钥只读取不上传（详见 README 安全节）。
 

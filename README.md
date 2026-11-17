@@ -68,11 +68,16 @@ dsh plugin --profile web add dsh-remote-go
 
 ```bash
 pnpm install --frozen-lockfile --ignore-scripts
-pnpm run verify   # 规范 + 格式 + 语法 + 打包 + 覆盖率 + 单测 + 集成
+pnpm run verify   # 构建 + 规范 + 格式 + 语法 + 打包 + 覆盖率 + 单测 + 集成
 ```
+
+源码是 TypeScript（`index.ts`、`src/**/*.ts`）：`index.js` 与 `src/**/*.js` 由 `pnpm build` 生成，**不进版本库**。
+`pnpm test` / `pnpm run gate` / `pnpm run verify` 都会先自动构建，`pnpm pack` 由 `prepack` 构建并校验后再打包，
+所以克隆后不需要手工 `pnpm build`。`client.js` 仍是手写源码（浏览器半端，P3 起才转为构建产物）。
 
 | 脚本 | 作用 |
 |---|---|
+| `pnpm run build` | 清理旧产物并用锁定的 tsc 编译 `index.ts` / `src/**/*.ts`（`pnpm build` 之外不要手改产物） |
 | `pnpm run test:unit` | 单元测试（不需要网络 / SSH） |
 | `pnpm run test:integration:local` | 无外部依赖集成：模拟远端、重启、关闭远端 |
 | `pnpm run test:integration:external` | 需 DSH harness / 浏览器的集成 |

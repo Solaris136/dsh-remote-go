@@ -40,6 +40,22 @@ function fail(message) {
   process.exit(1)
 }
 
+/** Repository-relative TypeScript sources under `dir`; declarations emit no artifact. */
+async function walkTs(dir, out = []) {
+  for (const entry of await readdir(path.join(root, dir), { withFileTypes: true }).catch(() => [])) {
+    const rel = `${dir}/${entry.name}`
+    if (entry.isDirectory()) await walkTs(rel, out)
+    else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) out.push(rel)
+  }
+  return out
+}
+
+// The tarball must ship one `.js` per TypeScript source under `src/`. Since P1e those files are
+// not committed: `files[]` plus a real `pnpm build` (run by `prepack`) are the only things that
+// put them in the package, so a packaging regression here publishes a package whose `exports`
+// point at nothing. `index.ts` -> `index.js` is covered by the `mustShip` entry below.
+const sourceCount = (await walkTs('src')).length
+
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
 const problems = []
 
@@ -67,6 +83,9 @@ for (const needed of [
 ]) {
   if (!ships(needed)) problems.push(`files[] must ship ${needed}`)
 }
+// The sources are `.ts` (P1e): without the negation the tarball would ship them next to the
+// emitted `.js`, which is neither the published contract nor needed by a consumer.
+if (!files.includes('!src/**/*.ts')) problems.push('files[] must exclude the TypeScript sources with "!src/**/*.ts"')
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
 
 if (tarball) {
@@ -94,6 +113,16 @@ if (tarball) {
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
   if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
     problems.push('tarball does not contain src/*.js')
+  // P1e: the `.js` files are build output, so the only guarantee that a published module exists
+  // is the tarball itself. Every `.ts` source must be represented, and no `.ts` may slip in.
+  const typescriptSources = entries.filter((file) => file.endsWith('.ts'))
+  if (typescriptSources.length > 0)
+    problems.push(`tarball contains TypeScript sources: ${typescriptSources.slice(0, 10).join(', ')}`)
+  const shippedArtifacts = entries.filter((file) => file.startsWith('src/') && file.endsWith('.js'))
+  if (shippedArtifacts.length < sourceCount)
+    problems.push(
+      `tarball ships ${shippedArtifacts.length} src/**/*.js but the repository has ${sourceCount} TypeScript source(s); run pnpm build before packing`,
+    )
   // Assert the vendor runtime explicitly: `mustShip` covers the two files, this catches a
   // `files[]` regression that drops the whole directory from the published tarball.
   if (!entries.some((file) => file.startsWith('vendor/')))

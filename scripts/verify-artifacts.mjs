@@ -1,10 +1,12 @@
-// Artifact drift gate: the `.js` files committed next to the `.ts` sources must be exactly
-// what `pnpm build` emits, and every source must have its artifact at all.
+// One-way artifact gate: every TypeScript source must have a fresh `.js` next to it, and `src/`
+// must not contain a `.js` that no `.ts` produces.
 //
-// The comparison is against the build output, not against `HEAD`: this refactor lands in the
-// working tree first and is committed per phase (D7), so "differs from HEAD" is a normal
-// mid-phase state while "differs from what tsc emits" never is. The gate therefore snapshots
-// every artifact, rebuilds, and reports anything the build had to change.
+// Since P1e the artifacts are not committed (decision I in .agents/refactor/DECISIONS.md), so
+// there is nothing in git to compare against. "Fresh" therefore means "a build of the current
+// tree found nothing to rewrite", "complete" means "the build emitted one artifact per source",
+// and the only other state to reject is an orphan artifact left behind by a deleted `.ts`.
+// The gate is deliberately one-way: no committedness checks, no "commit the artifacts" path and
+// no switch that could restore the two-mode layout.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -22,21 +24,12 @@ function fail(message) {
   process.exit(1)
 }
 
-function gitOutput(args) {
-  const result = spawnSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 64 * 1024 * 1024,
-  })
-  return result.status === 0 ? result.stdout.split(/\r?\n/).filter(Boolean) : null
-}
-
-async function walkSources(dir, out) {
+/** Repository-relative paths under `dir` whose file name ends with `suffix`. */
+async function walk(dir, suffix, out = []) {
   for (const entry of await readdir(path.join(root, dir), { withFileTypes: true }).catch(() => [])) {
     const rel = `${dir}/${entry.name}`
-    if (entry.isDirectory()) await walkSources(rel, out)
-    else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(rel)
+    if (entry.isDirectory()) await walk(rel, suffix, out)
+    else if (entry.isFile() && entry.name.endsWith(suffix)) out.push(rel)
   }
   return out
 }
@@ -48,9 +41,9 @@ async function expandInclude(pattern) {
   // The declaration suffix is tested first: it also ends in `.ts`, and the directory before
   // it has to be walked the same way (`types/**/*.d.ts`).
   const declarationRecursive = '/**/*.d.ts'
-  if (text.endsWith(declarationRecursive)) return walkSources(text.slice(0, -declarationRecursive.length), [])
+  if (text.endsWith(declarationRecursive)) return walk(text.slice(0, -declarationRecursive.length), '.ts')
   const recursive = '/**/*.ts'
-  if (text.endsWith(recursive)) return walkSources(text.slice(0, -recursive.length), [])
+  if (text.endsWith(recursive)) return walk(text.slice(0, -recursive.length), '.ts')
   if (!text.includes('*') && !text.includes('?')) {
     const exact = text.replace(/^\.\//, '')
     return existsSync(path.join(root, exact)) ? [exact] : []
@@ -82,7 +75,7 @@ async function expectedSources() {
   return { sources: [...sources].sort(), declarations }
 }
 
-async function hashArtifact(file) {
+async function hashFile(file) {
   try {
     return createHash('sha256')
       .update(await readFile(path.join(root, file)))
@@ -96,9 +89,18 @@ const { sources, declarations } = await expectedSources().catch((error) => fail(
 if (sources.length === 0) fail('no TypeScript sources matched tsconfig.json "include"; nothing would be verified')
 const artifacts = sources.map((source) => source.replace(/\.ts$/, '.js'))
 
-// Snapshot first: anything the build has to rewrite is a stale (or missing) committed artifact.
+// Orphans have to be collected before the build: `pnpm build` starts by deleting every generated
+// `.js`, so afterwards an orphan is gone and the chance to report it would be gone with it. An
+// orphan is a `.js` under `src/` without a `.ts` twin - a stale twin that survived a rename/delete.
+const orphans = []
+for (const artifact of await walk('src', '.js')) {
+  const source = artifact.replace(/\.js$/, '.ts')
+  if (!existsSync(path.join(root, source))) orphans.push({ artifact, source })
+}
+
+// Snapshot first: anything the build has to create or rewrite is a missing or stale artifact.
 const before = new Map()
-for (const artifact of artifacts) before.set(artifact, await hashArtifact(artifact))
+for (const artifact of artifacts) before.set(artifact, await hashFile(artifact))
 
 const build = spawnSync(process.execPath, [path.join(root, 'scripts', 'build.mjs')], {
   cwd: root,
@@ -111,46 +113,33 @@ if (build.status !== 0)
   )
 
 const problems = []
+for (const { artifact, source } of orphans)
+  problems.push(
+    `${artifact}: orphan; no ${source} twin exists, so this .js is not build output (pnpm build removed it)`,
+  )
 for (const [index, artifact] of artifacts.entries()) {
   const source = sources[index]
-  const after = await hashArtifact(artifact)
-  if (after === null) problems.push(`${artifact}: pnpm build did not produce it (source: ${source})`)
+  const after = await hashFile(artifact)
+  if (after === null) problems.push(`${artifact}: missing; pnpm build did not produce it from ${source}`)
   else if (before.get(artifact) === null)
-    problems.push(`${artifact}: missing from the working tree (source: ${source})`)
+    problems.push(`${artifact}: missing before the build; pnpm build created it from ${source}, so run pnpm build`)
   else if (before.get(artifact) !== after)
-    problems.push(`${artifact}: the committed artifact was stale; pnpm build rewrote it (source: ${source})`)
+    problems.push(`${artifact}: stale; pnpm build rewrote it from ${source}, so run pnpm build`)
 }
-
-// Committedness. An artifact that is already committed must stay committed: a `.ts` source
-// in HEAD whose `.js` is untracked means a plain clone cannot import the module at all. The
-// one state this cannot judge is a source that is not committed yet either — that is a phase
-// landing in the working tree (D7), so it is reported without failing until the phase is in.
-const headPaths = gitOutput(['ls-tree', '-r', '--name-only', 'HEAD'])
-const trackedPaths = gitOutput(['ls-files', '--cached'])
-const pending = []
-if (headPaths === null || trackedPaths === null) {
-  console.warn('[verify-artifacts] WARN: git is unavailable here; the committedness checks were skipped')
-} else {
-  const head = new Set(headPaths)
-  const tracked = new Set(trackedPaths)
-  for (const [index, artifact] of artifacts.entries()) {
-    if (tracked.has(artifact)) continue
-    const source = sources[index]
-    if (head.has(source)) problems.push(`${artifact}: not tracked by git although ${source} is committed`)
-    else pending.push(artifact)
-  }
-}
-if (pending.length > 0) {
-  console.warn(
-    `[verify-artifacts] note: ${pending.length} artifact(s) are not committed yet because their source is not committed yet either; commit them together with the phase`,
-  )
-}
+// The package `exports` entry point is loaded by path, so both halves are asserted explicitly
+// instead of relying on the tsconfig include that happens to cover them: the source must stay
+// compiled, and the emitted file must exist for a plain install to load `index.js`.
+if (existsSync(path.join(root, 'index.ts')) && !sources.includes('index.ts'))
+  problems.push('index.ts: not covered by tsconfig.json "include"; the package entry point would never be built')
+if (!existsSync(path.join(root, 'index.js')))
+  problems.push('index.js: missing; the package "exports" entry point was not produced (source: index.ts)')
 
 if (problems.length > 0) {
   for (const problem of problems) console.error(`[verify-artifacts] FAIL: ${problem}`)
-  fail(`${problems.length} problem(s) found; run pnpm build and commit the emitted artifacts with their source`)
+  fail(`${problems.length} problem(s) found; every .ts source must own the .js that pnpm build emits, and nothing else`)
 }
 console.log(
-  `[verify-artifacts] OK: ${artifacts.length} artifact(s) match the build output` +
-    (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : ''),
+  `[verify-artifacts] OK: ${artifacts.length} artifact(s) freshly produced from ${sources.length} source(s)` +
+    (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : '') +
+    '; no orphan artifacts',
 )
