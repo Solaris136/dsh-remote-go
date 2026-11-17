@@ -7,10 +7,25 @@ function getFetch() {
   return null
 }
 
-function apiError(view, cause) {
+/**
+ * One request's knobs. The caller builds one inline, `apiRequest` is its only reader, and every
+ * member is optional: `GET` without a body is the common case.
+ */
+interface ApiRequestOptions {
+  method?: string
+  body?: unknown
+  signal?: AbortSignal
+}
+
+/** The error `apiError` throws: a plain `Error` that also carries the view every surface renders. */
+interface ApiFailure extends Error {
+  view?: LocalErrorView
+}
+
+function apiError(view, cause?) {
   const text =
     resolveText(view && view.detail, 'zh') || resolveText(view && view.title, 'zh') || 'dsh-remote-go request failed'
-  const error = new Error(text)
+  const error: ApiFailure = new Error(text)
   error.name = 'ApiError'
   error.view = view
   if (cause !== undefined) error.cause = cause
@@ -18,13 +33,13 @@ function apiError(view, cause) {
 }
 
 /** One JSON request: the marker header and same-origin credentials are not optional (docs/api.md). */
-async function apiRequest(path, options) {
-  const opts = options || {}
+async function apiRequest(path, options?: ApiRequestOptions) {
+  const opts: ApiRequestOptions = options || {}
   const fetcher = getFetch()
   if (!fetcher) throw apiError(localErrorView('network'))
   const method = typeof opts.method === 'string' ? opts.method.toUpperCase() : 'GET'
-  const headers = { accept: 'application/json', 'x-dsh-remote-go': '1' }
-  const init = { method, headers, credentials: 'same-origin' }
+  const headers: Record<string, string> = { accept: 'application/json', 'x-dsh-remote-go': '1' }
+  const init: RequestInit = { method, headers, credentials: 'same-origin' }
   if (opts.signal !== undefined) init.signal = opts.signal
   if (opts.body !== undefined) {
     headers['content-type'] = 'application/json; charset=utf-8'

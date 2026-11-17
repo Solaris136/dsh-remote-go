@@ -24,7 +24,7 @@ function mountHostRow(win) {
             win.__drgBridgeQueue = queue
           }
 
-    var make = function (tag, className) {
+    var make = function (tag: string, className?: string) {
       var node = doc.createElement(tag)
       if (className) node.className = className
       return node

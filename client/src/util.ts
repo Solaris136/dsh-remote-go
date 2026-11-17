@@ -79,6 +79,12 @@ function displayAddress(host) {
   return ''
 }
 
+/**
+ * `setTimeout`'s handle: a number in the DOM and a `Timeout` object in Node, and only the latter
+ * carries `unref`. The callers that keep a ticker alive under a non-browser test process use it.
+ */
+type TimerHandle = ReturnType<typeof setTimeout> & { unref?: () => void }
+
 function unrefTimer(timer) {
   if (timer && typeof timer.unref === 'function') timer.unref()
 }
@@ -152,7 +158,7 @@ function progressText(t, progress) {
 
 /** A one-slot store: `emit` wakes every listener, `subscribe` returns its release. */
 function createStore() {
-  const listeners = new Set()
+  const listeners = new Set<() => void>()
   return {
     emit() {
       for (const listener of [...listeners]) {

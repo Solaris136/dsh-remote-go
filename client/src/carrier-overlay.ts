@@ -11,10 +11,20 @@ function disposeWebCarrier(entry) {
 }
 
 /**
+ * What one acquire attempt produced. `ok:false` carries the reason the window did not change
+ * (`acquire-failed`, `bad-url`, `superseded`); the overlay host only acts on the acquire failure.
+ */
+interface CarrierShowResult {
+  ok: boolean
+  reason?: string
+  reused?: boolean
+}
+
+/**
  * Show one host's window, warming it on first visit. Creation is async (the bridge hands out a
  * lease), so `carrierPool.wanted` makes the last request win: a superseded creation is dropped.
  */
-async function showOverlay(options) {
+async function showOverlay(options): Promise<CarrierShowResult> {
   const hostId = typeof options.hostId === 'string' ? options.hostId : ''
   carrierPool.wanted = hostId
   return whenCarrierIdle(() => showOverlayNow(hostId, options))
@@ -96,7 +106,7 @@ async function revealCarrier(entry) {
   entry.root.style.opacity = ''
 }
 
-async function showOverlayNow(hostId, options) {
+async function showOverlayNow(hostId, options): Promise<CarrierShowResult> {
   const url = typeof options.url === 'string' ? options.url : ''
   let entry = carrierOf(hostId)
   const reused = entry !== null

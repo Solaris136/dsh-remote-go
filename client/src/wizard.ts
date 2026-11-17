@@ -26,7 +26,7 @@ function WizardDialog(props) {
   const [saving, setSaving] = useState(null)
   const [formError, setFormError] = useState(null)
   /** Field-level messages keyed by draft field, cleared as soon as that field changes. */
-  const [fieldErrors, setFieldErrors] = useState({})
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [aliases, setAliases] = useState([])
   const [knownHosts, setKnownHosts] = useState(null)
   const [aliasesLoading, setAliasesLoading] = useState(false)
@@ -85,7 +85,7 @@ function WizardDialog(props) {
       password: 'wizard-password',
     }[field]
     if (!testId) return
-    const node = document.querySelector('[data-testid="' + testId + '"]')
+    const node = document.querySelector<HTMLElement>('[data-testid="' + testId + '"]')
     if (node && typeof node.focus === 'function') node.focus()
   }
 

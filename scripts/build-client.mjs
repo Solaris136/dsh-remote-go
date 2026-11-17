@@ -82,6 +82,7 @@ const SOURCES = [
   'toast',
   'overlay-state',
   'manage-window',
+  'actions',
   'plugin-overlay',
   'styles',
   'plugin',
@@ -113,13 +114,9 @@ const GUEST_GLOBALS = new Set([
   '__DSH_DIRECTORY_PICKER__',
 ])
 
-// A module is a contiguous, reviewable slice; `plugin-overlay.ts` is the one documented exception
-// (P3b): `PluginOverlay` is a single function, so the slice cannot get under the budget without
-// rewriting it, which P3b's byte-equality rule forbids.
+// A module is a contiguous, reviewable slice. Every one of them fits the budget with no exception:
+// P3c split the overlay host's commands out into `actions.ts`, which was the last module over it.
 const MAX_MODULE_LINES = 600
-const SIZE_EXCEPTIONS = new Map([
-  ['plugin-overlay.ts', 'one function (PluginOverlay); splitting it would mean rewriting it'],
-])
 
 function fail(message) {
   throw new Error(message)
@@ -276,7 +273,7 @@ async function composeSource() {
     const body = text.slice(newline + 1)
     if (body.trim() === '') fail(`${file} has an empty body`)
     const lines = body.split('\n').length - 1
-    if (lines > MAX_MODULE_LINES && !SIZE_EXCEPTIONS.has(path.basename(file))) {
+    if (lines > MAX_MODULE_LINES) {
       fail(`${file} is ${lines} lines, over the ${MAX_MODULE_LINES}-line module budget`)
     }
     checkSourceScript(file, body)

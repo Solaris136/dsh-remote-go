@@ -10,12 +10,30 @@ const carrierPool = {
   poll: null,
 }
 
+/**
+ * The per-surface operations the pool drives. Both backends (`DESKTOP_CARRIER`, `WEB_CARRIER`)
+ * implement exactly this, and the entry they build carries it unchanged.
+ */
+interface CarrierBackend {
+  kind: string
+  create(hostId: string, url: string, message: string, options: unknown): unknown
+  load(entry: unknown, url: string): void | Promise<void>
+  pushRow(entry: unknown, payload: unknown): void
+  waitReady(entry: unknown): Promise<unknown>
+  dispose(entry: unknown): unknown
+  poll: ((entry: unknown) => void) | null
+}
+
 /** Show/hide operations run one at a time: two overlapping opens must not build two guests. */
 let carrierQueue = Promise.resolve()
 
 let captionStateWatcher = null
 
-function whenCarrierIdle(task) {
+/**
+ * Serialize one carrier operation behind the previous one and hand back its own result: the queue
+ * keeps the *chain*, never the value, so a caller still receives what its task returned.
+ */
+function whenCarrierIdle<T>(task: () => T | PromiseLike<T>): Promise<T> {
   const run = carrierQueue.then(task, task)
   carrierQueue = run.then(
     () => undefined,
@@ -37,7 +55,11 @@ function carrierWarm(hostId) {
   return carrierOf(hostId) !== null
 }
 
-function desktopBrowserBridge() {
+/**
+ * `window.dshDesktop`, narrowed to the browser half this module drives. Anything else (no bridge,
+ * another protocol version, or a shell without guest support) answers `null` at the call site.
+ */
+function desktopBrowserBridge(): DshDesktopBrowser | null {
   if (typeof window === 'undefined') return null
   const carrier = window.dshDesktop
   if (!carrier || carrier.protocolVersion !== DESKTOP_BRIDGE_VERSION) return null
@@ -119,9 +141,14 @@ const CARRIER_INSTALL_MAX_ATTEMPTS = 8
 /** Set by `apply` (the panel store lives there); a carrier's error layer asks for the local page. */
 let requestLocalPage = null
 
+/** The error layer's own handle on its text node, so a reload can rewrite the line in place. */
+interface CarrierErrorLayer extends HTMLDivElement {
+  __drgText?: HTMLParagraphElement
+}
+
 function createCarrierErrorLayer(message, options) {
   const opts = options || {}
-  const layer = document.createElement('div')
+  const layer: CarrierErrorLayer = document.createElement('div')
   layer.className = 'drg-carrier-error'
   layer.setAttribute('data-testid', 'remote-overlay-error')
   // A failure that fills the window is an alert: it appears without user action and the only
@@ -144,7 +171,7 @@ function createCarrierErrorLayer(message, options) {
   return layer
 }
 
-function showCarrierError(layer, message) {
+function showCarrierError(layer, message?: string) {
   if (!layer) return
   if (layer.__drgText && typeof message === 'string' && message !== '') layer.__drgText.textContent = message
   layer.style.display = 'flex'

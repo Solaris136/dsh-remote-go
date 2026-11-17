@@ -293,7 +293,10 @@ function Select(props) {
       'aria-invalid': props.invalid === true ? 'true' : undefined,
       'aria-describedby': props.describedBy,
       'data-testid': props.testId,
-      onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.value) : undefined,
+      onChange:
+        typeof props.onChange === 'function'
+          ? (event: ReactChangeEvent<HTMLSelectElement>) => props.onChange(event.target.value)
+          : undefined,
     },
     options.map((option) => h('option', { key: option.value, value: option.value }, option.label)),
   )

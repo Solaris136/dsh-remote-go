@@ -1,6 +1,7 @@
-// client/src/styles.ts - const CSS (the whole panel stylesheet) and StyleSheet(); after plugin-overlay.ts, before plugin.ts.
+// client/src/styles.ts - const CSS (the whole panel stylesheet) and PanelStyleSheet(); after plugin-overlay.ts, before plugin.ts.
 //#region 16. styles
 
+// @ts-expect-error lib.dom already declares a global `CSS` namespace (the escape/supports object), so a script-scope `const CSS` is a redeclaration; the artifact contract pins this declaration verbatim (build-client.mjs and test/unit/guards.test.js both match it), so it can be neither renamed nor moved into a scope. Expires when the stylesheet moves into client/template.js.
 const CSS = `
     /*
      * No local token layer: every colour, surface, radius and shadow is the host's own --dsw-*
@@ -535,6 +536,6 @@ const CSS = `
     html.drg-caption-live body > [data-windows-menu] { z-index: 2147483002; }
 `
 
-function StyleSheet() {
+function PanelStyleSheet() {
   return h('style', { 'data-dsh-remote-go': 'styles', dangerouslySetInnerHTML: { __html: CSS } })
 }

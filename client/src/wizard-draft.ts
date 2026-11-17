@@ -56,8 +56,33 @@ function parseMaskedAddress(masked) {
   return result
 }
 
+/**
+ * The body `POST /hosts` takes as this wizard builds it. `jumpHost`, `id` and `auth` are added
+ * conditionally (a new host vs. an edit, an untouched credential vs. a new one), which is why they
+ * are optional here: the Host treats a missing field as "keep what is stored".
+ */
+interface HostInputBody {
+  name: string
+  address: string
+  port: number
+  username: string
+  keepAlive: string
+  idleMinutes: number
+  autoReconnect: boolean
+  hostKeyPolicy: string
+  jumpHost?: string
+  id?: string
+  auth?: { type: string; keyPath?: string }
+}
+
+/** What a save may or may not demand from the draft (an edit that leaves auth alone demands less). */
+interface HostDraftValidationOptions {
+  requireKeyPath?: boolean
+  requirePassword?: boolean
+}
+
 function buildHostInput(draft, hostId, includeAuth) {
-  const host = {
+  const host: HostInputBody = {
     name: String(draft.name || '').trim(),
     address: String(draft.address || '').trim(),
     port: toInt(draft.port, 22),
@@ -89,7 +114,7 @@ function fieldError(field, code) {
   return { field, code }
 }
 
-function validateHostDraft(draft, options = {}) {
+function validateHostDraft(draft, options: HostDraftValidationOptions = {}) {
   if (!String(draft.name || '').trim()) return fieldError('name', 'wizard.validationName')
   const address = String(draft.address || '').trim()
   if (!address) return fieldError('address', 'wizard.validationAddress')

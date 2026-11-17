@@ -53,7 +53,7 @@ function SettingsModal(props) {
   const [draft, setDraft] = useState(() => settingsDraft(props.settings))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
-  const [fieldErrors, setFieldErrors] = useState({})
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   // Key-file picker overlay for the default key path.
   const [keyPicker, setKeyPicker] = useState(false)
   const patch = (patchValue) => {
@@ -80,7 +80,7 @@ function SettingsModal(props) {
   }
   const focusField = (field) => {
     if (typeof document === 'undefined' || !document.querySelector) return
-    const node = document.querySelector('[data-testid="settings-' + field + '"]')
+    const node = document.querySelector<HTMLElement>('[data-testid="settings-' + field + '"]')
     if (node && typeof node.focus === 'function') node.focus()
   }
 

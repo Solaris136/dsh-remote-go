@@ -4,5 +4,11 @@
   "policy": "Every entry states why a narrower type is impossible. Keys are <repo-relative-path>:<1-based-line>. `match` guards a stale line; `--update` re-anchors and prunes, never adds.",
   "any": {},
   "doubleAssertion": {},
-  "suppressions": {}
+  "suppressions": {
+    "client/src/styles.ts:4": {
+      "reason": "lib.dom declares a global `CSS` namespace, and the published artifact's contract pins this declaration verbatim (`scripts/build-client.mjs` counts `const CSS = ` template literals and `test/unit/guards.test.js` reads the same literal), so the name can be neither renamed nor moved into a nested scope. The directive is stripped by esbuild, so the artifact is unaffected. It expires when the stylesheet moves into `client/template.js`, which is the only way to stop the name being a script-scope declaration.",
+      "match": "@ts-expect-error lib.dom already declares a global",
+      "until": "P7"
+    }
+  }
 }

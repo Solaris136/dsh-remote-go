@@ -1,4 +1,46 @@
 // client/src/carrier-desktop.ts - createDesktopCarrier, the guest backend (9b 8/11); after carrier-caption.ts, before carrier-web.ts.
+/**
+ * The desktop carrier runs inside Electron, where `<webview>` is a real element with a `loadURL`
+ * method; `lib.dom` can only type the tag name as `HTMLElement`, so the shape this module calls is
+ * declared here instead of being reached for through `any`.
+ */
+interface WebviewElement extends HTMLElement {
+  loadURL(url: string): Promise<void>
+}
+
+/** The guest's `did-fail-load` event; a sub-resource failure carries a negative `errorCode`. */
+interface WebviewLoadFailure extends Event {
+  isMainFrame?: boolean
+  errorCode?: number
+}
+
+/**
+ * One desktop guest. The pool keeps it warm and every backend call takes it, so the fields a
+ * later frame mutates (`installAttempts`, `ready`, `failed`, …) are declared with it.
+ */
+interface DesktopCarrierEntry {
+  kind: string
+  backend: CarrierBackend
+  hostId: string
+  lease: string
+  root: HTMLElement
+  view: WebviewElement
+  grip: HTMLElement | null
+  caption: { height: number } | null
+  captionApplied: boolean
+  sidebarCollapsed: boolean | null
+  sidebarStart: string
+  url: string
+  rowInstalled: boolean
+  failed: boolean
+  timer: number | null
+  ready: boolean
+  readyWaiters: ((value: boolean) => void)[]
+  revealToken: number
+  /** Install retries for the current document; the pool's retry chain increments it. */
+  installAttempts?: number
+}
+
 async function createDesktopCarrier(hostId, url, message, options) {
   const bridge = desktopBrowserBridge()
   if (bridge === null) return null
@@ -56,7 +98,9 @@ async function createDesktopCarrier(hostId, url, message, options) {
       'px;z-index:1;-webkit-app-region:drag'
   }
 
-  const view = document.createElement('webview')
+  // `lib.dom` types a custom tag as a plain `HTMLElement`; the one member this module calls
+  // (`loadURL`) is declared on `WebviewElement` above, and this is the only assertion in the file.
+  const view = document.createElement('webview') as WebviewElement
   view.className = 'drg-carrier-view'
   view.setAttribute('name', String(reservation.lease))
   view.setAttribute('partition', String(reservation.partition))
@@ -65,7 +109,7 @@ async function createDesktopCarrier(hostId, url, message, options) {
 
   // Built before any listener is attached: the handlers below read it, and a guest that fired an event while the
   // element was being appended would otherwise read a binding that is still in its temporal dead zone.
-  const entry = {
+  const entry: DesktopCarrierEntry = {
     kind: 'desktop',
     backend: DESKTOP_CARRIER,
     hostId,
@@ -147,7 +191,7 @@ async function createDesktopCarrier(hostId, url, message, options) {
         if (carrierPool.current === entry.hostId) startHostRowPoll(entry)
       })
   })
-  view.addEventListener('did-fail-load', (event) => {
+  view.addEventListener('did-fail-load', (event: WebviewLoadFailure) => {
     if (entry.view !== view) return
     // A main-frame failure leaves a blank window, so say so; sub-resource
     // failures (errorCode -3, aborted) are normal and must stay silent.

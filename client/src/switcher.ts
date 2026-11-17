@@ -39,7 +39,7 @@ function switcherPayload() {
   }
 }
 
-function updateSwitcher(patch) {
+function updateSwitcher(patch?) {
   if (patch && typeof patch === 'object') {
     if (Array.isArray(patch.hosts)) {
       switcher.hosts = patch.hosts.filter((host) => host && typeof host.id === 'string')

@@ -27,7 +27,7 @@ function RemoteIcon(props) {
   )
 }
 
-function strokeIcon(paths, viewBox) {
+function strokeIcon(paths, viewBox?: string) {
   return function Icon(props) {
     const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
     return h(

@@ -79,9 +79,26 @@ const LOCAL_ERRORS = {
   },
 }
 
-function localErrorView(code, technical) {
+/** One `{zh,en}` pair exactly as the locale service resolves it. */
+interface LocalizedText {
+  zh: string
+  en: string
+}
+
+/** The view every failure surface renders (`ErrorView` in docs/api.md §0). */
+interface LocalErrorView {
+  code: string
+  retryable: boolean
+  title: LocalizedText
+  detail: LocalizedText
+  nextSteps: LocalizedText[]
+  /** The Host's own message, kept out of the localized copy (`error-view.test.js` pins it). */
+  technical?: string
+}
+
+function localErrorView(code, technical?: string) {
   const base = LOCAL_ERRORS[code] || LOCAL_ERRORS.internal
-  const view = {
+  const view: LocalErrorView = {
     code: base.code,
     retryable: base.retryable,
     title: base.title,
