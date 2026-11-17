@@ -1,3 +1,32 @@
+/**
+ * The mutable per-host state — one flat object, eight type-level blocks.
+ *
+ * design-arch §2.2/§7.4 divide the 67 fields (66 declared + `warningSource`) into eight blocks and
+ * name the **single module** allowed to write each one. The fields stay flat (decision H1): every
+ * reader keeps `runtime.status` / `runtime.ssh` / `runtime.remote.uiReady`, because 136 unit-test
+ * assertions, `host-view.ts` and `diagnostics.ts` read those paths. Splitting the *type* is what
+ * buys the boundary; physical nesting is a separate, later change.
+ *
+ * | # | block        | fields | writer                                        |
+ * |---|--------------|--------|-----------------------------------------------|
+ * | 1 | `identity`   | 2      | `host-registry.ts` (`ensureRuntime`/`commitEntry`) |
+ * | 2 | `session`    | 20     | `runtime/fsm.ts` — only through `dispatch()`/`writeBack()` |
+ * | 3 | `link`       | 12     | `connect/link.ts`                             |
+ * | 4 | `remote`     | 19     | `connect/remote-state.ts`                     |
+ * | 5 | `authz`      | 3      | `connect/ownership.ts` (read-only elsewhere)  |
+ * | 6 | `logs`       | 3      | `connect-log.ts`                              |
+ * | 7 | `rendezvous` | 3      | `prompts.ts`                                  |
+ * | 8 | `timers`     | 5      | `host-lifecycle.ts`                           |
+ *
+ * 2 + 20 + 12 + 19 + 3 + 3 + 3 + 5 = 67. The `remote` row counts the container plus its 12
+ * sub-fields (1 + 12 + the six facts/home/exchange/restarts fields), which is why the block
+ * interface itself declares seven properties.
+ *
+ * Deviation log for this stage (see the report): `phase`, `linkBusy`, `episodeSource`, `restarts`
+ * and the three promise fields keep today's wider storage type, because narrowing them would force
+ * edits in `connect-pipeline.ts`/`host-lifecycle.ts`, which this stage does not own. The FSM's own
+ * `SessionState` (`runtime/fsm.ts`) uses the narrow types; `writeBack` converts on the way out.
+ */
 import type { BilingualText } from './util.js'
 import type { ErrorView } from './errors.js'
 import type { HostEntry } from './settings.js'
@@ -7,6 +36,53 @@ import type { RemoteFacts } from './probe.js'
 import type { ExchangeResult } from './remote-proc.js'
 import type { Tunnel } from './tunnel.js'
 import type { SshConnection } from './ssh.js'
+// Type-only edge into `prompts.ts`, the same pattern `context.ts` already uses for
+// `LifecycleVerdict`: the rendezvous block is *declared* from the payload types its only writer
+// owns, and both edges erase at emit time, so nothing cycles at run time.
+import type { PendingConflict, PendingHostKey } from './prompts.js'
+
+/* ── block vocabulary (design-arch §2.4.1 / §7.2) ─────────────────────────────────────────── */
+
+/** The eight statuses `HostView.status` may carry. `limited` is reserved: P2 never produces it. */
+export type HostStatus =
+  | 'unconfigured'
+  | 'connecting'
+  | 'fingerprint-pending'
+  | 'conflict-pending'
+  | 'connected'
+  | 'disconnected'
+  | 'error'
+  | 'limited'
+
+/** What the user wants, as opposed to what the transport currently sees. */
+export type Desired = 'idle' | 'connected'
+
+/** The one-shot link action that currently owns the runtime (§2.4.5 collapses four locks into this). */
+export type Activity = 'connect' | 'restart' | 'reattach' | 'stop' | 'repair'
+
+/** The staged connect line, in order. */
+export type ConnectPhase = 'ssh' | 'probe' | 'bootstrap' | 'start' | 'tunnel' | 'verifying' | 'ready'
+
+/** A progress line: the code the Client localizes plus its interpolation values. */
+export type Progress = ConnectProgressState
+
+/** Why `warning` is set; a successful attach clears only the `restart-stop` one. */
+export type WarningSource = 'alongside' | 'restart-stop'
+
+/** One open liveness episode (`heartbeat`/`tunnel`/`proxy` saw the remote UI fail). */
+export interface EpisodeState {
+  source: string
+  phase: 'suspected' | 'confirmed'
+  cooldownUntil: number
+}
+
+/** The `HostView.conflict` payload; §7.2 will move it to `src/contracts.ts` once that file exists. */
+export interface ConflictView {
+  detectedAt: string
+  processes: { pid: number; command: string }[]
+}
+
+/* ── payload types the blocks are made of ─────────────────────────────────────────────────── */
 
 /** The remote web this runtime currently knows about; cleared by every teardown. */
 export interface RemoteRuntime {
@@ -28,6 +104,9 @@ export interface RemoteRuntime {
    */
   viewRev: number
 }
+
+/** §7.2 calls this `RemoteView`; the long-standing name stays because readers import it. */
+export type RemoteView = RemoteRuntime
 
 /** One process this connection launched, with the identity proved before the launch. */
 export interface LaunchedProcess {
@@ -59,33 +138,72 @@ export interface BoundProcess {
   origin: string
 }
 
-/**
- * The mutable per-host state. `service` owns the object; `connect-pipeline` drives it,
- * `connect-log`/`connect-progress` write their own slices, and `host-view`/`diagnostics`
- * only read it.
- */
-export interface HostRuntime {
+/* ── 1/8 identity — writer: host-registry.ts ───────────────────────────────────────────────── */
+
+/** The store-backed host this runtime belongs to. Written only by `host-registry.ts`. */
+export interface RuntimeIdentity {
   id: string
   entry: HostEntry
-  status: string
+}
+
+/* ── 2/8 session — writer: runtime/fsm.ts (dispatch/writeBack only) ────────────────────────── */
+
+/**
+ * Everything the state machine owns: what the user wants, what the link is doing, and the counters
+ * and flags that decide whether a late write may still land.
+ *
+ * No other module may assign into this block once the FSM is wired (P2 step 4); today the
+ * pipeline/lifecycle/prompts still do, which is exactly the ownership this block retires.
+ */
+export interface RuntimeSession {
+  status: HostStatus
   phase: string | null
-  progress: ConnectProgressState | null
+  progress: Progress | null
   error: ErrorView | null
   warning: BilingualText | null
   /**
    * Why `warning` is set (`alongside` | `restart-stop`): a successful attach clears a stale
    * "stop not confirmed" warning but must keep describing a process that is still running, so
-   * the reason has to travel with the text. Absent on a runtime that never warned.
+   * the reason has to travel with the text. `null` on a runtime that never warned.
    */
-  warningSource?: string | null
-  fingerprint: RuntimeFingerprint | null
+  warningSource: WarningSource | null
+  desired: Desired
+  closing: boolean
   /**
-   * The jump host's own host key context: `{ sha256, keyType, status, pinned }`. Kept apart
-   * from `fingerprint` (the target) so a jump-host confirmation can never pin the target
-   * and a target pin can never be checked against the jump host (B1).
+   * The user answered a prompt with "no" (or let it time out): the connection attempt must
+   * not be retried automatically, because a retry would ask the same question again (H2).
    */
-  jumpFingerprint: RuntimeFingerprint | null
-  remote: RemoteRuntime
+  connectCancelled: boolean
+  /**
+   * The transport this attempt was dialling closed under the pipeline (including while the
+   * handshake was still waiting for a host-key answer). Such a failure is a dropped link,
+   * not an auth/key decision (H3).
+   */
+  transportLost: boolean
+  reconnectAttempts: number
+  /** The in-flight connect/restart/re-attach, held by the executor (§2.4.5). */
+  connectPromise: Promise<void> | null
+  restartPromise: Promise<void> | null
+  reattachPromise: Promise<void> | null
+  /**
+   * `activity`'s storage form. Still `string` because `host-lifecycle.ts#beginLinkWork` takes a
+   * caller-supplied kind; `SessionState.activity` is the narrow `Activity | null`.
+   */
+  linkBusy: string | null
+  /** `epoch`: the token a one-shot action must still hold to be allowed to write (R4/R10). */
+  linkToken: number
+  /** Consecutive failed liveness probes; a confirmed episode is two of them. */
+  remoteFailures: number
+  remoteEpisode: boolean
+  /** `episodeSource`'s storage form; the watchdog's labels are free-form (`heartbeat`/`proxy`/`tunnel`). */
+  episodeSource: string | null
+  episodeCooldownUntil: number
+}
+
+/* ── 3/8 link — writer: connect/link.ts ────────────────────────────────────────────────────── */
+
+/** The live transport, its tunnel, the launch token and everything credential-shaped. */
+export interface RuntimeLink {
   ssh: SshConnection | null
   jumpSsh: SshConnection | null
   tunnel: Tunnel | null
@@ -99,6 +217,22 @@ export interface HostRuntime {
   forgetPassword: boolean
   /** Mirrors the credential store for `HostView.passwordSaved` (restored on load). */
   passwordSaved: boolean
+  fingerprint: RuntimeFingerprint | null
+  /**
+   * The jump host's own host key context: `{ sha256, keyType, status, pinned }`. Kept apart
+   * from `fingerprint` (the target) so a jump-host confirmation can never pin the target
+   * and a target pin can never be checked against the jump host (B1).
+   */
+  jumpFingerprint: RuntimeFingerprint | null
+  tunnelRepairFailures: number
+  nextTunnelRepairAt: number
+}
+
+/* ── 4/8 remote — writer: connect/remote-state.ts ──────────────────────────────────────────── */
+
+/** The remote web, the probe facts and the memories that must survive a teardown (H1/R9). */
+export interface RuntimeRemote {
+  remote: RemoteRuntime
   facts: RemoteFacts | null
   /**
    * The last known remote home, managed web pid and profile. `facts`/`remote` are cleared by
@@ -109,32 +243,20 @@ export interface HostRuntime {
   remotePid: number | null
   remoteProfile: string | null
   exchange: ExchangeResult | null
-  pendingHostKey: unknown
-  pendingConflict: unknown
-  conflict: unknown
-  desired: string
+  /** Bounded diagnostics trail; the writer spreads arbitrary `Record<string, unknown>` entries. */
+  restarts: Array<Record<string, unknown>>
+}
+
+/* ── 5/8 authz — writer: connect/ownership.ts (everyone else: read-only) ───────────────────── */
+
+/**
+ * The kill rights this connection proved. `connect/ownership.ts` maintains the block and only
+ * exposes `authorizeLaunch()`/`authorizeBind()`/`keepAlongside()`/`proveOwnership()`; restart/stop/
+ * lifecycle may read it *through* `proveOwnership` and never by poking these maps directly.
+ */
+export interface RuntimeAuthz {
   /**
-   * The user answered a prompt with "no" (or let it time out): the connection attempt must
-   * not be retried automatically, because a retry would ask the same question again (H2).
-   */
-  connectCancelled: boolean
-  /**
-   * The transport this attempt was dialling closed under the pipeline (including while the
-   * handshake was still waiting for a host-key answer). Such a failure is a dropped link,
-   * not an auth/key decision (H3).
-   */
-  transportLost: boolean
-  reconnectAttempts: number
-  reconnectTimer: ReturnType<typeof setTimeout> | null
-  idleTimer: ReturnType<typeof setTimeout> | null
-  connectPromise: Promise<unknown> | null
-  /** One-shot link actions (local restart / remote re-attach / listener repair / stop) and their token. */
-  linkBusy: string | null
-  linkToken: number
-  restartPromise: Promise<unknown> | null
-  reattachPromise: Promise<unknown> | null
-  /**
-   * Processes this connection actually launched (pid -> start time), plus pids adopted from a
+   * Processes this connection actually launched (pid -> identity), plus pids adopted from a
    * registry record written by a launch. Only these may ever be stopped; a pid a re-attach
    * discovered gets display rights, never kill rights.
    */
@@ -146,31 +268,57 @@ export interface HostRuntime {
    * without granting the kill right to a restart.
    */
   bound: BoundProcess | null
-  /** Current tunnel repair (a broken local listener under a healthy remote). */
-  tunnelRepair: Promise<{ ok: boolean; reason?: string }> | null
-  tunnelRepairFailures: number
-  nextTunnelRepairAt: number
-  /** Liveness probes: a confirmed episode is two consecutive failed probes. */
-  heartbeatTimer: ReturnType<typeof setInterval> | null
-  remoteCheckTimer: ReturnType<typeof setTimeout> | null
-  remoteFailures: number
-  remoteEpisode: boolean
-  episodeSource: string | null
-  episodeCooldownUntil: number
   /** Processes kept alongside this connection (chosen in the conflict prompt). */
   alongsidePids: number[]
-  /** Bounded, client-independent record of restarts / re-attaches for diagnostics. */
-  restarts: Array<Record<string, unknown>>
-  closing: boolean
+}
+
+/* ── 6/8 logs — writer: connect-log.ts ─────────────────────────────────────────────────────── */
+
+/** The per-host connect-log ring and its cursors. */
+export interface RuntimeLogs {
   logs: ConnectLogEntry[]
   logSeq: number
-  // Which connection this runtime is on; the connect log starts at 1 and resets its ring.
+  /** Which connection this runtime is on; the connect log starts at 1 and resets its ring. */
   connectCount: number
 }
 
+/* ── 7/8 rendezvous — writer: prompts.ts ───────────────────────────────────────────────────── */
+
+/** The two paused-prompt slots and the conflict card the Client may be showing. */
+export interface RuntimeRendezvous {
+  pendingHostKey: PendingHostKey | null
+  pendingConflict: PendingConflict | null
+  conflict: ConflictView | null
+}
+
+/* ── 8/8 timers — writer: host-lifecycle.ts ────────────────────────────────────────────────── */
+
+/** Every timer the watchdog owns, plus the in-flight listener rebuild teardown has to await. */
+export interface RuntimeTimers {
+  reconnectTimer: ReturnType<typeof setTimeout> | null
+  idleTimer: ReturnType<typeof setTimeout> | null
+  heartbeatTimer: ReturnType<typeof setInterval> | null
+  remoteCheckTimer: ReturnType<typeof setTimeout> | null
+  /** Current tunnel repair (a broken local listener under a healthy remote). */
+  tunnelRepair: Promise<{ ok: boolean; reason?: string }> | null
+}
+
 /**
- * The per-host runtime object shared by the service and every helper.
+ * The per-host runtime object shared by the service and every helper: the eight blocks, flat.
+ *
+ * The intersection is not decoration — it is the compile-time proof that the object has exactly
+ * these 67 field paths, and `createHostRuntime` below is checked against it field by field.
  */
+export type HostRuntime = RuntimeIdentity &
+  RuntimeSession &
+  RuntimeLink &
+  RuntimeRemote &
+  RuntimeAuthz &
+  RuntimeLogs &
+  RuntimeRendezvous &
+  RuntimeTimers
+
+/** An empty `RemoteRuntime`; the teardown path resets to it while keeping the version. */
 export function emptyRemote(): RemoteRuntime {
   return {
     version: null,
@@ -188,7 +336,14 @@ export function emptyRemote(): RemoteRuntime {
   }
 }
 
-/** Build the mutable state for one host. The entry always carries the id the store issued. */
+/**
+ * Build the mutable state for one host. The entry always carries the id the store issued.
+ *
+ * The return annotation types the literal field by field, so an empty container needs no `as`
+ * (contextual typing supplies its element type) and a missing or extra field is a compile error.
+ * @param host - the stored host, already carrying its id.
+ * @returns a fresh runtime in the `unconfigured` state.
+ */
 export function createHostRuntime(host: HostEntry & { id: string }): HostRuntime {
   return {
     id: host.id,
@@ -198,6 +353,7 @@ export function createHostRuntime(host: HostEntry & { id: string }): HostRuntime
     progress: null,
     error: null,
     warning: null,
+    warningSource: null,
     fingerprint: host.pinnedFingerprint
       ? { sha256: host.pinnedFingerprint, keyType: 'pinned', status: 'pinned', pinned: host.pinnedFingerprint }
       : null,
@@ -241,12 +397,10 @@ export function createHostRuntime(host: HostEntry & { id: string }): HostRuntime
     remoteEpisode: false,
     episodeSource: null,
     episodeCooldownUntil: 0,
-    // The three containers start empty and are filled by `connect-pipeline`; the `as` fixes the
-    // element type an empty literal cannot infer (it erases at emit time).
-    alongsidePids: [] as number[],
-    restarts: [] as Array<Record<string, unknown>>,
+    alongsidePids: [],
+    restarts: [],
     closing: false,
-    logs: [] as ConnectLogEntry[],
+    logs: [],
     logSeq: 0,
     connectCount: 0,
   }
