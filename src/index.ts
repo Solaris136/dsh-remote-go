@@ -7,6 +7,8 @@ import { statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createAdmission } from './admission.js'
 import { createApi } from './api.js'
+import { KERNEL_PROBE_VERSION, createKernelAdapter } from './kernel-adapter.js'
+import type { KernelAdapter, KernelProbeReport } from './kernel-adapter.js'
 import { detectLocalEnginesNode, detectLocalVersion } from './local-version.js'
 import { createRemoteProxy } from './proxy/index.js'
 import type { UpgradeRegistration } from './proxy/index.js'
@@ -16,32 +18,6 @@ import { HostStore, resolveDshHome, resolveStateDir } from './store.js'
 import { registerHostTools } from './tools.js'
 import type { ToolContext } from './tools.js'
 import { messageOf } from './util.js'
-
-/** One client-module entry the loader's graph lists. */
-interface ClientModuleEntry {
-  id?: unknown
-  rev?: unknown
-  url?: unknown
-  inject?: unknown
-  immediately?: unknown
-}
-
-/** The loader's client-module graph (only what the diagnostics row reads). */
-interface ClientModuleGraph {
-  rev?: unknown
-  release?: unknown
-  entries?: ClientModuleEntry[]
-}
-
-/**
- * The client-module service of this kernel: the published graph plus the bundle path the loader
- * would serve. Kept separate from `local-version.ts`'s narrower `ClientModulesService` (that one
- * only reads `release.version`), because this half also reports the on-disk bundle.
- */
-interface LoaderClientModules {
-  graph?: () => ClientModuleGraph | null
-  clientPath?: (id: string) => string | null
-}
 
 /** One prefix registration on DSH's own web server. */
 interface WebRegistration {
@@ -61,21 +37,17 @@ interface WebServerService {
   registerUpgrade?: (registration: UpgradeRegistration) => () => void
 }
 
-/** The loader fiber's own metadata, read for the diagnostics row only. */
-interface PluginFiber {
-  entry?: { options?: { id?: unknown; name?: unknown } }
-}
-
 /**
  * The plugin context this entry drives. Every member is the slice cordis actually provides; the
  * optional ones are the services this plugin may run without (`connection`, `credentials`, `tools`
  * are looked up, never injected as required).
+ *
+ * The loader's own metadata (`fiber`, `clientModules`) is deliberately *not* declared here: it is
+ * read through `kernel-adapter.ts`, which is the only module allowed to know that shape.
  */
 interface PluginContext {
   webServer?: WebServerService
   get: (name: string) => unknown
-  clientModules?: LoaderClientModules | null
-  fiber?: PluginFiber
   /** `webServer` is the only injected service; effects are released when the fiber unloads. */
   effect?: (setup: () => () => void, label?: string) => () => void
   inject?: (names: string[], apply: (scoped: ToolContext) => () => void) => { dispose?: () => void } | undefined
@@ -102,6 +74,9 @@ interface SelfInfo {
  *
  * A `type`, not an `interface`: the API option declares `() => Record<string, unknown>`, and only
  * an object type literal is assignable to an index signature.
+ *
+ * `kernel` is additive (v2.12): `entry` and `client` keep their historical shape and their `null`s,
+ * while `kernel.probes` reports *why* a field is null (absent service vs. moved shape).
  */
 type SelfReport = {
   home: string
@@ -109,8 +84,9 @@ type SelfReport = {
   hostVersion: string | null
   engineNodeRange: string | null
   storeCorrupt: boolean
-  entry: { id: unknown; name: unknown } | null
+  entry: { id: string | null; name: string | null } | null
   client: Record<string, unknown> | null
+  kernel: { version: string; probes: KernelProbeReport }
 }
 
 export const name = PLUGIN_ID
@@ -120,6 +96,9 @@ export const optional = ['connection', 'credentials']
 
 export function apply(ctx: PluginContext, config: PluginConfig = {}): RemoteGoService {
   const logger = createLogger()
+  // The kernel's own metadata (loader fiber, client-module registry) is read through one adapter,
+  // so `/diagnostics/self` and every future kernel probe share the same three-state answers.
+  const kernel = createKernelAdapter(ctx)
   const home = config.home ? String(config.home) : resolveDshHome(process.env)
   const stateDir = resolveStateDir(home)
   const store = new HostStore({ dir: stateDir, logger })
@@ -150,7 +129,7 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): RemoteGoSe
     admit,
     logger,
     diagnostics: () =>
-      describeSelf(ctx, {
+      describeSelf(kernel, {
         home,
         stateDir,
         localVersion: service.localVersion,
@@ -195,7 +174,7 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): RemoteGoSe
       try {
         await service.init()
         syncViewRoutes()
-        const detected = await detectLocalVersion({ ctx })
+        const detected = await detectLocalVersion({ ctx, logger })
         if (detected.version) service.setLocalVersion(detected.version, detected.source)
         // The managed Node version is the lower bound of DSH's own `engines.node`;
         // reading it here keeps the plugin in step with the running DSH build.
@@ -233,7 +212,14 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): RemoteGoSe
   return service
 }
 
-function describeSelf(ctx: PluginContext, info: SelfInfo): SelfReport {
+/**
+ * The `/diagnostics/self` body: the installation facts plus the kernel probe table.
+ *
+ * Every kernel read goes through `kernel-adapter.ts`, whose three states map onto this document the
+ * same way everywhere: `ok` fills the historical field, `absent`/`changed` leave it `null` (exactly
+ * what a missing service used to do) and `kernel.probes` says which of the two it was.
+ */
+function describeSelf(kernel: KernelAdapter, info: SelfInfo): SelfReport {
   const out: SelfReport = {
     home: info.home,
     stateDir: info.stateDir,
@@ -243,41 +229,40 @@ function describeSelf(ctx: PluginContext, info: SelfInfo): SelfReport {
     storeCorrupt: info.storeCorrupt === true,
     entry: null,
     client: null,
+    kernel: { version: KERNEL_PROBE_VERSION, probes: kernel.probeReport() },
   }
-  try {
-    const entry = ctx?.fiber?.entry
-    out.entry = {
-      id: entry?.options?.id ?? null,
-      name: entry?.options?.name ?? null,
+  const entry = kernel.fiberEntry()
+  if (entry.state === 'ok' && entry.value !== null) out.entry = { id: entry.value.id, name: entry.value.name }
+  const graph = kernel.clientModuleGraph()
+  const row = kernel.clientModuleRow(PLUGIN_ID)
+  const clientPathProbe = kernel.clientPath(PLUGIN_ID)
+  const clientPath = clientPathProbe.state === 'ok' ? clientPathProbe.value : null
+  let bundle: Record<string, unknown> | null = null
+  if (clientPath) {
+    try {
+      const stat = statSync(clientPath)
+      bundle = { path: clientPath, size: stat.size, mtimeMs: stat.mtimeMs }
+    } catch (error) {
+      bundle = { path: clientPath, error: messageOf(error) }
     }
-  } catch {
-    // swallow-ok: the fiber shape is loader-internal and diagnostics must never throw
   }
-  try {
-    // `get` is the kernel's untyped lookup: the loader's shape is declared above, not trusted.
-    const clientModules = (ctx?.get?.('clientModules') ?? ctx?.clientModules) as LoaderClientModules | null
-    const graph = clientModules?.graph?.()
-    const clientPath = clientModules?.clientPath?.(PLUGIN_ID) ?? null
-    const row = Array.isArray(graph?.entries) ? (graph.entries.find((item) => item.id === PLUGIN_ID) ?? null) : null
-    let bundle: Record<string, unknown> | null = null
-    if (clientPath) {
-      try {
-        const stat = statSync(clientPath)
-        bundle = { path: clientPath, size: stat.size, mtimeMs: stat.mtimeMs }
-      } catch (error) {
-        bundle = { path: clientPath, error: messageOf(error) }
-      }
-    }
-    out.client = {
-      graph: graph ? { rev: graph.rev ?? null, release: graph.release ?? null, entries: graph.entries.length } : null,
-      row: row
-        ? { id: row.id, rev: row.rev, url: row.url, inject: row.inject ?? [], immediately: row.immediately === true }
+  out.client = {
+    graph:
+      graph.state === 'ok' && graph.value !== null
+        ? { rev: graph.value.rev, release: graph.value.release, entries: graph.value.entries }
         : null,
-      clientPath,
-      bundle,
-    }
-  } catch (error) {
-    out.client = { error: messageOf(error) }
+    row:
+      row.state === 'ok' && row.value !== null
+        ? {
+            id: row.value.id,
+            rev: row.value.rev,
+            url: row.value.url,
+            inject: row.value.inject,
+            immediately: row.value.immediately,
+          }
+        : null,
+    clientPath,
+    bundle,
   }
   return out
 }

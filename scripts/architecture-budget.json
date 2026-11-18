@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "terminalStage": "P7",
+  "policy": "Structural budget for scripts/check-architecture.mjs. Every number in `rules` is a ratchet: the script fails when an actual value exceeds it and warns when the actual value is lower (that means the budget can be lowered). `--update` only ever lowers a number; raising one is a reviewed edit of this file. P7's terminal state is 0 for every `violations` field and for `barrelReExports`; the only surviving allowances are the six orchestration entries that may take `ConnectCtx` and the recorded line ceiling of `src/runtime/fsm.ts` (which must be removed once that table is split).",
+  "rules": {
+    "fileLength": {
+      "limit": 600,
+      "violations": 0,
+      "exceptions": {
+        "src/runtime/fsm.ts": {
+          "maxLines": 840,
+          "reason": "The explicit transition table plus its guards: one table on purpose (design-arch §2.3), because splitting it would scatter the FSM's proof. P7 terminal: the table moves to data files and this exception is deleted."
+        }
+      }
+    },
+    "clientFileLength": {
+      "limit": 600,
+      "violations": 0
+    },
+    "godCtxParams": {
+      "violations": 0,
+      "entries": ["startConnect", "reconnectHost", "restartHost", "stopRemoteHost", "reattachHost", "repairTunnel"]
+    },
+    "barrelReExports": {
+      "violations": 0
+    },
+    "statusAssignments": {
+      "violations": 0,
+      "owners": ["src/runtime/fsm.ts"]
+    }
+  }
+}

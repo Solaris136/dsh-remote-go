@@ -1,31 +1,26 @@
 /**
- * Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in `hosts.json`; with no credential service nothing is persisted.
+ * Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in
+ * `hosts.json`; with no credential service nothing is persisted.
+ *
+ * Both kernel shapes this store touches live in `kernel-adapter.ts`: the record API and the
+ * `<scope>/<id>` key grammar, which is replicated there and confirmed against the kernel's own
+ * parser when one is exposed. A kernel whose grammar moved (`changed`) does not change the keys
+ * this plugin generates — the stored form is the one already on users' machines — but it is
+ * reported once, because a save the moved grammar later refuses must not look like a silent no-op.
  */
-
+import { credentialRecordKey, createKernelAdapter } from './kernel-adapter.js'
+import type { CredentialRecordApi } from './kernel-adapter.js'
 import { HOST_ID_RE } from './settings.js'
 import { isPlainObject } from './util.js'
 import type { Logger } from './util.js'
 
-/** One stored password payload; `version` guards a shape change of this record. */
+/** The stored password payload; `version` guards a change of the record body. */
 export interface PasswordPayload {
   version: number
   password: string
 }
 
-/** The record DSH's credential service stores for one key. */
-export interface CredentialRecord {
-  kind: string
-  payload: PasswordPayload
-}
-
-/** The slice of DSH's credential service this store needs (`@deepseek-ai/dsh-credentials`). */
-export interface CredentialService {
-  readRecord(key: string): Promise<{ kind?: string; payload?: unknown } | null>
-  modifyRecord(key: string, update: () => Promise<CredentialRecord>): Promise<unknown>
-  deleteRecord(key: string): Promise<unknown>
-}
-
-/** The DSH context surface the store resolves its service through. */
+/** The DSH context surface the store resolves its service through (only `get` is read). */
 export interface CredentialContext {
   get(name: string): unknown
 }
@@ -56,37 +51,50 @@ const PAYLOAD_VERSION = 1
  * with it. A host id is `h_<base36>`: its only character outside the grammar is the underscore,
  * which maps onto `-` without collisions because the issued suffix never contains one. Only an id
  * this plugin issued is addressable, so an unexpected value never reaches the document.
+ * @param hostId - the host id as it appears in `hosts.json`.
+ * @returns the record key, or `null` when the id is not addressable.
  */
 export function passwordRecordKey(hostId: unknown): string | null {
   if (typeof hostId !== 'string' || !HOST_ID_RE.test(hostId)) return null
-  const id = RECORD_ID_PREFIX + hostId.replace(/_/g, '-')
-  if (!/^[a-z][a-z0-9-]*$/.test(id)) return null
-  return `${RECORD_SCOPE}/${id}`
+  return credentialRecordKey(RECORD_SCOPE, RECORD_ID_PREFIX + hostId.replace(/_/g, '-'))
 }
 
+/**
+ * Build the store for one plugin activation.
+ * @param options - the kernel context (a fake in tests) and the warning sink.
+ * @returns the store; every method answers "not stored"/"not saved" instead of throwing.
+ */
 export function createSecretStore(options: SecretStoreOptions = {}): SecretStore {
   const logger = options.logger ?? console
-
-  function credentials(): Partial<CredentialService> | null {
-    try {
-      const ctx = options.ctx
-      if (!ctx || typeof ctx.get !== 'function') return null
-      const service = ctx.get('credentials') as Partial<CredentialService> | null
-      if (!service || typeof service.modifyRecord !== 'function' || typeof service.readRecord !== 'function') {
-        return null
-      }
-      return service
-    } catch (error) {
-      logger.warn?.('[dsh-remote-go] credential service lookup failed:', error)
-      return null
-    }
-  }
+  const kernel = createKernelAdapter(options.ctx)
+  let grammarChecked = false
 
   /**
-   * The address of one host's password, or null when the id is not addressable.
+   * Report a moved key grammar once per store. The keys stay in their stored form on purpose: a
+   * changed grammar is a kernel we do not recognize, not a reason to orphan every saved password.
    */
-  function keyFor(hostId: unknown): string | null {
-    return passwordRecordKey(hostId)
+  function noteGrammar(): void {
+    if (grammarChecked) return
+    grammarChecked = true
+    const probe = kernel.credentialKeyGrammar()
+    if (probe.state !== 'changed') return
+    logger.warn?.(
+      '[dsh-remote-go] the kernel credential key grammar changed; keys keep their stored form and saves may stop working:',
+      probe.detail,
+    )
+  }
+
+  /** The record API, or `null` when this composition has no credential service. */
+  function credentials(): CredentialRecordApi | null {
+    const probe = kernel.credentialService()
+    if (probe.state === 'ok' && probe.value !== null) {
+      noteGrammar()
+      return probe.value
+    }
+    if (probe.reason === 'lookup-failed') {
+      logger.warn?.('[dsh-remote-go] credential service lookup failed:', probe.detail)
+    }
+    return null
   }
 
   return {
@@ -96,7 +104,7 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
 
     async get(hostId: string): Promise<string | null> {
       const service = credentials()
-      const key = keyFor(hostId)
+      const key = passwordRecordKey(hostId)
       if (!service || key === null) return null
       try {
         const record = await service.readRecord(key)
@@ -117,7 +125,7 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
 
     async set(hostId: string, password: string): Promise<boolean> {
       const service = credentials()
-      const key = keyFor(hostId)
+      const key = passwordRecordKey(hostId)
       if (!service || key === null || typeof password !== 'string' || password === '') return false
       try {
         await service.modifyRecord(key, async () => ({
@@ -133,7 +141,7 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
 
     async remove(hostId: string): Promise<boolean> {
       const service = credentials()
-      const key = keyFor(hostId)
+      const key = passwordRecordKey(hostId)
       if (!service || key === null || typeof service.deleteRecord !== 'function') return false
       try {
         await service.deleteRecord(key)

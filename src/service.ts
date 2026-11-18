@@ -12,6 +12,8 @@ import { createDownloadJobs } from './download-jobs.js'
 import type { DownloadJobView, DownloadJobs } from './download-jobs.js'
 import { reconnectHost, startConnect } from './connect/links.js'
 import type { AcceptedResult, StartConnectOptions } from './connect/links.js'
+import { reattachHost } from './connect/reattach.js'
+import { repairTunnel } from './connect/repair.js'
 import { restartHost } from './connect/restart.js'
 import { stopRemoteHost } from './connect/stop.js'
 import type { StopRemoteResult } from './connect/stop.js'
@@ -189,8 +191,13 @@ export class RemoteGoService extends EventEmitter {
      * The watchdog: one bus (assembled in `context.ts`), one subscriber (`connect/watchdog.ts`),
      * installed here because the facade owns the lifecycle — it subscribes now and unsubscribes on
      * shutdown, exactly where the three reverse callbacks of design-arch §1.7 used to be wired.
+     * The two orchestration entries are bound here: the actor is not an entry point, so it takes
+     * the three slices it reads plus these two callbacks instead of the whole context.
      */
-    this.uninstallWatchdog = installWatchdog(this.ctx)
+    this.uninstallWatchdog = installWatchdog(this.ctx, {
+      reattach: (runtime, info) => reattachHost(this.ctx, runtime, info),
+      repair: (runtime) => repairTunnel(this.ctx, runtime),
+    })
     /**
      * `noteRemoteUnreachable` is not a capability: `watchdog.ts` is imported forward by every
      * production caller. The alias exists because 13 test call sites drive a proxy/tunnel failure

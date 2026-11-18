@@ -15,8 +15,6 @@ import type {
 import { normalizeRemoteFilePath } from './remote-path.js'
 import type { SshPort } from './ssh-port.js'
 
-export { normalizeRemoteFilePath, remoteFileName } from './remote-path.js'
-
 /** What one download call accepts: the local home plus the destination chosen in the dialog. */
 export interface ReadHostDownloadOptions extends SaveHostFileOptions, SaveHostFolderOptions {
   destination?: unknown

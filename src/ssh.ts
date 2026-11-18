@@ -40,10 +40,6 @@ import { expandHome } from './util.js'
 
 const { Client } = ssh2
 
-// The historical public surface of this module, kept for the callers and tests that have always
-// imported it here: the single implementation is in `ssh-failures.ts`, shared with the test double.
-export { toSshError } from './ssh-failures.js'
-
 /**
  * The adapter's own options: the port's connect options plus the one seam unit tests need.
  * `clientFactory` is internal — production never sets it; tests hand in a scripted ssh2 client.

@@ -5,10 +5,10 @@ import { Readable } from 'node:stream'
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { SshConnection, parseSshKeyType, toSshError } from '../../dist/src/ssh.js'
+import { SshConnection, parseSshKeyType } from '../../dist/src/ssh.js'
 import { fingerprintFromBlob } from '../../dist/src/known-hosts.js'
 import { errors, RemoteGoError } from '../../dist/src/errors.js'
-import { classifySshFailure, closedError, toSshError as aliasToSshError } from '../../dist/src/ssh-failures.js'
+import { classifySshFailure, closedError, toSshError } from '../../dist/src/ssh-failures.js'
 import { headTail } from '../../dist/src/util.js'
 
 function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'key-material') {
@@ -663,8 +663,13 @@ const codedShape = (error) => ({
   nextSteps: error.nextSteps,
 })
 
-test("toSshError is the same function as classifySshFailure's alias (no second rule table)", () => {
-  assert.equal(toSshError, aliasToSshError)
+test('ssh-failures.ts is the single source: the adapter no longer re-exports the classifier', async () => {
+  // The classifier used to be re-exported from `ssh.ts` for old call sites; the barrel gate
+  // (scripts/check-architecture.mjs) forbids `export … from`, so the owner module is the only
+  // exporter. Importing it here proves both the name and the deletion.
+  const adapter = await import('../../dist/src/ssh.js')
+  assert.equal('toSshError' in adapter, false)
+  assert.equal(typeof toSshError, 'function')
   assert.equal(typeof classifySshFailure, 'function')
 })
 

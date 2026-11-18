@@ -4,18 +4,17 @@
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { createKernelAdapter } from './kernel-adapter.js'
 import { isPlainObject } from './util.js'
 import { normalizeVersion, parseVersion } from './version.js'
-
-/** The kernel's client-module registry: the only surface this probe reads from it. */
-export interface ClientModulesService {
-  graph?: () => { release?: { version?: unknown } | null } | null
-}
 
 /** Everything the version probes may read; all of it is injectable for tests. */
 export interface LocalVersionInput {
   env?: NodeJS.ProcessEnv
-  ctx?: { get?: (name: 'clientModules') => ClientModulesService | null | undefined }
+  /** The plugin context: only the loader's release identity is read, through `kernel-adapter.ts`. */
+  ctx?: unknown
+  /** Warn sink for a moved kernel shape — a silent fallback would pin the wrong npx version. */
+  logger?: { warn?: (...args: unknown[]) => void }
   argv1?: string
   resourcesPath?: string
   cwd?: string
@@ -42,14 +41,19 @@ export async function detectLocalVersion(input: LocalVersionInput = {}): Promise
 
   // The web client-module registry publishes the Host release identity, which
   // releases share with the CLI package version.
-  try {
-    const clientModules = input.ctx?.get?.('clientModules')
-    const release = clientModules?.graph?.()?.release
-    if (release?.version && parseVersion(normalizeVersion(release.version))) {
-      return { version: normalizeVersion(release.version), source: 'client-modules' }
+  const release = createKernelAdapter(input.ctx).clientModuleRelease()
+  if (release.state === 'ok' && release.value !== null) {
+    const version = release.value.version
+    if (version !== null && parseVersion(normalizeVersion(version))) {
+      return { version: normalizeVersion(version), source: 'client-modules' }
     }
-  } catch {
-    // swallow-ok: the clientModules service is absent in this composition
+  } else if (release.state === 'changed') {
+    // A moved release identity is a kernel this probe does not recognize: keep the package.json
+    // fallback, but say so — a silently wrong pin breaks every connect that follows.
+    input.logger?.warn?.(
+      '[dsh-remote-go] the client-module release identity changed shape; falling back to package.json:',
+      release.detail,
+    )
   }
 
   for (const candidate of candidatePackageJsons(input)) {

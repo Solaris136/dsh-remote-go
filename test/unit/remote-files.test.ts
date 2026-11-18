@@ -3,12 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import {
-  normalizeRemoteFilePath,
-  readHostDownload,
-  remoteFileName,
-  toRemoteFileError,
-} from '../../dist/src/remote-files.js'
+import { normalizeRemoteFilePath, remoteFileName } from '../../dist/src/remote-path.js'
+import { readHostDownload, toRemoteFileError } from '../../dist/src/remote-files.js'
 
 function runtimeWith(ssh) {
   return { id: 'h_1', status: 'connected', ssh }
