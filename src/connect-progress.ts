@@ -1,18 +1,12 @@
 /**
- * Connect progress: the coalesced `/state` frame that carries log lines, the staged progress line and the npm / managed-Node reporters; it never sets a status.
+ * Connect progress: the staged progress line (published on the state channel) and the log rows
+ * (published on the log channel); it never sets a status.
  */
 import { appendConnectLog, connectFailureLines, connectLogVisible } from './connect-log.js'
 import type { ConnectFailureView, ConnectLogEntry, ConnectLogInput, ConnectLogRuntime } from './connect-log.js'
 import type { ConnectPhase } from './host-runtime.js'
 import { logVisible, nowIso } from './util.js'
 import type { BilingualText } from './util.js'
-
-/**
- * Coalescing window for shipping log lines: the connect console may print many
- * lines a second (npx download, remote stdout), and every one of them would
- * otherwise be its own `/state` frame.
- */
-const LOG_FLUSH_MS = 150
 
 /** Throttle for the npx reporter: one progress frame per 700 ms at most. */
 const REPORT_MIN_INTERVAL_MS = 700
@@ -43,10 +37,16 @@ export interface NodeProgressEvent {
   bytes?: unknown
 }
 
-/** What a caller has to supply: a logger, the state emitter and the settings lookup. */
+/**
+ * What a caller has to supply: a logger, the two publishers (state model / log rows) and the
+ * settings lookup.
+ */
 export interface ConnectProgressOptions {
   logger: Record<string, ((...args: unknown[]) => void) | undefined>
+  /** A state-model change (phase/progress): bumps the revision and broadcasts the state frame. */
   emitState: () => void
+  /** Log rows were appended: publish them on the log channel, never on the state channel. */
+  emitLogs?: (runtime: ConnectProgressRuntime) => void
   getSettings?: () => { logLevel?: string } | undefined
   logLevel?: string
 }
@@ -80,8 +80,6 @@ export function describePreflightEvent(line: unknown, version: string): Prefligh
 }
 
 export function createConnectProgress(options: ConnectProgressOptions) {
-  let flushTimer: ReturnType<typeof setTimeout> | null = null
-
   /** Append one line and echo it to the Host logger at the same level. */
   function write(runtime: ConnectProgressRuntime, input: ConnectLogInput): ConnectLogEntry {
     const entry = appendConnectLog(runtime, { at: nowIso(), ...input })
@@ -96,7 +94,7 @@ export function createConnectProgress(options: ConnectProgressOptions) {
   function log(runtime: ConnectProgressRuntime, level: string, ...args: unknown[]): ConnectLogEntry {
     const message = args.map((value) => (typeof value === 'string' ? value : JSON.stringify(value))).join(' ')
     const entry = write(runtime, { level, message, phase: runtime.phase })
-    scheduleFlush(runtime)
+    publish(runtime)
     return entry
   }
 
@@ -114,19 +112,17 @@ export function createConnectProgress(options: ConnectProgressOptions) {
     for (const line of connectFailureLines(view, { phase, label: context.label })) {
       write(runtime, { level: line.level, message: line.message, text: line.text, phase: line.phase })
     }
-    scheduleFlush(runtime)
+    publish(runtime)
   }
 
-  /** Ship the log tail to the Client's console without one `/state` frame per line. */
-  function scheduleFlush(runtime: ConnectProgressRuntime): void {
+  /**
+   * Hand the appended rows to the log channel. The state channel is not touched: a log line is
+   * not a state change (docs/api.md v2.12). Coalescing (150 ms) belongs to the event hub, so this
+   * is one cheap notification per row and the hub decides how many frames leave the process.
+   */
+  function publish(runtime: ConnectProgressRuntime): void {
     if (!connectLogVisible(runtime.status)) return
-    if (flushTimer !== null) return
-    flushTimer = setTimeout(() => {
-      flushTimer = null
-      options.emitState()
-    }, LOG_FLUSH_MS)
-    // A pending log frame must never keep the process alive on its own.
-    flushTimer.unref?.()
+    options.emitLogs?.(runtime)
   }
 
   /**
@@ -195,12 +191,11 @@ export function createConnectProgress(options: ConnectProgressOptions) {
     }
   }
 
-  function dispose(): void {
-    if (flushTimer !== null) {
-      clearTimeout(flushTimer)
-      flushTimer = null
-    }
-  }
+  /**
+   * Nothing to release: the 150 ms window moved into the event hub with the channel itself. The
+   * call stays because `service.shutdown()` has always made it (docs/api.md v2.12).
+   */
+  function dispose(): void {}
 
   return { log, logFailure, phase, nodeProgress, bootstrapReporter, dispose }
 }

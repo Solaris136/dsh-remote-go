@@ -3917,3 +3917,206 @@ test('a carrier failure layer is an alert with a way back to the local page', ()
   assert.equal(text.textContent, 'failed to load')
   assert.doesNotThrow(() => button.click())
 })
+
+/* ── Connect-log channel (docs/api.md v2.12) ──────────────────────────────────────────────────
+ *
+ * The log channel is a second EventSource; these cases pin the three merge rules (R1 preserve,
+ * R2 seed, R3 apply), the dedupe/reset behaviour that makes a reconnect invisible, and the
+ * stream's own backoff/off-switch. They are pure seams: the UI above them is unchanged.
+ */
+
+function logState(hosts, overrides = {}) {
+  return { rev: 1, instance: 'gen-1', hosts, ...overrides }
+}
+
+function logHost(overrides = {}) {
+  return hostView({ status: 'connecting', phase: 'ssh', logs: [], ...overrides })
+}
+
+function logLine(seq, message = `row ${seq}`) {
+  return { seq, at: '2026-11-17T14:03:11.412Z', level: 'info', phase: 'ssh', message }
+}
+
+test('a state frame never wipes the rows the log channel merged (R1)', () => {
+  const { mergeStatePreservingLogs } = plugin.__test
+  const cursors = new Map()
+  const previous = logState([logHost({ id: 'h_a', logs: [logLine(1), logLine(2)] })])
+  // A v2.12 state frame: same host, `logs` empty.
+  const next = logState([logHost({ id: 'h_a', logSeq: 2 })], { rev: 2 })
+  const merged = mergeStatePreservingLogs(previous, next, cursors)
+  assert.deepEqual(
+    merged.hosts[0].logs.map((entry) => entry.seq),
+    [1, 2],
+    'the rows stay on screen',
+  )
+  assert.equal(merged.rev, 2, 'and the state itself is the new one')
+  // The host leaves the log-visible set: the rows go with the connect window.
+  const closed = mergeStatePreservingLogs(
+    previous,
+    logState([logHost({ id: 'h_a', status: 'connected' })], { rev: 3 }),
+    cursors,
+  )
+  assert.equal(closed.hosts[0].logs.length, 0, 'the rows go with the connect window')
+  // An older Host still inlines rows in its frames: its tail is authoritative.
+  const legacy = mergeStatePreservingLogs(
+    previous,
+    logState([logHost({ id: 'h_a', logs: [logLine(5), logLine(6)] })], { rev: 4 }),
+    cursors,
+  )
+  assert.deepEqual(
+    legacy.hosts[0].logs.map((entry) => entry.seq),
+    [5, 6],
+  )
+  assert.deepEqual({ ...cursors.get('h_a') }, { instance: 'gen-1', attempt: 0, seq: 6 }, 'the cursor re-anchors')
+})
+
+test('a snapshot seeds the tail without duplicates and never rewinds a cursor (R2)', () => {
+  const { seedLogsFromSnapshot } = plugin.__test
+  const cursors = new Map()
+  const live = logState([logHost({ id: 'h_a', logs: [logLine(1), logLine(2), logLine(3)] })])
+  // The snapshot is older than the log channel: it brings rows 1 and 2 again.
+  const snapshot = logState([logHost({ id: 'h_a', logs: [logLine(1), logLine(2)], logAttempt: 0, logSeq: 2 })], {
+    rev: 0,
+  })
+  const seeded = seedLogsFromSnapshot(live, snapshot, cursors)
+  assert.deepEqual(
+    seeded.hosts[0].logs.map((entry) => entry.seq),
+    [1, 2, 3],
+    'old rows are merged by seq, not appended twice',
+  )
+  assert.equal(cursors.get('h_a').seq, 3, 'the cursor never moves back')
+  // A snapshot from an older attempt of the same generation is ignored entirely.
+  const rewound = seedLogsFromSnapshot(seeded, snapshot, new Map([['h_a', { instance: 'gen-1', attempt: 1, seq: 4 }]]))
+  assert.equal(rewound, seeded, 'nothing changed, so nothing repaints')
+})
+
+test('a log frame applies by cursor: reset rebuilds, older frames are dropped, replays do not repaint (R3)', () => {
+  const { applyLogFrame } = plugin.__test
+  const cursors = new Map()
+  const empty = logState([logHost({ id: 'h_a' })])
+  const frame = (overrides = {}) => ({
+    hostId: 'h_a',
+    instance: 'gen-1',
+    attempt: 1,
+    seq: 2,
+    reset: true,
+    visible: true,
+    entries: [logLine(1), logLine(2)],
+    ...overrides,
+  })
+  const first = applyLogFrame(empty, frame(), cursors)
+  assert.equal(first.applied, true)
+  assert.deepEqual(
+    first.state.hosts[0].logs.map((entry) => entry.seq),
+    [1, 2],
+  )
+  assert.deepEqual({ ...cursors.get('h_a') }, { instance: 'gen-1', attempt: 1, seq: 2 })
+  // The same reset again (a reconnect, or the frame after `GET /state` already seeded it): no repaint.
+  const replay = applyLogFrame(first.state, frame(), cursors)
+  assert.equal(replay.applied, false, 'a replay changes nothing on screen')
+  // An increment only adds rows past the cursor.
+  const increment = applyLogFrame(
+    first.state,
+    frame({ reset: undefined, seq: 4, entries: [logLine(2), logLine(3), logLine(4)] }),
+    cursors,
+  )
+  assert.deepEqual(
+    increment.state.hosts[0].logs.map((entry) => entry.seq),
+    [1, 2, 3, 4],
+    'row 2 is not rendered twice',
+  )
+  assert.equal(cursors.get('h_a').seq, 4)
+  // An older attempt (a late frame from the previous connection) is dropped whole.
+  const stale = applyLogFrame(first.state, frame({ reset: undefined, attempt: 0, seq: 9 }), cursors)
+  assert.equal(stale.applied, false)
+  // A newer attempt without a reset flag still rebuilds: its seq restarts at 1.
+  const nextAttempt = applyLogFrame(
+    increment.state,
+    frame({ reset: undefined, attempt: 2, seq: 1, entries: [logLine(1)] }),
+    cursors,
+  )
+  assert.deepEqual(
+    nextAttempt.state.hosts[0].logs.map((entry) => entry.seq),
+    [1],
+    'the old attempt rows are gone',
+  )
+  assert.equal(nextAttempt.state.hosts[0].logs[0].seq, 1)
+  // A frame from another publish generation clears the panel instead of mixing generations.
+  const foreign = applyLogFrame(increment.state, frame({ instance: 'gen-old' }), cursors)
+  assert.equal(foreign.applied, true)
+  assert.equal(foreign.state.hosts[0].logs.length, 0, 'the rows of another generation are dropped')
+  assert.equal(cursors.has('h_a'), false)
+  // A frame for a host this page does not render is ignored, not buffered.
+  assert.equal(applyLogFrame(first.state, frame({ hostId: 'h_missing' }), cursors).applied, false)
+})
+
+test('the log channel opens only for a connect window and backs off without a banner', () => {
+  const scheduled = []
+  const instances = []
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url
+      this.listeners = {}
+      this.closed = false
+      this.readyState = 0
+      instances.push(this)
+    }
+    addEventListener(type, handler) {
+      if (!this.listeners[type]) this.listeners[type] = []
+      this.listeners[type].push(handler)
+    }
+    close() {
+      this.closed = true
+    }
+    emit(type, payload) {
+      for (const handler of this.listeners[type] || []) handler(payload)
+    }
+  }
+  const client = loadClientPlugin({
+    EventSource: FakeEventSource,
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms }
+      scheduled.push(timer)
+      return timer
+    },
+    clearTimeout: () => {},
+  })
+  const frames = []
+  const modes = []
+  const stream = client.__test.subscribeConnectLog({
+    onFrame: (frame) => frames.push(frame),
+    onEnd: () => {},
+    onMode: (mode) => modes.push(mode),
+  })
+  assert.deepEqual(instances, [], 'nothing opens until a connect window exists')
+  stream.setEnabled(true)
+  assert.equal(instances.length, 1)
+  assert.equal(instances[0].url, '/dsh-remote-go/api/events/logs')
+  assert.deepEqual(modes, [], 'an open EventSource is not live before a frame or ping')
+  instances[0].emit('log', { data: JSON.stringify({ hostId: 'h_a', attempt: 1, seq: 1, entries: [] }) })
+  assert.equal(modes.at(-1), 'live')
+  assert.equal(frames.length, 1)
+  // A transient drop retries with the same backoff the state channel uses.
+  instances[0].readyState = 0
+  instances[0].emit('error', {})
+  assert.equal(instances[0].closed, true)
+  assert.equal(modes.at(-1), 'reconnecting')
+  scheduled.at(-1).fn()
+  assert.equal(instances.length, 2, 'the retry opens a fresh EventSource')
+  stream.dispose()
+  // A permanent refusal (an older Host without `/events/logs`) switches the channel off: no
+  // banner, no polling, no retry chain — the state channel already carries the tail.
+  const unreachable = client.__test.subscribeConnectLog({ onMode: (mode) => modes.push(mode) })
+  unreachable.setEnabled(true)
+  const refused = instances.at(-1)
+  refused.readyState = 2
+  refused.emit('error', {})
+  assert.equal(modes.at(-1), 'off')
+  const before = scheduled.length
+  unreachable.reconnect()
+  unreachable.setEnabled(false)
+  unreachable.setEnabled(true)
+  assert.equal(scheduled.length, before, 'no retry chain is left behind')
+  assert.equal(instances.at(-1), refused, 'and no stream is opened again')
+  unreachable.dispose()
+})

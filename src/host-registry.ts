@@ -7,7 +7,7 @@ import { errors } from './errors.js'
 import { createHostRuntime } from './host-runtime.js'
 import type { HostRuntime } from './host-runtime.js'
 import { hostView } from './host-view.js'
-import type { HostView } from './host-view.js'
+import type { HostView, HostViewOptions } from './host-view.js'
 import { listKeyFiles as listKeyFilesInHome, OUTSIDE_HOME } from './key-files.js'
 import type { KeyFilesListing } from './key-files.js'
 import { parseKnownHosts, summarizeKnownHosts } from './known-hosts.js'
@@ -96,19 +96,27 @@ async function restoreSavedPasswords(ctx: HostState & Store): Promise<void> {
   )
 }
 
-function hostViewFor(ctx: Config & Store, runtime: HostRuntime): HostView {
-  return hostView(runtime, {
-    targetVersion: ctx.localVersion(),
-    passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,
-    // A quarantined hosts.json means the list beside it is the empty recovery fallback.
-    storeCorrupt: ctx.store?.hostsCorrupt === true,
-  })
+function hostViewFor(ctx: Config & Store, runtime: HostRuntime, options: HostViewOptions = {}): HostView {
+  return hostView(
+    runtime,
+    {
+      targetVersion: ctx.localVersion(),
+      passwordStorageAvailable: ctx.secrets ? ctx.secrets.available() === true : false,
+      // A quarantined hosts.json means the list beside it is the empty recovery fallback.
+      storeCorrupt: ctx.store?.hostsCorrupt === true,
+    },
+    options,
+  )
 }
 
-/** Build the client-facing state snapshot (contract: docs/api.md). */
-export function snapshot(ctx: HostState & Config & Store): StateSnapshot {
+/**
+ * Build the client-facing state snapshot (contract: docs/api.md).
+ * @param ctx - the service context.
+ * @param options - `logs: false` strips every tail (the SSE state frame's shape).
+ */
+export function snapshot(ctx: HostState & Config & Store, options: HostViewOptions = {}): StateSnapshot {
   const localVersion = ctx.localVersion()
-  const hosts = [...ctx.state.runtimes.values()].map((runtime) => hostViewFor(ctx, runtime))
+  const hosts = [...ctx.state.runtimes.values()].map((runtime) => hostViewFor(ctx, runtime, options))
   return {
     hostVersion: localVersion,
     targetVersion: localVersion,

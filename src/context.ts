@@ -287,6 +287,8 @@ export interface ServiceOptions extends Partial<ServiceDeps> {
 export interface ServiceHooks {
   /** `service.emitState()`: revision bump plus broadcast (the `Reporter.emitState` leaf). */
   publish(): void
+  /** `service.emitLogs(hostId)`: publish one host's appended rows on the log channel only. */
+  publishLogs(hostId: string): void
   /** `service.init()`: the facade's lazy first load (the `Store.init` leaf). */
   load(): Promise<unknown>
   localVersion(): string | null
@@ -352,6 +354,9 @@ export function createCtx(options: ServiceOptions, hooks: ServiceHooks): Ctx {
     logLevel,
     getSettings: () => options.store.getSettings(),
     emitState: () => hooks.publish(),
+    // Log rows and progress lines have different channels (docs/api.md v2.12): a row is not a
+    // state change, so it must not bump the revision the Client gates everything else on.
+    emitLogs: (runtime) => hooks.publishLogs(runtime.id),
   })
   // One bus per service instance: a test (or a plugin reload) that builds a second service must
   // not inherit the first one's subscriber.

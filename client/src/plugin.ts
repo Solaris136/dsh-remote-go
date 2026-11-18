@@ -221,6 +221,12 @@ const components = {
 const __test = {
   createDialogStack,
   subscribeState,
+  subscribeConnectLog,
+  applyLogFrame,
+  mergeStatePreservingLogs,
+  seedLogsFromSnapshot,
+  connectLogVisible,
+  connectLogStatuses: CONNECT_LOG_STATUSES,
   stateRevision,
   stateInstance,
   isNewerState,

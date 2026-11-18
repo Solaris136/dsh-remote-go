@@ -127,6 +127,17 @@ function PluginOverlay(props) {
     const entryRev = Number.isInteger(entry.viewRev) ? entry.viewRev : null
     return entryRev === viewRev
   }
+  /**
+   * The connect-log channel (docs/api.md `GET /events/logs`): one multiplexed stream for every
+   * host with a connect window, opened only while one exists. Rows arrive here; the state channel
+   * keeps the revision gate, the polling fallback and the degraded banner.
+   */
+  const reconnectConnectLog = useConnectLogStream(remote)
+  /** The banner's retry reconnects both channels; the log one only when it is in use. */
+  const retryLive = () => {
+    remote.reconnectStream()
+    reconnectConnectLog()
+  }
   const hostsRef = useRef(hosts)
   hostsRef.current = hosts
   // A host we asked for that still has to connect: the list stays up until it is ready.
@@ -467,7 +478,7 @@ function PluginOverlay(props) {
       error: remote.error,
       busyHostId,
       mode: remote.mode,
-      onRetryLive: remote.reconnectStream,
+      onRetryLive: retryLive,
       fingerprintBusy,
       onClose: () => {
         // The connect body is per-visit: closing the window must not leave a stale host

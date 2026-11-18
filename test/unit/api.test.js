@@ -109,9 +109,9 @@ function withTimeout(promise, ms, label) {
   })
 }
 
-/** One open `/events` stream: its response, the collected frames and a promise that it ended. */
-function openSse(base) {
-  const url = new URL(`${base}/events`)
+/** One open `/events` (or `/events/logs`) stream: its response, the text so far and its end. */
+function openSse(base, ssePath = '/events') {
+  const url = new URL(`${base}${ssePath}`)
   return new Promise((resolve, reject) => {
     const request = http.request(
       { host: url.hostname, port: url.port, path: url.pathname, method: 'GET' },
@@ -898,7 +898,8 @@ test('GET /version reports plugin and host versions', async () => {
     assert.equal(result.json.ok, true)
     assert.equal(result.json.hostVersion, '0.2.2-rc.1')
     assert.equal(result.json.version, PLUGIN_VERSION)
-    assert.equal(result.json.apiVersion, '2.11')
+    // v2.12 splits the SSE channels (docs/api.md): the contract version moves with it.
+    assert.equal(result.json.apiVersion, '2.12')
   } finally {
     await api.close()
     await service.shutdown()
@@ -1206,10 +1207,10 @@ test('the connect log is redacted at its producer: a start line never reaches /s
   }
 })
 
-test('the connecting state frame carries the redacted start line, not the token', async () => {
+test('the connecting log frame carries the redacted start line, not the token', async () => {
   const tokenLine = 'LINE:dsh web: http://127.0.0.1:38124/?token=SUPERSECRET-TOKEN'
   const { service } = await makeTestService({
-    // Connect stays in `connecting` long enough for the SSE frame to be observed.
+    // Connect stays in `connecting` long enough for the frames to be observed.
     startWeb: async (_ssh, options) => {
       options.onLine(tokenLine)
       await new Promise((resolve) => setTimeout(resolve, 250))
@@ -1227,31 +1228,35 @@ test('the connecting state frame carries the redacted start line, not the token'
     },
   })
   const api = await startApi(service)
-  const controller = new AbortController()
+  // v2.12 contract change (docs/api.md): the log rows travel on the log channel, not inside the
+  // state frame. This case used to read them from `/events`; it now reads the log channel and
+  // keeps the security assertion on both streams.
+  const stateStream = await openSse(api.base)
+  const logStream = await openSse(api.base, '/events/logs')
   try {
     const host = await createHost(service)
-    const response = await fetch(`${api.base}/events`, { signal: controller.signal })
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let text = ''
     const connect = call(api.base, `/hosts/${host.id}/connect`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
     })
     const deadline = Date.now() + 4000
-    while (Date.now() < deadline && !text.includes('dsh web')) {
-      const { value, done } = await reader.read()
-      if (done) break
-      text += decoder.decode(value, { stream: true })
+    while (Date.now() < deadline && !logStream.text().includes('dsh web')) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
     }
     await connect
-    assert.ok(text.includes('dsh web'), `the connecting frame never carried the start line: ${text.slice(0, 400)}`)
-    assert.equal(text.includes('SUPERSECRET-TOKEN'), false, 'the SSE state frame leaked the launch token')
-    assert.match(text, /token=<redacted>/)
+    const frames = logStream.text()
+    assert.ok(frames.includes('dsh web'), `the log frame never carried the start line: ${frames.slice(0, 400)}`)
+    assert.equal(frames.includes('SUPERSECRET-TOKEN'), false, 'the log frame leaked the launch token')
+    assert.match(frames, /token=<redacted>/)
+    // The state channel carries no log rows at all (the same rule the state frame test pins).
+    const stateFrames = stateStream.text()
+    assert.equal(stateFrames.includes('SUPERSECRET-TOKEN'), false, 'the state frame leaked the launch token')
+    assert.equal(stateFrames.includes('dsh web'), false, 'the state frame must not inline log rows')
     await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
   } finally {
-    controller.abort()
+    stateStream.request.destroy()
+    logStream.request.destroy()
     await api.close()
     await service.shutdown()
   }

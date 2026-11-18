@@ -155,6 +155,9 @@ function harnessPage() {
       this.url = url
       this.listeners = {}
       this.closed = false
+      // 0 = CONNECTING until told otherwise; a test that wants the "permanent refusal" path
+      // (an older Host without /events/logs) sets 2 before emitting an error.
+      this.readyState = 0
       window.__streams.push(this)
     }
     addEventListener(type, handler) {
@@ -165,13 +168,28 @@ function harnessPage() {
       if (type === 'open' && typeof this.onopen === 'function') this.onopen(payload)
       for (const handler of this.listeners[type] || []) handler(payload)
     }
-    close() { this.closed = true }
+    close() {
+      this.closed = true
+      this.readyState = 2
+    }
   }
-  window.__failStream = () => {
-    const open = window.__streams.filter((stream) => !stream.closed)
+  /** Fail the newest open stream (optionally the one whose URL ends with suffix). */
+  window.__failStream = (suffix) => {
+    const open = window.__streams.filter(
+      (stream) => !stream.closed && (!suffix || String(stream.url).endsWith(suffix)),
+    )
     const stream = open[open.length - 1]
     if (stream) stream.emit('error', {})
   }
+  /** One frame on the connect-log channel (docs/api.md GET /events/logs). */
+  window.__pushLog = (frame) => {
+    for (const stream of window.__streams) {
+      if (stream.closed || !String(stream.url).endsWith('/events/logs')) continue
+      stream.emit('log', { data: JSON.stringify(frame) })
+    }
+  }
+  window.__logStreams = () =>
+    window.__streams.filter((stream) => String(stream.url).endsWith('/events/logs'))
   window.__pushState = (state) => {
     window.__state = state
     // The client may have rebuilt its EventSource: every live instance gets the frame, the
@@ -1030,6 +1048,190 @@ window.ReactDOM = { createRoot }`,
         assert.equal(layer.button, true)
         await page.click('#dsh-remote-go-overlay-h_hang [data-testid="remote-overlay-back-local"]')
         await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
+      })
+
+      await t.test('the connect log arrives on its own channel and never renders a line twice', async () => {
+        const patchHost = (hostId, patch) =>
+          page.evaluate(
+            ({ hostId, patch }) => {
+              window.__pushState({
+                ...window.__state,
+                rev: window.__state.rev + 1,
+                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
+              })
+            },
+            { hostId, patch },
+          )
+        const line = (seq, message) => ({
+          seq,
+          at: new Date().toISOString(),
+          level: 'info',
+          phase: 'ssh',
+          message,
+        })
+        const renderedLines = () =>
+          page.evaluate(() => document.querySelectorAll('[data-testid="connect-log-line"]').length)
+        await openManage()
+        await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-restart"]')
+        await page.waitForFunction(() => window.__calls.some((call) => /\/restart$/.test(call.url)), { timeout: 5000 })
+        await patchHost('h_a', { status: 'connecting', phase: 'ssh', progress: { code: 'ssh-connecting' }, logs: [] })
+        await page.waitForSelector('[data-testid="connect-log"]', { timeout: 5000 })
+        // B1: the log channel is a second EventSource with its own path, opened only while a
+        // connect window exists (it did not exist before this host started connecting).
+        const urls = await page.evaluate(() =>
+          window.__logStreams().map((stream) => ({ url: stream.url, closed: stream.closed })),
+        )
+        assert.ok(urls.length >= 1, 'the log channel opens with the connect window')
+        assert.equal(urls.at(-1).url, '/dsh-remote-go/api/events/logs')
+        assert.equal(urls.at(-1).closed, false)
+        // The page may have moved to another publish generation in an earlier scenario: the frame
+        // must name the generation the client is on, or it is (correctly) dropped as foreign.
+        const instance = await page.evaluate(() => window.__state.instance)
+        const resetFrame = {
+          hostId: 'h_a',
+          instance,
+          attempt: 0,
+          seq: 3,
+          reset: true,
+          visible: true,
+          entries: [line(1, 'first row'), line(2, 'second row'), line(3, 'third row')],
+        }
+
+        // B2: rows come from `log` frames. The window is freshly opened, so a state refresh may
+        // still be in flight; a real Host answers a reconnect with a `reset`, and the harness has
+        // no server behind the fake stream, so the frame is re-sent until it lands.
+        try {
+          await page.waitForFunction(
+            (frame) => {
+              window.__pushLog(frame)
+              return document.querySelectorAll('[data-testid="connect-log-line"]').length === 3
+            },
+            { timeout: 5000 },
+            resetFrame,
+          )
+        } catch (error) {
+          const diag = await page.evaluate((frame) => {
+            window.__pushLog(frame)
+            return {
+              lines: document.querySelectorAll('[data-testid="connect-log-line"]').length,
+              text: document.querySelector('[data-testid="connect-log"]')?.textContent ?? '',
+              streams: window.__logStreams().map((stream) => ({
+                closed: stream.closed,
+                listeners: Object.keys(stream.listeners),
+                logHandlers: (stream.listeners.log || []).length,
+              })),
+              hosts: window.__state.hosts.map((host) => ({ id: host.id, status: host.status, logs: host.logs.length })),
+            }
+          }, resetFrame)
+          throw new Error(`the log frame did not paint: ${JSON.stringify(diag)} (${error.message})`)
+        }
+        assert.equal(
+          await page.evaluate(() => window.__logStreams().filter((stream) => !stream.closed).length),
+          1,
+          'exactly one log stream is open for the window',
+        )
+        // ...a state frame (whose `logs` is empty in v2.12) does not wipe or duplicate them...
+        await patchHost('h_a', { logs: [] })
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        assert.equal(await renderedLines(), 3, 'a state frame leaves the merged rows alone')
+        // ...and a frame that repeats a rendered `seq` changes nothing.
+        await page.evaluate(
+          ({ entries, instance }) =>
+            window.__pushLog({ hostId: 'h_a', instance, attempt: 0, seq: 3, visible: true, entries }),
+          { entries: [line(3, 'third row')], instance },
+        )
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        assert.equal(await renderedLines(), 3, 'a repeated seq is not rendered twice')
+        // B3: a reset for a new attempt rebuilds the panel from the frame alone.
+        await page.evaluate(
+          ({ entries, instance }) =>
+            window.__pushLog({ hostId: 'h_a', instance, attempt: 1, seq: 1, reset: true, visible: true, entries }),
+          { entries: [line(1, 'retry row')], instance },
+        )
+        await page.waitForFunction(() => document.querySelectorAll('[data-testid="connect-log-line"]').length === 1, {
+          timeout: 5000,
+        })
+        assert.match(
+          await page.$eval('[data-testid="connect-log"]', (node) => node.textContent),
+          /retry row/,
+          'the rebuilt panel shows the new attempt only',
+        )
+        await patchHost('h_a', { status: 'connected', phase: 'ready', progress: null, logs: [] })
+        await page.waitForFunction(() => !document.querySelector('[data-testid="connect-log"]'), { timeout: 5000 })
+        await closeManage()
+      })
+
+      await t.test('a missing log channel falls back to the snapshot without degrading the banner', async () => {
+        const line = { seq: 7, at: new Date().toISOString(), level: 'info', phase: 'ssh', message: 'from the snapshot' }
+        const patchHost = (hostId, patch) =>
+          page.evaluate(
+            ({ hostId, patch }) => {
+              window.__pushState({
+                ...window.__state,
+                rev: window.__state.rev + 1,
+                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
+              })
+            },
+            { hostId, patch },
+          )
+        await openManage()
+        await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-restart"]')
+        await page.waitForFunction(() => window.__calls.some((call) => /\/restart$/.test(call.url)), { timeout: 5000 })
+        // A failed connection is the status whose connect window carries a retry control, and its
+        // retry is a real user action that ends in `GET /state`.
+        await patchHost('h_a', {
+          status: 'error',
+          phase: 'ssh',
+          progress: null,
+          error: {
+            code: 'network',
+            retryable: true,
+            title: { zh: '连接失败', en: 'Connect failed' },
+            detail: { zh: '网络不可达。', en: 'The network is unreachable.' },
+            nextSteps: [],
+          },
+          logs: [],
+        })
+        await page.waitForSelector('[data-testid="connect-log"]', { timeout: 5000 })
+        await page.waitForSelector('[data-testid="error-retry"]', { timeout: 5000 })
+        // The log channel dies (here: a permanent refusal, the shape an older Host answers). It
+        // must not raise the degraded banner: that banner belongs to the state channel.
+        await page.evaluate(() => window.__failStream('/events/logs'))
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="live-reconnect"]'))),
+          false,
+          'a dead log channel never shows the state-channel banner',
+        )
+        // `GET /state` still carries the tail, and the retry's refresh merges it (R2).
+        await page.evaluate(
+          ({ entry }) => {
+            window.__state = {
+              ...window.__state,
+              rev: window.__state.rev + 1,
+              hosts: window.__state.hosts.map((host) =>
+                host.id === 'h_a' ? { ...host, logs: [entry], logAttempt: 1, logSeq: entry.seq } : host,
+              ),
+            }
+          },
+          { entry: line },
+        )
+        await page.click('[data-testid="error-retry"]')
+        await page.waitForFunction(
+          () =>
+            [...document.querySelectorAll('[data-testid="connect-log-line"]')].some((node) =>
+              node.textContent.includes('from the snapshot'),
+            ),
+          { timeout: 5000 },
+        )
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="live-reconnect"]'))),
+          false,
+          'and the state channel stayed live',
+        )
+        await patchHost('h_a', { status: 'connected', phase: 'ready', progress: null, logs: [] })
+        await page.waitForFunction(() => !document.querySelector('[data-testid="connect-log"]'), { timeout: 5000 })
+        await closeManage()
       })
 
       await t.test('the page logged no errors', async () => {

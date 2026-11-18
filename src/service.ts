@@ -3,6 +3,8 @@
  */
 import { EventEmitter } from 'node:events'
 import { MIN_DSH_VERSION, REMOTE_VIEW_PREFIX } from './constants.js'
+import { connectLogTail, connectLogVisible } from './connect-log.js'
+import type { ConnectLogTailItem } from './connect-log.js'
 import { describePreflightEvent } from './connect-progress.js'
 import { createCtx } from './context.js'
 import type { Ctx, ServiceHooks, ServiceLogger, ServiceOptions } from './context.js'
@@ -49,6 +51,27 @@ export { describePreflightEvent }
 export interface StateView extends StateSnapshot {
   rev: number
   instance: string
+}
+
+/**
+ * One host's connect log as the log channel reads it (docs/api.md `GET /events/logs`).
+ *
+ * This is the cursor view, not the `HostView`: the channel needs the retained rows with their
+ * `seq` span, and it must be able to publish a host that has just left the log-visible set (whose
+ * `HostView.logs` is already `[]`).
+ */
+export interface ConnectLogView {
+  hostId: string
+  /** The connection attempt (= the N of the boundary line's "第 N 次连接"). */
+  attempt: number
+  /** Whether this host is still in the log-visible set (contract `CONNECT_LOG_STATUSES`). */
+  visible: boolean
+  /** The oldest `seq` the ring still holds; an empty ring is "one past the current cursor". */
+  firstSeq: number
+  /** The current cursor: the `seq` of the newest row. */
+  seq: number
+  /** The tail the log channel replays, ≤ `LOG_TAIL_LIMIT` rows (already redacted at write time). */
+  entries: ConnectLogTailItem[]
 }
 
 /** The wizard's plain "save"/"forget" action for one host's SSH password. */
@@ -110,7 +133,7 @@ export class RemoteGoService extends EventEmitter {
   /** `engines.node` of the local DSH package; the managed Node version is its lower bound. */
   declare engineNodeRange: string | null
   declare secrets: SecretStore | null
-  /** Monotonic revision of the published `/state` snapshot (StateView.rev). */
+  /** Monotonic revision of the published `/state` snapshot (StateView.rev). Log rows never move it. */
   declare stateRev: number
   /**
    * Identifies this plugin instance. `rev` is only monotonic inside one process; after a Host
@@ -143,6 +166,7 @@ export class RemoteGoService extends EventEmitter {
      */
     const hooks: ServiceHooks = {
       publish: () => this.emitState(),
+      publishLogs: (hostId) => this.emitLogs(hostId),
       load: () => this.init(),
       localVersion: () => this.localVersion,
       engineNodeRange: () => this.engineNodeRange,
@@ -197,10 +221,30 @@ export class RemoteGoService extends EventEmitter {
       // Every emitted frame gets its own monotonic revision. The Client drops a frame whose
       // `rev` is not newer than the one on screen, so an out-of-order SSE delivery or a slow
       // `GET /state` can no longer repaint the panel backwards (docs/api.md StateView.rev).
+      //
+      // Only a change to the *state model* publishes here. A connect log line is not one: it is
+      // published on the log channel (`emitLogs`) and must not move `rev`, or the Client would
+      // discard in-flight `/state` reads every 150 ms (docs/api.md v2.12).
       this.stateRev += 1
       this.emit('state', this.snapshot())
     } catch (error) {
       this.logger.warn?.('[dsh-remote-go] state listener failed:', error)
+    }
+  }
+
+  /**
+   * One host's log ring grew: publish it on the log channel only (docs/api.md `GET /events/logs`).
+   *
+   * The payload is just the host id; a subscriber reads the cursor view itself, so the event
+   * carries no snapshot and cannot be confused with a state change. Coalescing (150 ms) belongs
+   * to the event hub, not here.
+   * @param hostId - the host whose rows changed.
+   */
+  emitLogs(hostId: string): void {
+    try {
+      this.emit('logs', { hostId })
+    } catch (error) {
+      this.logger.warn?.('[dsh-remote-go] log listener failed:', error)
     }
   }
 
@@ -248,9 +292,49 @@ export class RemoteGoService extends EventEmitter {
     this.engineNodeRange = text === '' ? null : text
   }
 
-  /** Build the client-facing state snapshot (contract: docs/api.md). */
-  snapshot(): StateView {
-    return { ...snapshot(this.ctx), rev: this.stateRev, instance: this.stateInstance }
+  /**
+   * Build the client-facing state snapshot (contract: docs/api.md).
+   *
+   * `options.logs === false` is the state-frame shape: every `hosts[].logs` is `[]` (the log
+   * channel owns the rows). The default keeps the `GET /state` / diagnostics shape, whose tail is
+   * the authoritative snapshot and the Client's only fallback when the log channel is missing.
+   * @param options - `logs: false` strips the per-host tails.
+   */
+  snapshot(options: { logs?: boolean } = {}): StateView {
+    return { ...snapshot(this.ctx, options), rev: this.stateRev, instance: this.stateInstance }
+  }
+
+  /**
+   * One host's cursor view for the log channel, or null for an unknown host.
+   * Reads the live runtime, so a published row is already in the ring by the time it is asked for.
+   * @param hostId - the host to read.
+   */
+  logView(hostId: string): ConnectLogView | null {
+    const runtime = this.ctx.state.runtimes.get(hostId)
+    if (!runtime) return null
+    const logs = Array.isArray(runtime.logs) ? runtime.logs : []
+    const seq = typeof runtime.logSeq === 'number' ? runtime.logSeq : 0
+    const oldest = logs[0]
+    const firstSeq = oldest !== undefined && typeof oldest.seq === 'number' ? oldest.seq : seq + 1
+    return {
+      hostId,
+      // `connectCount` is what the boundary line numbers ("第 N 次连接"); it only moves forward.
+      attempt: typeof runtime.connectCount === 'number' ? runtime.connectCount : 0,
+      visible: connectLogVisible(runtime.status),
+      firstSeq,
+      seq,
+      // `connectLogTail` is the one exit for the entry shape (redaction happened at write time).
+      entries: connectLogTail(runtime),
+    }
+  }
+
+  /** The hosts whose connect window is on screen, i.e. every host the log channel publishes. */
+  logHostIds(): string[] {
+    const ids: string[] = []
+    for (const [id, runtime] of this.ctx.state.runtimes) {
+      if (connectLogVisible(runtime.status)) ids.push(id)
+    }
+    return ids
   }
 
   userHome(): string {

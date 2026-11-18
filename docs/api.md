@@ -1,8 +1,8 @@
-# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.11）
+# dsh-remote-go · 本地 Host ↔ Client HTTP API 契约（v2.12）
 
 > Host 插件（`src/`）与 Client 插件（`client.js`）之间的唯一协议，两侧都不得依赖对方的内部实现。
 > 基地址 `/dsh-remote-go/api`（挂在本机 DSH Web 服务同源路由下）；JSON 为 `application/json; charset=utf-8`（SSE 除外）。
-> 成功 `{ "ok": true, ... }`；失败 `{ "ok": false, "error": ErrorView }`。除 `/health` 与 `/events` 外，所有请求必须带 `x-dsh-remote-go: 1`。
+> 成功 `{ "ok": true, ... }`；失败 `{ "ok": false, "error": ErrorView }`。除 `/health`、`/events` 与 `/events/logs` 外，所有请求必须带 `x-dsh-remote-go: 1`。
 > **准入**：每条请求（`/health` 除外）在进入路由前先过本机 DSH 自己的准入——`Host`/`Origin` 栅栏 + 浏览器会话认证
 > （`ctx.connection.requestRejection`），与 DSH 自带路由同一套检查；`/health` 不要求会话，但仍过 Host/Origin 栅栏。
 > 内核没有该服务时（旧内核）退回本插件自己的标识头 + 同源栅栏。
@@ -88,6 +88,15 @@
 > 存储在下一次读取时拒绝，导致整个凭据文件不可用。`HostView.passwordSaved` 现在只表示凭据存储里确实有记录
 > （由 Host 启动时读取，内存中的一次性密码不再算已保存）；`StateView` 增加 `passwordStorageAvailable`
 > 供向导决定是否显示「记住密码」。切回密钥认证或删除主机时会删除该主机的密码记录。
+>
+> **v2.12 变更（SSE 拆通道）**：状态与连接日志分成两条 SSE 流。`GET /events` 仍是状态通道（`state` /
+> `download` / `remote-unreachable` / `ping`，路径与丢帧规则不变），但**`hosts[].logs` 在状态帧里恒为 `[]`**；
+> 连接日志走新增的 `GET /events/logs`，帧带 `hostId` / `attempt` / `seq` 与 `id:`，可用 `Last-Event-ID`
+> 续传，不可续时发 `reset` 并重放尾部。`HostView` 增加 `logAttempt` / `logSeq` 两个游标字段（只增不改）。
+> **日志追加不再改变 `StateView.rev`**：`rev` 只因状态模型变化自增。`GET /state` **仍然**返回每台主机的日志尾，
+> 它仍是唯一带日志的权威快照。降级行为（同包发布，两种混跑都可能出现在开发期）：**新 Client + 旧 Host**
+> （没有 `/events/logs`）→ 日志流 404 后自动关闭，日志改从 `GET /state` 与状态帧里的 `logs` 得到，不报错、
+> 不弹窗；**旧 Client + 新 Host** → 状态帧 `logs` 为空，连接窗口的日志面板为空（**已知降级**），其余一切正常。
 
 ## 0. 通用类型
 
@@ -142,6 +151,26 @@ interface ConnectLogEntry {
   boundary?: true             // 本次连接的第一行：第 N 次连接 + 时刻
 }
 
+/**
+ * `GET /events/logs` 的 `log` 帧（v2.12）。一条流多路复用所有「日志可见」的主机，帧用 hostId 区分。
+ * `id:` = `<instance>:<hostId>:<attempt>:<seq>`，重连时由 EventSource 回传为 `Last-Event-ID`。
+ */
+interface ConnectLogFrame {
+  hostId: string
+  instance: string           // 发布代际 = StateView.instance；换代际即游标作废
+  attempt: number            // 本次连接序号 = 边界行「第 N 次连接」的 N；每次连接开始时 +1
+  seq: number                // 游标：本帧最后一行的 seq；本帧为空时等于该主机当前游标
+  reset?: true               // 客户端丢弃该主机现有行，用 entries 重建（首帧 / 续传不可用）
+  visible: boolean           // false ⇒ 该主机已离开「日志可见」集合，随后会有 log-end
+  entries: ConnectLogEntry[] // ≤ 120 行（与 Host 日志尾同一窗口），按 seq 升序
+}
+
+/** `GET /events/logs` 的 `log-end` 帧（v2.12）：该主机的这次连接不再有新行。 */
+interface ConnectLogEnd {
+  hostId: string
+  attempt: number
+}
+
 interface RemoteView {
   version: string | null        // 远端 DSH 版本（= 本机版本）
   uiReady: boolean
@@ -185,13 +214,22 @@ interface HostView {
     processes: { pid: number; command: string }[]
   } | null
   /**
-   * 连接窗口的日志尾（Client 按 locale 渲染）。仅当 status 是 `connecting` / `fingerprint-pending` /
-   * `error` 时非空——也就是屏幕上确实有连接窗口的时候；其余状态为 `[]`，避免每帧携带历史日志。
+   * 连接窗口的日志尾（Client 按 locale 渲染）。**`GET /state` 总是带本次连接的尾部**；只有
+   * status 是 `connecting` / `fingerprint-pending` / `error` 时非空——也就是屏幕上确实有连接窗口
+   * 的时候；其余状态为 `[]`。**SSE 状态帧里恒为 `[]`**：实时明细走 `GET /events/logs`（v2.12）。
    * **每次连接开始时重置**（手动连接 / 重连 / 自动重连都会），因此这里只有本次连接的行，第一行是带
    * 次数与时间的边界行；最多 120 条，旧的先掉。失败会被写成多行：阶段与错误码、双语原因、每条建议、
    * 脱敏并 `headTail` 截断的技术细节（`remote-dsh-start-failed` 为远端日志尾部逐行）。
    */
   logs: ConnectLogEntry[]
+  /**
+   * 这条日志尾的游标：`attempt` = 第几次连接（边界行的 N），`logSeq` = 最新一行的 `seq`。
+   * 两个字段只增不改，用来让 Client 把「已合并的行」与一次快照对齐、并在日志通道不可用时用
+   * `logs` 的最大 `seq` 兜底。旧 Host 没有这两个字段：Client 按 `logs` 的最大 `seq` 推导游标，
+   * `attempt` 记为 0，只在收到 `reset` 帧时更新（v2.12）。
+   */
+  logAttempt: number
+  logSeq: number
   remote: RemoteView
   keepAlive: 'keep' | 'stop' | 'idle'
   idleMinutes: number           // 1–1440
@@ -255,6 +293,8 @@ interface StateView {
   /**
    * `/state` 快照的单调 revision：每次 Host 发布（SSE 帧与每次 GET 读到的当前快照）都带同一个当前值，
    * 状态变化时自增。Client 只接受比屏幕上更新的帧，乱序 SSE 或迟到的 GET 响应不得把界面回退。
+   * **连接日志的追加不改变 `rev`**（v2.12）：日志是只增的、按 `(attempt, seq)` 排序的数据，走
+   * `GET /events/logs`，不是状态模型变化——否则每 150ms 一次的合帧都会让 Client 丢掉在途的 `/state`。
    * 旧 Host 没有该字段：Client 退回「后到即生效」。
    */
   rev: number
@@ -318,12 +358,20 @@ launch URL）、`detail`、`nextSteps` 里的 token / 密码 / 私钥 / `Authori
 ```json
 { "ok": true, "state": StateView }
 ```
+**唯一带连接日志尾的权威快照**（`hosts[].logs` + `logAttempt` / `logSeq`）。三种用途：首屏（页面在任何
+SSE 建立前就能画出连接窗口）、轮询兜底（状态流断开时每 3s 一次）、**日志降级源**（日志通道不可用或 404 时，
+缺失的行从这里补；见 §「状态通道与日志通道的对齐、去重与重连」）。
 
-### `GET /events`（SSE，DSH 准入 + Origin/Host 栅栏）
-`text/event-stream`：连接后立即推一帧 `state`，随后状态变化时推送，每 15s 一次 `ping`。EventSource 无法设置自定义请求头，因此该路由先过 DSH 准入（Host/Origin 栅栏 + 浏览器会话），再过本插件的 Origin / Host 同源 / 非 cross-site 栅栏；没有会话的调用方在开流前就被拒绝（401），DNS rebinding 的调用方因 `Host` 不是本机 origin 被拒绝（403）。
+### `GET /events`（SSE，状态通道；DSH 准入 + Origin/Host 栅栏）
+`text/event-stream`：连接后立即推一帧 `state`，随后**状态模型变化**时推送，每 15s 一次 `ping`。EventSource 无法设置自定义请求头，因此该路由先过 DSH 准入（Host/Origin 栅栏 + 浏览器会话），再过本插件的 Origin / Host 同源 / 非 cross-site 栅栏；没有会话的调用方在开流前就被拒绝（401），DNS rebinding 的调用方因 `Host` 不是本机 origin 被拒绝（403）。
+
+这条流只承载状态：帧就是 `StateView` 本身，**唯一差异是 `hosts[].logs` 恒为 `[]`**（其余字段，含
+`logAttempt` / `logSeq` 游标，与 `GET /state` 逐字相同）。连接日志走 `GET /events/logs`（见下一节）；
+`phase` / `progress` 等进度字段**仍在这条流上**——它们是 `HostView` 的权威字段（v2.12，决策 B2）。
+状态帧不带 `id:`：每帧都是完整快照，重连不需要续传。
 ```text
 event: state
-data: { ...StateView }
+data: { ...StateView, hosts: [{ ...HostView, logs: [] }] }
 
 event: download
 data: { ...DownloadJobView }
@@ -339,9 +387,97 @@ data: {}
 `download` 只在下载任务启动、进度变化、完成或失败时推送；客户端仍应在收到 `POST /downloads` 后轮询 `/status` 一次，避免 EventSource 尚未订阅时漏帧。
 `remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续两次探活失败，开始重挂）、`recovered`（探活恢复）。若故障来源是代理/隧道，同一个 recovered 之前会先问本地监听器：能应答就不动；不应答才重建 listener（先建新、再关旧，失败按 30s→120s 退避）。重建会把 `RemoteView.viewRev` 自增（本地回环端口变了），承载方据此重新 `GET /hosts/:id/open` 并导航；关闭旧 listener 会短暂断开现有 WebSocket 与下载，属预期。同一类疑似上报在 recovered 后 15s 内不重复开新事件。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。拿不到新 launch token 的远端（例如日志被 supervisor 重定向）不会被接管，而是以 `remote-unreachable` 结束并保留主机、配置与 SSH。
 
+### `GET /events/logs`（SSE，连接日志通道；同一套准入与栅栏）
+新增于 v2.12。`text/event-stream`：**一条流多路复用**所有「日志可见」的主机（`status` ∈ `connecting` /
+`fingerprint-pending` / `error`，也就是屏幕上确实有连接窗口的那几台），帧用 `hostId` 区分；不按主机开流
+（浏览器对同一 origin 的连接数有限，状态流已经占了一条）。准入与状态通道**完全相同**：先 DSH 准入，
+再过本插件的 Origin / Host 同源 / 非 cross-site 栅栏；EventSource 加不了自定义头，所以这条路由也**不要求**
+`x-dsh-remote-go`。每 15s 一次 `ping`。
+
+```text
+event: log
+id: x8k-1k2j-1:h_a:2:17
+data: { "hostId": "h_a", "instance": "x8k-1k2j-1", "attempt": 2, "seq": 17, "visible": true,
+        "entries": [ { "seq": 16, "at": "2026-11-17T14:03:11.412Z", "level": "info",
+                       "phase": "bootstrap", "message": "npx: added 12 packages" },
+                     { "seq": 17, "at": "2026-11-17T14:03:11.902Z", "level": "debug",
+                       "phase": "bootstrap", "message": "npx: http fetch GET 200 …" } ] }
+
+event: log
+id: x8k-1k2j-1:h_a:2:140
+data: { "hostId": "h_a", "instance": "x8k-1k2j-1", "attempt": 2, "seq": 140, "reset": true,
+        "visible": true, "entries": [ /* 尾部 ≤ 120 行，含 boundary 行 */ ] }
+
+event: log-end
+data: { "hostId": "h_a", "attempt": 2 }
+
+event: ping
+data: {}
+```
+
+- **首帧对齐**：连接建立后，对每台「日志可见」的主机立即发一帧 `reset: true`（尾部 ≤ 120 行）——客户端
+  不需要知道自己错过了什么，直接用它重建，天然幂等。
+- **`id:` 与续传**：`id` = `<instance>:<hostId>:<attempt>:<seq>`。EventSource 自动重连时会把它回传为
+  `Last-Event-ID`；服务端逐主机判定（`id` 只能描述一台主机，其余主机照常收 `reset`）：
+
+  | 条件 | 行为 |
+  |---|---|
+  | 没有 `Last-Event-ID`（首次连接） | `reset` 帧（尾部 ≤ 120 行） |
+  | `cursor.instance !== StateView.instance` | `reset` 帧（代际换了，游标作废） |
+  | `cursor.hostId !== hostId` | 该主机的 `reset` 帧 |
+  | `cursor.attempt !== 当前 attempt` | `reset` 帧（新一次连接，`seq` 从 1 重新计数） |
+  | `cursor.seq < 环里最旧一行的 seq - 1`（超出 200 行环窗） | `reset` 帧 |
+  | 否则 | 增量帧：只带 `seq > cursor.seq` 的行；**无新增则不发帧**（不制造空帧） |
+
+- **离开可见集合**：主机状态变为 `connected` / `disconnected` 等时，先发最后一帧（`visible: false`），再发
+  `log-end`；客户端之后不再收到这台主机的帧。`log-end` 不是清 UI 的依据——状态帧里的 `status` 已经是。
+- **上限与背压**（与状态通道**各自的集合**，互不影响）：
+
+  | 量 | 值 | 作用 |
+  |---|---|---|
+  | 活日志流 | 8（`MAX_SSE_LOG_CLIENTS`），第 9 条挤掉最老的一条 | 一个页面现在开 2 条流，共享计数会让 4 个标签页互相挤掉状态流 |
+  | 单帧字节 | 64 KiB（`MAX_LOG_FRAME_BYTES`） | 超限的帧被切分；不会撞 1 MiB 的总闸 |
+  | 单帧行数 | 120（`MAX_LOG_FRAME_ENTRIES`） | 一次写入几百行时拆成多帧，按 `seq` 升序 |
+  | 合帧窗口 | 150ms | 每台主机的行在 hub 里合并后再发，不按行发 |
+  | 单订阅者积压 | 1 MiB | 超限即断开该订阅者（**日志帧不重传**：重连后拿 `reset` 重建） |
+  | 进程内最坏积压 | 8 × 1 MiB（状态）+ 8 × 1 MiB（日志）= 16 MiB | 与 v2.11 的 8 MiB 同量级 |
+
+- **不做**：跨主机游标（一个 `id` 只描述一台主机）、服务端为每个订阅者保存无限积压（只从 200 行环里重放，
+  超出即 `reset`）、按页面收窄订阅（所有页面看同一份状态）。日志行**在写入环时就已脱敏**，帧里不含
+  token / 密码 / 私钥。
+
+### 状态通道与日志通道的对齐、去重与重连
+
+```text
+client                          Host
+  ├─ GET /state ───────────────►  rev=41, hosts[h_a].logs=tail(17), logAttempt=2, logSeq=17
+  ├─ EventSource /events ──────►  立即一帧 state（rev=41，logs=[]）
+  ├─ EventSource /events/logs ─►  对每台日志可见主机一帧 log（h_a，attempt=2，seq=17，reset，≤120 行）
+  │                              之后每 15s 一次 ping
+  └─ 日志通道断/404 ───────────►  状态流的 3s 轮询把缺失的行补回来（logs + logSeq）
+```
+
+客户端的三条规则（**服务端仍是唯一权威**，客户端只做合并，不造数据）：
+
+- **R1（状态帧不覆盖日志）**：状态帧里的 `hosts[].logs` 恒为 `[]`，到达时保留已经合并的行；该主机的
+  `status` 离开日志可见集合时清空。旧 Host 的帧里若仍带 `logs`（非空），以帧为准并重锚游标。
+- **R2（快照补日志）**：`GET /state` 的日志尾**无条件**按 `seq` 合并进状态树——即使这份快照因为 `rev`
+  太旧而不会重绘状态。日志是只增的、按 `(attempt, seq)` 过滤，用旧快照合并是幂等的；这条就是日志通道
+  不可用时的降级路径。
+- **R3（日志帧按游标合并）**：`frame.instance` 与当前代际不同 ⇒ 清空该主机的行并作废游标（随后必有
+  `reset`）；`attempt` 更大 ⇒ 按 `reset` 处理；`attempt` 更小 ⇒ 整帧丢弃；`attempt` 相同 ⇒ 只接受
+  `entry.seq > cursor.seq` 的行，全部更旧则整帧丢弃。`reset: true` ⇒ 用 `entries` 替换该主机的数组。
+
+**幂等承诺**：客户端逐条按 `seq` 过滤，服务端因此可以自由重发（重连、`reset` 与快照叠加），不会出现一行
+渲染两次；这也是本协议不需要 ACK / 应用层重传的理由。`reset` 的内存上界是一帧（≤ 120 行）。
+
+**降级（v2.12 双向容忍）**：`/events/logs` 返回 404（旧 Host）或一直连不上时，日志流自动关闭、**不报错、
+不弹窗、不轮询**；连接窗口的日志继续由 `GET /state` 的轮询（R2）提供，最坏延迟一个轮询周期（3s）。
+反过来，旧 Client 对新 Host 只会看到空的 `logs`（连接窗口日志为空），其余功能正常。
+
 ### `GET /version`
 ```json
-{ "ok": true, "version": "0.2.0", "apiVersion": "2.11", "hostVersion": "0.2.2-rc.1" }
+{ "ok": true, "version": "0.2.0", "apiVersion": "2.12", "hostVersion": "0.2.2-rc.1" }
 ```
 
 ### `GET /diagnostics/self`
@@ -593,6 +729,9 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 
 ## 2. 进度 code
 
+**进度与阶段仍随状态通道（`GET /events` 的 `state` 帧与 `GET /state`）下发；日志通道不承载进度**
+（v2.12，决策 B2：`phase` / `progress` 是 `HostView` 的权威字段，搬走会出现两份来源）。
+
 - `ssh-connecting`（`host`，跳板机另有 `jump` / `via`）、`host-key-confirm`（`sha256` / `keyType`；跳板机的确认额外带
   `role: "jump"` 与跳板机地址 `host`，这是「等待确认的是哪台机器」的唯一信号——目标机的帧形状不变）
 - `auth-checking`、`probing`
@@ -615,6 +754,10 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 5. guest 只允许 `http://127.0.0.1:<port>`；浏览器 iframe 只允许 `/dsh-remote-go/remote/<hostId>/` 形状的
    同源路径（拒绝绝对 URL、`//`、转义与路径穿越），两端都在交给承载器前再校验一次。
 6. 每条请求先过本机 DSH 的准入（Host/Origin 栅栏 + 浏览器会话）；内核没有 Connection 服务时退回本插件自己的栅栏。
-7. `Host` 必须是本机监听 origin：DNS rebinding 下浏览器会带上攻击者的域名，这是唯一能拦下它的检查（`/events` 也只有这一道）。
+7. `Host` 必须是本机监听 origin：DNS rebinding 下浏览器会带上攻击者的域名，这是唯一能拦下它的检查（`/events`
+   与 `/events/logs` 也只有这一道）。
 8. 跨站请求（Origin 不同或 `sec-fetch-site: cross-site`）必须被拒绝；同源代理使用同一栅栏。
 9. 代理只服务 `connected` 主机：断开后同一 URL 立即不再有上游；远端的 cookie 只存在 Host 内存里。
+10. **日志通道与状态通道共用同一套准入与 Origin/Host 栅栏**（v2.12）；日志帧里只含**已脱敏**的行：
+    脱敏发生在写入日志环时（`appendConnectLog`），`ConnectLogEntry` 不含 token、密码、私钥或 home 路径，
+    与 `GET /state` / 诊断导出读的是同一份数据。

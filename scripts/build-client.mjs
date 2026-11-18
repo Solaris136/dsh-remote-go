@@ -58,6 +58,8 @@ const SOURCES = [
   'util',
   'errors',
   'api-client',
+  'connect-logs',
+  'log-stream',
   'primitives',
   'dialogs',
   'host-list',

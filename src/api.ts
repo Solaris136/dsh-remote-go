@@ -1,12 +1,16 @@
 /**
  * Local HTTP API for the browser half (contract: docs/api.md); every request passes DSH's own
  * admission when the kernel provides it, then the marker header and, with an Origin, same-origin.
+ *
+ * This module is routing only: authentication, the JSON envelope and the status codes. The two
+ * SSE channels live in `events.ts` (own subscriber sets, caps and replay).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
 import type { ErrorView } from './errors.js'
-import type { DownloadJobView } from './download-jobs.js'
+import { createEventHub } from './events.js'
+import type { EventHub } from './events.js'
 import type { RawHostEntry } from './host-registry.js'
 import { redactObject } from './redact.js'
 import { sameServerHost, sameServerOrigin } from './request-trust.js'
@@ -18,19 +22,7 @@ const MAX_BODY_BYTES = 1 * 1024 * 1024
 /** HTTP status for one `invalid-input` refusal: an oversized body is not a business conflict. */
 const PAYLOAD_TOO_LARGE = 413
 
-/**
- * At most this many live `/events` streams are served; a new one evicts the oldest, so a page
- * that leaks EventSources cannot grow this set without bound.
- */
-const MAX_SSE_CLIENTS = 8
-
-/** One SSE frame may not exceed this many bytes (a runaway snapshot is dropped, not buffered). */
-const MAX_SSE_FRAME_BYTES = 1 * 1024 * 1024
-
-/** A subscriber whose unsent backlog passes this is gone: drop it instead of buffering forever. */
-const MAX_SSE_BUFFERED_BYTES = 1 * 1024 * 1024
-
-/** Rows shared by the `/version` and `/diagnostics/self` responses. */
+/** `/version` and `/diagnostics/self` share one version row. */
 const VERSION_ROW = { version: PLUGIN_VERSION, apiVersion: API_VERSION }
 const PLUGIN_ROW = { id: 'dsh-remote-go', version: PLUGIN_VERSION }
 
@@ -91,56 +83,9 @@ export function statusForErrorCode(code: string): number {
 export function createApi(options: ApiOptions): Api {
   const { service } = options
   const logger = options.logger ?? console
-  const sseClients = new Set<ServerResponse>()
   const kernelAdmit = typeof options.admit === 'function' ? options.admit : null
-
-  /**
-   * Write one SSE frame to every subscriber, dropping the ones that already went away, are
-   * too far behind, or are gone from the set by the time their turn comes.
-   */
-  function writeAll(frame: string): void {
-    const bytes = Buffer.byteLength(frame)
-    if (bytes > MAX_SSE_FRAME_BYTES) {
-      // One frame that no browser could render is not worth unbounded memory: the next state
-      // change (or the client's own `/state` read) carries the same data at a smaller size.
-      logger.warn?.(`[dsh-remote-go] dropped an ${bytes}-byte SSE frame`)
-      return
-    }
-    for (const client of sseClients) {
-      if (client.writableEnded === true || client.destroyed === true) {
-        sseClients.delete(client)
-        continue
-      }
-      // A slow consumer must not grow the process heap: once its queue is too deep it is
-      // treated as gone, and the browser reconnects to a fresh stream.
-      if (client.writableLength > MAX_SSE_BUFFERED_BYTES) {
-        sseClients.delete(client)
-        try {
-          client.end()
-        } catch {}
-        continue
-      }
-      try {
-        client.write(frame)
-      } catch {
-        sseClients.delete(client)
-      }
-    }
-  }
-
-  const broadcastState = (): void => writeAll(`event: state\ndata: ${JSON.stringify(service.snapshot())}\n\n`)
-  service.on('state', broadcastState)
-  const broadcastDownload = (job: DownloadJobView): void =>
-    writeAll(`event: download\ndata: ${JSON.stringify(job)}\n\n`)
-  service.on('download', broadcastDownload)
-  // One frame per liveness episode transition (suspected / confirmed / recovered); the
-  // progress line lives in `state`, this event only makes the transition observable.
-  const broadcastRemoteUnreachable = (event: unknown): void =>
-    writeAll(`event: remote-unreachable\ndata: ${JSON.stringify(event)}\n\n`)
-  service.on('remote-unreachable', broadcastRemoteUnreachable)
-
-  const heartbeat = setInterval(() => writeAll('event: ping\ndata: {}\n\n'), 15_000)
-  heartbeat.unref?.()
+  // Both SSE channels: subscriber sets, caps, heartbeat, 150 ms coalescing and cursor replay.
+  const hub: EventHub = createEventHub({ service, logger })
 
   const crossSite = (): AuthVerdict => ({
     ok: false,
@@ -295,31 +240,20 @@ export function createApi(options: ApiOptions): Api {
     res.end(body)
   }
 
-  function handleSse(req: IncomingMessage, res: ServerResponse): void {
-    // A page that leaks EventSource connections must not pin the process: the oldest stream is
-    // closed when the cap is reached, and the page reconnects to one fresh stream.
-    while (sseClients.size >= MAX_SSE_CLIENTS) {
-      const oldest: ServerResponse | undefined = sseClients.values().next().value
-      if (oldest === undefined) break
-      sseClients.delete(oldest)
-      try {
-        oldest.end()
-      } catch {}
-    }
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-cache, no-transform',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    })
-    res.write(`event: state\ndata: ${JSON.stringify(service.snapshot())}\n\n`)
-    sseClients.add(res)
-    req.on('close', () => {
-      sseClients.delete(res)
-    })
+  /**
+   * Which SSE channel a GET path names, or null. Both routes pass the same pre-condition: DSH's
+   * admission (above) plus the Origin/Host fence, because an EventSource cannot set the marker
+   * header. Keeping the pair in one place is what stops the two routes from drifting apart.
+   */
+  function sseRoute(path: string, method: string): 'state' | 'logs' | null {
+    if (method !== 'GET') return null
+    if (path === '/events') return 'state'
+    if (path === '/events/logs') return 'logs'
+    return null
   }
 
   // One entry per route: `(req, url) => response body`. The dispatcher owns auth,
+
   // init, status codes and the error envelope, so handlers only shape data.
   const ROUTES: Record<string, RouteHandler> = {
     // A liveness probe only: no state, no version, nothing worth reading without a session.
@@ -479,15 +413,18 @@ export function createApi(options: ApiOptions): Api {
 
       // SSE cannot carry the custom header. It already passed DSH's admission above; the fence
       // here covers kernels without the Connection service, and browsers block a cross-origin
-      // EventSource anyway because this route never sends CORS headers.
-      if (path === '/events' && method === 'GET') {
+      // EventSource anyway because these routes never send CORS headers. The state channel
+      // (`/events`) and the connect-log channel (`/events/logs`) share this one pre-condition.
+      const sse = sseRoute(path, method)
+      if (sse !== null) {
         const originOnly = authorizeOrigin(req)
         if (!originOnly.ok) {
           sendJson(res, originOnly.status, { ok: false, error: originOnly.error })
           return
         }
         await service.init()
-        handleSse(req, res)
+        if (sse === 'logs') hub.handleLogs(req, res)
+        else hub.handleState(req, res)
         return
       }
 
@@ -570,16 +507,8 @@ export function createApi(options: ApiOptions): Api {
   return {
     handler,
     dispose() {
-      service.removeListener('state', broadcastState)
-      service.removeListener('download', broadcastDownload)
-      service.removeListener('remote-unreachable', broadcastRemoteUnreachable)
-      clearInterval(heartbeat)
-      for (const client of sseClients) {
-        try {
-          client.end()
-        } catch {}
-      }
-      sseClients.clear()
+      // One entry point for the whole listener teardown: the hub owns both channel sets.
+      hub.dispose()
     },
   }
 }

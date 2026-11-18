@@ -18,6 +18,14 @@ export interface HostViewContext {
   storeCorrupt?: boolean
 }
 
+/**
+ * What a projection may leave out. `logs: false` is the SSE state-frame shape: the rows travel on
+ * the log channel, so a state frame carries `logs: []` and stays small (docs/api.md v2.12).
+ */
+export interface HostViewOptions {
+  logs?: boolean
+}
+
 /** One host as the Client renders it; every field is contract (docs/api.md HostView). */
 export interface HostView {
   id: string
@@ -39,6 +47,14 @@ export interface HostView {
   conflict: unknown
   fingerprint: RuntimeFingerprint | null
   logs: ConnectLogTailItem[]
+  /**
+   * The log cursor this host's tail ends at: the attempt (boundary line number) and the `seq` of
+   * its newest row. The log channel is the only real-time carrier of rows; these two fields let
+   * the Client align what it already merged with a snapshot it reads, and are what a client of a
+   * Host *without* `/events/logs` (older build) falls back to (docs/api.md v2.12).
+   */
+  logAttempt: number
+  logSeq: number
   remote: RemoteRuntime
   keepAlive: KeepAlive
   idleMinutes: number
@@ -59,7 +75,7 @@ export interface MaskedAddressSource {
   port?: number | null
 }
 
-export function hostView(runtime: HostRuntime, ctx: HostViewContext): HostView {
+export function hostView(runtime: HostRuntime, ctx: HostViewContext, options: HostViewOptions = {}): HostView {
   const entry = runtime.entry
   return {
     id: runtime.id,
@@ -92,7 +108,9 @@ export function hostView(runtime: HostRuntime, ctx: HostViewContext): HostView {
     warning: runtime.warning,
     conflict: runtime.conflict,
     fingerprint: runtime.fingerprint,
-    logs: connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],
+    logs: options.logs === false ? [] : connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],
+    logAttempt: typeof runtime.connectCount === 'number' ? runtime.connectCount : 0,
+    logSeq: typeof runtime.logSeq === 'number' ? runtime.logSeq : 0,
     remote: {
       ...runtime.remote,
       version: runtime.remote.version ?? null,

@@ -1,4 +1,4 @@
-// client/src/overlay-state.ts - stateRevision/stateInstance/isNewerState/useRemoteState, the only /state subscriber; after toast.ts, before manage-window.ts.
+// client/src/overlay-state.ts - stateRevision/stateInstance/isNewerState/useRemoteState, the only /state subscriber and the log merge owner; after toast.ts, before manage-window.ts.
 //#region 15. overlay host (floating windows + remote window)
 
 /**
@@ -37,13 +37,57 @@ function useRemoteState(initialState, onDownload) {
   const revRef = useRef(stateRevision(initialState))
   const instanceRef = useRef(stateInstance(initialState))
   const streamRef = useRef(null)
+  // The last state this hook computed. `setState` alone cannot be read synchronously, and both
+  // merge paths (a frame, a log row) need the current tree; keeping the ref ahead of the render
+  // is what makes two frames arriving in one tick merge instead of overwrite each other.
+  const stateRef = useRef(hasInitial ? initialState : null)
+  /**
+   * Per-host log cursors (docs/api.md `ConnectLogFrame`). They live beside the state, not inside
+   * it: the cursor is transport bookkeeping and must never reach the DOM or a React key.
+   */
+  const cursorsRef = useRef<LogCursors | null>(null)
+  if (cursorsRef.current === null) {
+    const cursors = new Map()
+    // A server-rendered initial state carries the tail of a Host that may already be connecting:
+    // seed from it so the first `reset` frame adds nothing on screen.
+    if (hasInitial) seedLogsFromSnapshot(initialState, initialState, cursors)
+    cursorsRef.current = cursors
+  }
+  /** R2: merge a payload's authoritative tail, whatever the revision gate later decides. */
+  const seedLogs = (next) => {
+    const current = stateRef.current
+    if (current === null) return
+    const seeded = seedLogsFromSnapshot(current, next, cursorsRef.current)
+    if (seeded === current) return
+    stateRef.current = seeded
+    setState(seeded)
+  }
   const applyState = (next) => {
+    seedLogs(next)
     if (!isNewerState(next, revRef.current, instanceRef.current)) return false
     instanceRef.current = stateInstance(next) ?? instanceRef.current
     revRef.current = stateRevision(next) ?? revRef.current
-    setState(next)
+    // R1: a v2.12 state frame carries `logs: []`; the rows this page merged stay on screen.
+    const merged = mergeStatePreservingLogs(stateRef.current, next, cursorsRef.current)
+    stateRef.current = merged
+    setState(merged)
     return true
   }
+  const applyLog = useCallback((frame) => {
+    if (!alive.current) return
+    const current = stateRef.current
+    if (current === null) return
+    // R3: dedupe/replace by cursor. `applied: false` means the frame changed nothing visible.
+    const result = applyLogFrame(current, frame, cursorsRef.current)
+    if (!result.applied) return
+    stateRef.current = result.state
+    setState(result.state)
+  }, [])
+  const applyLogEnd = useCallback((end) => {
+    // The host left the log-visible set: its cursor is spent. The rows stay until the next state
+    // frame drops them with the connect window (R1), so nothing has to be painted here.
+    if (end && typeof end.hostId === 'string') cursorsRef.current.delete(end.hostId)
+  }, [])
   const downloadHandler = useRef(typeof onDownload === 'function' ? onDownload : () => {})
   downloadHandler.current = typeof onDownload === 'function' ? onDownload : () => {}
   const refresh = useCallback(() => {
@@ -55,6 +99,9 @@ function useRemoteState(initialState, onDownload) {
     return api.getState().then(
       (next) => {
         if (!alive.current) return
+        // The log tail of a snapshot is append-only, so it merges even when the snapshot itself
+        // is too old to paint (a slower `/state` must not lose rows the log channel missed).
+        seedLogs(next)
         if (!isNewerState(next, requestedAt, requestedInstance)) {
           setLoading(false)
           return
@@ -101,11 +148,15 @@ function useRemoteState(initialState, onDownload) {
     }
   }, [])
   const patch = useCallback((updater) => {
-    setState((current) => (current === null ? current : updater(current)))
+    setState((current) => {
+      const next = current === null ? current : updater(current)
+      if (next !== current) stateRef.current = next
+      return next
+    })
   }, [])
   const reconnectStream = useCallback(() => {
     const dispose = streamRef.current
     if (dispose && typeof dispose.reconnect === 'function') dispose.reconnect()
   }, [])
-  return { state, error, loading, mode, refresh, patch, reconnectStream }
+  return { state, error, loading, mode, refresh, patch, reconnectStream, applyLog, applyLogEnd }
 }

@@ -5,6 +5,8 @@ const NS = 'dsh-remote-go'
 const PANEL_ID = 'dsh-remote-go'
 const API_BASE = '/dsh-remote-go/api'
 const EVENT_PATH = '/dsh-remote-go/api/events'
+/** The connect-log channel (docs/api.md): the same admission as `/events`, rows only. */
+const LOG_EVENT_PATH = '/dsh-remote-go/api/events/logs'
 const POLL_INTERVAL_MS = 3000
 /**
  * A dropped SSE stream is rebuilt with exponential backoff instead of leaving the panel in
