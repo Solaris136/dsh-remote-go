@@ -9,7 +9,9 @@
 //                        `import`/`export` anywhere (checked below), so a declaration in one file
 //                        is the same binding a later file uses - exactly the single file P3a had.
 //   client/template.js   the loader shell — `window.__ModuleLoader__.load({ id, factory(require) })`,
-//                        `require('react')`, and the `return __drgExport` hand-off. It is read as
+//                        `require('react')`, the one `const CSS = ` panel stylesheet (kept out of
+//                        the splices' script scope so it no longer redeclares lib.dom's global
+//                        `CSS` namespace), and the `return __drgExport` hand-off. It is read as
 //                        text and spliced, never parsed or formatted, so the frozen contract text
 //                        in it stays byte-exact.
 //   prettier             formats the composed file with the repository's `.prettierrc.json`, so the
@@ -160,7 +162,7 @@ function helperDeclarations(text) {
 }
 
 /** Structural contract of the artifact: every rule is a hard build failure, not a warning. */
-function checkArtifact(text, sourceText) {
+function checkArtifact(text, templateText) {
   const rules = [
     [/window\.__ModuleLoader__\.load\(/.test(text), 'the loader call vanished'],
     [(text.match(/window\.__ModuleLoader__\.load\(/g) ?? []).length === 1, 'the loader call must appear once'],
@@ -174,8 +176,8 @@ function checkArtifact(text, sourceText) {
     [(text.match(/\brequire\s*\(/g) ?? []).length === 1, 'exactly one require() call must remain'],
     [(text.match(/const CSS = `/g) ?? []).length === 1, 'the stylesheet must stay one `const CSS = ` template literal'],
     [
-      literalOf(text, 'CSS') === literalOf(sourceText, 'CSS'),
-      'the stylesheet bytes changed between the source and the artifact',
+      literalOf(text, 'CSS') === literalOf(templateText, 'CSS'),
+      'the stylesheet bytes changed between client/template.js and the artifact',
     ],
     [
       (text.match(/const TONE_VARS = \{/g) ?? []).length === 1,
@@ -290,9 +292,8 @@ async function composeSource() {
 }
 
 /** One build: esbuild transform + template splice + prettier. Returns the finished artifact text. */
-async function compose(sourceText) {
-  const template = await readFile(path.join(root, TEMPLATE), 'utf8')
-  if (!template.includes(BUNDLE_MARKER)) fail(`${TEMPLATE} must contain the ${BUNDLE_MARKER} marker`)
+async function compose(sourceText, templateText) {
+  if (!templateText.includes(BUNDLE_MARKER)) fail(`${TEMPLATE} must contain the ${BUNDLE_MARKER} marker`)
   // The annotation below is stripped textually, so a literal one in the source would be mangled by
   // that regex: catching it here keeps the strip safe instead of making it a hidden landmine.
   if (sourceText.includes('@__PURE__')) fail('the client sources must not contain a literal @__PURE__ annotation')
@@ -316,19 +317,20 @@ async function compose(sourceText) {
   })
   const body = bundle.outputFiles[0].text.replaceAll('/* @__PURE__ */ ', '')
   // The replacement has to be a function: `$&`/`$'` in the bundle would be read as replace patterns.
-  const composed = template.replace(BUNDLE_MARKER, () => body)
+  const composed = templateText.replace(BUNDLE_MARKER, () => body)
   const config = (await prettier.resolveConfig(path.join(root, OUT))) ?? {}
   return prettier.format(composed, { ...config, parser: 'babel', filepath: path.join(root, OUT) })
 }
 
 await checkManifest()
 const sourceText = await composeSource()
+const templateText = await readFile(path.join(root, TEMPLATE), 'utf8')
 
-const first = await compose(sourceText)
-const second = await compose(sourceText)
+const first = await compose(sourceText, templateText)
+const second = await compose(sourceText, templateText)
 if (first !== second) fail('two consecutive builds differ; the artifact is not reproducible')
 
-checkArtifact(first, sourceText)
+checkArtifact(first, templateText)
 for (const leak of guestHelperLeaks(first)) fail(`a guest script closes over a bundler helper: ${leak}`)
 for (const helper of helperDeclarations(first)) fail(`a \`__\`-prefixed binding leaked into the artifact: ${helper}`)
 

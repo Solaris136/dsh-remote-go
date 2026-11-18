@@ -1,23 +1,13 @@
 {
   "version": 2,
-  "stage": "P6",
+  "stage": "P7",
   "terminalStage": "P7",
   "policy": "Structural budget for scripts/check-architecture.mjs. Every number in `rules` is a ratchet: the script fails when an actual value exceeds it and warns when the actual value is lower (that means the budget can be lowered). `--update` only ever lowers a number; raising one is a reviewed edit of this file. `stage` is the phase this tree is being reviewed at and `terminalStage` is the one it must arrive at: when they are equal the gate forbids **any** `fileLength` exception, **any** non-zero `violations` field and any surviving `p7Todo` entry, so the terminal state cannot be declared while its exemptions still exist. At P7 the only surviving allowance is the `godCtxParams.entries` list (the orchestration entries and their private helpers, each with its file and reason).",
-  "p7Todo": [
-    "Split the src/runtime/fsm.ts transition table into data files so the file drops under the 600-line limit, then delete its fileLength exception (the last exemption in this budget).",
-    "Move client/src/styles.ts's `const CSS = ` out of script scope (the last `@ts-expect-error`, `until: P7` in types/any-allowlist.json) so `node scripts/check-types.mjs --stage P7 --strict` is green.",
-    "Bump `stage` to `P7`; check-architecture.mjs then refuses to run with any exemption left."
-  ],
+  "p7Todo": [],
   "rules": {
     "fileLength": {
       "limit": 600,
-      "violations": 0,
-      "exceptions": {
-        "src/runtime/fsm.ts": {
-          "maxLines": 793,
-          "reason": "The explicit transition table plus its guards: one table on purpose (design-arch §2.3), because splitting it would scatter the FSM's proof. P7 terminal: the table moves to data files and this exception is deleted."
-        }
-      }
+      "violations": 0
     },
     "clientFileLength": {
       "limit": 600,

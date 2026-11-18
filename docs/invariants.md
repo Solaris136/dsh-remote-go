@@ -74,7 +74,7 @@
   `the gate still answers every OwnershipReason literal, so the frozen table stays real`；
   `every stopWeb call site is registered, and exactly three skip the ownership gate`。
 - **代码位置**：`src/connect/pipeline.ts:148`、`:164`、`:354`、`:357`、`src/host-runtime.ts:281`、`:283`、
-  `src/prompts.ts:124`、`:134`、`:194`、`:222`、`:251`、`:264`、`src/runtime/fsm.ts:331`
+  `src/prompts.ts:124`、`:134`、`:194`、`:222`、`:251`、`:264`、`src/runtime/rules.ts:181`
 - **已知缺口（安全审查 M-3，P7b 登记，不改行为）**：有三处 `stopWeb` 调用**不经过** `proveOwnership`：
   `src/connect/pipeline.ts:366`（adopt 到一个版本不匹配的旧实例后停止它）、`:395`（registry 里
   "不可 adopt 的遗留实例"）和 `src/host-lifecycle.ts:393`（teardown 的 `stopRemote`）。三处与 `main` 同源，
@@ -141,7 +141,7 @@
 - **由谁保护**：`a remote layout refuses an unknown home instead of building a literal-tilde path`；
   `the idle policy remembers the real remote home and pid across the teardown`。
 - **代码位置**：`src/connect/pipeline.ts:312`、`:313`、`src/host-lifecycle.ts:198`、`:381`、`src/host-runtime.ts:297`、
-  `:299`、`:301`、`src/runtime/fsm.ts:499`
+  `:299`、`:301`、`src/runtime/rules.ts:340`
 - **状态**：COVERED
 
 ### H2 — 自动重试预算只有一处决定
@@ -155,8 +155,8 @@
   `a transport that closes while a host-key prompt is open is a dropped link and is retried`；
   `connect.failed only arms a retry while the user still wants the link (H2)`；
   `a successful attach resets the retry budget exactly once`（T-d）。
-- **代码位置**：`src/host-runtime.ts:216`、`src/connect/pipeline.ts:95`、`:515`、`:518`、`src/runtime/fsm.ts:64`、`:68`
-  （两处重置点：`src/runtime/fsm.ts:264` 用户 connect 重置、`:411` 成功 attach 清零）
+- **代码位置**：`src/host-runtime.ts:216`、`src/connect/pipeline.ts:95`、`:515`、`:518`、`src/runtime/fsm.ts:70`、`:74`
+  （两处重置点：`src/runtime/rules.ts:114` 用户 connect 重置、`src/runtime/rules.ts:258` 成功 attach 清零）
 - **状态**：COVERED（原 PARTIAL：#14 由 T-d 补齐）
 
 ### H3 — 传输关闭导致的失败一律归类为可重试的断链
@@ -167,7 +167,7 @@
 - **由谁保护**：`a transport dropped during bootstrap is a network failure and is retried`；
   `a transport that closes while a host-key prompt is open is a dropped link and is retried`。
 - **代码位置**：`src/connect/failures.ts:4`、`:25`、`src/connect/guards.ts:3`、`:45`、`src/connect/pipeline.ts:252`、
-  `:253`、`:279`、`:488`、`src/host-runtime.ts:222`、`src/runtime/fsm.ts:66`
+  `:253`、`:279`、`:488`、`src/host-runtime.ts:222`、`src/runtime/fsm.ts:72`
 - **状态**：COVERED
 
 ### H4 — 每个 await 之后、发布状态之前都要确认"这次连接仍被需要"
@@ -261,7 +261,7 @@
 - **由谁保护**：`the session block names every writer, and status has exactly one`
   （`SESSION_WRITERS` 把四个字段的 owner 登记为 `host-lifecycle.ts` + `watchdog.ts`，任何第三个写者——包括
   `runtime/fsm.ts`——都会被判失败）；`git grep "type: 'remote\." -- src` 仍为 0（三条规则与其事件已删除）。
-- **代码位置**：`src/watchdog.ts:69`、`:89`、`:114`、`:131`、`src/runtime/fsm.ts:168`、`src/runtime/dispatch.ts:76`
+- **代码位置**：`src/watchdog.ts:69`、`:89`、`:114`、`:131`、`src/runtime/fsm.ts:161`、`src/runtime/dispatch.ts:76`
 - **状态**：COVERED
 
 ## 2. 44 行出现点映射表
@@ -275,26 +275,26 @@
 | 2 | B1 | `src/connect-pipeline.js:952` | `src/connect/pipeline.ts:354`、`:357` | 重挂记录是"托管"不是"拥有"，只有 launch 脚本写的记录才证明可停 | `a re-attach to a pid this connection did not launch grants no kill rights`；`stop never signals a pid this connection did not launch or take over` | COVERED |
 | 3 | B1 | `src/host-runtime.js:42` | `src/host-runtime.ts:281`、`:283` | `jumpFingerprint` 与目标 `fingerprint` 是两个字段 | `a jump host and the target keep separate host-key contexts`；`editing the jump host re-asks for its key instead of reporting host-key-changed` | COVERED |
 | 4 | B1 | `src/prompts.js:12` | `src/prompts.ts:124`、`:134` | `requestHostKey` 用 `role` 决定回答归属 | `a jump host and the target keep separate host-key contexts` | COVERED |
-| 5 | B1 | `src/prompts.js:73` | `src/prompts.ts:194`、`:195`、`src/runtime/fsm.ts:331` | 当前被确认的 key 必须就是 `HostView.fingerprint` 显示的那个 | `a jump host and the target keep separate host-key contexts`（`:72` 断言 jump key，`:95` 断言目标 key）；`connect pauses on the first host key and resumes after confirmation` | COVERED |
+| 5 | B1 | `src/prompts.js:73` | `src/prompts.ts:194`、`:195`、`src/runtime/rules.ts:181` | 当前被确认的 key 必须就是 `HostView.fingerprint` 显示的那个 | `a jump host and the target keep separate host-key contexts`（`:72` 断言 jump key，`:95` 断言目标 key）；`connect pauses on the first host key and resumes after confirmation` | COVERED |
 | 6 | B1 | `src/prompts.js:97` | `src/prompts.ts:222`、`:251`、`:264` | jump key 只记内存，绝不写 `store.pinnedFingerprint` | `a jump host and the target keep separate host-key contexts`（`:79` 断言 store 未被改写）；`an existing target pin never reaches the jump host connection` | COVERED |
 | 7 | B4 | `src/connect-pipeline.js:1782` | `src/connect/reattach.ts:124`、`:125` | 空 token 直接判失败 | `a re-attach that returns an empty token is an explicit failure`；`resolveRemoteWeb reports no-token instead of accepting an empty token` | COVERED |
 | 8 | B8 | `src/service.js:173` | `src/connect/repair.ts:3`、`src/connect/watchdog.ts:42` | `repairTunnel` 只重建 listener | `a broken tunnel under a healthy remote is rebuilt once instead of flapping`；`a healthy local listener is not rebuilt for one failed request` | COVERED |
 | 9 | H1 | `src/connect-pipeline.js:912` | `src/connect/pipeline.ts:312`、`:313` | 探测没给 `$HOME` 时 `layoutForRuntime` 抛错，而不是造出 `~/.dsh` | `a remote layout refuses an unknown home instead of building a literal-tilde path` | COVERED |
-| 10 | H1 | `src/host-lifecycle.js:320` | `src/host-lifecycle.ts:198`、`src/runtime/fsm.ts:499` | 空闲停止用"记住的 home/pid"，不用被清空后的 `facts` | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
+| 10 | H1 | `src/host-lifecycle.js:320` | `src/host-lifecycle.ts:198`、`src/runtime/rules.ts:340` | 空闲停止用"记住的 home/pid"，不用被清空后的 `facts` | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
 | 11 | H1 | `src/host-lifecycle.js:509` | `src/host-lifecycle.ts:381` | teardown 前把 `remoteHome` 存下来 | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
 | 12 | H1 | `src/host-runtime.js:63` | `src/host-runtime.ts:297`、`:299`、`:301` | `remoteHome`/`remotePid`/`remoteProfile` 三字段存在 | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
-| 13 | H2 | `src/connect-pipeline.js:157` | `src/runtime/fsm.ts:68`、`:264` | 用户主动 connect 重置预算，定时重试保留已花掉的预算 | `autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |
-| 14 | H2 | `src/connect-pipeline.js:776` | `src/runtime/fsm.ts:411` | 只有成功 attach 才重置预算，失败一律消耗 | `a successful attach resets the retry budget exactly once`（T-d）；`autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |
-| 15 | H2 | `src/connect-pipeline.js:838` | `src/connect/pipeline.ts:95`、`src/runtime/fsm.ts:264` | 自动重试**不**重置预算 | `autoReconnect.maxAttempts is the real retry budget, not one attempt`；`a successful attach resets the retry budget exactly once`（T-d） | COVERED |
+| 13 | H2 | `src/connect-pipeline.js:157` | `src/runtime/fsm.ts:74`、`src/runtime/rules.ts:114` | 用户主动 connect 重置预算，定时重试保留已花掉的预算 | `autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |
+| 14 | H2 | `src/connect-pipeline.js:776` | `src/runtime/rules.ts:258` | 只有成功 attach 才重置预算，失败一律消耗 | `a successful attach resets the retry budget exactly once`（T-d）；`autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |
+| 15 | H2 | `src/connect-pipeline.js:838` | `src/connect/pipeline.ts:95`、`src/runtime/rules.ts:114` | 自动重试**不**重置预算 | `autoReconnect.maxAttempts is the real retry budget, not one attempt`；`a successful attach resets the retry budget exactly once`（T-d） | COVERED |
 | 16 | H2 | `src/connect-pipeline.js:1114` | `src/connect/pipeline.ts:515`、`:518` | 是否重试只有一处决定；用户"否"是终局 | `a first connect that fails with error+close synchronously is not retried`；`connect.failed only arms a retry while the user still wants the link (H2)` | COVERED |
-| 17 | H2 | `src/host-runtime.js:75` | `src/host-runtime.ts:216`、`src/runtime/fsm.ts:64` | `connectCancelled` 字段存在且阻断自动重试 | `a first connect that fails with error+close synchronously is not retried`；`a host-key prompt that times out clears its pending state` | COVERED |
+| 17 | H2 | `src/host-runtime.js:75` | `src/host-runtime.ts:216`、`src/runtime/fsm.ts:70` | `connectCancelled` 字段存在且阻断自动重试 | `a first connect that fails with error+close synchronously is not retried`；`a host-key prompt that times out clears its pending state` | COVERED |
 | 18 | H3 | `src/connect-pipeline.js:79` | `src/connect/guards.ts:3`、`:45` | `assertTransportOpen` 抛 typed `network` | `a transport dropped during bootstrap is a network failure and is retried` | COVERED |
 | 19 | H3 | `src/connect-pipeline.js:89` | `src/connect/failures.ts:4`、`:25` | `normalizeConnectFailure` 把竞态失败改写成 dropped link | `a transport dropped during bootstrap is a network failure and is retried`；`a transport that closes while a host-key prompt is open is a dropped link and is retried` | COVERED |
 | 20 | H3 | `src/connect-pipeline.js:249` | `src/connect/pipeline.ts:279`、`:198` | SSH 一开就挂断线监听（不等 UI ready） | `a transport dropped during bootstrap is a network failure and is retried` | COVERED |
 | 21 | H3 | `src/connect-pipeline.js:851` | `src/connect/pipeline.ts:252`、`:253` | `transportUp` 记录"曾经连上过" | `a transport dropped during bootstrap is a network failure and is retried` | COVERED |
 | 22 | H3 | `src/connect-pipeline.js:878` | `src/connect/pipeline.ts:279`、`:234` | 在后续步骤**之前**挂 close handler | `a transport dropped during bootstrap is a network failure and is retried` | COVERED |
 | 23 | H3 | `src/connect-pipeline.js:1086` | `src/connect/pipeline.ts:488`、`:489` | 失败归类用 `transportLost \|\| (transportUp && !connected)` | `a transport dropped during bootstrap is a network failure and is retried` | COVERED |
-| 24 | H3 | `src/host-runtime.js:81` | `src/host-runtime.ts:222`、`src/runtime/fsm.ts:66` | `transportLost` 字段 | `a transport that closes while a host-key prompt is open is a dropped link and is retried` | COVERED |
+| 24 | H3 | `src/host-runtime.js:81` | `src/host-runtime.ts:222`、`src/runtime/fsm.ts:72` | `transportLost` 字段 | `a transport that closes while a host-key prompt is open is a dropped link and is retried` | COVERED |
 | 25 | H4 | `src/connect-pipeline.js:74` | `src/connect/guards.ts:3`、`:40` | `assertStillWanted` 的判定（`linkTaken` 的四个条件） | `assertStillWanted rejects every taken link and accepts a live one`（T-e） | COVERED |
 | 26 | H4 | `src/connect-pipeline.js:520` | `src/connect/transport.ts:109` | 工厂 await 期间被断开 → 关掉新 listener，不发布 | `a disconnect while the new listener is being created closes that listener`；`removing the host while the new listener is being created cannot leak it`；`shutting down during a tunnel rebuild closes the new listener` | COVERED |
 | 27 | H4 | `src/connect-pipeline.js:749` | `src/connect/verify.ts:28` | token 交换后、探活窗口内再确认一次 | `a token exchange that lands after a user cancel never touches the closed tunnel`（T-c） | COVERED |
@@ -318,10 +318,10 @@
 
 **行数核对**：44 行 = B1×6、B4×1、B8×1、H1×4、H2×5、H3×7、H4×6、M1×3、M2×2、M3×2、M4×6、M6×1。
 **标记核对**：当前 56 处标记（55 行去重，`src/connect/guards.ts:3` 同一行同时带 `(H4)` 与 `(H3)`）全部落在
-上表某一行，外加 B9 的两处（`src/host-runtime.ts:249`、`src/runtime/fsm.ts:168`；B9 没有 review 基线行，见 §0）；
+上表某一行，外加 B9 的两处（`src/host-runtime.ts:249`、`src/runtime/fsm.ts:161`；B9 没有 review 基线行，见 §0）；
 其中 11 处是 P2/P5 拆分时复制到新模块头的重复标记（如 B8 的 `repair.ts:3`/`watchdog.ts:42`、
-M4 的 `registry.ts:*`/`stop.ts:*`、H1 的 `fsm.ts:499`、M1 的 `effects.ts:64`、H2 的 `fsm.ts:68`）。
-第 13–15 行共用一个 `(H2)` 注释（`fsm.ts:68`）说明规则，两个重置点作为代码行单列。
+M4 的 `registry.ts:*`/`stop.ts:*`、H1 的 `rules.ts:340`、M1 的 `effects.ts:64`、H2 的 `fsm.ts:73`）。
+第 13–15 行共用一个 `(H2)` 注释（`fsm.ts:73`）说明规则，两个重置点作为代码行单列。
 P7a 起 `src/runtime/fsm.ts` 那条抄来的 `(B8)` 随三条 `remote.*` 死规则一并删除，所以 B8 只剩 2 处（`repair.ts:3`、
 `watchdog.ts:42`）。
 

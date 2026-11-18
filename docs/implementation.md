@@ -28,6 +28,7 @@ dsh-remote-go
 │  ├─ prompts.ts            指纹确认与远端冲突的用户决定 rendezvous
 │  ├─ host-runtime.ts       每主机 runtime 对象的唯一形状（建/用分开）
 │  ├─ host-view.ts          每主机对客户端的只读视图（HostView 投影）
+│  ├─ runtime/              会话状态机：`events.ts`（31 个事件与只读 `EventScope`）、`rules.ts`（每事件一条 guard/apply/effects 规则表与纯辅助）、`fsm.ts`（`transition()` 引擎、`SessionState`/拒绝类型与 `writeBack`）
 │  ├─ connect-log.ts        连接日志：每次连接的重置与边界行、失败分解、环形缓冲下限、日志尾与可见状态
 │  ├─ diagnostics.ts        10 项诊断检查表（只读投影，不新建连接）
 │  ├─ ssh.ts                ssh2 封装：指纹策略、认证回退、exec、forwardOut
@@ -67,6 +68,9 @@ dsh-remote-go
 
 `src/`、`index.ts`、`client/src/` 是唯一的手写源码（TypeScript）。`pnpm build` 先用锁定的 `tsc` 把
 `index.ts` / `src/**/*.ts` 编译到 `dist/`，再由 `scripts/build-client.mjs` 生成 `dist/client.js`；
+客户端样式表是一个 `const CSS = ` 模板字面量，放在 `client/template.js` 的 bundle 标记之前（与拼进来的
+模块同处 factory 作用域，`lib.dom` 不再把它看成全局 `CSS`），`client/src/styles.ts` 只保留读取它的
+`PanelStyleSheet()`；
 根目录的 `index.js` 是一行再导出 `dist/index.js` 的 shim（DSH 链接式安装直接打开 `<plugin>/index.js`，
 不走 exports）；`package.json` 的 `exports` 与它一致，所以链接式安装与 npm 安装加载的是同一份构建产物。
 仓库根目录不产生 `index.js` / `client.js` / `src/**/*.js` 副本，发布也不需要 `prepack`/`postpack` 的
@@ -74,6 +78,8 @@ stage/unstage 步骤；`dist/` 已被 `.gitignore` 忽略。`pnpm test` / `gate`
 `node --test test/unit/*.test.ts` 跑 TypeScript 源码。
 
 依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect/` / `host-lifecycle` / `connect-progress` / `prompts`。`connect/ → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.ts` 只依赖 `service` 的公开方法与 `errors`/`util`（Host/Origin 栅栏与同源代理共用 `request-trust.ts`，不复制实现）。`host-runtime.ts` 是 runtime 形状的唯一来源，`host-view.ts` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.ts` 决定；三者都不做 I/O，新增字段或视图只改一处。
+
+`src/runtime/` 是状态机的两半：`rules.ts` 持有 `Record<EventType, Rule>` 规则表（31 个事件的 guard/apply/effects）与 `move`/`epochAfter`/`progressOf` 等纯辅助，`fsm.ts` 是 `transition()` 引擎、`SessionState`/`RefusalReason` 类型、`stillWanted`/`isActivityCurrent` 与 `writeBack`。两个文件都在 600 行以内，所以 P7 的 `scripts/architecture-budget.json` 不再有 `fileLength` 例外（表在 `runtime/rules.ts`，引擎在 `runtime/fsm.ts`）。
 
 ## 2. Host 入口与装配
 `src/index.ts#apply(ctx, config)`：解析 `$DSH_HOME` 与插件状态目录 → `HostStore` → `SecretStore`（没有 `credentials` 服务时降级为仅内存）→ `RemoteGoService`（注入 store/home/logger/secrets/本地版本/指纹确认超时）→ 组装准入函数 `admit` → `createApi({ service, getOrigin, admit, logger, diagnostics })` 在 `ctx.effect` 内挂到 `webServer` 的 `/dsh-remote-go/api` 前缀 → `createRemoteProxy({ webServer, getOrigin, admit, resolveHost: service.webViewTarget })` 挂到 `/dsh-remote-go/remote/` 前缀，并在 service 的每次 `state` 上 `proxy.sync(service.hostIds())`（保持每主机一条升级路由）→ 异步 `service.init()` + `detectLocalVersion`/`detectLocalEnginesNode`（读不到版本记 warn）→ 卸载时 `api.dispose()`、`proxy.dispose()`、`service.shutdown()`、注销两条路由。

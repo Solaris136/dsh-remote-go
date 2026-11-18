@@ -12,14 +12,13 @@ import assert from 'node:assert/strict'
 import {
   IllegalTransition,
   REFUSALS,
-  RESTART_STOP_WARNING,
-  STOP_FAILED_LABEL,
   isActivityCurrent,
   isRefusal,
   stillWanted,
   transition,
   writeBack,
 } from '../../dist/src/runtime/fsm.js'
+import { RESTART_STOP_WARNING, STOP_FAILED_LABEL } from '../../dist/src/runtime/rules.js'
 import { EVENT_TYPE_PARITY, EVENT_TYPES } from '../../dist/src/runtime/events.js'
 
 const STATUSES = [

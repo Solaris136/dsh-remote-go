@@ -110,7 +110,7 @@
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "node node_modules/typescript/bin/tsc -p client/tsconfig.json --noEmit",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
-    "verify:types": "node scripts/build.mjs --noEmit && pnpm run typecheck:client && node scripts/check-types.mjs --stage P6 --strict",
+    "verify:types": "node scripts/build.mjs --noEmit && pnpm run typecheck:client && node scripts/check-types.mjs --stage P7 --strict",
     "build:vendor": "node scripts/build-vendor.mjs",
     "pack:check": "node scripts/pack-check.mjs",
     "pack:check:tarball": "node scripts/pack-check.mjs --find artifacts",
