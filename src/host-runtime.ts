@@ -35,7 +35,7 @@ import type { ConnectProgressState } from './connect-progress.js'
 import type { RemoteFacts } from './probe.js'
 import type { ExchangeResult } from './remote-proc.js'
 import type { Tunnel } from './tunnel.js'
-import type { SshConnection } from './ssh.js'
+import type { SshPort } from './ssh-port.js'
 // Type-only edge into `prompts.ts`, the same pattern `context.ts` already uses for
 // `LifecycleVerdict`: the rendezvous block is *declared* from the payload types its only writer
 // owns, and both edges erase at emit time, so nothing cycles at run time.
@@ -223,8 +223,8 @@ export interface RuntimeSession {
 
 /** The live transport, its tunnel, the launch token and everything credential-shaped. */
 export interface RuntimeLink {
-  ssh: SshConnection | null
-  jumpSsh: SshConnection | null
+  ssh: SshPort | null
+  jumpSsh: SshPort | null
   tunnel: Tunnel | null
   token: string | null
   password: string | null

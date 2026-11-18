@@ -882,3 +882,55 @@ describe('watchdog-bus-guard', () => {
     assert.match(source, /export function stopRemoteHeartbeat/)
   })
 })
+
+/* ── ssh-port-guard (design-ssh §7 S4 / decision D4) ───────────────────────────────────────────
+ *
+ * `SshPort` is the only surface the host half may depend on (P5). Two imports stay inside the
+ * adapter layer: the ssh2 adapter module itself (`src/ssh.ts`, reached only by the assembly root
+ * that builds the default factory) and the vendored ssh2 bundle (the adapter plus its SFTP
+ * capability module). A third module reaching over either edge would re-couple the host half to
+ * ssh2 — the exact debt P5 retires — so both are machine-checked.
+ */
+describe('ssh-port-guard', () => {
+  const ADAPTER_MODULE = new Set(['ssh.ts'])
+  const ASSEMBLY_ROOTS = new Set(['context.ts'])
+  const SSH2_CONSUMERS = new Set(['ssh.ts', 'ssh-sftp.ts'])
+  const IMPORT_SPECIFIER = /(?:from\s+|import\s*\(\s*)['"]([^'"]+)['"]/g
+
+  async function importsOf(file) {
+    const text = stripComments(await readFile(file, 'utf8'))
+    return [...text.matchAll(IMPORT_SPECIFIER)].map((match) => match[1])
+  }
+
+  test('only the assembly root imports the ssh2 adapter module', async () => {
+    const offenders = []
+    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      if (ADAPTER_MODULE.has(relative) || ASSEMBLY_ROOTS.has(relative)) continue
+      for (const specifier of await importsOf(file)) {
+        if (/(?:^|\/)ssh\.js$/.test(specifier)) offenders.push(`${relative} imports ${specifier}`)
+      }
+    }
+    assert.deepEqual(offenders, [], 'a module outside the assembly root depends on the ssh2 adapter class')
+  })
+
+  test('only the adapter layer imports the vendored ssh2 bundle', async () => {
+    const offenders = []
+    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
+      const relative = path.relative(SRC, file).split(path.sep).join('/')
+      if (SSH2_CONSUMERS.has(relative)) continue
+      for (const specifier of await importsOf(file)) {
+        if (specifier.includes('vendor/ssh2')) offenders.push(`${relative} imports ${specifier}`)
+      }
+    }
+    assert.deepEqual(offenders, [], 'a module outside the ssh2 adapter imports the vendored bundle')
+  })
+
+  test('the port declaration stays transport-agnostic', async () => {
+    const source = await readFile(path.join(SRC, 'ssh-port.ts'), 'utf8')
+    assert.doesNotMatch(source, /vendor\/ssh2/, 'the port must not name the ssh2 implementation')
+    assert.doesNotMatch(source, /from '\.\/ssh\.js'/, 'the port must not import its adapter')
+    // The EventEmitter shape is structural, so the port does not extend the node EventEmitter.
+    assert.doesNotMatch(source, /extends EventEmitter/)
+  })
+})

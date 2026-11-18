@@ -8,7 +8,7 @@ import { errors, toErrorView } from './errors.js'
 import type { ErrorView } from './errors.js'
 import { normalizeRemoteFilePath, readHostDownload, remoteFileName } from './remote-files.js'
 import type { HostDownloadRuntime, SavedDownload } from './local-download.js'
-import type { TransferInventory, TransferProgress } from './ssh.js'
+import type { TransferInventory, TransferProgress } from './ssh-port.js'
 
 /** How long a finished job remains inspectable before it is pruned. */
 export const DOWNLOAD_JOB_TTL_MS = 10 * 60 * 1000

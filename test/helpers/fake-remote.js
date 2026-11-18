@@ -1,11 +1,14 @@
-import { EventEmitter } from 'node:events'
-import { Duplex } from 'node:stream'
 import { mkdtemp } from 'node:fs/promises'
 import { rm, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { HostStore } from '../../src/store.js'
 import { RemoteGoService } from '../../src/service.js'
+import { FakeSshPort } from './fake-ssh-port.js'
+
+// The service-level suites have always imported the double as `FakeSsh`; the implementation lives
+// in `fake-ssh-port.js` so the port conformance suite can share it (design-ssh §7).
+export { FakeSshPort as FakeSsh }
 
 /**
  * Temporary service directories created by `makeTestService`. `node --test` runs every
@@ -56,47 +59,6 @@ export function makeFacts(overrides = {}) {
   }
 }
 
-export class FakeSsh extends EventEmitter {
-  constructor(input = {}) {
-    super()
-    this.connected = false
-    this.disposed = false
-    this.options = input.options ?? {}
-    this.calls = []
-    this.execImpl = input.exec ?? (async () => ({ code: 0, stdout: '', stderr: '' }))
-    this.connectImpl = input.connect
-    this.onConnectRequest = input.onConnectRequest
-    this.files = input.files ?? new Map()
-  }
-  async connect() {
-    this.onConnectRequest?.(this.options)
-    if (this.connectImpl) return this.connectImpl()
-    this.connected = true
-    return { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
-  }
-  async exec(command, options = {}) {
-    this.calls.push({ command, options })
-    return this.execImpl(command, options)
-  }
-  async forwardOut() {
-    return new Duplex({
-      read() {},
-      write(_chunk, _encoding, callback) {
-        callback()
-      },
-    })
-  }
-  async dispose() {
-    this.disposed = true
-    this.connected = false
-    this.emit('close')
-  }
-  simulateClose() {
-    this.connected = false
-    this.emit('close')
-  }
-}
-
 export class FakeTunnel {
   constructor(port = 41000) {
     this.localPort = port
@@ -129,7 +91,7 @@ export async function makeTestService(overrides = {}) {
   const sshFactory =
     overrides.sshFactory ??
     ((options) => {
-      const ssh = new FakeSsh({ options, files: overrides.sshFiles })
+      const ssh = new FakeSshPort({ options, files: overrides.sshFiles })
       events.push({ type: 'ssh', ssh })
       return ssh
     })

@@ -8,7 +8,7 @@ import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS } from '../constants.js
 import { errors } from '../errors.js'
 import { remoteLayout } from '../layout.js'
 import type { RemoteLayout } from '../layout.js'
-import type { SshTransport } from '../ssh.js'
+import type { SshPort } from '../ssh-port.js'
 import { headTail, isLoopbackHost, isPid, messageOf, shellQuote } from '../util.js'
 import { normalizeVersion } from '../version.js'
 import { LAUNCH_MARKER } from './registry.js'
@@ -97,7 +97,7 @@ rm -f "$DUMP"`
 }
 
 export async function ensureBrowserCarrier(
-  ssh: SshTransport,
+  ssh: SshPort,
   options: { plan: LaunchPlan; layout: RemoteLayout; profile: string; onLine?: (line: string) => void },
 ): Promise<BrowserCarrierResult> {
   try {
@@ -201,7 +201,7 @@ export function parseLaunchedPid(text: unknown): LaunchedPid {
  * stopped" rule the connect pipeline enforces (review blocker 2).
  */
 async function stopFailedLaunch(
-  ssh: SshTransport,
+  ssh: SshPort,
   layout: RemoteLayout,
   startedPid: number,
   onLine?: (line: string) => void,
@@ -225,7 +225,7 @@ async function stopFailedLaunch(
 }
 
 export async function startRemoteWeb(
-  ssh: SshTransport,
+  ssh: SshPort,
   options: {
     plan: LaunchPlan
     layout?: RemoteLayout

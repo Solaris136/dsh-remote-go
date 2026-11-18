@@ -13,7 +13,7 @@ import type {
   SavedDownload,
 } from './local-download.js'
 import { normalizeRemoteFilePath } from './remote-path.js'
-import type { SshTransport } from './ssh.js'
+import type { SshPort } from './ssh-port.js'
 
 export { normalizeRemoteFilePath, remoteFileName } from './remote-path.js'
 
@@ -39,7 +39,7 @@ export async function readHostDownload(
     })
   }
   const remotePath = normalizeRemoteFilePath(rawPath)
-  const ssh: SshTransport = runtime.ssh
+  const ssh: SshPort = runtime.ssh
   if (typeof ssh.inspectRemotePath !== 'function') {
     throw errors.internal('the SSH transport does not support path inspection')
   }

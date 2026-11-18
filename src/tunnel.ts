@@ -3,11 +3,12 @@
  */
 import http from 'node:http'
 import net from 'node:net'
-import type { ClientChannel, SshTransport } from './ssh.js'
+import type { Duplex } from 'node:stream'
+import type { SshPort } from './ssh-port.js'
 
 /** What `createTunnel` needs: the transport, the remote port and the optional listener bindings. */
 export interface TunnelOptions {
-  ssh?: SshTransport | null
+  ssh?: SshPort | null
   remoteHost?: string
   remotePort: number
   listenHost?: string
@@ -62,7 +63,7 @@ export async function createTunnel(options: TunnelOptions): Promise<Tunnel> {
   const sockets = new Set<net.Socket>()
   // The forwarded SSH channels this listener opened: a closed listener must destroy them too,
   // otherwise an established pipe keeps the (already released) SSH transport busy.
-  const streams = new Set<ClientChannel>()
+  const streams = new Set<Duplex>()
   let closed = false
 
   const server = net.createServer((socket) => {

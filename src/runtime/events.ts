@@ -12,11 +12,12 @@ import type { ErrorView } from '../errors.js'
 import type { ConnectProgressState } from '../connect-progress.js'
 import type { Activity, ConnectPhase, EpisodeSource, HostStatus } from '../host-runtime.js'
 import type { KeepAlive } from '../settings.js'
-import type { SshConnection } from '../ssh.js'
+import type { SshPort } from '../ssh-port.js'
 
 /**
- * The host-key a prompt is about. P5 moves the authoritative declaration to `src/ssh-port.ts`
- * (design-ssh §3); until then the event payload carries this minimal shape.
+ * The host-key a prompt is about, as the event payload needs it. The port's authoritative
+ * {@link SshPort} declaration lives in `src/ssh-port.ts`; this is the minimal projection an event
+ * carries (a caller that only saw a fingerprint may omit the type).
  */
 export interface HostKeyInfo {
   sha256: string
@@ -119,7 +120,7 @@ export interface EventPayloads {
   // The transport that closed. The pure function cannot compare identity with `state.ssh` (the
   // link block is not part of SessionState), so `EventScope.transportIsCurrent` carries the verdict
   // and this payload documents which transport produced it.
-  'transport.closed': { transport: SshConnection | null }
+  'transport.closed': { transport: SshPort | null }
   'hostkey.pending': { info: HostKeyInfo; role: 'target' | 'jump'; host: string | null; port: number }
   'hostkey.answered': { accept: boolean }
   // The §2.4.2 row requires `error=hostKeyUnknown`, whose bilingual, coded view can only be built

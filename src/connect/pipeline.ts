@@ -12,6 +12,7 @@
  *
  * The effect owner is `runtime/effects.ts`; the state machine is `runtime/fsm.ts`.
  */
+import type { Duplex } from 'node:stream'
 import { REMOTE_START_TIMEOUT_MS, SSH_READY_TIMEOUT_MS } from '../constants.js'
 import { beginConnectLog } from '../connect-log.js'
 import type { Config, HostState, RemoteDeps, Reporter, Store, Transport } from '../context.js'
@@ -27,7 +28,7 @@ import { requestHostKey } from '../prompts.js'
 import type { StartedRemoteWeb } from '../remote-web/start.js'
 import { dispatch, scopeFactsFor } from '../runtime/dispatch.js'
 import { createRuntimeEffects } from '../runtime/effects.js'
-import type { ClientChannel, SshAuthConfig, SshConnection, SshConnectionOptions } from '../ssh.js'
+import type { SshAuthOptions, SshConnectOptions, SshPort } from '../ssh-port.js'
 import { isPid, messageOf, nowIso } from '../util.js'
 import { normalizeVersion, versionsEqual } from '../version.js'
 import { markConnected } from './attach.js'
@@ -125,7 +126,7 @@ function retryNow(ctx: PipelineCtx, runtime: HostRuntime): void {
  * @param runtime - host runtime.
  * @param ssh - the transport that was just created.
  */
-function watchTransport(ctx: PipelineCtx, runtime: HostRuntime, ssh: SshConnection | null): void {
+function watchTransport(ctx: PipelineCtx, runtime: HostRuntime, ssh: SshPort | null): void {
   if (!ssh || typeof ssh.on !== 'function') return
   ssh.on('close', () => {
     // A transport this runtime no longer dials (replaced, or disposed before a new attempt)
@@ -155,12 +156,12 @@ function watchTransport(ctx: PipelineCtx, runtime: HostRuntime, ssh: SshConnecti
  */
 async function openTransport(ctx: PipelineCtx, runtime: HostRuntime, target: ConnectTarget): Promise<void> {
   const settings = ctx.settings()
-  const auth = (): SshAuthConfig => ({
+  const auth = (): SshAuthOptions => ({
     type: runtime.entry.auth?.type ?? 'key',
     keyPath: runtime.entry.auth?.keyPath ?? null,
     password: runtime.password ?? null,
   })
-  const buildOptions = (resolved: DialTarget, role: 'target' | 'jump', sock?: ClientChannel): SshConnectionOptions => {
+  const buildOptions = (resolved: DialTarget, role: 'target' | 'jump', sock?: Duplex): SshConnectOptions => {
     const isJump = role === 'jump'
     // A per-host policy and pin describe the saved target. A jump host only obeys the
     // global policy and, at most, a pin remembered for this session (it is not persisted).

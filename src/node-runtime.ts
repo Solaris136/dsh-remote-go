@@ -13,7 +13,7 @@ import { buildNodeChecksumScript, buildNodeInstallScript, parseNodeChecksumOutpu
 import type { NodeRelease } from './node/download.js'
 import type { RemoteFacts } from './probe.js'
 import type { RemoteLayout } from './layout.js'
-import type { SshExecOptions, SshTransport } from './ssh.js'
+import type { SshExecOptions, SshPort } from './ssh-port.js'
 
 export const MANAGED_NODE_VERSION_FALLBACK = MIN_NODE_VERSION
 
@@ -138,7 +138,7 @@ function nodeError(detail: BilingualText, technical?: string): RemoteGoError {
 
 /** Run one remote command and normalize whatever shape the transport returned. */
 async function runRemote(
-  ssh: SshTransport,
+  ssh: SshPort,
   command: string,
   options: SshExecOptions,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -150,7 +150,7 @@ async function runRemote(
   }
 }
 
-async function scanManagedNode(ssh: SshTransport, layout: RemoteLayout): Promise<NodeInstallation[]> {
+async function scanManagedNode(ssh: SshPort, layout: RemoteLayout): Promise<NodeInstallation[]> {
   let result: { code: number; stdout: string; stderr: string }
   try {
     result = await runRemote(ssh, buildNodeScanScript(layout), {
@@ -176,7 +176,7 @@ async function scanManagedNode(ssh: SshTransport, layout: RemoteLayout): Promise
 }
 
 async function resolveNodeRelease(
-  ssh: SshTransport,
+  ssh: SshPort,
   input: { layout: RemoteLayout; version: string; arch: string; bases?: readonly string[] },
 ): Promise<{ ok: true; release: NodeRelease } | NodeSetupFailure> {
   let result: { code: number; stdout: string; stderr: string }
@@ -215,7 +215,7 @@ async function resolveNodeRelease(
 }
 
 async function installNodeRelease(
-  ssh: SshTransport,
+  ssh: SshPort,
   input: {
     layout: RemoteLayout
     release: NodeRelease
@@ -301,7 +301,7 @@ export interface EnsureRemoteNodeOptions {
   onProgress?: (event: NodeInstallEvent) => void
 }
 
-export async function ensureRemoteNode(ssh: SshTransport, options: EnsureRemoteNodeOptions): Promise<ManagedNode> {
+export async function ensureRemoteNode(ssh: SshPort, options: EnsureRemoteNodeOptions): Promise<ManagedNode> {
   const facts = options.facts ?? {}
   const layout = options.layout
   const version = normalizeVersion(options.version ?? MANAGED_NODE_VERSION_FALLBACK)

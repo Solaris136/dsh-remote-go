@@ -4,7 +4,7 @@
 import { headTail } from './util.js'
 import { errors } from './errors.js'
 import { normalizeVersion } from './version.js'
-import type { SshTransport } from './ssh.js'
+import type { SshPort } from './ssh-port.js'
 
 /** The libc family the remote runs; `unknown` never upgrades to a guess. */
 export type RemoteLibc = 'musl' | 'glibc' | 'unknown'
@@ -106,7 +106,7 @@ export function toProbeFacts(values: Record<string, string>): RemoteFacts {
   }
 }
 
-export async function probeRemote(ssh: SshTransport, options: { timeoutMs?: number } = {}): Promise<RemoteFacts> {
+export async function probeRemote(ssh: SshPort, options: { timeoutMs?: number } = {}): Promise<RemoteFacts> {
   const script = buildProbeScript()
   const timeoutMs = options.timeoutMs ?? 60_000
   const result = await ssh.exec(script, { timeoutMs })

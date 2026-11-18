@@ -17,7 +17,7 @@ import { mkdir, open, rm, stat } from 'node:fs/promises'
 import { errors, isRemoteGoError } from './errors.js'
 import type { RemoteGoError } from './errors.js'
 import { remoteFileName, safeLocalSegment } from './remote-path.js'
-import type { SshTransport, TransferInventory, TransferProgress } from './ssh.js'
+import type { SshPort, TransferInventory, TransferProgress } from './ssh-port.js'
 
 /**
  * Path segments that execute something when the user logs in, or that authorize a login.
@@ -85,7 +85,7 @@ export interface DownloadDestinationOptions {
 export interface HostDownloadRuntime {
   readonly id: string
   readonly status: string
-  readonly ssh: SshTransport | null
+  readonly ssh: SshPort | null
 }
 
 /** What one single-file download reports while it streams. */

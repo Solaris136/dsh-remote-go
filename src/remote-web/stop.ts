@@ -6,7 +6,7 @@
  */
 import type { RemoteLayout } from '../layout.js'
 import { remotePortOwnerPid } from '../remote-proc.js'
-import type { SshTransport } from '../ssh.js'
+import type { SshPort } from '../ssh-port.js'
 import { isPid, messageOf, shellQuote } from '../util.js'
 import { readRunRegistry } from './registry.js'
 import { readWebLineFromLog } from './resolve.js'
@@ -22,7 +22,7 @@ export interface StopRemoteWebResult {
  * The pid a readiness line in the log belongs to, as a last resort for a stop whose pid is
  * unknown. The log only names the port; `/proc` proves which process listens on it (M4).
  */
-async function pidFromReadinessLine(ssh: SshTransport, layout: RemoteLayout): Promise<number> {
+async function pidFromReadinessLine(ssh: SshPort, layout: RemoteLayout): Promise<number> {
   const line = await readWebLineFromLog(ssh, layout)
   if (!line || !isPid(line.port)) return 0
   const owner = await remotePortOwnerPid(ssh, line.port)
@@ -30,7 +30,7 @@ async function pidFromReadinessLine(ssh: SshTransport, layout: RemoteLayout): Pr
 }
 
 export async function stopRemoteWeb(
-  ssh: SshTransport,
+  ssh: SshPort,
   layout: RemoteLayout,
   options: { pid?: unknown } = {},
 ): Promise<StopRemoteWebResult> {

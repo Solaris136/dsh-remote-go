@@ -6,7 +6,7 @@ import { headTail, shellQuote } from './util.js'
 import type { BilingualText } from './util.js'
 import { isNodeVersionSupported, normalizeVersion, parseVersion, versionsEqual } from './version.js'
 import type { RemoteFacts } from './probe.js'
-import type { SshTransport } from './ssh.js'
+import type { SshPort } from './ssh-port.js'
 
 /** The launch command the plan names: the npx invocation plus the Node paths it was proven with. */
 export interface LaunchStart {
@@ -109,7 +109,7 @@ ${pathPrefix}npm_config_loglevel=http ${shellQuote(plan.start.npxPath)} -y @deep
 }
 
 export async function verifyNpxVersion(
-  ssh: SshTransport,
+  ssh: SshPort,
   plan: LaunchPlan,
   options: PreflightOptions = {},
 ): Promise<string> {

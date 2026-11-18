@@ -7,7 +7,9 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { SshConnection, parseSshKeyType, toSshError } from '../../src/ssh.js'
 import { fingerprintFromBlob } from '../../src/known-hosts.js'
-import { errors } from '../../src/errors.js'
+import { errors, RemoteGoError } from '../../src/errors.js'
+import { classifySshFailure, closedError, toSshError as aliasToSshError } from '../../src/ssh-failures.js'
+import { headTail } from '../../src/util.js'
 
 function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'key-material') {
   const type = Buffer.from(keyType, 'ascii')
@@ -602,4 +604,121 @@ test('a synchronous error+close during the handshake is one failure, not a dropp
   )
   assert.deepEqual(closes, [], 'the teardown of a failed attempt must not read as a lost link')
   assert.equal(ssh.connected, false)
+})
+
+/* ── error-classification equivalence (P5 / decision D2) ────────────────────────────────────────
+ *
+ * `toSshError` was extracted into `classifySshFailure` (and `toSshError` became an alias). The
+ * extraction is only allowed if the client-visible code and wording did not move, so these cases
+ * compare the new classifier against a verbatim copy of HEAD's `toSshError` / `closedError` — the
+ * *old* rules, not the new alias (comparing the alias with its own implementation would prove
+ * nothing).
+ */
+
+/** HEAD `src/ssh.ts:876-903` (pre-P5 `toSshError`), copied verbatim as the oracle. */
+function headToSshError(error, host, port) {
+  if (!error) return errors.internal('unknown ssh error')
+  if (error instanceof RemoteGoError) return error
+  const message = String(error?.message ?? error)
+  const code = String(error?.code ?? '')
+  if (/host key|hostkey|verification/i.test(message)) {
+    return errors.network({
+      zh: `主机密钥校验未通过（${host}:${port}）。`,
+      en: `Host key verification failed for ${host}:${port}.`,
+    })
+  }
+  if (/authentication|All configured authentication methods failed|Permission denied/i.test(message)) {
+    return errors.auth()
+  }
+  if (
+    /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|timed out|timeout|Cannot connect|connect failed/i.test(
+      `${code} ${message}`,
+    )
+  ) {
+    return errors.network()
+  }
+  return errors.network({
+    zh: `SSH 连接失败：${headTail(message, 300)}`,
+    en: `SSH connection failed: ${headTail(message, 300)}`,
+  })
+}
+
+/** HEAD `src/ssh.ts:42-51` (pre-P5 `closedError`), copied verbatim as the oracle. */
+function headClosedError() {
+  return errors.network(
+    {
+      zh: 'SSH 连接已断开，本次操作没有完成；如果主机仍在线，重连即可继续。',
+      en: 'SSH connection is not open; the transport closed before this step finished.',
+    },
+    { technical: 'reason=ssh-closed' },
+  )
+}
+
+/** Everything the client can observe of one coded error (identity deliberately excluded). */
+const codedShape = (error) => ({
+  code: error.code,
+  detail: error.detail,
+  retryable: error.retryable,
+  technical: error.technical ?? null,
+  nextSteps: error.nextSteps,
+})
+
+test("toSshError is the same function as classifySshFailure's alias (no second rule table)", () => {
+  assert.equal(toSshError, aliasToSshError)
+  assert.equal(typeof classifySshFailure, 'function')
+})
+
+test('classifySshFailure is message-for-message equivalent to HEAD toSshError', () => {
+  const cases = [
+    { label: 'auth', make: () => new Error('All configured authentication methods failed') },
+    { label: 'auth (permission denied)', make: () => new Error('Permission denied (publickey,password)') },
+    {
+      label: 'transport (ECONNREFUSED)',
+      make: () => Object.assign(new Error('connect ECONNREFUSED 1.2.3.4:22'), { code: 'ECONNREFUSED' }),
+    },
+    { label: 'transport (handshake timeout)', make: () => new Error('Timed out while waiting for handshake') },
+    { label: 'hostkey', make: () => new Error('Host key verification failed') },
+    { label: 'fallback', make: () => new Error('something odd happened') },
+    { label: 'thrown string', make: () => 'not an Error' },
+  ]
+  for (const { label, make } of cases) {
+    const error = make()
+    const expected = codedShape(headToSshError(error, 'h', 22))
+    assert.deepEqual(codedShape(classifySshFailure(error, { host: 'h', port: 22 })), expected, label)
+    assert.deepEqual(codedShape(toSshError(error, 'h', 22)), expected, `${label} (alias)`)
+  }
+})
+
+test('an explicit failure kind keeps the same code and wording HEAD produced for it', () => {
+  // Each row: an adapter that already knows the kind must not invent different client text.
+  const rows = [
+    { label: 'auth', kind: 'auth', head: () => new Error('All configured authentication methods failed') },
+    {
+      label: 'transport',
+      kind: 'transport',
+      head: () => Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    },
+    { label: 'hostkey', kind: 'hostkey', head: () => new Error('Host key verification failed') },
+    { label: 'timeout', kind: 'timeout', head: () => new Error('Timed out while waiting for handshake') },
+  ]
+  for (const { label, kind, head } of rows) {
+    assert.deepEqual(
+      codedShape(classifySshFailure(new Error('an adapter that already knows'), { kind, host: 'h', port: 22 })),
+      codedShape(headToSshError(head(), 'h', 22)),
+      label,
+    )
+  }
+  assert.deepEqual(
+    codedShape(classifySshFailure(new Error('closed'), { kind: 'closed' })),
+    codedShape(headClosedError()),
+    'closed',
+  )
+  assert.deepEqual(codedShape(closedError()), codedShape(headClosedError()), 'closedError')
+})
+
+test('a coded error passes through the classifier untouched, whatever kind is claimed', () => {
+  const typed = errors.hostKeyChanged('SHA256:a', 'SHA256:b')
+  assert.equal(classifySshFailure(typed, { kind: 'transport' }), typed)
+  assert.equal(classifySshFailure(typed, { host: 'h', port: 22 }), typed)
+  assert.equal(toSshError(typed, 'h', 22), typed)
 })

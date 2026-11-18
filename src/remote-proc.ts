@@ -4,7 +4,7 @@
 import http from 'node:http'
 import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
 import { isPid, messageOf } from './util.js'
-import type { SshTransport } from './ssh.js'
+import type { SshPort } from './ssh-port.js'
 
 /** One DSH process the remote's `ps` scan named. */
 export interface RemoteProcessRef {
@@ -78,7 +78,7 @@ export function parseForeignDshOutput(stdout: unknown): RemoteProcessRef[] {
  * proceeds without a conflict prompt (a broken scan must not block connecting).
  */
 export async function findForeignDshProcesses(
-  ssh: SshTransport,
+  ssh: SshPort,
   options: { ignorePids?: unknown[]; timeoutMs?: number } = {},
 ): Promise<ForeignDshScan> {
   try {
@@ -102,7 +102,7 @@ export async function findForeignDshProcesses(
 }
 
 export async function stopForeignDshProcesses(
-  ssh: SshTransport,
+  ssh: SshPort,
   processes: ReadonlyArray<{ pid?: unknown }> | null | undefined,
   options: { timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; alive: number[]; output: string }> {
@@ -153,7 +153,7 @@ echo "STOPPED"
  * @param pid - remote process id.
  * @returns listening ports, ascending and unique.
  */
-export async function remoteListenPorts(ssh: SshTransport, pid: number): Promise<number[]> {
+export async function remoteListenPorts(ssh: SshPort, pid: number): Promise<number[]> {
   if (!isPid(pid)) return []
   const script = `set -u
 PID=${pid}
@@ -201,7 +201,7 @@ export function parseListenPorts(stdout: unknown): number[] {
  * @param port - TCP port on the remote's loopback.
  * @returns the owning pid, or null when it cannot be read.
  */
-export async function remotePortOwnerPid(ssh: SshTransport, port: number): Promise<number | null> {
+export async function remotePortOwnerPid(ssh: SshPort, port: number): Promise<number | null> {
   if (!isPid(port) || port > 65535) return null
   const script = `set -u
 PORT_HEX=$(printf '%04X' ${port})
@@ -235,7 +235,7 @@ done
  * @param ssh - SSH transport.
  * @param pid - remote process id.
  */
-export async function remoteProcessIdentity(ssh: SshTransport, pid: number): Promise<ProcessIdentity> {
+export async function remoteProcessIdentity(ssh: SshPort, pid: number): Promise<ProcessIdentity> {
   if (!isPid(pid)) return { ok: false, reason: 'invalid-pid' }
   const script = `set -u
 PID=${pid}
@@ -278,7 +278,7 @@ export function parseProcessIdentity(stdout: unknown): ProcessIdentity {
   }
 }
 
-export async function remoteHttpStatus(ssh: SshTransport, port: number): Promise<number | null> {
+export async function remoteHttpStatus(ssh: SshPort, port: number): Promise<number | null> {
   if (!isPid(port)) return null
   const script = `URL="http://127.0.0.1:${port}/"
 if command -v curl >/dev/null 2>&1; then
@@ -297,7 +297,7 @@ fi
 }
 
 export async function waitForRemoteUi(
-  ssh: SshTransport,
+  ssh: SshPort,
   port: number,
   options: { attempts?: number; intervalMs?: number } = {},
 ): Promise<{ ok: boolean; status: number | null }> {

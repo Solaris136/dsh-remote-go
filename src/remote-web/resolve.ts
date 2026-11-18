@@ -16,7 +16,7 @@ import {
   remotePortOwnerPid,
   remoteProcessIdentity,
 } from '../remote-proc.js'
-import type { SshTransport } from '../ssh.js'
+import type { SshPort } from '../ssh-port.js'
 import { isLoopbackHost, isPid, shellQuote } from '../util.js'
 import { normalizeVersion } from '../version.js'
 import { LAUNCH_MARKER, isPlainObjectValue, readRunRegistry } from './registry.js'
@@ -49,7 +49,7 @@ export function parseWebLine(text: unknown): WebLine | null {
   return { url: rawUrl, host, port, token, rawLine: match[0] }
 }
 
-export async function readWebLineFromLog(ssh: SshTransport, layout: RemoteLayout): Promise<WebLine | null> {
+export async function readWebLineFromLog(ssh: SshPort, layout: RemoteLayout): Promise<WebLine | null> {
   try {
     const result = await ssh.exec(`grep 'dsh web:' ${shellQuote(layout.logFile)} 2>/dev/null | tail -n 1 || true`, {
       timeoutMs: 15_000,
@@ -61,7 +61,7 @@ export async function readWebLineFromLog(ssh: SshTransport, layout: RemoteLayout
   }
 }
 
-export async function remotePidAlive(ssh: SshTransport, pid: number): Promise<boolean> {
+export async function remotePidAlive(ssh: SshPort, pid: number): Promise<boolean> {
   if (!isPid(pid)) return false
   try {
     const result = await ssh.exec(`kill -0 ${pid} 2>/dev/null && echo alive || true`, { timeoutMs: 10_000 })
@@ -93,7 +93,7 @@ export interface AdoptedRemoteWeb {
  * different DSH state than the user asked for.
  */
 export async function adoptRemoteWeb(
-  ssh: SshTransport,
+  ssh: SshPort,
   layout: RemoteLayout,
   options: { profile?: string } = {},
 ): Promise<AdoptedRemoteWeb | null> {
@@ -174,7 +174,7 @@ export function dshPackageDirFromCommand(command: unknown): string | null {
 }
 
 /** Read the version of the DSH package a process actually loaded, over SFTP (no shell). */
-async function packageVersionFromDir(ssh: SshTransport, dir: string): Promise<string | null> {
+async function packageVersionFromDir(ssh: SshPort, dir: string): Promise<string | null> {
   if (!dir || typeof ssh.readRemoteFile !== 'function') return null
   try {
     const file = await ssh.readRemoteFile(`${dir}/package.json`, { maxBytes: 64 * 1024 })
@@ -194,7 +194,7 @@ async function packageVersionFromDir(ssh: SshTransport, dir: string): Promise<st
  * otherwise the `package.json` of the package its argv loaded. Null when it cannot be
  * proven - the caller must not fill in the local version.
  */
-export async function remoteDshVersion(ssh: SshTransport, command: unknown): Promise<string | null> {
+export async function remoteDshVersion(ssh: SshPort, command: unknown): Promise<string | null> {
   const pinned = versionFromCommand(command)
   if (pinned) return pinned
   const dir = dshPackageDirFromCommand(command)
@@ -231,7 +231,7 @@ export type ResolvedRemoteWeb =
  * ("still running, but no way to authenticate") so the user gets the right remedy.
  */
 export async function resolveRemoteWeb(
-  ssh: SshTransport,
+  ssh: SshPort,
   layout: RemoteLayout,
   options: { profile?: string; timeoutMs?: number } = {},
 ): Promise<ResolvedRemoteWeb> {

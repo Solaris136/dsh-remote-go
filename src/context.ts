@@ -33,8 +33,8 @@ import { clearRunRegistry, readRunRegistry, writeRunRegistry } from './remote-we
 import { adoptRemoteWeb, resolveRemoteWeb } from './remote-web/resolve.js'
 import { startRemoteWeb } from './remote-web/start.js'
 import { stopRemoteWeb } from './remote-web/stop.js'
-import { SshConnection } from './ssh.js'
-import type { SshConnectionOptions } from './ssh.js'
+import { createSsh2Port } from './ssh.js'
+import type { SshFactory } from './ssh-port.js'
 import { createTunnel, probeLoopback } from './tunnel.js'
 import type { EpisodeSource, HostRuntime } from './host-runtime.js'
 import type { SecretStore } from './secrets.js'
@@ -62,7 +62,11 @@ export type ServiceLogger = {
  * any of them. Each signature is the production implementation's own — no looser stand-in.
  */
 export interface ServiceDeps {
-  sshFactory: (options: SshConnectionOptions) => SshConnection
+  /**
+   * Obtain one transport per dial attempt. The shape is frozen (decision D4) and the production
+   * default is `createSsh2Port`; tests inject their own `SshPort` implementation here.
+   */
+  sshFactory: SshFactory
   tunnelFactory: typeof createTunnel
   tunnelProbe: typeof probeLoopback
   probe: typeof probeRemote
@@ -158,7 +162,7 @@ export type TransportPorts = Pick<
   | 'preflight'
 >
 
-/** 3/6 — transport + remote runtime factories. P5 grows the `SshPort` port out of `sshFactory`. */
+/** 3/6 — transport + remote runtime factories. `sshFactory` produces the `SshPort` (P5). */
 export interface Transport {
   readonly deps: TransportPorts
 }
@@ -326,7 +330,7 @@ export function createCtx(options: ServiceOptions, hooks: ServiceHooks): Ctx {
     tunnelRepairSettleMs: options.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS,
   }
   const deps: ServiceDeps = {
-    sshFactory: options.sshFactory ?? ((sshOptions) => new SshConnection(sshOptions)),
+    sshFactory: options.sshFactory ?? ((sshOptions) => createSsh2Port(sshOptions)),
     tunnelFactory: options.tunnelFactory ?? createTunnel,
     /** Local listener health: decides whether a transient proxy failure needs a rebuild. */
     tunnelProbe: options.tunnelProbe ?? probeLoopback,

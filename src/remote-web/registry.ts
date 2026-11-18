@@ -8,7 +8,7 @@
 import { DEFAULT_REMOTE_PROFILE } from '../constants.js'
 import { errors } from '../errors.js'
 import type { RemoteLayout } from '../layout.js'
-import type { SshTransport } from '../ssh.js'
+import type { SshPort } from '../ssh-port.js'
 import { isPid, messageOf, nowIso, shellQuote } from '../util.js'
 import { normalizeVersion } from '../version.js'
 
@@ -101,7 +101,7 @@ export function isPlainObjectValue(value: unknown): value is Record<string, unkn
   return value !== null && typeof value === 'object'
 }
 
-export async function readRunRegistry(ssh: SshTransport, layout: RemoteLayout): Promise<RunRegistryRecord | null> {
+export async function readRunRegistry(ssh: SshPort, layout: RemoteLayout): Promise<RunRegistryRecord | null> {
   try {
     const result = await ssh.exec(`cat ${shellQuote(layout.runFile)} 2>/dev/null || true`, { timeoutMs: 10_000 })
     if (result.code !== 0 || result.stdout.trim() === '') return null
@@ -146,10 +146,7 @@ export function buildRunRegistryRecord(input: RunRegistryInput = {}): PersistedR
  * gone (a stop) or the record is known stale. Never kills a pid.
  * @returns whether the removal was acknowledged.
  */
-export async function clearRunRegistry(
-  ssh: SshTransport,
-  layout: RemoteLayout,
-): Promise<{ ok: boolean; output: string }> {
+export async function clearRunRegistry(ssh: SshPort, layout: RemoteLayout): Promise<{ ok: boolean; output: string }> {
   try {
     const result = await ssh.exec(`rm -f ${shellQuote(layout.runFile)}`, { timeoutMs: 10_000 })
     return { ok: result.code === 0, output: String(result.stdout ?? '').trim() }
@@ -168,7 +165,7 @@ export async function clearRunRegistry(
  * @returns whether the write was acknowledged.
  */
 export async function writeRunRegistry(
-  ssh: SshTransport,
+  ssh: SshPort,
   layout: RemoteLayout,
   record: RunRegistryRecord | PersistedRunRegistry,
 ): Promise<{ ok: boolean; output: string }> {
