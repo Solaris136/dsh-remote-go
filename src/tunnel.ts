@@ -142,7 +142,7 @@ export async function createTunnel(options: TunnelOptions): Promise<Tunnel> {
         try {
           stream.destroy()
         } catch {
-          /* the channel may already be gone */
+          // swallow-ok: the forwarded channel may already be gone
         }
       }
       streams.clear()

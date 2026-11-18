@@ -223,6 +223,168 @@ test('a transport that closes while a host-key prompt is open is a dropped link 
   await service.shutdown()
 })
 
+test('a disconnect after the store write but before markConnected publishes nothing', async () => {
+  const { service, store } = await makeTestService()
+  const host = await createHost(service)
+  const runtime = service.runtimes.get(host.id)
+  // Hold the last store write (`lastOpenedAt`) open: the user disconnects while it is in flight.
+  const originalPatch = store.patchHost.bind(store)
+  const patches = []
+  let releaseStore = null
+  let storeEntered = null
+  const writing = new Promise((resolve) => {
+    storeEntered = resolve
+  })
+  store.patchHost = async (id, patch) => {
+    patches.push(patch)
+    if (patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt')) {
+      storeEntered()
+      await new Promise((resolve) => {
+        releaseStore = resolve
+      })
+    }
+    return originalPatch(id, patch)
+  }
+  const frames = framesOf(service)
+  await service.connect(host.id)
+  await writing
+  const tunnel = runtime.tunnel
+  assert.ok(tunnel, 'the listener is published before the last store write')
+  await service.disconnect(host.id)
+  assert.equal(tunnel.closed, true, 'the teardown keeps its own listener closed')
+  releaseStore()
+  await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: 'pipeline settled' })
+  assert.equal(runtime.status, 'disconnected')
+  assert.equal(runtime.remote.uiReady, false)
+  assert.equal(service.snapshot().activeHostId, null)
+  const views = frames.flatMap((frame) => frame.hosts).filter((view) => view.id === host.id)
+  assert.equal(
+    views.some((view) => view.status === 'connected'),
+    false,
+    'a store write that lands after the disconnect must not publish a connected host',
+  )
+  assert.equal(
+    views.some((view) => view.error?.code === 'internal' || view.error?.code === 'network'),
+    false,
+    'a cancelled attempt is not a failure',
+  )
+  assert.equal(
+    patches.filter((patch) => patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt'))
+      .length,
+    1,
+    'the store write itself did land; only the publication after it was stopped',
+  )
+  await service.shutdown()
+})
+
+test('a token exchange that lands after a user cancel never touches the closed tunnel', async () => {
+  class CountingTunnel {
+    constructor(port) {
+      this.localPort = port
+      this.closed = false
+      this.closeCalls = 0
+    }
+    async close() {
+      this.closeCalls += 1
+      this.closed = true
+    }
+  }
+  let tunnel = null
+  let releaseExchange = null
+  let exchangeEntered = null
+  const exchanging = new Promise((resolve) => {
+    exchangeEntered = resolve
+  })
+  const { service, store } = await makeTestService({
+    tunnelFactory: async () => {
+      tunnel = new CountingTunnel(45124)
+      return tunnel
+    },
+    // The exchange is in flight when the user cancels: it resolves after the teardown.
+    exchange: async () => {
+      exchangeEntered()
+      await new Promise((resolve) => {
+        releaseExchange = resolve
+      })
+      return { ok: true, firstStatus: 302, location: './', status: 200, title: 'DSH', csp: null, bodyLength: 1 }
+    },
+  })
+  const host = await createHost(service)
+  const runtime = service.runtimes.get(host.id)
+  const originalPatch = store.patchHost.bind(store)
+  let lastOpenedWrites = 0
+  store.patchHost = async (id, patch) => {
+    if (patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt')) lastOpenedWrites += 1
+    return originalPatch(id, patch)
+  }
+  await service.connect(host.id)
+  await exchanging
+  assert.ok(tunnel !== null, 'the exchange runs against the published listener')
+  assert.equal(tunnel.closed, false)
+  await service.disconnect(host.id)
+  assert.equal(tunnel.closed, true, 'the cancel closes the listener')
+  const closeCallsAfterCancel = tunnel.closeCalls
+  releaseExchange()
+  await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: 'pipeline settled' })
+  assert.equal(runtime.status, 'disconnected')
+  assert.equal(runtime.remote.uiReady, false, 'a cancelled exchange must not mark the remote UI ready')
+  assert.equal(service.snapshot().activeHostId, null)
+  assert.equal(lastOpenedWrites, 0, 'a cancelled exchange must not reach the store write')
+  assert.equal(tunnel.closed, true, 'the late exchange must not reopen the listener')
+  assert.equal(tunnel.closeCalls, closeCallsAfterCancel, 'the late exchange must not touch the closed listener again')
+  await service.shutdown()
+})
+
+test('a successful attach resets the retry budget exactly once', async () => {
+  let failing = false
+  const { service } = await makeTestService({
+    sshFactory: (options) => {
+      const ssh = new FakeSsh({
+        options,
+        connect: async () => {
+          if (failing) throw errors.network({ zh: '链路已断。', en: 'the link is down' })
+          ssh.connected = true
+          return { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
+        },
+      })
+      return ssh
+    },
+  })
+  await service.saveSettings({ autoReconnect: { enabled: true, maxAttempts: 3, baseDelayMs: 20 } })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'initially connected' })
+  const runtime = service.runtimes.get(host.id)
+
+  failing = true
+  runtime.ssh.simulateClose()
+  // Two failed attempts spend the budget; the next timer fires on a third attempt that succeeds.
+  await waitFor(() => runtime.reconnectAttempts >= 2 && runtime.status === 'error', {
+    timeoutMs: 20_000,
+    label: 'retry budget spent twice',
+  })
+  // Count the writes back to zero. `connect.succeeded` is the only event allowed to make one:
+  // `connect.requested` keeps a retry's budget, so a retry cannot masquerade as a reset.
+  let resets = 0
+  let current = runtime.reconnectAttempts
+  Object.defineProperty(runtime, 'reconnectAttempts', {
+    configurable: true,
+    enumerable: true,
+    get: () => current,
+    set: (value) => {
+      if (current > 0 && value === 0) resets += 1
+      current = value
+    },
+  })
+  failing = false
+  await waitFor(() => runtime.status === 'connected', { timeoutMs: 20_000, label: 'recovered' })
+  assert.equal(runtime.reconnectAttempts, 0)
+  assert.equal(runtime.reconnectTimer, null, 'a successful attach leaves no retry armed')
+  assert.equal(resets, 1, 'only the successful attach may reset the spent budget')
+  assert.equal(service.snapshot().activeHostId, host.id)
+  await service.shutdown()
+})
+
 const STAGES = ['probe', 'bootstrap', 'start', 'tunnel', 'verifying']
 
 /** The dependencies a connect runs *after* each stage, in pipeline order. */

@@ -251,7 +251,7 @@ function describeSelf(ctx: PluginContext, info: SelfInfo): SelfReport {
       name: entry?.options?.name ?? null,
     }
   } catch {
-    /* fiber shape is loader-internal; diagnostics must never throw */
+    // swallow-ok: the fiber shape is loader-internal and diagnostics must never throw
   }
   try {
     // `get` is the kernel's untyped lookup: the loader's shape is declared above, not trusted.
@@ -296,7 +296,7 @@ function createLogger() {
     try {
       sink?.call(console, tag, ...args)
     } catch {
-      /* logging must never throw */
+      // swallow-ok: logging must never throw into the host
     }
   }
   return {

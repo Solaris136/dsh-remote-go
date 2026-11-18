@@ -110,7 +110,9 @@ export async function repairTunnel(ctx: ConnectCtx, runtime: HostRuntime): Promi
         }
         try {
           await created.close()
-        } catch {}
+        } catch {
+          // swallow-ok: the unpublished listener is discarded; its close cannot fail the repair
+        }
       }
       endLinkWork(runtime, token)
     }

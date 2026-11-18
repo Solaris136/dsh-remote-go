@@ -123,7 +123,9 @@ async function acquireLock(lockFile: string, options: LockOptions): Promise<() =
       return async (): Promise<void> => {
         try {
           await handle.close()
-        } catch {}
+        } catch {
+          // swallow-ok: a failed close on a released lock handle is not actionable here
+        }
         // A leaked lock costs the next writer a full stale wait, so retry the unlink
         // (Windows can hold it briefly after close).
         for (let attempt = 0; attempt < LOCK_UNLINK_ATTEMPTS; attempt += 1) {
@@ -165,7 +167,7 @@ async function breakStaleLock(fsImpl: JsonFileSystem, lockFile: string, staleMs:
     const info = await fsImpl.stat(lockFile)
     if (Date.now() - info.mtimeMs > staleMs) await removeQuietly(fsImpl, lockFile)
   } catch {
-    /* the lock disappeared or cannot be inspected: retry the create */
+    // swallow-ok: the lock disappeared or cannot be inspected; the create retries
   }
 }
 
@@ -193,7 +195,9 @@ export async function writeJsonAtomic(file: string, value: unknown, options: Wri
     if (handle) {
       try {
         await handle.close()
-      } catch {}
+      } catch {
+        // swallow-ok: the temp file is removed right below; a close error is not fixable
+      }
     }
     await removeQuietly(fsImpl, tmp)
     throw error
@@ -226,12 +230,14 @@ async function syncDir(fsImpl: JsonFileSystem, dir: string): Promise<void> {
     handle = await fsImpl.open(dir, 'r')
     await handle.sync()
   } catch {
-    /* not supported on this platform/filesystem */
+    // swallow-ok: directory fsync is not supported on every platform or filesystem
   } finally {
     if (handle) {
       try {
         await handle.close()
-      } catch {}
+      } catch {
+        // swallow-ok: the directory handle is best effort, like the fsync above
+      }
     }
   }
 }
@@ -266,7 +272,9 @@ export async function readJsonFile(file: string, options: ReadJsonOptions = {}):
 async function removeQuietly(fsImpl: JsonFileSystem, target: string): Promise<void> {
   try {
     await fsImpl.unlink(target)
-  } catch {}
+  } catch {
+    // swallow-ok: a missing temp file is the success case for this cleanup
+  }
 }
 
 async function lockExists(fsImpl: JsonFileSystem, lockFile: string): Promise<boolean> {

@@ -49,7 +49,7 @@ export async function detectLocalVersion(input: LocalVersionInput = {}): Promise
       return { version: normalizeVersion(release.version), source: 'client-modules' }
     }
   } catch {
-    /* service not present in this composition */
+    // swallow-ok: the clientModules service is absent in this composition
   }
 
   for (const candidate of candidatePackageJsons(input)) {
@@ -66,7 +66,9 @@ export async function detectLocalVersion(input: LocalVersionInput = {}): Promise
       ) {
         return { version: normalizeVersion(parsed.version), source: `package.json:${candidate}` }
       }
-    } catch {}
+    } catch {
+      // swallow-ok: a candidate that is absent or unparsable is skipped by design
+    }
   }
   return { version: null, source: 'unknown' }
 }
@@ -89,7 +91,9 @@ export async function detectLocalEnginesNode(input: LocalVersionInput = {}): Pro
       if (typeof range === 'string' && range.trim() !== '') {
         return { range: range.trim(), source: `package.json:${candidate}` }
       }
-    } catch {}
+    } catch {
+      // swallow-ok: the same candidate scan as the version probe above
+    }
   }
   return { range: null, source: 'unknown' }
 }

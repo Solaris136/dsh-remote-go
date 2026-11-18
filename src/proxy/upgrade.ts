@@ -153,7 +153,9 @@ export function createUpgradeHandler(
       clearTimeout(handshakeTimer)
       try {
         socket.end()
-      } catch {}
+      } catch {
+        // swallow-ok: the client socket may already be closed
+      }
     }
     upstream.on('end', endClient)
     upstream.on('close', endClient)

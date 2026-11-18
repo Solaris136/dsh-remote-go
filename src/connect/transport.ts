@@ -100,7 +100,9 @@ export async function openTunnelFor(ctx: WatchdogCtx, runtime: HostRuntime, remo
   if (!Number.isInteger(localPort) || !isPid(localPort) || localPort > 65535) {
     try {
       await tunnel?.close?.()
-    } catch {}
+    } catch {
+      // swallow-ok: the listener never carried a caller; the internal error is what matters
+    }
     throw errors.internal(new Error(`the tunnel factory returned no usable local port (${tunnel?.localPort})`))
   }
   // The listener was created while the caller awaited the factory: a disconnect or a host
@@ -111,7 +113,9 @@ export async function openTunnelFor(ctx: WatchdogCtx, runtime: HostRuntime, remo
   } catch (error) {
     try {
       await tunnel.close()
-    } catch {}
+    } catch {
+      // swallow-ok: the cancellation error must be rethrown, not masked by a close error
+    }
     throw error
   }
   runtime.tunnel = tunnel

@@ -206,7 +206,9 @@ export function createEventHub(options: EventHubOptions): EventHub {
     if (res.writableLength > MAX_SSE_BUFFERED_BYTES) {
       try {
         res.end()
-      } catch {}
+      } catch {
+        // swallow-ok: the response is already gone; the subscriber is dropped either way
+      }
       return false
     }
     try {
@@ -424,7 +426,9 @@ export function createEventHub(options: EventHubOptions): EventHub {
       evictOldest(stateClients, MAX_SSE_CLIENTS, (client) => {
         try {
           client.end()
-        } catch {}
+        } catch {
+          // swallow-ok: eviction closes a stream the browser already dropped
+        }
       })
       openStream(res)
       // The first frame is the current snapshot, exactly as a fresh `GET /state` would read it;
@@ -439,7 +443,9 @@ export function createEventHub(options: EventHubOptions): EventHub {
       evictOldest(logClients, MAX_SSE_LOG_CLIENTS, (client) => {
         try {
           client.res.end()
-        } catch {}
+        } catch {
+          // swallow-ok: same eviction as the state channel; the stream is already gone
+        }
       })
       openStream(res)
       const client: LogClient = { res, cursors: new Map() }
@@ -472,13 +478,17 @@ export function createEventHub(options: EventHubOptions): EventHub {
       for (const res of stateClients) {
         try {
           res.end()
-        } catch {}
+        } catch {
+          // swallow-ok: dispose ends streams the browser may already have closed
+        }
       }
       stateClients.clear()
       for (const client of logClients) {
         try {
           client.res.end()
-        } catch {}
+        } catch {
+          // swallow-ok: the same dispose sweep on the log channel
+        }
       }
       logClients.clear()
     },

@@ -48,7 +48,7 @@ export function endSftp(sftp: SftpSession): void {
   try {
     sftp.end()
   } catch {
-    /* the session may already be gone */
+    // swallow-ok: the SFTP session may already be gone
   }
 }
 
@@ -79,7 +79,7 @@ export async function saveSftpFile(
         try {
           options.onProgress({ doneBytes, totalBytes, doneFiles: 0, totalFiles: 1 })
         } catch {
-          /* progress listeners must not break the transfer */
+          // swallow-ok: progress listeners must not break the transfer
         }
       },
       options.isCancelled,
@@ -193,14 +193,14 @@ export async function saveSftpTree(
     try {
       options.onInventory({ totalBytes, totalFiles })
     } catch {
-      /* progress listeners must not break the download */
+      // swallow-ok: inventory listeners must not break the download
     }
   }
   if (ignoredNames.length > 0 && typeof options.onIgnored === 'function') {
     try {
       options.onIgnored(ignoredNames.slice())
     } catch {
-      /* progress listeners must not break the download */
+      // swallow-ok: the ignored-name listener must not break the download
     }
   }
   await mkdir(localRoot, { recursive: true })
@@ -214,7 +214,7 @@ export async function saveSftpTree(
     try {
       options.onProgress({ doneBytes, totalBytes, doneFiles, totalFiles })
     } catch {
-      /* progress listeners must not break the download */
+      // swallow-ok: progress listeners must not break the download
     }
   }
   for (const member of members) {
@@ -285,7 +285,7 @@ function copySftpFileToLocal(
       try {
         input.destroy()
       } catch {
-        /* already gone */
+        // swallow-ok: the read stream is already destroyed
       }
       const finish = () => reject(error)
       try {
@@ -307,7 +307,7 @@ function copySftpFileToLocal(
       try {
         onChunk(Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk))
       } catch {
-        /* progress listeners must not break the transfer */
+        // swallow-ok: the progress listener must not break the transfer
       }
     })
     pipeline(input, output).then(

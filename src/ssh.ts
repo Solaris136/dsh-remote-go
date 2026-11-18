@@ -380,7 +380,7 @@ export class SshConnection extends EventEmitter implements SshPort {
             try {
               options.onStdout?.(text)
             } catch {
-              /* stdout listeners must not break the command */
+              // swallow-ok: stdout listeners must not break the command
             }
           }
         })
@@ -391,7 +391,7 @@ export class SshConnection extends EventEmitter implements SshPort {
             try {
               options.onStderr?.(text)
             } catch {
-              /* stderr listeners must not break the command */
+              // swallow-ok: stderr listeners must not break the command
             }
           }
         })
@@ -495,7 +495,9 @@ export class SshConnection extends EventEmitter implements SshPort {
         // Keep an error sink attached: ssh2 may still emit during teardown.
         client.on('error', () => {})
         client.end()
-      } catch {}
+      } catch {
+        // swallow-ok: an error handler is installed above and end() must not throw
+      }
     }
   }
 }

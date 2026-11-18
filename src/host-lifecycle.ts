@@ -289,7 +289,9 @@ export async function closeTunnel(runtime: HostRuntime): Promise<void> {
   if (tunnel) {
     try {
       await tunnel.close()
-    } catch {}
+    } catch {
+      // swallow-ok: teardown continues; a dead tunnel needs no second error
+    }
   }
 }
 
@@ -301,12 +303,16 @@ export async function disposeSsh(runtime: HostRuntime): Promise<void> {
   if (ssh) {
     try {
       await ssh.dispose()
-    } catch {}
+    } catch {
+      // swallow-ok: disposal must not stop the rest of the teardown
+    }
   }
   if (jump) {
     try {
       await jump.dispose()
-    } catch {}
+    } catch {
+      // swallow-ok: the same disposal rule as the target transport
+    }
   }
 }
 
@@ -465,7 +471,7 @@ export async function releaseRuntimeForShutdown(
     await closeTunnel(runtime)
     await disposeSsh(runtime)
   } catch {
-    /* best effort on shutdown */
+    // swallow-ok: shutdown is best effort; every resource is released above
   }
 }
 

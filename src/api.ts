@@ -499,7 +499,7 @@ export function createApi(options: ApiOptions): Api {
       try {
         sendJson(res, status, { ok: false, error: view })
       } catch {
-        /* response already gone */
+        // swallow-ok: the response is already gone; a failed write cannot be reported on it
       }
     }
   }

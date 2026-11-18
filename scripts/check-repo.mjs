@@ -288,6 +288,170 @@ for (const rel of [...hygieneFiles].sort()) {
 }
 for (const failure of hygieneFailures) fail(failure)
 
+// 4b. Empty catch hygiene. An empty catch body — bare, or holding only a comment — is a decision
+// to ignore a failure, so it has to say why: `// swallow-ok: <at least two words>`. The promise
+// form (`.catch(() => {})`) is not a statement and stays out of scope; a catch that turns an
+// unknown failure into a normal-looking typed reason is `test/unit/guards.test.ts`'s half of the
+// rule. Sources only: `dist/` is the emitter's copy of the same text and would double-report.
+const SWALLOW_OK = /swallow-ok:\s*(\S[^\n]*)/
+const CATCH_START = /(?<![.\w$])catch\b\s*(?:\([^)]*\)\s*)?\{/g
+const MARKER_WINDOW_LINES = 5
+
+/**
+ * The source with comments blanked and string / template / regex bodies replaced by spaces,
+ * keeping every line break so a reported line number stays true.
+ *
+ * One pass on purpose: stripping comments first would read the `//` in `'http://x'` as a comment
+ * and destroy the closing quote, which then hides the rest of the file from every later rule. A
+ * `catch {` written inside a literal therefore cannot be located here.
+ */
+function codeOnly(source) {
+  let out = ''
+  let index = 0
+  let previous = ''
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+    if (char === '/' && next === '*') {
+      index += 2
+      out += '  '
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) {
+        out += source[index] === '\n' ? '\n' : ' '
+        index += 1
+      }
+      if (index < source.length) {
+        out += '  '
+        index += 2
+      }
+      continue
+    }
+    if (char === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') {
+        out += ' '
+        index += 1
+      }
+      continue
+    }
+    // A `/` after an operator or an opening bracket starts a regex, not a division: its body is
+    // masked as one unit so a quote inside it cannot open a string state.
+    const regex = char === '/' && (previous === '' || '(:,=:[!&|?{};+-*%<>~^'.includes(previous))
+    if (char === "'" || char === '"' || char === '`' || regex) {
+      const quote = regex ? '/' : char
+      out += char
+      index += 1
+      let inClass = false
+      while (index < source.length) {
+        const current = source[index]
+        if (current === '\\') {
+          out += ' '
+          index += 1
+          if (index < source.length) {
+            out += source[index] === '\n' ? '\n' : ' '
+            index += 1
+          }
+          continue
+        }
+        if (current === quote && (!regex || !inClass)) {
+          out += quote
+          index += 1
+          break
+        }
+        if (current === '\n' && quote !== '`') break
+        if (regex && current === '[') inClass = true
+        else if (regex && current === ']') inClass = false
+        out += current === '\n' ? '\n' : ' '
+        index += 1
+      }
+      previous = 'x'
+      continue
+    }
+    if (!/\s/.test(char)) previous = char
+    out += char
+    index += 1
+  }
+  return out
+}
+
+/** The `}` that closes the `{` at `open`, or -1. */
+function matchingBrace(text, open) {
+  let depth = 0
+  for (let index = open; index < text.length; index += 1) {
+    if (text[index] === '{') depth += 1
+    else if (text[index] === '}' && --depth === 0) return index
+  }
+  return -1
+}
+
+/**
+ * The contiguous comment block directly above `line` (1-based), at most five lines. A blank line
+ * or a code line ends the block, so a marker from the previous statement cannot vouch for this one.
+ */
+function commentBlockAbove(lines, line) {
+  const block = []
+  for (let index = line - 2; index >= 0 && block.length < MARKER_WINDOW_LINES; index -= 1) {
+    const trimmed = lines[index].trim()
+    if (!/^(?:\/\/|\/\*)|\*\/$/.test(trimmed) && !trimmed.startsWith('*')) break
+    block.unshift(lines[index])
+  }
+  return block.join('\n')
+}
+
+/** The line of the `try` that owns the catch at `catchIndex`, or -1 when the shape is unreadable. */
+function tryHeaderLine(code, catchIndex) {
+  let cursor = catchIndex - 1
+  while (cursor >= 0 && /\s/.test(code[cursor])) cursor -= 1
+  if (code[cursor] !== '}') return -1
+  let depth = 0
+  for (; cursor >= 0; cursor -= 1) {
+    if (code[cursor] === '}') depth += 1
+    else if (code[cursor] === '{' && --depth === 0) {
+      let head = cursor - 1
+      while (head >= 0 && /\s/.test(code[head])) head -= 1
+      return /try$/.test(code.slice(head - 2, head + 1)) ? code.slice(0, head).split('\n').length : -1
+    }
+  }
+  return -1
+}
+
+/** Every empty catch body in one source file that carries no usable `swallow-ok` marker. */
+function emptyCatchFindings(rel, text) {
+  const code = codeOnly(text)
+  const lines = text.split('\n')
+  const findings = []
+  for (const match of code.matchAll(CATCH_START)) {
+    const open = match.index + match[0].length - 1
+    const close = matchingBrace(code, open)
+    // A body with a statement is `guards.test.ts`'s business, not this rule's.
+    if (close < 0 || code.slice(open + 1, close).trim() !== '') continue
+    const line = code.slice(0, match.index).split('\n').length
+    const header = tryHeaderLine(code, match.index)
+    const windows = [text.slice(open + 1, close), commentBlockAbove(lines, line)]
+    if (header >= 0) windows.push(commentBlockAbove(lines, header))
+    const marker = windows.map((window) => window.match(SWALLOW_OK)).find(Boolean) ?? null
+    const words = marker === null ? 0 : marker[1].trim().split(/\s+/).filter(Boolean).length
+    if (words < 2) {
+      findings.push(
+        `${rel}:${line} — empty catch ${
+          marker === null ? 'without "// swallow-ok: <reason>"' : 'with a swallow-ok reason shorter than two words'
+        }`,
+      )
+    }
+  }
+  return findings
+}
+
+const catchFailures = []
+for (const rel of await walk('src', (path_) => path_.endsWith('.ts') && !path_.endsWith('.d.ts'))) {
+  const text = await readText(rel)
+  if (text === null) fail(`${rel}: unreadable while checking empty catch bodies`)
+  else catchFailures.push(...emptyCatchFindings(rel, text))
+}
+for (const failure of catchFailures) fail(failure)
+check(
+  catchFailures.length === 0,
+  `${catchFailures.length} empty catch(es) state no reason; add // swallow-ok: <why it is safe to ignore>`,
+)
+
 // 5. Secret hygiene. vendor/ stays out of scope: the vendored ssh2 bundle embeds a
 // test key literal that would otherwise be reported on every run.
 const SECRET_PATTERNS = [

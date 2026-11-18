@@ -4,67 +4,77 @@
 ## 1. 仓库结构
 ```text
 dsh-remote-go
-├─ index.js                 包入口：再导出 src/index.js
-├─ client.js                浏览器半端（单文件、无构建、window.__ModuleLoader__ 注册）
+├─ dist/                    构建产物（`pnpm build` 生成，不进版本库；package.json 的 exports 直接指向这里）
+│  ├─ index.js              包入口：再导出 dist/src/index.js
+│  ├─ client.js             浏览器半端 bundle（单文件，window.__ModuleLoader__ 注册）
+│  └─ src/**/*.js           Host 半端模块（由 src/**/*.ts 编译）
 ├─ cordis.patch.yml         bundle 的 profile patch
 ├─ vendor/                  ssh2 的单文件 bundle（运行时零依赖；js-yaml 只是 devDependency）
 ├─ package.json             dsh.bundle.patch + dsh.client（web / immediately / inject）
 ├─ src/
-│  ├─ index.js              Host 插件入口：挂 API 与同源远端代理、注册模型工具、初始化 service、探测本机版本
-│  ├─ tools.js              模型工具：只读的 remote_hosts_list（白名单投影，无写操作面）
-│  ├─ admission.js          DSH 准入装配：把 `ctx.get('connection').requestRejection` 变成每请求闸门
-│  ├─ api.js                本地 HTTP 路由与准入（契约实现；SSE 转发给 events.js）
-│  ├─ events.js             两条 SSE 通道：状态订阅者、日志订阅者与游标重放、上限与心跳
-│  ├─ request-trust.js      本地 API 与同源代理共用的 Host/Origin 栅栏（单一实现）
+│  ├─ index.ts              Host 插件入口：挂 API 与同源远端代理、注册模型工具、初始化 service、探测本机版本
+│  ├─ tools.ts              模型工具：只读的 remote_hosts_list（白名单投影，无写操作面）
+│  ├─ admission.ts          DSH 准入装配：把 `ctx.get('connection').requestRejection` 变成每请求闸门
+│  ├─ api.ts                本地 HTTP 路由与准入（契约实现；SSE 转发给 events.ts）
+│  ├─ events.ts             两条 SSE 通道：状态订阅者、日志订阅者与游标重放、上限与心跳
+│  ├─ request-trust.ts      本地 API 与同源代理共用的 Host/Origin 栅栏（单一实现）
 │  ├─ proxy/                浏览器半端的同源远端代理（前缀 HTTP + 每主机 WebSocket + cookie jar）
-│  ├─ service.js            公共 facade：装配 ctx（依赖 + 可变状态）并委托给下面 6 个协作者
+│  ├─ service.ts            公共 facade：装配 ctx（依赖 + 可变状态）并委托给下面 6 个协作者
 │  ├─ connect/              连接管线：目标解析 → transport → probe → 托管 Node → 启动/收养 → 隧道 → 校验；本地重启与远端重挂也在这里
-│  ├─ host-registry.js      主机 CRUD、设置、快照、key-file 浏览与 ssh 别名发现
-│  ├─ host-lifecycle.js     重连/空闲计时器、轻量心跳与「连续两次失败」确认、一次性动作令牌、唯一 teardown 路径、shutdown
-│  ├─ connect-progress.js   日志环、日志通道的合帧入口（150ms）、进度码与 npx 行解析
-│  ├─ prompts.js            指纹确认与远端冲突的用户决定 rendezvous
-│  ├─ host-runtime.js       每主机 runtime 对象的唯一形状（建/用分开）
-│  ├─ host-view.js          每主机对客户端的只读视图（HostView 投影）
-│  ├─ connect-log.js        连接日志：每次连接的重置与边界行、失败分解、环形缓冲下限、日志尾与可见状态
-│  ├─ diagnostics.js        10 项诊断检查表（只读投影，不新建连接）
-│  ├─ ssh.js                ssh2 封装：指纹策略、认证回退、exec、forwardOut
-│  ├─ ssh-config.js         ~/.ssh/config 解析与别名发现
-│  ├─ known-hosts.js        known_hosts 只读解析 + OpenSSH SHA256 指纹
-│  ├─ local-ssh.js          读取本机 ~/.ssh 材料（只读）
-│  ├─ probe.js              远端环境探测（单条 POSIX sh，key<TAB>value）
-│  ├─ bootstrap.js          npx 预检：环境判定、固定命令模板、版本回读
-│  ├─ node-runtime.js       托管 Node：engines.node 下限解析、下载校验、安装/复用
-│  ├─ remote-web.js         远端 dsh web 启动/停止/收养、启动脚本与 URL 解析、重挂时的状态重读与 run registry 重写
-│  ├─ remote-proc.js        进程扫描、foreign DSH、探活与 token 交换、监听端口与端口归属 pid
-│  ├─ remote-path.js        远端绝对路径校验/命名、本地文件名清洗
-│  ├─ remote-files.js       远端路径校验、单文件/文件夹下载入口
-│  ├─ local-download.js     本机落盘：唯一文件/目录、流式写入、重名自动改名
-│  ├─ download-jobs.js      Host 侧下载任务：准备、进度节流、TTL/取消/容量上限
-│  ├─ tunnel.js             本地回环 TCP ↔ SSH forwardOut
-│  ├─ store.js              hosts/settings/secrets 持久化与内存缓存
-│  ├─ atomic-json.js        原子 JSON 写（tmp + wx + fsync + rename 重试）
-│  ├─ settings.js           设置与主机条目的默认值/校验/清洗
-│  ├─ secrets.js            DSH 凭据存储适配（`<owner>/<id>` 记录键；密码不落 hosts.json）
-│  ├─ layout.js             远端目录布局（~/.dsh 与插件状态目录）
-│  ├─ version.js            版本解析/比较/Node 门槛
-│  ├─ local-version.js      本机 DSH 版本探测（env → clientModules → package.json）
-│  ├─ errors.js             分类错误（中英双语、下一步、技术细节）
-│  ├─ redact.js             诊断脱敏
-│  ├─ key-files.js          用户主目录内的私钥文件浏览
-│  ├─ constants.js          默认值/常量
-│  └─ util.js               通用工具（时间、延迟、日志级别、文本）
+│  ├─ host-registry.ts      主机 CRUD、设置、快照、key-file 浏览与 ssh 别名发现
+│  ├─ host-lifecycle.ts     重连/空闲计时器、轻量心跳与「连续两次失败」确认、一次性动作令牌、唯一 teardown 路径、shutdown
+│  ├─ connect-progress.ts   日志环、日志通道的合帧入口（150ms）、进度码与 npx 行解析
+│  ├─ prompts.ts            指纹确认与远端冲突的用户决定 rendezvous
+│  ├─ host-runtime.ts       每主机 runtime 对象的唯一形状（建/用分开）
+│  ├─ host-view.ts          每主机对客户端的只读视图（HostView 投影）
+│  ├─ connect-log.ts        连接日志：每次连接的重置与边界行、失败分解、环形缓冲下限、日志尾与可见状态
+│  ├─ diagnostics.ts        10 项诊断检查表（只读投影，不新建连接）
+│  ├─ ssh.ts                ssh2 封装：指纹策略、认证回退、exec、forwardOut
+│  ├─ ssh-config.ts         ~/.ssh/config 解析与别名发现
+│  ├─ known-hosts.ts        known_hosts 只读解析 + OpenSSH SHA256 指纹
+│  ├─ local-ssh.ts          读取本机 ~/.ssh 材料（只读）
+│  ├─ probe.ts              远端环境探测（单条 POSIX sh，key<TAB>value）
+│  ├─ bootstrap.ts          npx 预检：环境判定、固定命令模板、版本回读
+│  ├─ node-runtime.ts       托管 Node：engines.node 下限解析、下载校验、安装/复用
+│  ├─ remote-web/           远端 dsh web 启动/停止/收养、启动脚本与 URL 解析、重挂时的状态重读与 run registry 重写
+│  ├─ remote-proc.ts        进程扫描、foreign DSH、探活与 token 交换、监听端口与端口归属 pid
+│  ├─ remote-path.ts        远端绝对路径校验/命名、本地文件名清洗
+│  ├─ remote-files.ts       远端路径校验、单文件/文件夹下载入口
+│  ├─ local-download.ts     本机落盘：唯一文件/目录、流式写入、重名自动改名
+│  ├─ download-jobs.ts      Host 侧下载任务：准备、进度节流、TTL/取消/容量上限
+│  ├─ tunnel.ts             本地回环 TCP ↔ SSH forwardOut
+│  ├─ store.ts              hosts/settings/secrets 持久化与内存缓存
+│  ├─ atomic-json.ts        原子 JSON 写（tmp + wx + fsync + rename 重试）
+│  ├─ settings.ts           设置与主机条目的默认值/校验/清洗
+│  ├─ secrets.ts            DSH 凭据存储适配（`<owner>/<id>` 记录键；密码不落 hosts.json）
+│  ├─ layout.ts             远端目录布局（~/.dsh 与插件状态目录）
+│  ├─ version.ts            版本解析/比较/Node 门槛
+│  ├─ local-version.ts      本机 DSH 版本探测（env → clientModules → package.json）
+│  ├─ errors.ts             分类错误（中英双语、下一步、技术细节）
+│  ├─ redact.ts             诊断脱敏
+│  ├─ key-files.ts          用户主目录内的私钥文件浏览
+│  ├─ constants.ts          默认值/常量
+│  └─ util.ts               通用工具（时间、延迟、日志级别、文本）
 ├─ locale/{zh,en}.json      插件市场显示元数据
 ├─ test/unit/               node:test 单元测试
 ├─ test/integration/        模拟远端集成 + 浏览器/桌面验收
 ├─ test/helpers/            共享测试工具（source-scan 等）
 ├─ e2e/sim/                 本机模拟远端主机（真实 SSH + HTTP stub）
 ├─ e2e/remote/              真实主机验收说明（无自举脚本）
-└─ scripts/                 仓库规范 / 打包 / 语法检查
+└─ scripts/                 仓库规范 / 构建 / 打包 / 语法检查
 ```
+
+`src/`、`index.ts`、`client/src/` 是唯一的手写源码（TypeScript）。`pnpm build` 先用锁定的 `tsc` 把
+`index.ts` / `src/**/*.ts` 编译到 `dist/`，再由 `scripts/build-client.mjs` 生成 `dist/client.js`；
+`package.json` 的 `exports` 指向 `dist/` 里的入口，所以链接式安装与 npm 安装加载的是同一份构建产物。
+仓库根目录不产生 `index.js` / `client.js` / `src/**/*.js` 副本，发布也不需要 `prepack`/`postpack` 的
+stage/unstage 步骤；`dist/` 已被 `.gitignore` 忽略。`pnpm test` / `gate` / `verify` 会先构建，测试直接用
+`node --test test/unit/*.test.ts` 跑 TypeScript 源码。
+
 依赖方向单向：`index → service`；`service` 建好 `ctx` 后委托 `host-registry` / `connect/` / `host-lifecycle` / `connect-progress` / `prompts`。`connect/ → host-lifecycle / prompts / connect-progress`，`host-lifecycle` 不依赖 pipeline（重连由 pipeline 发起），`prompts`/`connect-progress` 是叶子；低层模块不反向依赖 `service`，`api.js` 只依赖 `service` 的公开方法与 `errors`/`util`（Host/Origin 栅栏与同源代理共用 `request-trust.js`，不复制实现）。`host-runtime.js` 是 runtime 形状的唯一来源，`host-view.js` 是 `HostView` 的唯一投影，日志尾长度与可见状态由 `connect-log.js` 决定；三者都不做 I/O，新增字段或视图只改一处。
 
 ## 2. Host 入口与装配
-`src/index.js#apply(ctx, config)`：解析 `$DSH_HOME` 与插件状态目录 → `HostStore` → `SecretStore`（没有 `credentials` 服务时降级为仅内存）→ `RemoteGoService`（注入 store/home/logger/secrets/本地版本/指纹确认超时）→ 组装准入函数 `admit` → `createApi({ service, getOrigin, admit, logger, diagnostics })` 在 `ctx.effect` 内挂到 `webServer` 的 `/dsh-remote-go/api` 前缀 → `createRemoteProxy({ webServer, getOrigin, admit, resolveHost: service.webViewTarget })` 挂到 `/dsh-remote-go/remote/` 前缀，并在 service 的每次 `state` 上 `proxy.sync(service.hostIds())`（保持每主机一条升级路由）→ 异步 `service.init()` + `detectLocalVersion`/`detectLocalEnginesNode`（读不到版本记 warn）→ 卸载时 `api.dispose()`、`proxy.dispose()`、`service.shutdown()`、注销两条路由。
+`src/index.ts#apply(ctx, config)`：解析 `$DSH_HOME` 与插件状态目录 → `HostStore` → `SecretStore`（没有 `credentials` 服务时降级为仅内存）→ `RemoteGoService`（注入 store/home/logger/secrets/本地版本/指纹确认超时）→ 组装准入函数 `admit` → `createApi({ service, getOrigin, admit, logger, diagnostics })` 在 `ctx.effect` 内挂到 `webServer` 的 `/dsh-remote-go/api` 前缀 → `createRemoteProxy({ webServer, getOrigin, admit, resolveHost: service.webViewTarget })` 挂到 `/dsh-remote-go/remote/` 前缀，并在 service 的每次 `state` 上 `proxy.sync(service.hostIds())`（保持每主机一条升级路由）→ 异步 `service.init()` + `detectLocalVersion`/`detectLocalEnginesNode`（读不到版本记 warn）→ 卸载时 `api.dispose()`、`proxy.dispose()`、`service.shutdown()`、注销两条路由。
 
 `admit = createAdmission(ctx, logger)`（`admission.js`）是**两条路由唯一的准入入口**：`ctx.get('connection')?.requestRejection(req)`，返回内核的拒绝状态（401 浏览器会话未认证/失效，403 Host 或 Origin 不通过）或 `undefined` 表示放行。三条约束固定在这里，不在 `api.js`/`proxy/` 里各写一份：
 
@@ -243,7 +253,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 五条结构性约定（全部由 `test/unit/guards.test.js` 扫描源码强制；浏览器半端的行为用例在
 `test/unit/client.test.js`，两个测试文件共同守住 `client.js`）：
 
-1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.js`。
+1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.ts`；空 `catch`（裸的或只有注释）另由 `check-repo` 的 `swallow-ok` 规则管。
 2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，条目失效判失败。
 3. `e2e-child-process`：所有测试/脚本子进程必须 `windowsHide`。
 4. `client-styles`：样式注释必须闭合、界面选择器必须有生效声明块；禁止 `--drg-*` 自有 token 与颜色字面量（含 `var()` 兜底）；对话框 / 菜单 / 输入框必须用宿主 Dialog / MenuSurface / 字段的 token 组合；引用的 `--dsw-*` 必须在白名单里。
