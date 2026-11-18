@@ -208,6 +208,7 @@ export async function packPlugin(input) {
 
 const REQUIRED_PACKAGE_FILES = [
   'package.json',
+  'index.js',
   'dist/index.js',
   'dist/client.js',
   'cordis.patch.yml',

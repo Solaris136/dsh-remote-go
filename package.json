@@ -30,13 +30,15 @@
   "sideEffects": [
     "./dist/client.js"
   ],
+  "main": "./index.js",
   "exports": {
-    ".": "./dist/index.js",
+    ".": "./index.js",
     "./client": "./dist/client.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
+    "index.js",
     "dist",
     "vendor/THIRD_PARTY_NOTICES.md",
     "locale",

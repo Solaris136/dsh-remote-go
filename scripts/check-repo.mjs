@@ -610,9 +610,11 @@ for (const name of workflowNames) {
 // `client/src/` + `client/template.js`), and `exports` points into that directory, so a tracked
 // artifact is a stale copy or a `git add -f` accident - and an accidental commit would put
 // generated code back under review.
+// `index.js` is the hand-written entry the DSH loader opens for a linked plugin, so it is
+// source (a one-line re-export of `dist/`), not an artifact. A root `client.js` is still only
+// ever a legacy in-place build.
 const isArtifact = (rel) =>
   (rel.startsWith('dist/') && rel.endsWith('.js')) ||
-  rel === 'index.js' ||
   rel === 'client.js' ||
   (rel.startsWith('src/') && rel.endsWith('.js'))
 

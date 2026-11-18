@@ -72,7 +72,8 @@ pnpm run verify   # 构建 + 规范 + 格式 + 语法 + 打包 + 覆盖率 + 单
 ```
 
 源码是 TypeScript（`index.ts`、`src/**/*.ts`；浏览器半端是 `client/src/**`）：`pnpm build` 把它们编译/打包到
-`dist/`（`dist/index.js`、`dist/client.js`、`dist/src/**/*.js`），`package.json` 的 `exports` 直接指向 `dist/`，
+`dist/`（`dist/index.js`、`dist/client.js`、`dist/src/**/*.js`）；根目录的 `index.js` 是手写的一行 shim，
+再导出 `dist/index.js`（DSH 对链接式安装直接打开 `<plugin>/index.js`），`package.json` 的 `exports` 与它一致，
 所以仓库根目录不产生任何产物副本，发布也不需要根目录复制（没有 `prepack`/`postpack` 的 stage/unstage）。
 `dist/` **不进版本库**。`pnpm test` / `pnpm run gate` / `pnpm run verify` 都会先自动构建，`pnpm pack` 由 `prepack`
 构建并校验后再打包，所以克隆后不需要手工 `pnpm build`。

@@ -18,12 +18,12 @@ coverage/
 # `src/**/*.ts` -> dist/src/**/*.js, plus the composed browser half dist/client.js). Since P1e
 # the artifacts are generated output, not source, and are no longer committed.
 #
-# The published tarball ships exactly that `dist/` tree: `package.json` `exports` and `files[]`
-# point into it, and `prepack` only verifies the build (no staging copy). The three root entries
-# below are legacy guardrails from the build that emitted in place; `scripts/build.mjs` deletes
-# such a file if an old checkout still has one, and these patterns keep it out of a commit.
+# The published tarball ships the `dist/` tree plus one hand-written file: `index.js` is the entry
+# the DSH loader opens for a linked plugin (`<plugin dir>/index.js`), so it is a source shim that
+# re-exports `dist/` and stays tracked. The remaining root entries are legacy guardrails from the
+# build that emitted in place; `scripts/build.mjs` deletes such a file if an old checkout still has
+# one, and these patterns keep it out of a commit.
 /dist/
-/index.js
 /src/**/*.js
 /client.js
 

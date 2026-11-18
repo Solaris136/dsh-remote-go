@@ -100,10 +100,10 @@ const problems = []
 // Two lists for the two places the same contract is checked: the working tree holds the build
 // output in `dist/`, and the tarball must carry exactly that layout - a root `index.js` or
 // `client.js` in the tarball would mean the package and its `exports` disagreed.
-const REPOSITORY_FILES = `package.json dist/index.js dist/client.js cordis.patch.yml locale/en.json
+const REPOSITORY_FILES = `package.json index.js dist/index.js dist/client.js cordis.patch.yml locale/en.json
 locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js dist/vendor/ssh2.bundle.cjs
 vendor/THIRD_PARTY_NOTICES.md README.md LICENSE`.split(/\s+/)
-const TARBALL_FILES = `package.json dist/index.js dist/client.js cordis.patch.yml locale/en.json
+const TARBALL_FILES = `package.json index.js dist/index.js dist/client.js cordis.patch.yml locale/en.json
 locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js dist/vendor/ssh2.bundle.cjs
 vendor/THIRD_PARTY_NOTICES.md README.md LICENSE`.split(/\s+/)
 
@@ -121,7 +121,7 @@ for (const needed of ['dist', 'vendor/THIRD_PARTY_NOTICES.md', 'README.md', 'LIC
 // bundle through `exports["./client"]` (dsh-client-modules/clientExportOf). If either string drifts
 // from the build output, every install breaks at load time rather than at pack time.
 const exportPaths = pkg.exports && typeof pkg.exports === 'object' ? pkg.exports : {}
-if (exportPaths['.'] !== './dist/index.js') problems.push('exports["."] must be "./dist/index.js"')
+if (exportPaths['.'] !== './index.js') problems.push('exports["."] must be "./index.js"')
 if (exportPaths['./client'] !== './dist/client.js') problems.push('exports["./client"] must be "./dist/client.js"')
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
 
@@ -154,10 +154,10 @@ if (tarball) {
       file.startsWith('test/') || file.startsWith('e2e/') || file.startsWith('_research/') || file.startsWith('docs/'),
   )
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
-  // The published layout is `dist/`. A root entry or a root `src/` in the tarball means some older
-  // staging step leaked back in, and the package would then disagree with its own `exports`.
-  if (entries.includes('index.js')) problems.push('tarball contains a root index.js; the entry lives in dist/')
+  // The published layout is `dist/` plus the `index.js` entry the DSH loader opens. A root
+  // `client.js` or a root `src/` in the tarball means an older in-place build leaked back in.
   if (entries.includes('client.js')) problems.push('tarball contains a root client.js; the bundle lives in dist/')
+  if (!entries.includes('index.js')) problems.push('tarball is missing the root index.js entry shim')
   const rootSources = entries.filter((file) => file.startsWith('src/'))
   if (rootSources.length > 0)
     problems.push(`tarball contains root src/ entries: ${rootSources.slice(0, 10).join(', ')}`)

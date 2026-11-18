@@ -4,7 +4,8 @@
 ## 1. 仓库结构
 ```text
 dsh-remote-go
-├─ dist/                    构建产物（`pnpm build` 生成，不进版本库；package.json 的 exports 直接指向这里）
+├─ index.js                  loader 入口（手写 shim：再导出 dist/index.js）
+├─ dist/                    构建产物（`pnpm build` 生成，不进版本库；package.json 的 exports 指向这里）
 │  ├─ index.js              包入口：再导出 dist/src/index.js
 │  ├─ client.js             浏览器半端 bundle（单文件，window.__ModuleLoader__ 注册）
 │  └─ src/**/*.js           Host 半端模块（由 src/**/*.ts 编译）
@@ -66,7 +67,8 @@ dsh-remote-go
 
 `src/`、`index.ts`、`client/src/` 是唯一的手写源码（TypeScript）。`pnpm build` 先用锁定的 `tsc` 把
 `index.ts` / `src/**/*.ts` 编译到 `dist/`，再由 `scripts/build-client.mjs` 生成 `dist/client.js`；
-`package.json` 的 `exports` 指向 `dist/` 里的入口，所以链接式安装与 npm 安装加载的是同一份构建产物。
+根目录的 `index.js` 是一行再导出 `dist/index.js` 的 shim（DSH 链接式安装直接打开 `<plugin>/index.js`，
+不走 exports）；`package.json` 的 `exports` 与它一致，所以链接式安装与 npm 安装加载的是同一份构建产物。
 仓库根目录不产生 `index.js` / `client.js` / `src/**/*.js` 副本，发布也不需要 `prepack`/`postpack` 的
 stage/unstage 步骤；`dist/` 已被 `.gitignore` 忽略。`pnpm test` / `gate` / `verify` 会先构建，测试直接用
 `node --test test/unit/*.test.ts` 跑 TypeScript 源码。

@@ -11,8 +11,10 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
 端到端（非必需门禁，需要本机浏览器/桌面端）：`pnpm run test:web` / `pnpm run test:desktop`。
 
 运行时 JS 不是仓库里的源码：源码是 `.ts`，产物由 `pnpm build` 生成到 `dist/`（`dist/index.js`、
-`dist/client.js`、`dist/src/**/*.js`），不进版本库，仓库根目录也没有任何产物副本。
-`package.json` 的 `exports` 直接指向 `dist/`（`"."` → `./dist/index.js`、`"./client"` → `./dist/client.js`），
+`dist/client.js`、`dist/src/**/*.js`），不进版本库。仓库根目录只有一个手写的 `index.js`
+（一行再导出 `dist/index.js`）：DSH 的 host loader 对链接式安装直接打开 `<plugin>/index.js`，
+不经过 package exports，所以这个入口必须存在且随包发布。
+`package.json` 的 `exports` 与它一致（`"."` → `./index.js`、`"./client"` → `./dist/client.js`）；
 链接式安装（`dsh plugin add /path`）与 npm 安装加载的是同一份构建产物，没有根目录复制，也没有
 `prepack`/`postpack` 的 stage/unstage 步骤。`pnpm test` / `pnpm run gate` / `pnpm run verify` 会先自动构建；
 `pnpm pack` 由 `prepack` 构建并校验，发布包里的 `dist/` 由这一步产生（`files[]` 命中时 pnpm 不理会 `.gitignore`）。
@@ -25,7 +27,7 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
 | `dsh.bundle.patch` | 作为 DSH bundle 被安装/启用的入口 |
 | `dsh.client` | 浏览器半端声明（platform: web） |
 | `engines.dsh` / `engines.node` | 兼容区间；安装与启动都用运行版本校验 |
-| `files[]` | 必须含 `dist`（`dist/index.js`、`dist/client.js`、`dist/src/**/*.js`）、`locale`、`cordis.patch.yml`、`vendor/ssh2.bundle.cjs`、`vendor/THIRD_PARTY_NOTICES.md`、`README.md`、`LICENSE`；只打包 `dist/`，`.ts` 源码天然不在包内（无需再写 `!src/**/*.ts`） |
+| `files[]` | 必须含 `index.js`（loader 入口 shim）、`dist`（`dist/index.js`、`dist/client.js`、`dist/src/**/*.js`）、`locale`、`cordis.patch.yml`、`vendor/THIRD_PARTY_NOTICES.md`、`README.md`、`LICENSE`；`.ts` 源码天然不在包内 |
 | `license` / `repository` / `homepage` / `bugs` / `keywords` | 市场展示、收录与问题反馈入口 |
 | `packageManager` | 固定 pnpm 版本，CI 与本地一致 |
 
@@ -46,8 +48,8 @@ pnpm run verify   # 仓库规范 + 格式 + 语法 + workflow + 打包 + 覆盖�
    `pnpm run test:integration:local` + 严格模式（`DSH_E2E_STRICT=1`）的 `pnpm run test:integration:external`。
 2. 从 `package.json` 读取版本；`npm view <name>@<version>` 已存在则跳过发布（只补 tag / Release）。
 3. `pnpm pack` 后对 tarball 再校验（`pack:check:tarball`）：`pack` 的 `prepack` 会先 `pnpm build` 并跑
-   `verify-artifacts`，所以 tarball 里的 `dist/` 一定是本次构建产物，且不含任何 `.ts`；入口由
-   `exports` 直接指向 `dist/`，没有根目录副本需要 stage。
+   `verify-artifacts`，所以 tarball 里的 `dist/` 一定是本次构建产物，且不含任何 `.ts`；入口是根目录的
+   `index.js`（手写 shim，再导出 `dist/index.js`），客户端入口由 `exports["./client"]` 指向 `dist/client.js`。
 4. `npm publish --access public`：npm CLI 用工作流的 OIDC 身份完成认证（`id-token: write`），provenance 自动生成，**不需要任何 token**。
 5. 自动创建并推送 `v<x.y.z>` 标签，`gh release create` 生成 notes 并附上 `.tgz`。
 
