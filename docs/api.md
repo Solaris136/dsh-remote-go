@@ -92,7 +92,8 @@
 > **v2.12 变更（SSE 拆通道）**：状态与连接日志分成两条 SSE 流。`GET /events` 仍是状态通道（`state` /
 > `download` / `remote-unreachable` / `ping`，路径与丢帧规则不变），但**`hosts[].logs` 在状态帧里恒为 `[]`**；
 > 连接日志走新增的 `GET /events/logs`，帧带 `hostId` / `attempt` / `seq` 与 `id:`，可用 `Last-Event-ID`
-> 续传，不可续时发 `reset` 并重放尾部。`HostView` 增加 `logAttempt` / `logSeq` 两个游标字段（只增不改）。
+> 续传，不可续时发 `reset` 并重放尾部。`HostView` 增加 `logAttempt` / `logSeq` 两个游标字段（`logAttempt` 只增；
+`logSeq` 在**同一次 attempt 内**只增，换 attempt 时随该次连接从 1 重新计数）。
 > **日志追加不再改变 `StateView.rev`**：`rev` 只因状态模型变化自增。`GET /state` **仍然**返回每台主机的日志尾，
 > 它仍是唯一带日志的权威快照。降级行为（同包发布，两种混跑都可能出现在开发期）：**新 Client + 旧 Host**
 > （没有 `/events/logs`）→ 日志流 404 后自动关闭，日志改从 `GET /state` 与状态帧里的 `logs` 得到，不报错、
@@ -224,7 +225,9 @@ interface HostView {
   logs: ConnectLogEntry[]
   /**
    * 这条日志尾的游标：`attempt` = 第几次连接（边界行的 N），`logSeq` = 最新一行的 `seq`。
-   * 两个字段只增不改，用来让 Client 把「已合并的行」与一次快照对齐、并在日志通道不可用时用
+   * 「单调」指同一游标内：`logAttempt` 只增不改；`logSeq` 在同一次 attempt 内只增，换 attempt 时
+   * 随该次连接从 1 重新计数（所以消费方必须把 `(logAttempt, logSeq)` 当一对用，不能只看 `logSeq`）。
+   * 用来让 Client 把「已合并的行」与一次快照对齐、并在日志通道不可用时用
    * `logs` 的最大 `seq` 兜底。旧 Host 没有这两个字段：Client 按 `logs` 的最大 `seq` 推导游标，
    * `attempt` 记为 0，只在收到 `reset` 帧时更新（v2.12）。
    */

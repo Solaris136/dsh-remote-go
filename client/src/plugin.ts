@@ -230,6 +230,14 @@ const __test = {
   stateRevision,
   stateInstance,
   isNewerState,
+  // The log channel's paint path (W2): a burst of frames is one paint per display frame. Both
+  // halves are pure enough to drive directly - the scheduler is injected, the merge is the real
+  // `applyLogFrame` - so the coalescing is proved without a renderer.
+  createFrameBatch,
+  createLogPump,
+  // The password field's Enter gate (W4): React's synthetic event is not required to expose
+  // `isComposing`, so the rule is one function over both event shapes.
+  passwordEnterSubmits,
   streamRetryDelay,
   initialDraft,
   buildHostInput,

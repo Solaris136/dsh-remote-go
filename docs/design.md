@@ -123,6 +123,7 @@
 - 主按钮成对使用 `--dsw-alias-button-primary-fill` 与 `--dsw-alias-label-primary-foreground`，状态色用 `--dsw-alias-state-*-primary`；**对比度由主题负责**，插件不替主题纠正颜色。
 - 远端窗口用远端主题，本地主题不影响它（整窗 guest / 同源 frame 的边界；注入到远端页面里的主机条读的是远端页面的 token）。标题栏那一条由远端页面自己绘制、用远端主题，叠在上面的宿主标题栏菜单仍是本地主题。
 - 可访问性：焦点环走 `--dsw-focus-ring-*`；尊重 `prefers-reduced-motion`、`prefers-contrast: more` 与 `forced-colors: active`；窄窗口下主机清单变单列、向导 / 设置变全宽浮层。
+- 平台模式的具体形态（都是实现事实，正常配色下零像素差）：`prefers-reduced-motion: reduce` 下浮层内所有动画与过渡归零到 `0.01ms`、只保留 spinner 以 2.4s 继续转（表示仍在进行），注入远端页面的主机条则直接 `animation:none`；`forced-colors: active` 下对话框与抽屉各补 1px `CanvasText` 边框（强制色把两者都压成 `Canvas` 并去掉阴影，边框是唯一的分界，`box-sizing: border-box` 保证盒子尺寸不变）；键盘焦点始终保留轮廓，只有指针焦点才移除输入框 `outline`（`:focus:not(:focus-visible)`），注入到其他文档的两个表面各自带 `:focus-visible` 规则。
 - 验收：E2E 用「内联 token」模拟第三方主题，断言界面颜色跟随、按钮对比度达标、移除覆盖层后恢复宿主调色板；单元测试锁定 token 白名单（未知 token 直接失败）、禁止 `--drg-*` 自有 token、禁止颜色字面量、禁止渐变与配色模式分支。
 
 ### 4.7 远端文件与文件夹下载

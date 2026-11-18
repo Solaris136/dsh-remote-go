@@ -25,6 +25,10 @@ function loadClientPlugin(options = {}) {
     clearTimeout: options.clearTimeout || clearTimeout,
     setInterval,
     clearInterval,
+    // The coalescing scheduler prefers a display frame and falls back to a task: both are globals
+    // the page may or may not have, so a test picks which one exists.
+    requestAnimationFrame: options.requestAnimationFrame,
+    cancelAnimationFrame: options.cancelAnimationFrame,
     fetch: options.fetch,
     document: options.document,
     getComputedStyle: options.getComputedStyle,
@@ -4126,4 +4130,522 @@ test('the log channel opens only for a connect window and backs off without a ba
   assert.equal(scheduled.length, before, 'no retry chain is left behind')
   assert.equal(instances.at(-1), refused, 'and no stream is opened again')
   unreachable.dispose()
+})
+
+/* ── platform behaviour (P6 / Modern Web Guidance W2-W5) ──────────────────────────────────────
+ *
+ * The four changes of this phase replace an implementation mechanism and nothing else: no DOM
+ * structure, class, ARIA, copy, focus order or normal-mode pixel moves. These tests therefore pin
+ * the *mechanism* - one paint per display frame, a state-preserving move, the IME gate, the
+ * forced-colors-only edge - instead of a rendered snapshot.
+ */
+
+/** The panel stylesheet as it stands in the artifact (its bytes are pinned by the build check). */
+function clientCss() {
+  const match = SOURCE.match(/const\s+CSS\s*=\s*`([\s\S]*?)`/)
+  assert.ok(match, 'the client half must keep its stylesheet in a `const CSS = ` template literal')
+  return match[1].replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+/** The switcher row's stylesheet, which the row injects into the page that renders it. */
+function rowStyles() {
+  const match = SOURCE.match(/style\.textContent = \[([\s\S]*?)\]\.join\(''\)/)
+  assert.ok(match, 'the switcher row must keep its styles in the style.textContent array')
+  const withoutComments = match[1].replace(/^\s*\/\/.*$/gm, '')
+  const css = [...withoutComments.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((found) => found[1]).join('')
+  return css.replace(/\/\*[\s\S]*?\*\//g, '')
+}
+
+/**
+ * The bodies of every `@<header> { … }` block, brace-matched.
+ * @param css - one stylesheet
+ * @param header - the at-rule header as it is written, e.g. `media (forced-colors: active)`
+ */
+function atRuleBodies(css, header) {
+  const marker = '@' + header
+  const bodies = []
+  let index = 0
+  while (index < css.length) {
+    const start = css.indexOf(marker, index)
+    if (start < 0) break
+    const bodies_ = matchBraces(css, css.indexOf('{', start))
+    if (bodies_ === null) break
+    bodies.push(css.slice(bodies_.open + 1, bodies_.close))
+    index = bodies_.close + 1
+  }
+  return bodies
+}
+
+/** Every at-rule block removed, so the remaining text is plain `selector { declarations }`. */
+function stripAtRules(css) {
+  let out = ''
+  let index = 0
+  while (index < css.length) {
+    const start = css.indexOf('@', index)
+    if (start < 0) {
+      out += css.slice(index)
+      break
+    }
+    out += css.slice(index, start)
+    const found = matchBraces(css, css.indexOf('{', start))
+    if (found === null) {
+      out += css.slice(start)
+      break
+    }
+    index = found.close + 1
+  }
+  return out
+}
+
+function matchBraces(css, open) {
+  if (open < 0) return null
+  let depth = 1
+  let cursor = open + 1
+  while (cursor < css.length && depth > 0) {
+    if (css[cursor] === '{') depth += 1
+    else if (css[cursor] === '}') depth -= 1
+    cursor += 1
+  }
+  return depth === 0 ? { open, close: cursor - 1 } : null
+}
+
+/** Every `selector { declarations }` pair of an at-rule-free stylesheet. */
+function cssBlocks(css) {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((match) => ({
+    selectors: match[1]
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean),
+    body: match[2],
+  }))
+}
+
+/**
+ * A scheduler that records the callbacks it was handed: a display frame that the test decides
+ * when to run, which is the only way "one paint per frame" can be observed.
+ */
+function frameRecorder() {
+  const frames = []
+  const cancelled = []
+  return {
+    frames,
+    cancelled,
+    schedule: (callback) => {
+      frames.push(callback)
+      return frames.length
+    },
+    cancel: (handle) => cancelled.push(handle),
+    /** Run the oldest frame that has not been cancelled. */
+    runNext() {
+      const callback = frames.shift()
+      if (callback) callback()
+      return Boolean(callback)
+    },
+  }
+}
+
+test('a burst of connect-log frames paints once per display frame, in order and complete', () => {
+  const { createLogPump } = plugin.__test
+  const clock = frameRecorder()
+  const cursors = new Map()
+  const painted = []
+  let state = logState([logHost({ id: 'h_a', logs: [] })])
+  const pump = createLogPump({
+    read: () => state,
+    deliver: (next) => {
+      painted.push(next)
+      state = next
+    },
+    cursors: () => cursors,
+    alive: () => true,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  })
+  const frame = (seq) => ({
+    hostId: 'h_a',
+    instance: 'gen-1',
+    attempt: 1,
+    seq,
+    visible: true,
+    entries: [logLine(seq)],
+  })
+  // Ten frames: the Host emits one per log line, and a connection prints dozens a second.
+  for (let seq = 1; seq <= 10; seq += 1) pump.push(frame(seq))
+  assert.equal(clock.frames.length, 1, 'ten frames inside one display frame ask for one paint')
+  assert.equal(painted.length, 0, 'and nothing is painted before that frame runs')
+  assert.equal(pump.pending(), true)
+  clock.runNext()
+  assert.equal(painted.length, 1, 'the frame paints once')
+  assert.deepEqual(
+    painted[0].hosts[0].logs.map((entry) => entry.seq),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    'every row is there, once, in arrival order',
+  )
+  assert.deepEqual(
+    painted[0].hosts[0].logs.map((entry) => entry.message),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((seq) => `row ${seq}`),
+  )
+  assert.equal(pump.pending(), false)
+  // The next frame opens a new display frame: the coalescing is per frame, not a one-off.
+  pump.push(frame(11))
+  assert.equal(clock.frames.length, 1)
+  clock.runNext()
+  assert.deepEqual(
+    painted[1].hosts[0].logs.map((entry) => entry.seq),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  )
+  // A frame that only replays rows already on screen is not a reason to paint (R3).
+  pump.push(frame(11))
+  clock.runNext()
+  assert.equal(painted.length, 2, 'a replayed frame changes nothing on screen')
+})
+
+test('the deferred paint merges into the tree React holds then, never the one it replaced', () => {
+  const { createLogPump } = plugin.__test
+  const clock = frameRecorder()
+  const cursors = new Map()
+  let state = logState([logHost({ id: 'h_a', logs: [] })], { rev: 1, settings: { language: 'zh' } })
+  const painted = []
+  const pump = createLogPump({
+    read: () => state,
+    deliver: (next) => {
+      painted.push(next)
+      state = next
+    },
+    cursors: () => cursors,
+    alive: () => true,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  })
+  pump.push({ hostId: 'h_a', instance: 'gen-1', attempt: 1, seq: 1, reset: true, entries: [logLine(1)] })
+  // Something else advances the state while the frame is pending: a saved setting and a newer
+  // state frame both replace the tree. The queued paint must merge into that tree, not into the
+  // one it was scheduled against, or the setting would be painted back to its old value.
+  const saved = { ...state, rev: 2, settings: { language: 'en' } }
+  state = saved
+  clock.runNext()
+  assert.equal(painted.length, 1)
+  assert.equal(painted[0].settings.language, 'en', 'the newer tree wins')
+  assert.equal(painted[0].rev, 2)
+  assert.deepEqual(
+    painted[0].hosts[0].logs.map((entry) => entry.seq),
+    [1],
+    'and the frame is merged into it',
+  )
+  assert.notEqual(painted[0], saved, 'the delivered tree is the merged copy, not the input')
+})
+
+test('the paint waits for a display frame, and falls back to a task when the page has none', () => {
+  /** One pump over the smallest live state, so the *scheduler* is the only thing under test. */
+  const drive = (createLogPump) => {
+    const painted = []
+    let state = logState([logHost({ id: 'h_a', logs: [] })])
+    const pump = createLogPump({
+      read: () => state,
+      deliver: (next) => {
+        painted.push(next)
+        state = next
+      },
+      cursors: () => new Map(),
+      alive: () => true,
+    })
+    return {
+      painted,
+      push: (seq) =>
+        pump.push({ hostId: 'h_a', instance: 'gen-1', attempt: 1, seq, reset: seq === 1, entries: [logLine(seq)] }),
+      cancel: () => pump.cancel(),
+    }
+  }
+  // A page with a display frame: nothing runs until that frame is handed back, and a frame the
+  // panel no longer needs is given back instead of painted.
+  const frames = []
+  const frameClient = loadClientPlugin({
+    requestAnimationFrame: (callback) => frames.push(callback),
+    cancelAnimationFrame: (handle) => frames.push(`cancelled:${handle}`),
+  })
+  const framed = drive(frameClient.__test.createLogPump)
+  framed.push(1)
+  assert.equal(frames.length, 1, 'the default scheduler asked for one display frame')
+  assert.equal(framed.painted.length, 0, 'and waited for it')
+  frames.shift()()
+  assert.deepEqual(
+    framed.painted[0].hosts[0].logs.map((entry) => entry.seq),
+    [1],
+  )
+  framed.push(2)
+  framed.cancel()
+  assert.equal(frames.length, 2, 'cancel gives the frame back to the page')
+  assert.match(frames[1], /cancelled:/)
+  assert.equal(framed.painted.length, 1, 'a cancelled frame paints nothing')
+  // A page with no display frame (a document stub, or a host that removed it): one task later.
+  const timers = []
+  const taskClient = loadClientPlugin({
+    setTimeout: (callback) => {
+      timers.push(callback)
+      return timers.length
+    },
+  })
+  const tasked = drive(taskClient.__test.createLogPump)
+  tasked.push(1)
+  assert.equal(timers.length, 1, 'a page without frame callbacks gets one task')
+  assert.equal(tasked.painted.length, 0)
+  timers.shift()()
+  assert.deepEqual(
+    tasked.painted[0].hosts[0].logs.map((entry) => entry.seq),
+    [1],
+  )
+})
+
+test('a panel that is gone never receives the paint it was owed', () => {
+  const { createLogPump } = plugin.__test
+  const clock = frameRecorder()
+  const painted = []
+  const cursors = new Map()
+  const state = logState([logHost({ id: 'h_a', logs: [] })])
+  const pump = createLogPump({
+    read: () => state,
+    deliver: (next) => painted.push(next),
+    cursors: () => cursors,
+    alive: () => false,
+    schedule: clock.schedule,
+    cancel: clock.cancel,
+  })
+  pump.push({ hostId: 'h_a', instance: 'gen-1', attempt: 1, seq: 1, reset: true, entries: [logLine(1)] })
+  clock.runNext()
+  assert.deepEqual(painted, [], 'a frame merged after unmount is dropped')
+  pump.cancel()
+  assert.equal(pump.pending(), false)
+})
+
+/**
+ * A fake sidebar column records its insertions the way a real one behaves: `insertBefore` on a
+ * connected node takes it out of the tree first, and that removal step is what costs a node its
+ * focus and its state. The fake DOM never had to do it (every existing caller inserted a fresh
+ * node), so the recorder performs it.
+ */
+function detachFrom(dom, node) {
+  const at = dom.column.children.indexOf(node)
+  if (at < 0) return
+  dom.column.children.splice(at, 1)
+  node.parentNode = null
+}
+
+/** Record every `insertBefore` this column performs, leaving the page's API otherwise intact. */
+function recordInsertBefore(dom) {
+  const native = dom.column.insertBefore.bind(dom.column)
+  const calls = []
+  dom.column.insertBefore = (node, reference) => {
+    calls.push({ node, reference })
+    detachFrom(dom, node)
+    return native(node, reference)
+  }
+  return calls
+}
+
+/** Give the column a `moveBefore` that lands the node like the real one and records the call. */
+function recordMoveBefore(dom) {
+  // Captured now, so a later `recordInsertBefore` observes the page's own path only.
+  const native = dom.column.insertBefore.bind(dom.column)
+  const calls = []
+  dom.column.moveBefore = (node, reference) => {
+    calls.push({ node, reference })
+    detachFrom(dom, node)
+    return native(node, reference)
+  }
+  return calls
+}
+
+test('the switcher row is re-placed with moveBefore and keeps its open menu', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  local.carrier.update({
+    hosts: [hostView({ id: 'h_a', name: '43.133.80.40', status: 'connected' })],
+    labels: { local: '本地', addHost: '添加主机', manage: '管理界面' },
+  })
+  const row = rowOf(dom)
+  assert.ok(row, 'the row is installed first')
+  assert.equal(dom.brand.nextSibling, row)
+  // The row is a button with a menu inside it: this is the state a remove-then-insert would lose.
+  clickInside(row, row)
+  assert.equal(row.getAttribute('aria-expanded'), 'true')
+  // The shell inserts a sibling above the row (a re-rendered sidebar). The row is now one place
+  // off, so the next placement has to move it.
+  const foreign = dom.document.createElement('div')
+  dom.column.insertBefore(foreign, row)
+  assert.notEqual(dom.brand.nextSibling, row)
+  const moves = recordMoveBefore(dom)
+  const inserts = recordInsertBefore(dom)
+  local.carrier.update({ hosts: [] })
+  assert.equal(moves.length, 1, 'the connected node is moved, not re-inserted')
+  assert.equal(moves[0].node, row)
+  assert.equal(moves[0].reference, foreign, 'and lands directly after the brand row')
+  assert.equal(inserts.length, 0, 'the remove-then-insert path is not taken when moveBefore exists')
+  assert.deepEqual(dom.column.children.slice(0, 3), [dom.brand, row, foreign], 'the row is back in its place')
+  assert.equal(row.parentNode, dom.column)
+  assert.equal(row.getAttribute('aria-expanded'), 'true', 'the menu stayed open')
+  assert.equal(row.classList.contains('drg-open'), true, 'and is still the open surface')
+})
+
+test('without moveBefore the row is re-placed exactly as before', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  local.carrier.update({ hosts: [], labels: { local: '本地', addHost: '添加主机', manage: '管理界面' } })
+  const row = rowOf(dom)
+  assert.ok(row)
+  assert.equal(typeof dom.column.moveBefore, 'undefined', 'this page has no moveBefore')
+  clickInside(row, row)
+  const foreign = dom.document.createElement('div')
+  dom.column.insertBefore(foreign, row)
+  const inserts = recordInsertBefore(dom)
+  local.carrier.update({ hosts: [] })
+  assert.equal(inserts.length, 1, 'the fallback is the insertion the code always made')
+  assert.equal(inserts[0].node, row)
+  assert.equal(inserts[0].reference, foreign)
+  assert.deepEqual(dom.column.children.slice(0, 3), [dom.brand, row, foreign])
+  assert.equal(row.getAttribute('aria-expanded'), 'true')
+})
+
+test('a moveBefore that refuses the move falls through to the insertion', () => {
+  const dom = fakeDom()
+  const local = loadClientPlugin({ document: dom.document })
+  local.carrier.update({ hosts: [], labels: { local: '本地', addHost: '添加主机', manage: '管理界面' } })
+  const row = rowOf(dom)
+  const attempts = []
+  dom.column.moveBefore = (node, reference) => {
+    attempts.push({ node, reference })
+    // Chromium's first implementation refuses a cross-document move with `NotSupportedError`; a
+    // partial implementation has the same shape, and it must not cost the row its place.
+    throw new Error('NotSupportedError: the move is not atomic here')
+  }
+  const foreign = dom.document.createElement('div')
+  dom.column.insertBefore(foreign, row)
+  const inserts = recordInsertBefore(dom)
+  local.carrier.update({ hosts: [] })
+  assert.equal(attempts.length, 1, 'the state-preserving move is tried first')
+  assert.equal(inserts.length, 1, 'and the refusal still places the row')
+  assert.deepEqual(dom.column.children.slice(0, 3), [dom.brand, row, foreign])
+})
+
+test('an Enter that confirms an IME candidate does not submit the password', () => {
+  const { passwordEnterSubmits } = plugin.__test
+  // React's synthetic event does not carry `isComposing`: the native one is what decides.
+  assert.equal(passwordEnterSubmits({ key: 'Enter', nativeEvent: { isComposing: true } }), false)
+  // Safari clears `isComposing` on the composing Enter and reports the legacy 229 instead.
+  assert.equal(passwordEnterSubmits({ key: 'Enter', nativeEvent: { keyCode: 229 } }), false)
+  assert.equal(passwordEnterSubmits({ key: 'Enter', keyCode: 229 }), false, 'the synthetic value is checked too')
+  assert.equal(passwordEnterSubmits({ key: 'Enter', nativeEvent: { isComposing: true, keyCode: 229 } }), false)
+  // A key event that is not an Enter is never a submit, composing or not.
+  assert.equal(passwordEnterSubmits({ key: 'a', nativeEvent: {} }), false)
+  assert.equal(passwordEnterSubmits({ key: 'Escape', nativeEvent: { isComposing: true } }), false)
+  assert.equal(passwordEnterSubmits(null), false)
+})
+
+test('a plain Enter still submits, once per keypress', () => {
+  const { passwordEnterSubmits } = plugin.__test
+  assert.equal(passwordEnterSubmits({ key: 'Enter', nativeEvent: { isComposing: false, keyCode: 13 } }), true)
+  assert.equal(passwordEnterSubmits({ key: 'Enter', nativeEvent: { keyCode: 0 } }), true, 'a synthetic Enter')
+  assert.equal(passwordEnterSubmits({ key: 'Enter' }), true, 'an event with no native half')
+})
+
+test('the dialog gains its forced-colors edge only inside the forced-colors block', () => {
+  const css = clientCss()
+  const forced = atRuleBodies(css, 'media (forced-colors: active)')
+  assert.equal(forced.length, 1, 'expected exactly one forced-colors block')
+  assert.match(
+    forced[0],
+    /\.drg-modal, \.drg-drawer \{ border: 1px solid CanvasText; \}/,
+    'the dialog and the drawer are the two surfaces whose scrim collapses onto the same Canvas',
+  )
+  // Normal mode is untouched by construction (a media rule cannot apply), and that is what the
+  // normal-mode browser assertion measures: no other block gives either surface a live border.
+  const bordered = cssBlocks(stripAtRules(css)).filter(
+    (block) =>
+      block.selectors.some((selector) => selector === '.drg-modal' || selector === '.drg-drawer') &&
+      /(?:^|;)\s*border(?:-width|-style|-color)?\s*:/.test(block.body),
+  )
+  assert.deepEqual(
+    bordered.map((block) => block.selectors),
+    [['.drg-modal']],
+    'the only normal-mode border declaration is the dialog’s own reset',
+  )
+  assert.match(bordered[0].body, /border: 0(?:;|$)/, 'and it stays a zero-width border')
+})
+
+test('every animation and transition is covered by the reduced-motion opt-out', () => {
+  const css = clientCss()
+  const optOut = atRuleBodies(css, 'media (prefers-reduced-motion: reduce)')
+  assert.equal(optOut.length, 1, 'expected exactly one reduced-motion block in the panel')
+  assert.match(
+    optOut[0],
+    /\.drg-root \*, \.drg-root \*::before, \.drg-root \*::after \{ animation-duration: 0\.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0\.01ms !important; \}/,
+    'every descendant animation and transition collapses to a single 0.01ms pass',
+  )
+  // The one deliberate exception: a spinner is the only sign that work is still running, so it
+  // keeps turning - slowly - instead of freezing.
+  assert.match(
+    optOut[0],
+    /\.drg-spinner \{ animation-duration: 2\.4s; animation-iteration-count: infinite !important; \}/,
+    'the spinner stays a slow spinner',
+  )
+  // The rule above reaches `.drg-root` descendants only, so no animated selector may escape the
+  // panel root: an animation on the shell's seat, on `body` or on an injected id would keep
+  // running through the opt-out.
+  const animated = []
+  for (const block of cssBlocks(stripAtRules(css))) {
+    if (!/(?:^|;)\s*(?:animation|transition)\s*:/.test(block.body)) continue
+    for (const selector of block.selectors) {
+      assert.doesNotMatch(
+        selector,
+        /^(?:html|body)\b|^\[data-|^#/,
+        `"${selector}" animates outside the reduced-motion opt-out`,
+      )
+      animated.push(selector)
+    }
+  }
+  assert.ok(animated.length >= 10, `expected the panel's animated surfaces, found ${animated.length}`)
+  // The guest row is drawn in the remote page, which the panel stylesheet does not reach: it
+  // carries its own opt-out inside the injected script.
+  const row = rowStyles()
+  const rowOptOut = atRuleBodies(row, 'media (prefers-reduced-motion:reduce)')
+  assert.equal(rowOptOut.length, 1, 'the injected row must opt out on its own')
+  assert.match(rowOptOut[0], /#drg-host-row,#drg-host-row \*\{transition:none!important;animation:none!important\}/)
+  const rowAnimated = []
+  for (const block of cssBlocks(stripAtRules(row))) {
+    if (!/(?:^|;)\s*(?:animation|transition)\s*:/.test(block.body)) continue
+    for (const selector of block.selectors) {
+      assert.match(selector, /^#drg-host-row/, `"${selector}" animates outside the row's opt-out`)
+      rowAnimated.push(selector)
+    }
+  }
+  assert.ok(rowAnimated.length >= 4, `expected the row's animated surfaces, found ${rowAnimated.length}`)
+})
+
+test('no rule removes the focus ring without replacing it', () => {
+  const css = clientCss()
+  const removals = cssBlocks(stripAtRules(css)).filter((block) => /(?:^|;)\s*outline\s*:\s*(?:none|0)/.test(block.body))
+  assert.deepEqual(
+    removals.map((block) => block.selectors),
+    [['.drg-input:focus:not(:focus-visible)', '.drg-select:focus:not(:focus-visible)']],
+    'the only removed ring is the pointer-focus one',
+  )
+  for (const block of removals) {
+    for (const selector of block.selectors) {
+      assert.match(selector, /:not\(:focus-visible\)/, `${selector} must keep keyboard focus visible`)
+    }
+  }
+  // Keyboard focus still gets the panel-wide ring, reading the host's tokens inside the rule (a
+  // value inherited from an ancestor would paint a ring for mouse users too).
+  assert.match(
+    css,
+    /\.drg-root :focus-visible \{[^}]*outline: var\(--dsw-focus-ring-width, 2px\) solid var\(--dsw-focus-ring-color, var\(--dsw-alias-state-business-primary\)\);/,
+    'the panel keeps its one focus ring',
+  )
+  assert.match(
+    css,
+    /\.drg-input:focus-visible, \.drg-select:focus-visible \{ outline-offset: 1px; \}/,
+    'and the fields adjust the ring instead of dropping it',
+  )
+  // The two surfaces drawn outside `.drg-root` carry their own visible ring.
+  assert.match(rowStyles(), /#drg-host-row:focus-visible\{outline:var\(--dsw-focus-ring-width,2px\)/)
+  assert.match(SOURCE, /\.drg-carrier-error button:focus-visible\{outline:var\(--dsw-focus-ring-width,2px\)/)
 })

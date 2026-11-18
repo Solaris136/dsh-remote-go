@@ -513,6 +513,11 @@ const CSS = `
       .drg-dot { forced-color-adjust: none; }
       .drg-btn, .drg-input, .drg-select, .drg-host-card, .drg-modal, .drg-drawer, .drg-chip { border-color: ButtonText; }
       .drg-btn-primary { color: ButtonText; }
+      /* Forced colours collapse the dialog and its scrim onto the same Canvas and drop the shadow,
+         so the panel had no edge left: one CanvasText border is what tells the two surfaces apart.
+         The rule lives only here - normal, light and dark keep the dialog's own 0px border and the
+         drawer's none - and box-sizing keeps the box the same size. */
+      .drg-modal, .drg-drawer { border: 1px solid CanvasText; }
     }
     @media (max-width: 760px) {
       .drg-host-list { grid-template-columns: 1fr; }

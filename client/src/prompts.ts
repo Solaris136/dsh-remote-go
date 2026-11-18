@@ -1,5 +1,25 @@
-// client/src/prompts.ts - PasswordPrompt and RemoteConflictPrompt (region 13); after settings.ts, before toast.ts.
+// client/src/prompts.ts - PasswordPrompt, passwordEnterSubmits and RemoteConflictPrompt (region 13); after settings.ts, before toast.ts.
 //#region 13. password prompt
+
+/**
+ * Whether an Enter keypress means "submit this password".
+ *
+ * Enter is also how a CJK input method confirms a candidate, and that Enter arrives while the word
+ * is still being composed: submitting there sends half a password, which reads to the user as a
+ * failed login rather than as a keystroke they never made. React's synthetic event does not carry
+ * `isComposing`, so the native event is the only source; Safari additionally sends the composing
+ * Enter after clearing `isComposing`, which is why the keyed `229` value is checked as well (MWG
+ * `ime-safe-enter-submit`, its first strategy). Anything that is not an Enter is not a submit.
+ */
+function passwordEnterSubmits(event) {
+  if (!event || event.key !== 'Enter') return false
+  // The synthetic event is not required to expose these: fall back to it only when React handed
+  // out no native one (a test double, or a host that wrapped the event).
+  const native = event.nativeEvent || event
+  if (native.isComposing === true || event.isComposing === true) return false
+  // 229 is the value every engine that loses `isComposing` reports for a composing key event.
+  return native.keyCode !== 229 && event.keyCode !== 229
+}
 
 function PasswordPrompt(props) {
   const t = translatorOf(props)
@@ -75,7 +95,7 @@ function PasswordPrompt(props) {
           if (localError !== '') setLocalError('')
         },
         onKeyDown: (event) => {
-          if (event && event.key === 'Enter') submit()
+          if (passwordEnterSubmits(event)) submit()
         },
       }),
     ),

@@ -5,7 +5,7 @@ import http from 'node:http'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { makeTempRoot, resolveBrowser, skipOrFail } from './harness-support.ts'
+import { makeTempRoot, resolveBrowser, skipOrFail, waitFor } from './harness-support.ts'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 // The plugin serves the built artifact: `dist/client.js` (scripts/build-client.mjs).
@@ -734,6 +734,51 @@ window.ReactDOM = { createRoot }`,
         await closeManage()
       })
 
+      await t.test('an IME composing Enter never submits the password', async () => {
+        await openManage()
+        await page.evaluate(() => {
+          window.__connectMode = 'auth-error'
+          window.__connectAttempts = 0
+        })
+        await page.click('[data-testid="host-card"][data-host-id="h_pw"] [data-testid="host-open"]')
+        await page.waitForSelector('[data-testid="password-prompt"]', { visible: true, timeout: 5000 })
+        await page.evaluate(() => {
+          window.__connectMode = 'ok'
+          window.__connectAttempts = 0
+        })
+        await page.type('[data-testid="password-input"]', 'secret')
+        // The Enter that confirms an IME candidate: `isComposing` on the native event, and the
+        // legacy 229 every engine that loses the flag reports. Neither may submit the half-typed
+        // password (MWG `ime-safe-enter-submit`).
+        await page.evaluate(() => {
+          const input = document.querySelector('[data-testid="password-input"]')
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }))
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 229, bubbles: true }))
+        })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const composing = await page.evaluate(() => ({
+          attempts: window.__connectAttempts,
+          prompt: Boolean(document.querySelector('[data-testid="password-prompt"]')),
+        }))
+        assert.equal(composing.attempts, 0, 'a composing Enter sends nothing')
+        assert.equal(composing.prompt, true, 'and the prompt stays open')
+        // A plain Enter is still a submit: the guard only knows about composition.
+        await page.evaluate(() => {
+          document
+            .querySelector('[data-testid="password-input"]')
+            .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+        })
+        await page.waitForFunction(() => window.__connectAttempts >= 1, { timeout: 5000 })
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const submitted = await page.evaluate(() => ({
+          attempts: window.__connectAttempts,
+          prompt: Boolean(document.querySelector('[data-testid="password-prompt"]')),
+        }))
+        assert.equal(submitted.attempts, 1, 'the plain Enter submits once')
+        assert.equal(submitted.prompt, false)
+        await closeManage()
+      })
+
       await t.test('unchecking remember sends a connection-only password', async () => {
         await openManage()
         await page.evaluate(() => {
@@ -1009,6 +1054,129 @@ window.ReactDOM = { createRoot }`,
         await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
       })
 
+      await t.test('a re-ordered guest sidebar keeps the switcher row focused and open', async () => {
+        // The previous scenario hid the window without telling the overlay: the window is still
+        // the page's target, so hand it to the local page first and then ask for the host again -
+        // that is the transition a user makes, and it re-reveals the warm carrier.
+        await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'local' }))
+        await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
+        await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'open', hostId: 'h_a' }))
+        // The carrier goes up transparent and keeps `display:none` until it is revealed: a row
+        // inside a hidden document has no box and cannot take focus.
+        await waitFor(page, () => window.__harness.plugin.carrier.shown() === 'h_a', { timeout: 15_000 })
+        await waitFor(
+          page,
+          () => {
+            const root = document.getElementById('dsh-remote-go-overlay-h_a')
+            if (!root || getComputedStyle(root).display === 'none') return false
+            const frame = root.querySelector('iframe')
+            if (!frame) return false
+            const rect = frame.getBoundingClientRect()
+            return rect.width > 100 && rect.height > 100
+          },
+          { timeout: 15_000 },
+        )
+        const frame = await page.$('#dsh-remote-go-overlay-h_a iframe')
+        const frameHandle = await frame.contentFrame()
+        await frameHandle.waitForFunction(
+          () => {
+            const row = document.getElementById('drg-host-row')
+            if (!row) return false
+            const rect = row.getBoundingClientRect()
+            return rect.width > 0 && rect.height > 0
+          },
+          { timeout: 5000 },
+        )
+        // The row is a `role=button` surface whose menu is one of its children: open it, and put
+        // the focus on the row itself, so a remove-then-insert would be visible in both.
+        const recorder = await frameHandle.evaluate(() => {
+          const row = document.getElementById('drg-host-row')
+          row.focus()
+          row.click()
+          const proto = Element.prototype
+          const native = proto.moveBefore
+          window.__drgMoves = []
+          window.__drgNativeMove = native
+          if (typeof native === 'function') {
+            proto.moveBefore = function (node, reference) {
+              window.__drgMoves.push({ id: node ? node.id : null, ref: reference ? reference.id : null })
+              return native.call(this, node, reference)
+            }
+          }
+          // The shell re-renders the sidebar and lands a sibling above the row, which is what
+          // makes the next placement move it.
+          const foreign = document.createElement('div')
+          foreign.id = 'drg-shell-inserted'
+          row.parentNode.insertBefore(foreign, row)
+          return {
+            supported: typeof native === 'function',
+            focused: document.activeElement === row,
+            expanded: row.getAttribute('aria-expanded'),
+          }
+        })
+        assert.equal(recorder.focused, true, 'the row takes focus')
+        assert.equal(recorder.expanded, 'true', 'and its menu is open')
+        await page.evaluate(() => window.__harness.plugin.carrier.update())
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const placed = await frameHandle.evaluate(() => {
+          const row = document.getElementById('drg-host-row')
+          const previous = row.previousElementSibling
+          return {
+            moves: window.__drgMoves,
+            focused: document.activeElement === row,
+            expanded: row.getAttribute('aria-expanded'),
+            open: row.classList.contains('drg-open'),
+            previousIsBrand: Boolean(previous && previous.hasAttribute('data-window-drag')),
+            nextId: row.nextElementSibling ? row.nextElementSibling.id : null,
+          }
+        })
+        if (recorder.supported) {
+          // Chromium has `moveBefore`: the row keeps the state a remove would have dropped.
+          assert.ok(placed.moves.length >= 1, 'the connected row is moved with moveBefore')
+          assert.equal(placed.moves.at(-1).id, 'drg-host-row')
+          assert.equal(placed.moves.at(-1).ref, 'drg-shell-inserted', 'and lands directly after the brand row')
+          assert.equal(placed.focused, true, 'the row keeps focus across the move')
+          assert.equal(placed.expanded, 'true', 'the open menu survives it')
+          assert.equal(placed.open, true)
+        } else {
+          // No `moveBefore`: the placement falls back to the insertion this code always made. The
+          // position is what the test can require of that path.
+          assert.deepEqual(placed.moves, [])
+        }
+        assert.equal(placed.previousIsBrand, true, 'the row is back in its slot either way')
+        assert.equal(placed.nextId, 'drg-shell-inserted')
+        // The fallback path exists on a page that has no `moveBefore` (an older engine): the row
+        // still lands where it belongs, which is the promise the module makes.
+        const movesBefore = placed.moves.length
+        await frameHandle.evaluate(() => {
+          delete Element.prototype.moveBefore
+          const row = document.getElementById('drg-host-row')
+          const foreign = document.getElementById('drg-shell-inserted')
+          row.parentNode.insertBefore(foreign, row)
+        })
+        await page.evaluate(() => window.__harness.plugin.carrier.update())
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        const fallback = await frameHandle.evaluate(() => {
+          const row = document.getElementById('drg-host-row')
+          const previous = row.previousElementSibling
+          const state = {
+            moves: window.__drgMoves.length,
+            previousIsBrand: Boolean(previous && previous.hasAttribute('data-window-drag')),
+            nextId: row.nextElementSibling ? row.nextElementSibling.id : null,
+            hasMoveBefore: typeof Element.prototype.moveBefore,
+          }
+          // The document is pooled and reused by later scenarios: put the engine's own method back.
+          if (typeof window.__drgNativeMove === 'function') Element.prototype.moveBefore = window.__drgNativeMove
+          return state
+        })
+        assert.equal(fallback.hasMoveBefore, 'undefined', 'this page no longer offers moveBefore')
+        assert.equal(fallback.moves, movesBefore, 'and the fallback is not a moveBefore call')
+        assert.equal(fallback.previousIsBrand, true, 'the fallback still places the row')
+        assert.equal(fallback.nextId, 'drg-shell-inserted')
+        await page.evaluate(() => window.__harness.plugin.carrier.hide())
+        await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
+      })
+
       await t.test('a web carrier whose document is not DSH shows an alert with a way back', async () => {
         await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'open', hostId: 'h_bad' }))
         await page.waitForFunction(
@@ -1232,6 +1400,126 @@ window.ReactDOM = { createRoot }`,
         )
         await patchHost('h_a', { status: 'connected', phase: 'ready', progress: null, logs: [] })
         await page.waitForFunction(() => !document.querySelector('[data-testid="connect-log"]'), { timeout: 5000 })
+        await closeManage()
+      })
+
+      await t.test('the dialog edge appears under forced colors and normal mode is unchanged', async () => {
+        await openManage()
+        /** The dialog and drawer edges as the page computes them right now. */
+        const read = () =>
+          page.evaluate(() => {
+            const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
+            const style = getComputedStyle(dialog)
+            // `offsetWidth`/`offsetHeight` rather than the client rect: the dialog enters with a
+            // 160ms scale animation, and the layout box is what has to stay the same size.
+            const box = { width: dialog.offsetWidth, height: dialog.offsetHeight }
+            // The drawer is not open in this harness, so its rule is proven on an element of that
+            // class: both surfaces the forced-colors block touches have to be covered.
+            const probe = document.createElement('div')
+            probe.className = 'drg-drawer'
+            document.querySelector('.drg-root').appendChild(probe)
+            const drawer = getComputedStyle(probe)
+            const drawerEdge = { width: drawer.borderTopWidth, style: drawer.borderTopStyle }
+            probe.remove()
+            return {
+              forced: matchMedia('(forced-colors: active)').matches,
+              width: style.borderTopWidth,
+              style: style.borderTopStyle,
+              box,
+              background: style.backgroundColor,
+              scrim: getComputedStyle(document.querySelector('.drg-modal-backdrop')).backgroundColor,
+              drawer: drawerEdge,
+            }
+          })
+        const normal = await read()
+        assert.equal(normal.forced, false, 'the normal run is not in forced-colors mode')
+        assert.equal(normal.width, '0px', 'the dialog’s own border stays zero-width')
+        assert.equal(normal.style, 'none')
+        assert.deepEqual(normal.drawer, { width: '0px', style: 'none' }, 'and the drawer declares none')
+        await page.emulateMediaFeatures([{ name: 'forced-colors', value: 'active' }])
+        const forced = await read()
+        assert.equal(forced.forced, true, 'the emulation reached the page')
+        assert.equal(forced.width, '1px', 'the dialog gains a one-pixel edge')
+        assert.equal(forced.style, 'solid')
+        assert.equal(forced.drawer.width, '1px', 'and so does the drawer')
+        assert.equal(forced.drawer.style, 'solid')
+        // Zero pixel difference outside the mode, and inside it `box-sizing: border-box` keeps the
+        // box the same size: the edge is drawn inward, not added to the panel.
+        assert.deepEqual(forced.box, normal.box, 'the panel keeps its size')
+        await page.emulateMediaFeatures([])
+        const restored = await read()
+        assert.deepEqual(restored, normal, 'leaving the mode restores the computed styles exactly')
+        await closeManage()
+      })
+
+      await t.test('platform modes collapse motion and keep the focus ring visible', async () => {
+        await openManage()
+        const target = '[data-testid="host-add"]'
+        const motionOf = () =>
+          page.evaluate((selector) => {
+            // Computed times come back in whichever unit the engine picked (`0.16s`, `160ms`,
+            // and `1e-05s` for the collapsed case), so they are normalised to milliseconds.
+            const toMs = (value) => {
+              const text = String(value).trim()
+              if (text.endsWith('ms')) return Number.parseFloat(text)
+              if (text.endsWith('s')) return Number.parseFloat(text) * 1000
+              return Number.parseFloat(text)
+            }
+            const node = document.querySelector(selector)
+            const style = getComputedStyle(node)
+            return {
+              reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              transition: style.transitionDuration.split(',').map((part) => toMs(part)),
+              animation: toMs(getComputedStyle(document.querySelector('[role="dialog"]')).animationDuration),
+              backdrop: toMs(getComputedStyle(document.querySelector('.drg-modal-backdrop')).animationDuration),
+            }
+          }, target)
+        const running = await motionOf()
+        assert.equal(running.reduced, false, 'the normal run is not reduced-motion')
+        assert.ok(
+          running.transition.length > 0 && running.transition.every((part) => part > 1),
+          `the button animates its colours in the normal run (got ${running.transition.join(', ')})`,
+        )
+        assert.equal(running.animation, 160, 'so does the dialog')
+        await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }])
+        const reduced = await motionOf()
+        assert.equal(reduced.reduced, true, 'the emulation reached the page')
+        assert.ok(
+          reduced.transition.every((part) => part < 0.1),
+          `every transition collapses (got ${reduced.transition.join(', ')})`,
+        )
+        assert.ok(reduced.animation < 0.1, 'the dialog appears instead of animating in')
+        assert.ok(reduced.backdrop < 0.1, 'the scrim too')
+        await page.emulateMediaFeatures([])
+        // Keyboard focus keeps a visible ring: nothing removes an outline without replacing it.
+        // The ring reads two host tokens, and this harness paints no theme at all (every `--dsw-*`
+        // is undefined here, which makes the shorthand invalid and the ring invisible), so the two
+        // values the shell supplies are declared for the measurement and removed afterwards.
+        await page.evaluate(() => {
+          document.documentElement.style.setProperty('--dsw-focus-ring-width', '2px')
+          document.documentElement.style.setProperty('--dsw-focus-ring-color', 'rgb(0, 120, 255)')
+        })
+        await page.keyboard.press('Tab')
+        const ring = await page.evaluate(() => {
+          const node = document.activeElement
+          const style = getComputedStyle(node)
+          return {
+            focusVisible: node.matches(':focus-visible'),
+            inside: Boolean(node.closest('[role="dialog"]')),
+            width: style.outlineWidth,
+            outline: style.outlineStyle,
+            color: style.outlineColor,
+          }
+        })
+        await page.evaluate(() => {
+          document.documentElement.style.removeProperty('--dsw-focus-ring-width')
+          document.documentElement.style.removeProperty('--dsw-focus-ring-color')
+        })
+        assert.equal(ring.inside, true, 'Tab stays inside the open dialog')
+        assert.equal(ring.focusVisible, true, 'the Tab stop is a keyboard focus')
+        assert.equal(ring.outline, 'solid', 'and it paints the host’s focus ring')
+        assert.equal(ring.width, '2px')
+        assert.equal(ring.color, 'rgb(0, 120, 255)', 'with the host’s own ring colour, not a local one')
         await closeManage()
       })
 

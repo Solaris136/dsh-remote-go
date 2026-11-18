@@ -1,4 +1,4 @@
-// client/src/overlay-state.ts - stateRevision/stateInstance/isNewerState/useRemoteState, the only /state subscriber and the log merge owner; after toast.ts, before manage-window.ts.
+// client/src/overlay-state.ts - stateRevision/stateInstance/isNewerState/createFrameBatch/createLogPump/useRemoteState, the only /state subscriber and the log merge owner; after toast.ts, before manage-window.ts.
 //#region 15. overlay host (floating windows + remote window)
 
 /**
@@ -27,6 +27,179 @@ function isNewerState(next, currentRev, currentInstance) {
   return !(typeof currentRev === 'number' && rev <= currentRev)
 }
 
+/** Ask for one callback on the next display frame; the returned handle is handed back to `cancel`. */
+type FrameSchedule = (callback: () => void) => number
+/** Give a scheduled frame back so its callback cannot run (`0` means nothing was scheduled). */
+type FrameCancel = (handle: number) => void
+
+/**
+ * The page's own frame callback, with a task as the fallback: a page that has no
+ * `requestAnimationFrame` (a document stub, or a host that removed it) still has to repaint, and
+ * one `setTimeout(0)` is the same "not this task, but the next" promise.
+ *
+ * Both are looked up per call rather than captured at load: they are globals the embedding page
+ * may replace, and nothing has been scheduled at load time.
+ */
+function scheduleFrame(callback: () => void): number {
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback)
+  if (typeof setTimeout === 'function') return setTimeout(callback, 0)
+  // No timer at all (a host that stripped both): running now beats never painting. `0` tells the
+  // caller nothing is left to cancel.
+  callback()
+  return 0
+}
+function cancelFrame(handle: number): void {
+  if (handle <= 0) return
+  // The frame pair is cancelled by its own API; a page with one but not the other would leave the
+  // callback armed, so both have to be present for the frame path to be taken.
+  if (typeof cancelAnimationFrame === 'function' && typeof requestAnimationFrame === 'function') {
+    cancelAnimationFrame(handle)
+    return
+  }
+  if (typeof clearTimeout === 'function') clearTimeout(handle)
+}
+
+/** The handle `createFrameBatch` returns: one `run` at most per display frame. */
+interface FrameBatch {
+  /** Ask for a run in the next frame; a second request inside the same frame does nothing. */
+  request: () => void
+  /** Run the pending frame now (a caller that cannot wait), then drop it. */
+  flush: () => void
+  /** Drop the pending frame without running it (teardown). */
+  cancel: () => void
+  /** Whether a run is still owed to this frame. */
+  pending: () => boolean
+}
+
+/**
+ * Coalesce a burst of "repaint now" requests into one `run` per display frame.
+ *
+ * Why this exists: the Host answers every log line with its own SSE frame, so a connection emits
+ * dozens per second and each one used to be a React render of the whole overlay — including the
+ * management window a user may be typing into. Merging inside one frame keeps the content and its
+ * order (the frames themselves are not touched here) and costs at most one frame of latency.
+ *
+ * `run` reads whatever is live when it executes, which is the property that makes the deferral
+ * safe: it paints the newest tree, never the one that happened to be current when the frame was
+ * asked for.
+ */
+function createFrameBatch(run: () => void, schedule?: FrameSchedule, cancel?: FrameCancel): FrameBatch {
+  const arm = typeof schedule === 'function' ? schedule : scheduleFrame
+  const drop = typeof cancel === 'function' ? cancel : cancelFrame
+  let handle = 0
+  let armed = false
+  const runNow = () => {
+    armed = false
+    handle = 0
+    run()
+  }
+  return {
+    request() {
+      if (armed) return
+      armed = true
+      handle = arm(runNow)
+    },
+    flush() {
+      if (!armed) return
+      const pending = handle
+      armed = false
+      handle = 0
+      drop(pending)
+      run()
+    },
+    cancel() {
+      if (!armed) return
+      const pending = handle
+      armed = false
+      handle = 0
+      drop(pending)
+    },
+    pending() {
+      return armed
+    },
+  }
+}
+
+/** What the log pump needs from the hook: the live tree, the way back into React, and the panel. */
+interface LogPumpOptions {
+  /** The tree a frame merges into, or `null`/`undefined` while the first `/state` read is in flight. */
+  read: () => unknown
+  /** Hand a merged tree back (the hook keeps it as its live tree and asks React to paint). */
+  deliver: (state: unknown) => void
+  /** The per-host `(attempt, seq)` cursors the merge advances. */
+  cursors: () => LogCursors
+  /** Once the panel is gone nothing may be delivered. */
+  alive: () => boolean
+  schedule?: FrameSchedule
+  cancel?: FrameCancel
+}
+
+/** The connect-log channel's paint path. */
+interface LogPump {
+  /** Queue one `log` frame: no merge and no paint happens here. */
+  push: (frame: unknown) => void
+  /** Apply and paint the queued frames now (the end of an attempt cannot wait a frame). */
+  flush: () => void
+  /** Drop the queued frames and the pending frame (the panel unmounted). */
+  cancel: () => void
+  /** Whether a frame is queued or a paint is owed. */
+  pending: () => boolean
+}
+
+/**
+ * Queue `log` frames and paint them once per display frame.
+ *
+ * The *paint* waits, not the merge, and the merge runs at paint time for two reasons: the frame
+ * order is the merge's ordering key (`applyLogFrame` advances a per-host cursor, so a burst has to
+ * be applied in arrival order), and applying it to the tree React holds *then* means a tree this
+ * page already replaced (a saved setting, a newer state frame) is never painted back over it. The
+ * one tree that can still lose is a `patch` React has queued but not yet committed: it commits
+ * after this paint and is overwritten for a single state frame, which is the same window a
+ * same-tick log frame always had, and the Host's next state frame restores it.
+ *
+ * Rows are not lost when a paint is skipped for an empty state: the next `/state` frame carries
+ * the same tail (R2) and the log channel re-sends nothing it has not already sent.
+ */
+function createLogPump(options: LogPumpOptions): LogPump {
+  const frames: unknown[] = []
+  const batch = createFrameBatch(paint, options.schedule, options.cancel)
+  function paint() {
+    const current = options.read()
+    if (!options.alive() || current === null || current === undefined) {
+      frames.length = 0
+      return
+    }
+    const cursors = options.cursors()
+    let state = current
+    let changed = false
+    for (const frame of frames.splice(0, frames.length)) {
+      const result = applyLogFrame(state, frame, cursors)
+      if (!result.applied) continue
+      state = result.state
+      changed = true
+    }
+    // A frame that only replayed rows already on screen changes nothing: same as R3 returning
+    // `applied: false`, there is no reason to paint.
+    if (changed) options.deliver(state)
+  }
+  return {
+    push(frame) {
+      frames.push(frame)
+      batch.request()
+    },
+    flush() {
+      batch.flush()
+    },
+    cancel() {
+      batch.cancel()
+      frames.length = 0
+    },
+    pending() {
+      return frames.length > 0 || batch.pending()
+    },
+  }
+}
+
 function useRemoteState(initialState, onDownload) {
   const hasInitial = initialState !== undefined && initialState !== null
   const [state, setState] = useState(hasInitial ? initialState : null)
@@ -53,6 +226,23 @@ function useRemoteState(initialState, onDownload) {
     if (hasInitial) seedLogsFromSnapshot(initialState, initialState, cursors)
     cursorsRef.current = cursors
   }
+  /**
+   * The log channel's queue (one paint per display frame, W2). Built once: it only reads refs and
+   * the stable `setState`, so a render-recreated closure is not needed and would drop a queued
+   * frame on every render.
+   */
+  const pumpRef = useRef<LogPump | null>(null)
+  if (pumpRef.current === null) {
+    pumpRef.current = createLogPump({
+      read: () => stateRef.current,
+      deliver: (next) => {
+        stateRef.current = next
+        setState(next)
+      },
+      cursors: () => cursorsRef.current,
+      alive: () => alive.current,
+    })
+  }
   /** R2: merge a payload's authoritative tail, whatever the revision gate later decides. */
   const seedLogs = (next) => {
     const current = stateRef.current
@@ -75,17 +265,16 @@ function useRemoteState(initialState, onDownload) {
   }
   const applyLog = useCallback((frame) => {
     if (!alive.current) return
-    const current = stateRef.current
-    if (current === null) return
-    // R3: dedupe/replace by cursor. `applied: false` means the frame changed nothing visible.
-    const result = applyLogFrame(current, frame, cursorsRef.current)
-    if (!result.applied) return
-    stateRef.current = result.state
-    setState(result.state)
+    // W2: the frame is queued, not merged. `createLogPump` applies every frame that arrived inside
+    // this display frame in arrival order and paints once; the merge rules themselves are
+    // `applyLogFrame`'s and are unchanged.
+    pumpRef.current.push(frame)
   }, [])
   const applyLogEnd = useCallback((end) => {
     // The host left the log-visible set: its cursor is spent. The rows stay until the next state
-    // frame drops them with the connect window (R1), so nothing has to be painted here.
+    // frame drops them with the connect window (R1), so nothing has to be painted here - but a
+    // queued frame still belongs to the cursor this end retires, so it is merged first.
+    pumpRef.current.flush()
     if (end && typeof end.hostId === 'string') cursorsRef.current.delete(end.hostId)
   }, [])
   const downloadHandler = useRef(typeof onDownload === 'function' ? onDownload : () => {})
@@ -144,6 +333,8 @@ function useRemoteState(initialState, onDownload) {
     return () => {
       alive.current = false
       streamRef.current = null
+      // A paint that is still owed must not reach an unmounted panel.
+      pumpRef.current.cancel()
       dispose()
     }
   }, [])

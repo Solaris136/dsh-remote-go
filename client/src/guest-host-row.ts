@@ -238,6 +238,30 @@ function mountHostRow(win) {
       if (found === null) return null
       return { column: found, anchor: found.children.length > 0 ? found.children[0] : null }
     }
+    /**
+     * Put the row under `parent`, directly before `ref` (`null` appends).
+     *
+     * `insertBefore` on an already-connected node runs the DOM's remove-then-insert steps, and the
+     * remove step is what costs the node its focus and resets its state: the row is a `tabindex=0`
+     * button whose open menu is one of its children, so a shell that re-orders the sidebar (or
+     * inserts a sibling above the brand) used to drop both - the menu stayed open but Esc stopped
+     * reaching it. `moveBefore` is the specification's state-preserving move and lands the node in
+     * the same place; it is not in every engine yet, so its absence - or an implementation that
+     * refuses the move - falls through to exactly the insertion this code made before.
+     */
+    var moveRow = function (parent, ref) {
+      if (typeof parent.moveBefore === 'function') {
+        try {
+          parent.moveBefore(row, ref)
+          return
+        } catch (_error) {
+          // swallow-ok: a partial implementation must not cost the row its place; the fallback
+          // below is the same insertion the pre-moveBefore code performed.
+        }
+      }
+      if (ref === null) parent.appendChild(row)
+      else parent.insertBefore(row, ref)
+    }
     var place = function () {
       var slot = findSlot()
       if (slot === null) {
@@ -258,10 +282,10 @@ function mountHostRow(win) {
       }
       row.style.display = ''
       if (slot.anchor === null) {
-        if (row.parentNode !== slot.column) slot.column.appendChild(row)
+        if (row.parentNode !== slot.column) moveRow(slot.column, null)
         return 'installed'
       }
-      if (slot.anchor.nextSibling !== row) slot.column.insertBefore(row, slot.anchor.nextSibling)
+      if (slot.anchor.nextSibling !== row) moveRow(slot.column, slot.anchor.nextSibling)
       return 'installed'
     }
     var closeMenu = function () {
