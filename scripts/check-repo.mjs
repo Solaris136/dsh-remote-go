@@ -138,7 +138,7 @@ if (pkg === null) {
   // strict-mode coverage must differ per suite; a suite nobody lists silently stops running.
   // Every test suite must therefore be in one of the shared group scripts, or explicitly
   // owned by acceptance.yml.
-  const ACCEPTANCE_ONLY_SUITES = new Set(['test/integration/desktop.e2e.js'])
+  const ACCEPTANCE_ONLY_SUITES = new Set(['test/integration/desktop.e2e.ts'])
   const GROUP_SCRIPTS = ['test:integration:local', 'test:integration:external']
   const groupCommands = GROUP_SCRIPTS.map((name) => pkg.scripts?.[name])
   for (const [index, name] of GROUP_SCRIPTS.entries()) {
@@ -149,7 +149,7 @@ if (pkg === null) {
   }
   const suiteText = groupCommands.filter((command) => typeof command === 'string').join('\n')
   const suiteFiles = (await readdir(abs('test/integration'), { withFileTypes: true }).catch(() => []))
-    .filter((entry) => entry.isFile() && /\.(?:test|e2e)\.js$/.test(entry.name))
+    .filter((entry) => entry.isFile() && /\.(?:test|e2e)\.ts$/.test(entry.name))
     .map((entry) => `test/integration/${entry.name}`)
     .sort()
   for (const file of suiteFiles) {
@@ -197,10 +197,11 @@ if (pkg === null) {
 
 // 4. Line hygiene
 const MAX_TEXT_BYTES = 1024 * 1024
-const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store', 'artifacts'])
+// `dist/` is generated output (tsconfig outDir) and is never linted: `prettier` proves the
+// browser half's style, and line hygiene on an emitter's output would fail on the emitter.
+const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git', 'vendor', '.pnpm-store', 'artifacts', 'dist'])
 const SKIPPED_PREFIXES = ['e2e/artifacts/', 'node_modules/', 'vendor/']
-const ROOT_DOTFILES =
-  '.editorconfig .gitattributes .gitignore .nvmrc .node-version package.json index.js client.js'.split(' ')
+const ROOT_DOTFILES = '.editorconfig .gitattributes .gitignore .nvmrc .node-version package.json'.split(' ')
 // TypeScript sources are machine-read the same way their emitted JavaScript is.
 const TABBED_EXTENSIONS = /\.(?:js|mjs|cjs|ts|json|ya?ml)$/
 
@@ -298,7 +299,7 @@ const SECRET_PATTERNS = [
 // carries a base64 body. Requiring a plausible body lets docs/ and test/ be scanned.
 const PRIVATE_KEY_BLOCK = /-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----[\s\S]{0,200}?[A-Za-z0-9+/]{40,}/
 
-const secretFiles = new Set(['client.js', 'index.js'])
+const secretFiles = new Set(['dist/client.js', 'dist/index.js'])
 for (const dir of ['src', 'scripts', '.github', 'docs', 'test', 'e2e']) {
   for (const rel of await walk(dir, () => true)) secretFiles.add(rel)
 }
@@ -359,12 +360,18 @@ for (const name of workflowNames) {
   }
 }
 
-// 7. No build artifact in the index. The `.js` twins of the TypeScript sources and the composed
-// browser half (`client.js`, built from the modules under `client/src/` + `client/template.js`) are
-// generated output (`.gitignore`, decision I in .agents/refactor/DECISIONS.md): `pnpm build`
-// recreates them for every consumer, so a tracked one is a stale copy or a `git add -f` accident -
-// and an accidental commit would resurrect the two-mode layout the decision retired.
-const isArtifact = (rel) => rel === 'index.js' || rel === 'client.js' || (rel.startsWith('src/') && rel.endsWith('.js'))
+// 7. No build artifact in the index. `pnpm build` writes the published layout into `dist/`
+// (tsconfig outDir; the browser half is `dist/client.js`, built from the modules under
+// `client/src/` + `client/template.js`), and `prepack` stages copies at the package root
+// (`index.js`, `client.js`, `src/**/*.js`) for the duration of a `pnpm pack` only
+// (`.gitignore`, decision I in .agents/refactor/DECISIONS.md). `pnpm build` recreates them for
+// every consumer, so a tracked one is a stale copy or a `git add -f` accident - and an
+// accidental commit would resurrect the two-mode layout the decision retired.
+const isArtifact = (rel) =>
+  (rel.startsWith('dist/') && rel.endsWith('.js')) ||
+  rel === 'index.js' ||
+  rel === 'client.js' ||
+  (rel.startsWith('src/') && rel.endsWith('.js'))
 
 function gitTrackedFiles() {
   const result = spawnSync('git', ['ls-files', '-z'], {

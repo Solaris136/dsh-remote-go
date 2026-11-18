@@ -6,11 +6,14 @@ coverage/
 .pnpm-store/
 .agents/
 
-# Build output of `pnpm build` (tsc emits next to each source, D1). Formatting it would fight
-# the emitter and turn every build into a diff. `client.js` is deliberately NOT here: its build
+# Build output of `pnpm build` (tsc emits into dist/). Formatting it would fight the emitter and
+# turn every build into a diff. `dist/client.js` is deliberately NOT here: its build
 # (scripts/build-client.mjs) ends with prettier using this same config, so keeping it in the
-# checked set proves the artifact's style instead of exempting it.
-src/**/*.js
+# checked set proves the artifact's style instead of exempting it. The root entries are the
+# `prepack` stage copies of that same output; they only exist during a pack.
+/dist/index.js
+/dist/src/**/*.js
+/src/**/*.js
 /index.js
 
 # Captured E2E output keeps its byte-level form.

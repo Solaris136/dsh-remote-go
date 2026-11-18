@@ -1,4 +1,7 @@
-// Build the published browser half: the modules listed in `SOURCES` -> `client.js`.
+// Build the published browser half: the modules listed in `SOURCES` -> `dist/client.js`.
+// `scripts/stage-publish.mjs` copies it to `client.js` for the packed tarball (prepack), and
+// `scripts/unstage-publish.mjs` removes that copy again (postpack), so the repository root has
+// no generated file while the published layout is unchanged.
 //
 // Three parts, and the contract-bearing one is never rewritten by a tool:
 //
@@ -16,7 +19,7 @@
 // Why no bundler (deviation from design-client.md §3.1, recorded in the P3a report and confirmed by
 // P3b): with `bundle: true`, esbuild rewrites every module-level `const`/`let` to `var` (a bundle
 // flattens module scopes), which breaks two structural guards that read the artifact text and must
-// not be relaxed: `const CSS = ` at test/unit/guards.test.js:446-451 and `const TONE_VARS = {` at
+// not be relaxed: `const CSS = ` at test/unit/guards.test.ts:446-451 and `const TONE_VARS = {` at
 // :590-596. Source-level concatenation sidesteps the rewrite instead of arguing with it: `const`
 // stays `const`, no helper is emitted, nothing is renamed.
 //
@@ -33,7 +36,7 @@
 // external without bundle"), and the property it has to guarantee is asserted instead — exactly one
 // `require()` call survives and its specifier is `react`, so React is injected by the loader and
 // never inlined (checkArtifact below).
-import { readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import process from 'node:process'
@@ -90,7 +93,9 @@ const SOURCES = [
   'plugin',
 ].map((name) => `${SOURCE_DIR}/${name}.ts`)
 const TEMPLATE = 'client/template.js'
-const OUT = 'client.js'
+// Inside `dist/` like every other emitted file: the staged copy at the package root is what the
+// published `client.js` is, and it only exists between `prepack` and `postpack`.
+const OUT = 'dist/client.js'
 const BUNDLE_MARKER = '/* @@BUNDLE@@ */'
 // Bindings the artifact legitimately declares with a `__` prefix (`__drgExport` is the plugin face
 // the loader template hands back; `__test` is the test seam on it). Any other `__`-prefixed binding
@@ -176,14 +181,14 @@ function checkArtifact(text, sourceText) {
     ],
     [
       (text.match(/const TONE_VARS = \{/g) ?? []).length === 1,
-      'the `const TONE_VARS = {` table must survive (guards.test.js)',
+      'the `const TONE_VARS = {` table must survive (guards.test.ts)',
     ],
-    [text.includes('style.textContent = ['), 'the switcher row stylesheet array must survive (guards.test.js)'],
-    [text.includes("].join('')"), "the switcher row stylesheet `join('')` must survive (guards.test.js)"],
-    [text.includes('function openExternalUrl('), 'the capability bridge must stay a named function (guards.test.js)'],
+    [text.includes('style.textContent = ['), 'the switcher row stylesheet array must survive (guards.test.ts)'],
+    [text.includes("].join('')"), "the switcher row stylesheet `join('')` must survive (guards.test.ts)"],
+    [text.includes('function openExternalUrl('), 'the capability bridge must stay a named function (guards.test.ts)'],
     [
       text.includes("win.open(url, '_blank', 'noopener,noreferrer')"),
-      'the only new-window call site must stay on one line (guards.test.js)',
+      'the only new-window call site must stay on one line (guards.test.ts)',
     ],
     [!/^\s*(?:import|export)\b/m.test(text), 'the artifact must contain no `import`/`export` statement'],
     [!/\b__require\b|\brequire2\b/.test(text), 'a bundler rename (`__require`/`require2`) leaked into the artifact'],
@@ -329,6 +334,7 @@ checkArtifact(first, sourceText)
 for (const leak of guestHelperLeaks(first)) fail(`a guest script closes over a bundler helper: ${leak}`)
 for (const helper of helperDeclarations(first)) fail(`a \`__\`-prefixed binding leaked into the artifact: ${helper}`)
 
+await mkdir(path.dirname(path.join(root, OUT)), { recursive: true })
 await writeFile(path.join(root, OUT), first, 'utf8')
 console.log(
   `[build-client] wrote ${OUT} (${Buffer.byteLength(first)} bytes) from ${SOURCES.length} modules (${SOURCE_DIR}) + ${TEMPLATE}`,

@@ -28,7 +28,9 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import ssh2 from 'ssh2'
-import { buildProbeScript, parseProbeOutput, toProbeFacts } from '../../src/probe.js'
+// The product code is build output now (`pnpm build` -> dist/): the simulator runs the same
+// emitted modules the Host loads, and `src/` no longer contains `.js`.
+import { buildProbeScript, parseProbeOutput, toProbeFacts } from '../../dist/src/probe.js'
 import { createHostKey } from './host-key.mjs'
 
 const { Server: SshServer, Client: SshClient } = ssh2

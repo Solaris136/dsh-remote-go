@@ -53,7 +53,9 @@ async function walkTs(dir, out = []) {
 // The tarball must ship one `.js` per TypeScript source under `src/`. Since P1e those files are
 // not committed: `files[]` plus a real `pnpm build` (run by `prepack`) are the only things that
 // put them in the package, so a packaging regression here publishes a package whose `exports`
-// point at nothing. `index.ts` -> `index.js` is covered by the `mustShip` entry below.
+// point at nothing. Since the dist move the build output lives in `dist/`, and `prepack`'s
+// `scripts/stage-publish.mjs` copies it to the published root layout before pnpm reads `files[]`.
+// `index.ts` -> `dist/index.js` -> `index.js` is covered by the entries below.
 const sourceCount = (await walkTs('src')).length
 
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
@@ -61,11 +63,20 @@ const problems = []
 
 // The vendored ssh2 bundle is imported at runtime by src/ssh.js, so a missing vendor/
 // entry is an install-time crash, not a cosmetic packaging bug.
-const mustShip = `index.js client.js cordis.patch.yml locale/en.json locale/zh.json src/index.js
+//
+// Two lists, because the two sides genuinely differ: the working tree holds the build output in
+// `dist/`, and the tarball holds the staged copy at the package root (`index.js`, `client.js`,
+// `src/**/*.js`). Asserting the tarball layout is what keeps DSH's loader and `exports` working;
+// asserting the `dist/` layout is what proves a `pnpm pack` from this tree would have something
+// to stage.
+const REPOSITORY_FILES = `package.json dist/index.js dist/client.js cordis.patch.yml locale/en.json
+locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js vendor/ssh2.bundle.cjs
+vendor/THIRD_PARTY_NOTICES.md README.md LICENSE`.split(/\s+/)
+const TARBALL_FILES = `index.js client.js cordis.patch.yml locale/en.json locale/zh.json src/index.js
 src/api.js src/service.js vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md README.md LICENSE
 package.json`.split(/\s+/)
 
-for (const file of mustShip) {
+for (const file of REPOSITORY_FILES) {
   if (!existsSync(path.join(root, file))) problems.push(`missing file: ${file}`)
 }
 const files = pkg.files ?? []
@@ -104,13 +115,18 @@ if (tarball) {
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => line.replace(/^package\//, ''))
-  const missing = mustShip.filter((file) => !entries.includes(file))
+  const missing = TARBALL_FILES.filter((file) => !entries.includes(file))
   if (missing.length > 0) problems.push(`tarball is missing: ${missing.join(', ')}`)
   const stray = entries.filter(
     (file) =>
       file.startsWith('test/') || file.startsWith('e2e/') || file.startsWith('_research/') || file.startsWith('docs/'),
   )
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
+  // `dist/` is the working tree's build output, never a published path: the tarball must carry
+  // the staged root layout instead (asserted by `TARBALL_FILES`).
+  const distEntries = entries.filter((file) => file === 'dist' || file.startsWith('dist/'))
+  if (distEntries.length > 0)
+    problems.push(`tarball contains the local build directory: ${distEntries.slice(0, 10).join(', ')}`)
   if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
     problems.push('tarball does not contain src/*.js')
   // P1e: the `.js` files are build output, so the only guarantee that a published module exists

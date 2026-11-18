@@ -20,10 +20,12 @@ const GLOBAL_FLOORS = ['--test-coverage-lines=85', '--test-coverage-branches=70'
 const PER_FILE_FLOORS = new Map([
   // These two files sat far below the aggregate: local-ssh.js was at 29.63% line
   // coverage while the repository-wide number still passed.
-  ['src/local-ssh.js', 95],
-  ['src/local-download.js', 90],
+  ['dist/src/local-ssh.js', 95],
+  ['dist/src/local-download.js', 90],
 ])
+const CLIENT_ARTIFACT = 'dist/client.js'
 const CLIENT_FLOOR = 70
+const TEST_GLOB = 'test/unit/*.test.ts'
 
 function runCoverage(label, args) {
   console.log(`[check-coverage] ${label}`)
@@ -93,10 +95,14 @@ function classifyRun(result, label) {
 
 const sourceRun = runCoverage('runtime sources (aggregate floors 85 / 70 / 80)', [
   '--test-coverage-exclude=vendor/**',
+  // `scripts/build.mjs` mirrors the vendored ssh2 bundle into `dist/vendor/` so the emitted
+  // adapter's `../vendor/ssh2.bundle.cjs` import resolves; it is a third-party blob, not product
+  // code, and measuring it would sink the function floor on its own.
+  '--test-coverage-exclude=dist/vendor/**',
   '--test-coverage-exclude=test/**',
-  '--test-coverage-exclude=client.js',
+  `--test-coverage-exclude=${CLIENT_ARTIFACT}`,
   ...GLOBAL_FLOORS,
-  'test/unit/*.test.js',
+  TEST_GLOB,
 ])
 const sourceFailure = classifyRun(sourceRun, 'runtime-source pass')
 if (sourceFailure) failures.push(sourceFailure)
@@ -116,18 +122,20 @@ for (const [file, floor] of PER_FILE_FLOORS) {
 
 let clientPercentages = new Map()
 if (!testsFailed) {
-  const clientRun = runCoverage('client.js (per-file floor)', [
-    '--test-coverage-include=client.js',
+  const clientRun = runCoverage(`${CLIENT_ARTIFACT} (per-file floor)`, [
+    `--test-coverage-include=${CLIENT_ARTIFACT}`,
     `--test-coverage-lines=${CLIENT_FLOOR}`,
     '--test-coverage-branches=60',
     '--test-coverage-functions=55',
-    'test/unit/*.test.js',
+    TEST_GLOB,
   ])
-  const clientFailure = classifyRun(clientRun, 'client.js pass')
+  const clientFailure = classifyRun(clientRun, `${CLIENT_ARTIFACT} pass`)
   if (clientFailure) failures.push(clientFailure)
   clientPercentages = parseCoverage(clientRun.output)
-  if (!clientPercentages.has('client.js')) {
-    failures.push('client.js: not present in the coverage report (the vm context must load it by absolute path)')
+  if (!clientPercentages.has(CLIENT_ARTIFACT)) {
+    failures.push(
+      `${CLIENT_ARTIFACT}: not present in the coverage report (the vm context must load it by absolute path)`,
+    )
   }
 }
 
@@ -139,5 +147,5 @@ const measured = [...PER_FILE_FLOORS.keys()]
   .map((file) => `${file} ${sourcePercentages.get(file).toFixed(2)}%`)
   .join(', ')
 console.log(
-  `[check-coverage] OK: aggregate floors met; ${measured}; client.js ${clientPercentages.get('client.js').toFixed(2)}%`,
+  `[check-coverage] OK: aggregate floors met; ${measured}; ${CLIENT_ARTIFACT} ${clientPercentages.get(CLIENT_ARTIFACT).toFixed(2)}%`,
 )

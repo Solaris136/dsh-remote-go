@@ -1,13 +1,19 @@
-// One-way artifact gate: every TypeScript source must have a fresh `.js` next to it, `src/` must
-// not contain a `.js` that no `.ts` produces, and the composed browser half (`client.js`, P3a) must
-// still be what its sources produce.
+// One-way artifact gate: every TypeScript source must have a fresh `.js` under `dist/`, `dist/`
+// must not contain a `.js` that no `.ts` produces, and the composed browser half
+// (`dist/client.js`, P3a) must still be what its sources produce.
 //
-// Since P1e the artifacts are not committed (decision I in .agents/refactor/DECISIONS.md), so
-// there is nothing in git to compare against. "Fresh" therefore means "a build of the current
-// tree found nothing to rewrite", "complete" means "the build emitted one artifact per source",
-// and the only other state to reject is an orphan artifact left behind by a deleted `.ts`.
-// The gate is deliberately one-way: no committedness checks, no "commit the artifacts" path and
-// no switch that could restore the two-mode layout.
+// Since P1e the artifacts are not committed (decision I in .agents/refactor/DECISIONS.md), and
+// since the dist move they do not live next to their sources either: `tsconfig.json` emits the
+// whole program into `dist/` (`rootDir: "."` keeps `src/**` and `index.ts` in place under it).
+// "Fresh" therefore means "a build of the current tree found nothing to rewrite", "complete"
+// means "the build emitted one artifact per source at `dist/<source>.js`", and the only other
+// state to reject is an orphan artifact left behind by a deleted `.ts`.
+//
+// The package root is deliberately NOT checked here: `index.js`, `client.js` and `src/**/*.js`
+// exist only while `prepack` has staged them (`scripts/stage-publish.mjs`) and are removed by
+// `postpack` again, so asserting on them would fail on a normal checkout. The gate is one-way:
+// no committedness checks, no "commit the artifacts" path and no switch that could restore the
+// two-mode layout.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
@@ -19,6 +25,12 @@ import { fileURLToPath } from 'node:url'
 // fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
 // space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+
+// The single build output directory (tsconfig `outDir`).
+const DIST = 'dist'
+// The composed browser half, built by `scripts/build-client.mjs` from `client/src/` +
+// `client/template.js`. It is not part of the tsconfig program, so it is checked separately.
+const CLIENT_ARTIFACT = `${DIST}/client.js`
 
 function fail(message) {
   console.error(`[verify-artifacts] ${message}`)
@@ -76,6 +88,9 @@ async function expectedSources() {
   return { sources: [...sources].sort(), declarations }
 }
 
+/** The emitted twin of a source: `src/x.ts` -> `dist/src/x.js`, `index.ts` -> `dist/index.js`. */
+const artifactOf = (source) => `${DIST}/${source.replace(/\.ts$/, '.js')}`
+
 async function hashFile(file) {
   try {
     return createHash('sha256')
@@ -88,20 +103,25 @@ async function hashFile(file) {
 
 const { sources, declarations } = await expectedSources().catch((error) => fail(error.message))
 if (sources.length === 0) fail('no TypeScript sources matched tsconfig.json "include"; nothing would be verified')
-const artifacts = sources.map((source) => source.replace(/\.ts$/, '.js'))
+const artifacts = sources.map(artifactOf)
 
-// Orphans have to be collected before the build: `pnpm build` starts by deleting every generated
-// `.js`, so afterwards an orphan is gone and the chance to report it would be gone with it. An
-// orphan is a `.js` under `src/` without a `.ts` twin - a stale twin that survived a rename/delete.
+// Orphans have to be collected before the build: `pnpm build` starts by deleting `dist/`
+// wholesale, so afterwards an orphan is gone and the chance to report it would be gone with it.
+// An orphan is a `.js` under `dist/` without a `.ts` twin - a stale twin that survived a
+// rename/delete, or output of a source that no longer exists. `dist/client.js` is excluded: its
+// source is the client module list plus `client/template.js`, not a single `.ts` file.
 const orphans = []
-for (const artifact of await walk('src', '.js')) {
-  const source = artifact.replace(/\.js$/, '.ts')
+for (const artifact of await walk(DIST, '.js')) {
+  if (artifact === CLIENT_ARTIFACT) continue
+  const source = artifact.slice(DIST.length + 1).replace(/\.js$/, '.ts')
   if (!existsSync(path.join(root, source))) orphans.push({ artifact, source })
 }
 
 // Snapshot first: anything the build has to create or rewrite is a missing or stale artifact.
+// The client half is snapshotted here as well, before `scripts/build.mjs` deletes `dist/`.
 const before = new Map()
 for (const artifact of artifacts) before.set(artifact, await hashFile(artifact))
+const clientBefore = await hashFile(CLIENT_ARTIFACT)
 
 const build = spawnSync(process.execPath, [path.join(root, 'scripts', 'build.mjs')], {
   cwd: root,
@@ -115,12 +135,8 @@ if (build.status !== 0)
 
 const problems = []
 
-// The browser half is a single composed artifact, not part of the tsconfig program above: it uses
-// the DOM lib while `src/` uses Node's, and its sources are the modules under `client/src/` plus
-// the loader shell in `client/template.js` (P3a, design-client.md C1). Same one-way rule: hash it,
-// let its build run, and require that the build had nothing to rewrite.
-const CLIENT_ARTIFACT = 'client.js'
-const clientBefore = await hashFile(CLIENT_ARTIFACT)
+// Same one-way rule for the browser half: hash it, let its build run, and require that the build
+// had nothing to rewrite.
 const clientBuild = spawnSync(process.execPath, [path.join(root, 'scripts', 'build-client.mjs')], {
   cwd: root,
   stdio: 'inherit',
@@ -152,18 +168,20 @@ for (const [index, artifact] of artifacts.entries()) {
 }
 // The package `exports` entry point is loaded by path, so both halves are asserted explicitly
 // instead of relying on the tsconfig include that happens to cover them: the source must stay
-// compiled, and the emitted file must exist for a plain install to load `index.js`.
+// compiled, and the emitted file must exist for the `prepack` stage to copy `index.js`.
 if (existsSync(path.join(root, 'index.ts')) && !sources.includes('index.ts'))
   problems.push('index.ts: not covered by tsconfig.json "include"; the package entry point would never be built')
-if (!existsSync(path.join(root, 'index.js')))
-  problems.push('index.js: missing; the package "exports" entry point was not produced (source: index.ts)')
+if (!existsSync(path.join(root, `${DIST}/index.js`)))
+  problems.push(`${DIST}/index.js: missing; the package "exports" entry point was not produced (source: index.ts)`)
 
 if (problems.length > 0) {
   for (const problem of problems) console.error(`[verify-artifacts] FAIL: ${problem}`)
-  fail(`${problems.length} problem(s) found; every .ts source must own the .js that pnpm build emits, and nothing else`)
+  fail(
+    `${problems.length} problem(s) found; every .ts source must own the .js that pnpm build emits under ${DIST}/, and nothing else`,
+  )
 }
 console.log(
-  `[verify-artifacts] OK: ${artifacts.length} artifact(s) freshly produced from ${sources.length} source(s)` +
+  `[verify-artifacts] OK: ${artifacts.length} artifact(s) freshly produced under ${DIST}/ from ${sources.length} source(s)` +
     (declarations > 0 ? ` (${declarations} declaration file(s) skipped)` : '') +
     `; ${CLIENT_ARTIFACT} freshly composed from the client/src modules + client/template.js; no orphan artifacts`,
 )

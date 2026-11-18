@@ -13,7 +13,9 @@
     "noEmitOnError": true,
     "declaration": false,
     "sourceMap": false,
-    "noEmit": false
+    "noEmit": false,
+    "outDir": "./dist",
+    "rootDir": "."
   },
   "include": ["src/**/*.ts", "index.ts", "types/**/*.d.ts"]
 }
