@@ -107,6 +107,7 @@
     "gate": "pnpm build && node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/verify-artifacts.mjs && pnpm run verify:types && node scripts/check-coverage.mjs && pnpm pack --pack-destination artifacts && node scripts/pack-check.mjs --find artifacts",
     "verify": "pnpm build && node scripts/check-repo.mjs && prettier --check . && node scripts/check-syntax.mjs && node scripts/check-workflows.mjs && node scripts/pack-check.mjs && node scripts/verify-artifacts.mjs && pnpm run verify:types && node scripts/check-coverage.mjs && node --test --test-concurrency=1 \"test/integration/*.test.js\" \"test/integration/*.e2e.js\"",
     "build": "node scripts/build.mjs && node scripts/build-client.mjs",
+    "clean": "node scripts/clean.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck:client": "node node_modules/typescript/bin/tsc -p client/tsconfig.json --noEmit",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
