@@ -1,6 +1,10 @@
 /**
- * The `HostRuntime` session state machine, type side: the 34 events, the effects they produce, and
+ * The `HostRuntime` session state machine, type side: the 31 events, the effects they produce, and
  * the read-only scope the pure `transition()` gets its non-state facts from.
+ *
+ * Liveness is deliberately absent. The watchdog (`watchdog.ts`) owns the four episode fields and
+ * publishes its own bus events, so this machine has no `remote.*` event and no `episode`/`bus`
+ * effect: an FSM event that nothing dispatches was a second source of truth for the same fields.
  *
  * design-arch §7.5 is the authority for every declaration here; where this file adds a member it
  * says so next to the member (see `hostkey.timeout.view`, the `restore-stop` patch and the six
@@ -27,15 +31,15 @@ export interface HostKeyInfo {
 /** `arm()`/`disarm()` name a timer of the `timers` block. */
 export type TimerName = 'reconnect' | 'idle' | 'heartbeat' | 'remoteCheck'
 
+/**
+ * The timers a rule may arm. `remoteCheck` is the watchdog's own confirm probe: since the FSM no
+ * longer owns liveness no rule arms it (`watchdog.ts#scheduleRemoteCheck` does), but `shutdown`
+ * still disarms it, so the name stays in `TimerName` and out of this union.
+ */
+export type ArmableTimer = Exclude<TimerName, 'remoteCheck'>
+
 /** The four levels the connect log understands (`connect-progress.ts` writes them). */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
-
-/** One liveness episode as the SSE channel publishes it; structurally `RemoteUnreachableInfo`. */
-export interface EpisodeInfo {
-  phase: 'suspected' | 'confirmed' | 'recovered'
-  source: EpisodeSource
-  failures?: number
-}
 
 /** The watchdog bus message (§1.7 replaces the two reverse callbacks with it). */
 export type WatchdogEvent =
@@ -83,15 +87,13 @@ export type Effect =
   | { type: 'flushLogs' }
   | { type: 'log'; level: LogLevel; message: string }
   | { type: 'logFailure'; phase: string | null; label?: BilingualText; view?: ErrorView }
-  | { type: 'arm'; timer: TimerName; ms: number }
+  | { type: 'arm'; timer: ArmableTimer; ms: number }
   | { type: 'disarm'; timer: TimerName }
   | { type: 'settlePrompts' }
   | { type: 'closeLink' }
   | { type: 'teardown'; options: TeardownEffectOptions }
   | { type: 'apply'; patch: RuntimePatch }
   | { type: 'run'; activity: Activity; token: number }
-  | { type: 'episode'; info: EpisodeInfo }
-  | { type: 'bus'; event: WatchdogEvent }
 
 /* ── events ───────────────────────────────────────────────────────────────────────────────── */
 
@@ -134,9 +136,6 @@ export interface EventPayloads {
   'connect.failed': { view: ErrorView; phase: ConnectPhase | null }
   'disconnect.requested': { stopped?: boolean; stopRemote?: boolean }
   'idle.elapsed': NoPayload
-  'remote.suspected': { source: EpisodeSource }
-  'remote.confirmed': { source: EpisodeSource; failures: number }
-  'remote.recovered': { source: EpisodeSource; needRepair: boolean }
   'repair.requested': { token: number }
   'repair.finished': { ok: boolean }
   'restart.requested': { token: number; pid: number | null; port: number | null }
@@ -160,7 +159,7 @@ export interface EventPayloads {
   'host.removed': { keepAlive: KeepAlive }
 }
 
-/** The 34 event names, in the order design-arch §2.4.2 lists them. */
+/** The 31 event names, in the order design-arch §2.4.2 lists them (minus the three dead `remote.*`). */
 export const EVENT_TYPES = [
   'connect.requested',
   'step.entered',
@@ -177,9 +176,6 @@ export const EVENT_TYPES = [
   'connect.failed',
   'disconnect.requested',
   'idle.elapsed',
-  'remote.suspected',
-  'remote.confirmed',
-  'remote.recovered',
   'repair.requested',
   'repair.finished',
   'restart.requested',
@@ -201,7 +197,7 @@ export const EVENT_TYPES = [
 export type EventType = (typeof EVENT_TYPES)[number]
 
 /**
- * Compile-time proof that the payload map and the runtime tuple name the same 34 events: a
+ * Compile-time proof that the payload map and the runtime tuple name the same 31 events: a
  * mismatch in either direction is a type error here, before any test runs.
  */
 type EventTypeParity = [Exclude<EventType, keyof EventPayloads>, Exclude<keyof EventPayloads, EventType>] extends [
@@ -247,6 +243,5 @@ export interface EventScope {
     readonly reconnectMs: number
     readonly idleMs: number
     readonly heartbeatMs: number
-    readonly remoteConfirmMs: number
   }
 }

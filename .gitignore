@@ -18,10 +18,10 @@ coverage/
 # `src/**/*.ts` -> dist/src/**/*.js, plus the composed browser half dist/client.js). Since P1e
 # the artifacts are generated output, not source, and are no longer committed.
 #
-# The published tarball still ships them at the package root: `prepack` runs
-# scripts/stage-publish.mjs, which copies dist/ to `index.js` / `client.js` / `src/**/*.js`, and
-# `postpack` removes those copies again. The root entries below therefore exist only for the
-# duration of a `pnpm pack`, and `files[]` in package.json is honoured regardless of .gitignore.
+# The published tarball ships exactly that `dist/` tree: `package.json` `exports` and `files[]`
+# point into it, and `prepack` only verifies the build (no staging copy). The three root entries
+# below are legacy guardrails from the build that emitted in place; `scripts/build.mjs` deletes
+# such a file if an old checkout still has one, and these patterns keep it out of a commit.
 /dist/
 /index.js
 /src/**/*.js

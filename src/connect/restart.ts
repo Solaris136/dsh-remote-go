@@ -4,7 +4,7 @@
  * random port, verify and resume.
  */
 import { REMOTE_START_TIMEOUT_MS } from '../constants.js'
-import type { Config, ConnectCtx, HostState, RemoteDeps, Reporter, Store, Transport } from '../context.js'
+import type { ConnectCtx } from '../context.js'
 import { errors, toErrorView } from '../errors.js'
 import { closeTunnel, endLinkWork, isLinkWorkCurrent } from '../host-lifecycle.js'
 import type { HostRuntime } from '../host-runtime.js'
@@ -81,11 +81,13 @@ export async function restartHost(ctx: ConnectCtx, runtime: HostRuntime): Promis
   return { accepted: true }
 }
 
-async function runRestart(
-  ctx: HostState & Config & Transport & RemoteDeps & Reporter & Store,
-  runtime: HostRuntime,
-  token: number,
-): Promise<void> {
+/**
+ * The action body: proof of ownership, the conflict prompt, stop/start, the registry rewrite, the
+ * tunnel and the verify step all read the same six slices as its entry point, so it takes
+ * `ConnectCtx` rather than a second copy of the intersection (the gate's `godCtxParams` entry
+ * names it).
+ */
+async function runRestart(ctx: ConnectCtx, runtime: HostRuntime, token: number): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)

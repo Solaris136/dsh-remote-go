@@ -110,8 +110,6 @@ function promptEffects(ctx: PromptCtx): DispatchHost {
       }
       noEffect('apply')
     },
-    episode: () => noEffect('episode'),
-    bus: () => noEffect('bus'),
     flushLogs: () => {
       // No prompt rule flushes the log ring.
     },

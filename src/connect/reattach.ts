@@ -4,16 +4,7 @@
  * new launch token and verify. The SSH session and the host entry are untouched.
  */
 import { REMOTE_REATTACH_ATTEMPTS, REMOTE_REATTACH_INTERVAL_MS } from '../constants.js'
-import type {
-  Config,
-  ConnectCtx,
-  HostState,
-  ReattachRequest,
-  RemoteDeps,
-  Reporter,
-  Store,
-  Transport,
-} from '../context.js'
+import type { ConnectCtx, ReattachRequest } from '../context.js'
 import { errors, toErrorView } from '../errors.js'
 import { closeTunnel, endLinkWork, isLinkWorkCurrent } from '../host-lifecycle.js'
 import type { HostRuntime } from '../host-runtime.js'
@@ -72,12 +63,12 @@ export async function reattachHost(
   return { accepted: true }
 }
 
-async function runReattach(
-  ctx: HostState & Config & Transport & RemoteDeps & Reporter & Store,
-  runtime: HostRuntime,
-  info: ReattachRequest,
-  token: number,
-): Promise<void> {
+/**
+ * The action body: the re-attach re-reads the remote state, rewrites the run registry, rebuilds the
+ * tunnel and verifies the UI, so it spans all six slices exactly like its entry point — the same
+ * `ConnectCtx`, not a copied intersection (the gate's `godCtxParams` entries name it).
+ */
+async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: ReattachRequest, token: number): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   const layout = layoutForRuntime(runtime)

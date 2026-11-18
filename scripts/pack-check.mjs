@@ -50,11 +50,46 @@ async function walkTs(dir, out = []) {
   return out
 }
 
+/** Repository-relative `.js` artifacts under `dir`. */
+async function walkJs(dir, out = []) {
+  for (const entry of await readdir(path.join(root, dir), { withFileTypes: true }).catch(() => [])) {
+    const rel = `${dir}/${entry.name}`
+    if (entry.isDirectory()) await walkJs(rel, out)
+    else if (entry.isFile() && entry.name.endsWith('.js')) out.push(rel)
+  }
+  return out
+}
+
 // The tarball ships built JavaScript, and the build output lives in `dist/`: `exports["."]` and
 // `exports["./client"]` point into it directly, so there is no staged copy at the package root.
 // DSH's client loader reads `exports["./client"]` (dsh-client-modules/clientExportOf), which is
 // what makes the dist layout safe to publish instead of a root copy.
-const sourceCount = (await walkTs('src')).length
+//
+// One artifact per source, compared as a *set*: `dist/` plus the source path with `.ts` → `.js`.
+// A count comparison let one stale artifact hide a missing one, and reported only numbers; this
+// names the file that is missing (a `.ts` added without a rebuild) or extra (a `.ts` deleted
+// without a clean rebuild).
+const expectedArtifacts = new Set((await walkTs('src')).map((source) => `dist/${source.replace(/\.ts$/, '.js')}`))
+
+/**
+ * Compare one artifact set against the sources, naming both directions.
+ * @param actual - the `.js` paths that were found (working tree or tarball entry names).
+ * @param where - what the set describes, for the message.
+ */
+function compareArtifacts(actual, where) {
+  const missing = [...expectedArtifacts].filter((file) => !actual.has(file)).sort()
+  const extra = [...actual].filter((file) => !expectedArtifacts.has(file)).sort()
+  if (missing.length > 0) {
+    problems.push(
+      `${where} is missing ${missing.length} artifact(s) that a src/ source requires (rebuild): ${missing.join(', ')}`,
+    )
+  }
+  if (extra.length > 0) {
+    problems.push(
+      `${where} carries ${extra.length} artifact(s) with no src/ source (stale build output): ${extra.join(', ')}`,
+    )
+  }
+}
 
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
 const problems = []
@@ -89,6 +124,12 @@ const exportPaths = pkg.exports && typeof pkg.exports === 'object' ? pkg.exports
 if (exportPaths['.'] !== './dist/index.js') problems.push('exports["."] must be "./dist/index.js"')
 if (exportPaths['./client'] !== './dist/client.js') problems.push('exports["./client"] must be "./dist/client.js"')
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
+
+// The working tree is the first half of the same contract: every source has its artifact, and no
+// artifact survives a deleted source. The `--find artifacts` pass then checks the tarball again.
+if (!tarball) {
+  compareArtifacts(new Set(await walkJs('dist/src')), 'dist/src')
+}
 
 if (tarball) {
   if (!existsSync(tarball)) fail(`tarball not found: ${tarball}`)
@@ -125,11 +166,8 @@ if (tarball) {
   const typescriptSources = entries.filter((file) => file.endsWith('.ts'))
   if (typescriptSources.length > 0)
     problems.push(`tarball contains TypeScript sources: ${typescriptSources.slice(0, 10).join(', ')}`)
-  const shippedArtifacts = entries.filter((file) => file.startsWith('dist/src/') && file.endsWith('.js'))
-  if (shippedArtifacts.length < sourceCount)
-    problems.push(
-      `tarball ships ${shippedArtifacts.length} dist/src/**/*.js but the repository has ${sourceCount} TypeScript source(s); run pnpm build before packing`,
-    )
+  const shippedArtifacts = new Set(entries.filter((file) => file.startsWith('dist/src/') && file.endsWith('.js')))
+  compareArtifacts(shippedArtifacts, 'the tarball')
   // Assert the vendor runtime explicitly: the mirror lives next to the emitted adapter, so a
   // `files[]` or build regression that drops it is an install-time crash, not a cosmetic one.
   if (!entries.includes('dist/vendor/ssh2.bundle.cjs'))

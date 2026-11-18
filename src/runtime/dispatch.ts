@@ -40,19 +40,9 @@ import {
 } from '../constants.js'
 import type { WatchdogCtx } from '../context.js'
 import type { ErrorView } from '../errors.js'
-import type { Activity, EpisodeState, HostRuntime, Progress, RuntimeSession } from '../host-runtime.js'
+import type { Activity, HostRuntime, Progress, RuntimeSession } from '../host-runtime.js'
 import type { BilingualText } from '../util.js'
-import type {
-  Effect,
-  EpisodeInfo,
-  Event,
-  EventScope,
-  LogLevel,
-  RuntimePatch,
-  TeardownEffectOptions,
-  TimerName,
-  WatchdogEvent,
-} from './events.js'
+import type { Effect, Event, EventScope, LogLevel, RuntimePatch, TeardownEffectOptions, TimerName } from './events.js'
 
 /* ── storage form ↔ pure state ───────────────────────────────────────────────────────────── */
 
@@ -75,18 +65,14 @@ export function isActivity(value: string | null): value is Activity {
  * Read the session block out of the flat runtime (design-arch §2.2 keeps the fields flat; this is
  * the only adapter between storage and the pure machine).
  *
- * `episodeSource`/`episodeCooldownUntil` are the storage form of `episode`: the machine keeps a
- * single object, the runtime three fields. The episode's phase is not persisted today, so the read
- * uses `'suspected'`; it only matters for an in-flight `remote.*` transition, which this step does
- * not dispatch (the watchdog keeps its own episode code until the bus lands in P2 step 9).
+ * The four liveness fields (`remoteEpisode`/`episodeSource`/`episodeCooldownUntil`/`remoteFailures`)
+ * are **not** read here: `watchdog.ts` owns them and never dispatches an event, so a read would only
+ * round-trip the same value back. They used to be read for the dead `remote.*` transitions, which
+ * nothing dispatched.
  * @param runtime - the session block of one host.
  * @returns the pure session state.
  */
 export function readSession(runtime: RuntimeSession): SessionState {
-  const episode: EpisodeState | null =
-    runtime.remoteEpisode === true && typeof runtime.episodeSource === 'string'
-      ? { source: runtime.episodeSource, phase: 'suspected', cooldownUntil: Number(runtime.episodeCooldownUntil) || 0 }
-      : null
   const progress: Progress | null = runtime.progress ?? null
   return {
     status: runtime.status,
@@ -101,9 +87,7 @@ export function readSession(runtime: RuntimeSession): SessionState {
     connectCancelled: runtime.connectCancelled === true,
     transportLost: runtime.transportLost === true,
     reconnectAttempts: Number(runtime.reconnectAttempts) || 0,
-    remoteFailures: Number(runtime.remoteFailures) || 0,
     epoch: Number(runtime.linkToken) || 0,
-    episode,
   }
 }
 
@@ -135,10 +119,6 @@ export interface DispatchHost {
   teardown(runtime: HostRuntime, options: TeardownEffectOptions, event: Event): Promise<void>
   /** `apply`: hand one named data patch to the block's owner. */
   apply(runtime: HostRuntime, patch: RuntimePatch): void
-  /** `episode`: publish a liveness episode (the SSE `remote-unreachable` event). */
-  episode(runtime: HostRuntime, info: EpisodeInfo): void
-  /** `bus`: the watchdog event the retired reverse callbacks become (P2 step 9). */
-  bus(runtime: HostRuntime, event: WatchdogEvent): void
   /** `flushLogs`: the flush timer lives inside `connect-progress`; nothing else to do. */
   flushLogs(runtime: HostRuntime): void
 }
@@ -156,8 +136,6 @@ export interface DispatchOptions {
   run?: (activity: Activity, token: number) => void
   /** `arm(reconnect)` from `reconnect.scheduled`: the one place a retry timer may be created. */
   armReconnect?: (ms: number) => void
-  /** `arm(remoteCheck)`: the watchdog's confirm probe (P2 step 9 routes the events that need it). */
-  armRemoteCheck?: (ms: number) => void
   /**
    * The caller keeps the current link on purpose: skip `mark-detached`, `closeLink` and
    * `teardown`. Today's restart has one branch that publishes a failure while the old tunnel
@@ -224,7 +202,7 @@ export function promptScopeFacts(runtime: HostRuntime): DispatchScopeFacts {
     keepAlive: runtime.entry.keepAlive,
     remoteStarted: runtime.remote.pid !== null || runtime.remote.port !== null,
     recoverable: false,
-    delays: { reconnectMs: 0, idleMs: 0, heartbeatMs: 0, remoteConfirmMs: 0 },
+    delays: { reconnectMs: 0, idleMs: 0, heartbeatMs: 0 },
   }
 }
 
@@ -257,7 +235,6 @@ export function scopeFactsFor(ctx: WatchdogCtx, runtime: HostRuntime, event: Eve
       reconnectMs: Number(settings.autoReconnect.baseDelayMs) || 0,
       idleMs: idleMinutes * 60_000,
       heartbeatMs: heartbeatMs(settings.remoteHeartbeat),
-      remoteConfirmMs: Number(ctx.timers.remoteConfirmDelayMs) || 0,
     },
   }
 }
@@ -379,8 +356,6 @@ async function runEffects(
         if (effect.timer === 'reconnect') {
           // Single source: see the module comment. Only `reconnect.scheduled` owns the timer.
           if (event.type === 'reconnect.scheduled') options.armReconnect?.(effect.ms)
-        } else if (effect.timer === 'remoteCheck') {
-          options.armRemoteCheck?.(effect.ms)
         } else {
           host.arm(runtime, effect.timer, effect.ms)
         }
@@ -414,12 +389,6 @@ async function runEffects(
         }
         options.run(effect.activity, effect.token)
         break
-      case 'episode':
-        host.episode(runtime, effect.info)
-        break
-      case 'bus':
-        host.bus(runtime, effect.event)
-        break
     }
   }
 }
@@ -434,7 +403,7 @@ async function runEffects(
  * classify a failure).
  * @param host - the effects, bound to the caller's service context.
  * @param runtime - the host runtime.
- * @param event - one of the 34 events.
+ * @param event - one of the 31 events.
  * @param facts - the read-only scope facts.
  * @param options - caller semantics and the per-call effect hooks.
  * @returns the transition result: `ok:true` after the effects ran, or the refusal (state unchanged).

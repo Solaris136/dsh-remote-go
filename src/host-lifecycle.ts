@@ -493,8 +493,8 @@ export async function shutdownAll(ctx: TeardownCtx): Promise<void> {
  * The effects of this module, bound to one context.
  *
  * `host-lifecycle` owns the timers and the teardown path, so it builds the effect object itself
- * instead of importing `runtime/effects.ts` (which imports this module). `run`/`episode`/`bus`
- * are never reached from here; they are declared because the interface requires them.
+ * instead of importing `runtime/effects.ts` (which imports this module). `run` is never reached
+ * from here; it is declared because the interface requires it.
  * @param ctx - the watchdog/teardown context.
  * @returns the effect owner for one dispatch call.
  */
@@ -567,20 +567,6 @@ function effectsOf(ctx: TeardownCtx): DispatchHost {
       }
       runtime.remote.uiReady = patch.uiReady === true
       runtime.remote.localPort = patch.localPort
-    },
-    episode: (runtime, info) => {
-      ctx.onRemoteUnreachable?.(runtime, info)
-    },
-    bus: (runtime, event) => {
-      // The FSM's watchdog requests go to the same bus the liveness detector publishes on;
-      // `connect/watchdog.ts` is the only subscriber. No rule reachable from this module emits
-      // one, so this branch is currently unreachable as well — it exists so a future transition
-      // cannot quietly reintroduce a reverse callback.
-      if (event.kind === 'confirmed') {
-        ctx.bus.publish({ kind: 'confirmed', hostId: runtime.id, reason: event.reason, source: event.source })
-        return
-      }
-      ctx.bus.publish({ kind: 'recovered', hostId: runtime.id, source: event.source })
     },
     flushLogs: () => {
       // The coalescing flush belongs to `connect-progress`; no rule reached from this module emits it.

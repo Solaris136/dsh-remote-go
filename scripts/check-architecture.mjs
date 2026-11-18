@@ -1,8 +1,9 @@
 // Structural gates that stay cheap and low-noise: file length, the god-`ctx` ban, barrels,
 // runtime-state ownership, the client module size, and the ratchet that keeps each of them from
-// creeping back up. Node built-ins only, no AST: the rules are decided on "comments blanked,
-// string bodies masked" text, which is enough for these shapes and is what makes the script fast
-// enough to run before prettier in `pnpm gate` (design-contract §4).
+// creeping back up. Everything but the god-`ctx` rule is decided on "comments blanked, string
+// bodies masked" text, which is enough for those shapes and is what makes the rest of the script
+// fast enough to run before prettier in `pnpm gate` (design-contract §4). The god-`ctx` rule uses
+// the TypeScript compiler API instead, because a text scan cannot see through a type alias.
 //
 // Exit codes: 0 = all rules within budget, 1 = at least one violation.
 // `--update` lowers the recorded numbers to the actual values; it can never raise one, because a
@@ -12,6 +13,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const budgetPath = path.join(root, 'scripts', 'architecture-budget.json')
@@ -187,6 +189,42 @@ for (const name of ['fileLength', 'clientFileLength', 'godCtxParams', 'barrelReE
 }
 const measured = {}
 
+// ---- stage / terminal stage -----------------------------------------------------------------
+//
+// `stage` is the phase this tree is reviewed at; `terminalStage` is the phase it must arrive at.
+// The pair is what makes `terminalStage` more than a comment: at the terminal stage the budget may
+// not carry a single exemption, so the tree has to *arrive* clean instead of declaring itself clean.
+const STAGE_PATTERN = /^P[1-9]$/
+const stageNumber = (value) => Number(String(value).slice(1))
+const stage = budget.stage
+const terminalStage = budget.terminalStage
+if (typeof stage !== 'string' || !STAGE_PATTERN.test(stage)) {
+  console.error(
+    `[check-architecture] FAIL: scripts/architecture-budget.json — stage — must be a stage such as "P6" (found ${JSON.stringify(stage)}); without it the terminal stage cannot be enforced`,
+  )
+  process.exit(1)
+}
+if (typeof terminalStage !== 'string' || !STAGE_PATTERN.test(terminalStage)) {
+  console.error(
+    `[check-architecture] FAIL: scripts/architecture-budget.json — terminalStage — must be a stage such as "P7" (found ${JSON.stringify(terminalStage)})`,
+  )
+  process.exit(1)
+}
+if (stageNumber(terminalStage) < stageNumber(stage)) {
+  console.error(
+    `[check-architecture] FAIL: scripts/architecture-budget.json — terminalStage — ${terminalStage} is before stage ${stage}; a terminal state cannot already be behind the tree`,
+  )
+  process.exit(1)
+}
+const atTerminalStage = stage === terminalStage
+const p7Todo = budget.p7Todo ?? []
+if (!Array.isArray(p7Todo) || p7Todo.some((item) => typeof item !== 'string' || item.trim() === '')) {
+  console.error(
+    '[check-architecture] FAIL: scripts/architecture-budget.json — p7Todo — must be an array of non-empty strings naming the work still owed before the terminal stage',
+  )
+  process.exit(1)
+}
+
 /**
  * Compare one rule's measured violations with its recorded budget.
  *
@@ -271,94 +309,195 @@ async function ruleClientFileLength() {
 
 // ---- C: god-ctx ban -------------------------------------------------------------------------
 //
-// The gate recognises exactly two type names, `Ctx` and `ConnectCtx`, because those are the names
-// `src/context.ts` exports (design-contract §4.3: keep the type name in one place, and the rule
-// only has to know that one). Renaming the alias would silently switch the rule off, which is why
-// the six allowed entries are listed by *function name* in the budget: a rename there is a
-// reviewed diff, not a quiet escape.
+// The rule is decided on types, not on text: `typescript` is a devDependency, so this script builds
+// the same program `tsc` does and asks the checker which slice each parameter really needs. The old
+// text scan only recognised the two *spellings* `Ctx` and `ConnectCtx`, which meant a one-line alias
+// (`type PipelineCtx = HostState & … & Store`) or a copied intersection switched the rule off while
+// the gate kept saying zero violations.
+//
+// A parameter violates when its type — aliases, `Pick<>`s and intersections expanded by the
+// checker — is assignable to **all six** slices `src/context.ts` exports (`HostState`, `Config`,
+// `Transport`, `RemoteDeps`, `Reporter`, `Store`). Five of them (`WatchdogCtx`) is legal: that is
+// what the staging calls "not the god context". The allowed sites are listed per
+// `{ file, function, reason }` in the budget, so two functions with the same name are not
+// interchangeable: an entry whose file does not carry the violating function is an error.
 
-/** A function declaration whose first parameter is typed as the whole context. */
-const FN_DECL =
-  /(?:^|[^\w$.])(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(\s*([A-Za-z_$][\w$]*)\s*:\s*(ConnectCtx|Ctx)\b/dg
-/** The same shape as an arrow/function expression assigned to a name. */
-const FN_EXPR =
-  /(?:^|[^\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?\(\s*([A-Za-z_$][\w$]*)\s*:\s*(ConnectCtx|Ctx)\b/dg
-/** Every `name: Ctx` occurrence; the ones the two patterns above did not claim are inspected too. */
-const TYPED_CTX = /([A-Za-z_$][\w$]*)\s*:\s*(ConnectCtx|Ctx)\b/dg
+const SLICES = ['HostState', 'Config', 'Transport', 'RemoteDeps', 'Reporter', 'Store']
 
-/**
- * The `(` that opens the parameter list a position belongs to.
- *
- * A brace or a `;` at the same depth ends the search: a `name: Ctx` inside a type literal or a
- * block is not a parameter (`interface Options { handler: Ctx }` must not fail the gate).
- * @param code - the comment- and string-masked source.
- * @param index - the position of the parameter name.
- * @returns the opener's index, or -1 when the position is not inside a parameter list.
- */
-function enclosingParen(code, index) {
-  let depth = 0
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const char = code[cursor]
-    if (char === ')') depth += 1
-    else if (char === '(') {
-      if (depth === 0) return cursor
-      depth -= 1
-    } else if (char === '{' || char === '}' || char === ';') {
-      if (depth === 0) return -1
-    }
+/** The repo's own compiler options, so the gate resolves exactly what `tsc` resolves. */
+function architectureProgram(fileNames) {
+  const configFile = ts.readConfigFile(path.join(root, 'tsconfig.json'), ts.sys.readFile)
+  if (configFile.error) {
+    problems.push(
+      `tsconfig.json:${''} — god-ctx — unreadable (${ts.flattenDiagnosticMessageText(configFile.error.messageText, ' ')}); the type gate cannot run`,
+    )
+    return null
   }
-  return -1
+  const parsed = ts.parseJsonConfigFileContent(configFile.config ?? {}, ts.sys, root)
+  return ts.createProgram({ rootNames: fileNames, options: { ...parsed.options, noEmit: true } })
 }
 
-/** Every whole-context parameter in one file, attributed to a function name when possible. */
-function godCtxSites(rel, text) {
-  const code = structure(text)
-  const attributed = new Set()
-  const sites = []
-  for (const pattern of [FN_DECL, FN_EXPR]) {
-    for (const match of code.matchAll(pattern)) {
-      const name = match[1]
-      const type = match[3]
-      attributed.add(match.indices[2][0])
-      sites.push({ rel, line: lineOf(code, match.indices[2][0]), name, type })
-    }
+/** The six slice types, resolved through the checker (so a renamed export fails here, not silently). */
+function sliceTypes(checker, program) {
+  const contextFile = program.getSourceFile(path.join(root, 'src', 'context.ts'))
+  if (contextFile === undefined) {
+    problems.push('src/context.ts — god-ctx — missing; the six slice types cannot be resolved')
+    return null
   }
-  for (const match of code.matchAll(TYPED_CTX)) {
-    const start = match.indices[1][0]
-    if (attributed.has(start)) continue
-    const before = code.slice(0, start).replace(/\s+$/, '')
-    // `): Ctx` is a return type and `= Ctx` is a type alias side: neither is a parameter.
-    if (before.endsWith(')') || before.endsWith('=')) continue
-    if (!before.endsWith('(') && !before.endsWith(',')) continue
-    if (enclosingParen(code, start) < 0) continue
-    sites.push({ rel, line: lineOf(code, start), name: null, type: match[2] })
+  const moduleSymbol = checker.getSymbolAtLocation(contextFile)
+  if (moduleSymbol === undefined) {
+    problems.push('src/context.ts — god-ctx — the module has no symbol; the six slice types cannot be resolved')
+    return null
+  }
+  const exported = new Map(checker.getExportsOfModule(moduleSymbol).map((symbol) => [symbol.name, symbol]))
+  const types = []
+  for (const name of SLICES) {
+    const symbol = exported.get(name)
+    if (symbol === undefined) {
+      problems.push(`src/context.ts — god-ctx — the slice \`${name}\` is not exported; the gate cannot expand it`)
+      return null
+    }
+    const resolved = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol
+    types.push({ name, type: checker.getDeclaredTypeOfSymbol(resolved) })
+  }
+  return types
+}
+
+/** `Pick<>`/generics can hide behind a type parameter: measure the constraint, not the parameter. */
+function constrain(checker, type) {
+  return type.isTypeParameter?.() === true ? (checker.getBaseConstraintOfType(type) ?? type) : type
+}
+
+/**
+ * Which of the six slices a type is assignable to.
+ *
+ * A union is inspected member by member (a `Ctx | undefined` is still a god context in one branch);
+ * an intersection needs no special case, because the checker already sees `Ctx & X` as a subtype of
+ * every slice. `never`/`unknown` are excluded so an accidental bottom type cannot fake a violation.
+ */
+function coveredSlices(checker, type, slices) {
+  const candidates = type.isUnion?.() === true ? type.types : [type]
+  let best = []
+  for (const candidate of candidates) {
+    const measured = constrain(checker, candidate)
+    if (measured.flags & (ts.TypeFlags.Never | ts.TypeFlags.Unknown | ts.TypeFlags.Any)) continue
+    const covered = slices.filter((slice) => checker.isTypeAssignableTo(measured, slice.type))
+    if (covered.length > best.length) best = covered
+  }
+  return best
+}
+
+/** The declared name of a function-like node, or its nearest named parent, or `<anonymous>`. */
+function functionName(node) {
+  if (node.name !== undefined && ts.isIdentifier(node.name)) return node.name.text
+  const parent = node.parent
+  if (parent === undefined) return '<anonymous>'
+  if (ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text
+  if (ts.isPropertyAssignment(parent)) return parent.name.getText()
+  if (ts.isBinaryExpression(parent) && ts.isIdentifier(parent.left)) return parent.left.text
+  return '<anonymous>'
+}
+
+/** Every whole-context parameter of one program, as `[{ rel, line, name, slices }]`. */
+async function godCtxSites(files) {
+  const program = architectureProgram(files.map((file) => file))
+  if (program === null) return []
+  const checker = program.getTypeChecker()
+  const slices = sliceTypes(checker, program)
+  if (slices === null) return []
+  const srcRoot = `${SRC}${path.sep}`
+  const sites = []
+  for (const sourceFile of program.getSourceFiles()) {
+    if (!path.resolve(sourceFile.fileName).startsWith(path.resolve(srcRoot))) continue
+    if (sourceFile.isDeclarationFile) continue
+    const rel = relOf(sourceFile.fileName)
+    const visit = (node) => {
+      if (ts.isFunctionLike(node)) {
+        for (const parameter of node.parameters) {
+          const type = checker.getTypeAtLocation(parameter)
+          const covered = coveredSlices(checker, type, slices)
+          if (covered.length < SLICES.length) continue
+          const { line } = sourceFile.getLineAndCharacterOfPosition(parameter.getStart(sourceFile))
+          sites.push({
+            rel,
+            line: line + 1,
+            name: functionName(node),
+            type: slices.map((slice) => slice.name).join(' & '),
+          })
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
   }
   return sites
 }
 
 async function ruleGodCtx() {
-  const entries = new Set(rules.godCtxParams.entries ?? [])
+  const entries = rules.godCtxParams.entries ?? []
   const allowed = Number(rules.godCtxParams.violations) || 0
   const files = await sources(SRC)
-  const seenEntries = new Set()
+  const seen = new Set()
   const sites = []
   let violations = 0
-  for (const file of files) {
-    for (const site of godCtxSites(relOf(file), await readFile(file, 'utf8'))) {
-      if (site.name !== null && entries.has(site.name)) {
-        seenEntries.add(site.name)
-        continue
-      }
-      violations += 1
-      const who = site.name === null ? 'a parameter' : `\`${site.name}\``
-      sites.push(
-        `${site.rel}:${site.line} — god-ctx — ${who} takes the whole context (${site.type}); only the six orchestration entries may (see godCtxParams.entries in the budget)`,
+
+  const entryKey = (file, fn) => `${file}::${fn}`
+  const registered = new Set()
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      problems.push(
+        `architecture-budget.json — godCtxParams.entries — every entry must be { file, function, reason } (found ${JSON.stringify(entry)})`,
       )
+      continue
     }
+    if (typeof entry.file !== 'string' || !/^src\/.+\.ts$/.test(entry.file)) {
+      problems.push(
+        `architecture-budget.json — godCtxParams.entries — "${entry.function}" has no \`file\` (src/…/*.ts); an entry without its file would exempt every function of that name`,
+      )
+      continue
+    }
+    if (typeof entry.function !== 'string' || entry.function === '') {
+      problems.push(
+        `architecture-budget.json — godCtxParams.entries — ${entry.file} has an entry without a function name`,
+      )
+      continue
+    }
+    if (typeof entry.reason !== 'string' || entry.reason.trim().length < 20) {
+      problems.push(
+        `architecture-budget.json — godCtxParams.entries — ${entry.file}#${entry.function} needs a reason of at least 20 characters`,
+      )
+      continue
+    }
+    const key = entryKey(entry.file, entry.function)
+    if (registered.has(key)) {
+      problems.push(
+        `architecture-budget.json — godCtxParams.entries — duplicate entry for ${entry.file}#${entry.function}`,
+      )
+      continue
+    }
+    registered.add(key)
   }
-  for (const name of entries) {
-    if (!seenEntries.has(name))
-      warnings.push(`godCtxParams: the entry \`${name}\` matches no function — drop it from the budget`)
+
+  for (const site of await godCtxSites(files)) {
+    const key = entryKey(site.rel, site.name)
+    if (registered.has(key)) {
+      seen.add(key)
+      continue
+    }
+    violations += 1
+    sites.push(
+      `${site.rel}:${site.line} — god-ctx — \`${site.name}\` takes the whole context (${site.type}); narrow it to the slices the body reads, or register { file, function, reason } in godCtxParams.entries`,
+    )
+  }
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object') continue
+    const key = entryKey(entry.file, entry.function)
+    if (seen.has(key)) continue
+    // A stale or misspelled entry is a failure, not a warning: it is an exemption that would keep
+    // covering a function that no longer exists (or a same-named one in another file).
+    problems.push(
+      `architecture-budget.json — godCtxParams.entries — "${entry.file}#${entry.function}" matches no whole-context parameter; the function was narrowed/renamed/moved, so drop or fix the entry (a wrong \`file\` must not exempt a same-named function)`,
+    )
   }
   ratchet('godCtxParams', violations, allowed, sites)
 }
@@ -504,6 +643,29 @@ if (update) {
       .join(' ')}`,
   )
   process.exit(0)
+}
+
+if (atTerminalStage) {
+  for (const rel of Object.keys(rules.fileLength.exceptions ?? {})) {
+    problems.push(
+      `scripts/architecture-budget.json — terminal stage — fileLength has an exception for ${rel}; ${terminalStage} is the terminal stage, so every exemption must already be gone (split the file instead)`,
+    )
+  }
+  for (const [name, rule] of Object.entries(rules)) {
+    const value = Number(rule?.violations) || 0
+    if (value > 0) {
+      problems.push(
+        `scripts/architecture-budget.json — terminal stage — "${name}.violations" is ${value}; ${terminalStage} is the terminal stage, so every violation budget must be 0`,
+      )
+    }
+  }
+  for (const item of p7Todo) {
+    problems.push(`scripts/architecture-budget.json — terminal stage — p7Todo still names outstanding work: ${item}`)
+  }
+} else if (p7Todo.length === 0) {
+  warnings.push(
+    `p7Todo is empty while stage ${stage} is not terminal (${terminalStage}); record what is still owed before ${terminalStage}`,
+  )
 }
 
 for (const message of warnings) console.warn(`[check-architecture] WARN: ${message}`)

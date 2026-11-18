@@ -2,21 +2,28 @@
  * The mutable per-host state — one flat object, eight type-level blocks.
  *
  * design-arch §2.2/§7.4 divide the 67 fields (66 declared + `warningSource`) into eight blocks and
- * name the **single module** allowed to write each one. The fields stay flat (decision H1): every
+ * name the module that owns each block's write *policy*. The fields stay flat (decision H1): every
  * reader keeps `runtime.status` / `runtime.ssh` / `runtime.remote.uiReady`, because 136 unit-test
  * assertions, `host-view.ts` and `diagnostics.ts` read those paths. Splitting the *type* is what
  * buys the boundary; physical nesting is a separate, later change.
  *
- * | # | block        | fields | writer                                        |
- * |---|--------------|--------|-----------------------------------------------|
- * | 1 | `identity`   | 2      | `host-registry.ts` (`ensureRuntime`/`commitEntry`) |
- * | 2 | `session`    | 20     | `runtime/fsm.ts` — only through `dispatch()`/`writeBack()` |
- * | 3 | `link`       | 12     | `connect/link.ts`                             |
- * | 4 | `remote`     | 19     | `connect/remote-state.ts`                     |
- * | 5 | `authz`      | 3      | `connect/ownership.ts` (read-only elsewhere)  |
- * | 6 | `logs`       | 3      | `connect-log.ts`                              |
- * | 7 | `rendezvous` | 3      | `prompts.ts`                                  |
- * | 8 | `timers`     | 5      | `host-lifecycle.ts`                           |
+ * Only the `session` block has a gate (`test/unit/guards.test.ts#runtime-writer-guard`), and inside
+ * it only `status` is a single-writer field: `runtime/fsm.ts` writes it and no module may grow a
+ * second owner. The other session fields have the owners named below (the guard's `SESSION_WRITERS`
+ * table is the executable copy); a new writer must be registered in both places in the same change.
+ * The remaining seven blocks name an owner here but have no gate of their own — this table is a
+ * design claim, not an enforced invariant.
+ *
+ * | # | block        | fields | owner                                                    |
+ * |---|--------------|--------|----------------------------------------------------------|
+ * | 1 | `identity`   | 2      | `host-registry.ts` (`ensureRuntime`/`commitEntry`)        |
+ * | 2 | `session`    | 20     | `runtime/fsm.ts` alone for 6 fields (`status` first); the other 14 are listed in `RuntimeSession` and registered in the guard table |
+ * | 3 | `link`       | 12     | `connect/link.ts`                                        |
+ * | 4 | `remote`     | 19     | `connect/remote-state.ts`                                |
+ * | 5 | `authz`      | 3      | `connect/ownership.ts` (read-only elsewhere)             |
+ * | 6 | `logs`       | 3      | `connect-log.ts`                                         |
+ * | 7 | `rendezvous` | 3      | `prompts.ts`                                             |
+ * | 8 | `timers`     | 5      | `host-lifecycle.ts`                                      |
  *
  * 2 + 20 + 12 + 19 + 3 + 3 + 3 + 5 = 67. The `remote` row counts the container plus its 12
  * sub-fields (1 + 12 + the six facts/home/exchange/restarts fields), which is why the block
@@ -165,28 +172,44 @@ export interface RuntimeIdentity {
   entry: HostEntry
 }
 
-/* ── 2/8 session — writer: runtime/fsm.ts (dispatch/writeBack only) ────────────────────────── */
+/* ── 2/8 session — owner: runtime/fsm.ts, with the co-owners listed per field ──────────────── */
 
 /**
- * Everything the state machine owns: what the user wants, what the link is doing, and the counters
- * and flags that decide whether a late write may still land.
+ * Everything the state machine decides plus the counters and flags that decide whether a late write
+ * may still land.
  *
- * No other module may assign into this block once the FSM is wired (P2 step 4); today the
- * pipeline/lifecycle/prompts still do, which is exactly the ownership this block retires.
+ * **`status` is the one single-writer field**: `runtime/fsm.ts` writes it (through
+ * `dispatch()`/`writeBack()`) and nothing else may. The other fields have exactly the owners named
+ * below; `test/unit/guards.test.ts#runtime-writer-guard` holds the same list as data and fails when
+ * a module writes a field outside it, so a new writer has to be registered in this comment and in
+ * that table at the same time.
  */
 export interface RuntimeSession {
+  /** Owner: `runtime/fsm.ts` only — the guard's one single-writer field. */
   status: HostStatus
+  /** Owner: `runtime/fsm.ts`, co-owner `connect-progress.ts` (the pure-UI progress line). */
   phase: ConnectPhase | null
+  /** Owner: `runtime/fsm.ts`, co-owner `connect-progress.ts` (the pure-UI progress line). */
   progress: Progress | null
+  /** Owner: `runtime/fsm.ts` only. */
   error: ErrorView | null
+  /**
+   * Owner: `runtime/fsm.ts`; co-owners `connect/launch.ts` (the `alongside` decision) and
+   * `connect/restart.ts` (the "managed stop was not confirmed" branch). `connect.succeeded` clears a
+   * stale restart warning.
+   */
   warning: BilingualText | null
   /**
    * Why `warning` is set (`alongside` | `restart-stop`): a successful attach clears a stale
    * "stop not confirmed" warning but must keep describing a process that is still running, so
    * the reason has to travel with the text. `null` on a runtime that never warned.
+   *
+   * Owner: `runtime/fsm.ts`, with the same co-owners as `warning`.
    */
   warningSource: WarningSource | null
+  /** Owner: `runtime/fsm.ts` only. */
   desired: Desired
+  /** Owner: `runtime/fsm.ts`, co-owner `host-lifecycle.ts` (teardown marks the link dead first). */
   closing: boolean
   /**
    * The user answered a prompt with "no" (or let it time out): the connection attempt must
@@ -207,15 +230,30 @@ export interface RuntimeSession {
   /**
    * `activity`'s storage form. Narrowed to the five activities: `beginLinkWork` is the only
    * writer and it takes an `Activity`; `SessionState.activity` maps 1:1.
+   *
+   * Owner: `runtime/fsm.ts`, co-owner `host-lifecycle.ts` (`beginLinkWork`/`endLinkWork`/
+   * `cancelLinkWork` — the token plumbing the FSM adopted in `SessionState.activity`).
    */
   linkBusy: Activity | null
-  /** `epoch`: the token a one-shot action must still hold to be allowed to write (R4/R10). */
+  /**
+   * `epoch`: the token a one-shot action must still hold to be allowed to write (R4/R10).
+   *
+   * Owner: `runtime/fsm.ts`, co-owner `host-lifecycle.ts` (the same three token functions).
+   */
   linkToken: number
-  /** Consecutive failed liveness probes; a confirmed episode is two of them. */
+  /**
+   * Consecutive failed liveness probes; a confirmed episode is two of them.
+   *
+   * **Owner: `watchdog.ts` only.** The FSM does not read or write any of the four liveness fields:
+   * it has no `remote.*` event (nothing ever dispatched one), and `writeBack` deliberately skips
+   * them, so the liveness episode has exactly one source (B9); see docs/invariants.md.
+   */
   remoteFailures: number
+  /** Owner: `watchdog.ts` only (see `remoteFailures`). */
   remoteEpisode: boolean
-  /** `episode`'s storage form: which reporter saw the remote fail (see `EpisodeSource`). */
+  /** `episode`'s storage form: which reporter saw the remote fail. Owner: `watchdog.ts` only. */
   episodeSource: EpisodeSource | null
+  /** Owner: `watchdog.ts` only (see `remoteFailures`). */
   episodeCooldownUntil: number
 }
 

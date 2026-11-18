@@ -15,7 +15,7 @@
 import type { Duplex } from 'node:stream'
 import { REMOTE_START_TIMEOUT_MS, SSH_READY_TIMEOUT_MS } from '../constants.js'
 import { beginConnectLog } from '../connect-log.js'
-import type { Config, HostState, RemoteDeps, Reporter, Store, Transport } from '../context.js'
+import type { Config, ConnectCtx, Reporter, Store, Transport } from '../context.js'
 import { errors } from '../errors.js'
 import type { HostRuntime } from '../host-runtime.js'
 import { disposeSsh, scheduleReconnect } from '../host-lifecycle.js'
@@ -40,13 +40,6 @@ import { rememberBound, rememberLaunched } from './ownership.js'
 import { captureFingerprint, openTunnelFor, resolveTargetForRuntime, settlePasswordStorage } from './transport.js'
 import type { ConnectTarget, DialTarget } from './transport.js'
 import { verifyRemoteUi } from './verify.js'
-
-/**
- * The workflow body crosses all six slices (design-arch §1.2's whitelist stops at the six entry
- * points): the steps need Transport, RemoteDeps, Reporter, Config and Store, and the guards need
- * HostState. Written out instead of aliasing `Ctx` so a reader sees *why* it is this wide.
- */
-type PipelineCtx = HostState & Config & Transport & RemoteDeps & Reporter & Store
 
 /**
  * The remote web the pipeline is about to publish: one this connection started, or one it
@@ -76,7 +69,7 @@ interface WebInfo {
  * @param ctx - service context.
  * @param runtime - host runtime.
  */
-export function startConnectPromise(ctx: PipelineCtx, runtime: HostRuntime): void {
+export function startConnectPromise(ctx: ConnectCtx, runtime: HostRuntime): void {
   const run = connectPipeline(ctx, runtime).catch((error) => {
     ctx.progress.log(runtime, 'debug', 'connect pipeline stopped outside its error path:', messageOf(error))
   })
@@ -94,7 +87,7 @@ export function startConnectPromise(ctx: PipelineCtx, runtime: HostRuntime): voi
  * the previous failure, but it must **not** reset the retry budget the user's connect set (R5/H2),
  * so the event carries the one difference.
  */
-async function reconnectNow(ctx: PipelineCtx, runtime: HostRuntime): Promise<void> {
+async function reconnectNow(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   if (ctx.state.disposed || runtime.desired !== 'connected') return
   await disposeSsh(runtime)
   // A dropped link's retry is a new connection too: start from a clean log.
@@ -106,7 +99,7 @@ async function reconnectNow(ctx: PipelineCtx, runtime: HostRuntime): Promise<voi
 }
 
 /** A timer callback that starts a retry: report a throw instead of leaving it unhandled (L). */
-function retryNow(ctx: PipelineCtx, runtime: HostRuntime): void {
+function retryNow(ctx: ConnectCtx, runtime: HostRuntime): void {
   void reconnectNow(ctx, runtime).catch((error) => {
     ctx.progress.log(runtime, 'warn', 'the automatic retry could not start:', messageOf(error))
   })
@@ -122,11 +115,11 @@ function retryNow(ctx: PipelineCtx, runtime: HostRuntime): void {
  * handshake waits on a host-key prompt must resolve that prompt instead of parking the pipeline
  * until its 120 s timeout (H3/M1). This replaces the two listeners this module used to keep
  * (a silent handshake one and the live/in-flight one); their work is the event's effects now.
- * @param ctx - service context (the effect owner is bound to it).
+ * @param ctx - the orchestration context (the effect owner is bound to it).
  * @param runtime - host runtime.
  * @param ssh - the transport that was just created.
  */
-function watchTransport(ctx: PipelineCtx, runtime: HostRuntime, ssh: SshPort | null): void {
+function watchTransport(ctx: ConnectCtx, runtime: HostRuntime, ssh: SshPort | null): void {
   if (!ssh || typeof ssh.on !== 'function') return
   ssh.on('close', () => {
     // A transport this runtime no longer dials (replaced, or disposed before a new attempt)
@@ -154,7 +147,13 @@ function watchTransport(ctx: PipelineCtx, runtime: HostRuntime, ssh: SshPort | n
  * options — its own policy, its own pin and its own `onHostKey` role — so a key confirmed
  * for one can never be checked against, or written into, the other (B1).
  */
-async function openTransport(ctx: PipelineCtx, runtime: HostRuntime, target: ConnectTarget): Promise<void> {
+/**
+ * The dial. It reads only Config/Transport/Reporter/Store itself, but it hands `ctx` to
+ * `watchTransport`, whose close listener re-enters the pipeline after a drop — and that path needs
+ * the orchestration context. Narrowing the parameter therefore does not compile; the gate's
+ * `godCtxParams` entry records exactly that.
+ */
+async function openTransport(ctx: ConnectCtx, runtime: HostRuntime, target: ConnectTarget): Promise<void> {
   const settings = ctx.settings()
   const auth = (): SshAuthOptions => ({
     type: runtime.entry.auth?.type ?? 'key',
@@ -236,7 +235,7 @@ async function openTransport(ctx: PipelineCtx, runtime: HostRuntime, target: Con
   captureFingerprint(ctx, runtime, await runtime.ssh.connect())
 }
 
-async function connectPipeline(ctx: PipelineCtx, runtime: HostRuntime): Promise<void> {
+async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<void> {
   const log: ConnectLogWriter = (level, ...args) => ctx.progress.log(runtime, level, ...args)
   const phase: PhaseWriter = (name, code, params) => ctx.progress.phase(runtime, name, code, params)
   // Every attempt (a user connect or a scheduled retry) entered through `connect.requested`,
@@ -532,7 +531,7 @@ async function connectPipeline(ctx: PipelineCtx, runtime: HostRuntime): Promise<
  * @param {object} ctx - service context.
  * @param {object} runtime - host runtime.
  */
-function scheduleConnectRetry(ctx: PipelineCtx, runtime: HostRuntime): void {
+function scheduleConnectRetry(ctx: ConnectCtx, runtime: HostRuntime): void {
   if (ctx.state.disposed === true || runtime.desired !== 'connected') return
   if (!runtime.entry.autoReconnect || !ctx.settings().autoReconnect.enabled) return
   scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))

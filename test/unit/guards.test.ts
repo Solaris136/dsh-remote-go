@@ -708,22 +708,26 @@ describe('client-compat', () => {
 
 /* ── runtime-writer-guard (design-arch §2.3 / PLAN review item 2) ─────────────────────────────
  *
- * The session block of `HostRuntime` has exactly one writer: `runtime/fsm.ts`, through
- * `writeBack()`. P2 step 4 moved the 16 direct + 7 indirect `status` writes onto `dispatch`, and
- * this guard is what keeps a later catch from writing the block again ("a catch sets
- * `runtime.status = 'error'` directly and the SSE frame sequence forks from the state machine").
+ * What this guard actually enforces: **the session block names every writer, and `status` has
+ * exactly one.** It used to be described as "exactly one writer per field", which the table below
+ * never said — eleven fields list a second owner, and pretending otherwise made the gate look
+ * stronger than it is.
  *
- * The allowlist is deliberately explicit per field, with the reason the staging still names a
- * second writer. A field whose only owner is `fsm.ts` must never grow one:
+ * The facts (design-arch §2.3): P2 step 4 moved the 16 direct + 7 indirect `status` writes onto
+ * `dispatch`, so `status` is the one field with a single owner and no staging excuse; a catch that
+ * sets `runtime.status = 'error'` directly forks the SSE frame sequence from the state machine.
+ * Every other session field names the owners the staging still has, and a new writer has to be
+ * added to its list here (and to the `RuntimeSession` comment in `host-runtime.ts`) in the same
+ * change — that is what "registered" means in those two places.
  *
- *   status                  — fsm.ts only. The whole point of the step.
+ *   status                  — fsm.ts only. The one single-writer field; never grows an owner.
  *   desired                 — fsm.ts only.
  *   connectCancelled        — fsm.ts only.
  *   transportLost           — fsm.ts only.
  *   reconnectAttempts       — fsm.ts only (`reconnect.scheduled` adopted the budget).
  *   error                   — fsm.ts only.
- *   phase / progress        — the connect-progress line is pure UI (it never changes `status`);
- *                             it keeps writing the two presentation fields until P2 step 7 moves
+ *   phase / progress        — the connect-progress line is pure UI (it never changes `status`); it
+ *                             keeps writing the two presentation fields until P2 step 7 moves
  *                             `step.entered` into the pipeline.
  *   warning / warningSource — two action-scoped facts have no event of their own: the `alongside`
  *                             decision and the "managed stop was not confirmed" restart branch.
@@ -735,39 +739,73 @@ describe('client-compat', () => {
  *                             `dispatch(activity.begin)`/`link.cancelled`; until then it is the
  *                             storage form of `activity`/`epoch`.
  *   remoteFailures / remoteEpisode / episodeSource / episodeCooldownUntil
- *                           — the watchdog's liveness counters. P2 step 9 moved the liveness
- *                             machine out of `host-lifecycle.ts` into `watchdog.ts`, which now
- *                             owns every policy write; `host-lifecycle.ts` keeps only the timer
- *                             primitive `stopRemoteHeartbeat` (it owns the timer block) and its
- *                             counter reset.
+ *                           — `watchdog.ts` owns the policy writes and `host-lifecycle.ts` owns the
+ *                             timer primitive (`stopRemoteHeartbeat`) that resets them. The FSM used
+ *                             to be a third writer of the same four fields through the dead
+ *                             `remote.*` rules; those are gone, and `writeBack` no longer touches
+ *                             them (B9, docs/invariants.md).
  *   connectPromise / restartPromise / reattachPromise
  *                           — executor-held by design (§2.4.5); the pipeline owns the promises,
  *                             the FSM owns `activity`.
+ *
+ * `host-runtime.ts` is deliberately absent from every list: it builds the initial object literal in
+ * `createRuntime`, which is initialization, not a write of the block (and it holds no assignment).
  */
 const SESSION_WRITERS = {
-  status: ['runtime/fsm.ts', 'host-runtime.ts'],
-  desired: ['runtime/fsm.ts', 'host-runtime.ts'],
-  connectCancelled: ['runtime/fsm.ts', 'host-runtime.ts'],
-  transportLost: ['runtime/fsm.ts', 'host-runtime.ts'],
-  reconnectAttempts: ['runtime/fsm.ts', 'host-runtime.ts'],
-  error: ['runtime/fsm.ts', 'host-runtime.ts'],
-  phase: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
-  progress: ['runtime/fsm.ts', 'host-runtime.ts', 'connect-progress.ts'],
-  warning: ['runtime/fsm.ts', 'host-runtime.ts', 'connect/launch.ts', 'connect/restart.ts'],
-  warningSource: ['runtime/fsm.ts', 'host-runtime.ts', 'connect/launch.ts', 'connect/restart.ts'],
-  closing: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  linkBusy: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  linkToken: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts'],
-  remoteFailures: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
-  remoteEpisode: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
-  episodeSource: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
-  episodeCooldownUntil: ['runtime/fsm.ts', 'host-runtime.ts', 'host-lifecycle.ts', 'watchdog.ts'],
+  // The one single-writer field: the FSM owns it, nothing else may ever appear in this list.
+  status: ['runtime/fsm.ts'],
+  // fsm.ts only, like `status` — recorded so a second owner is a reviewed edit, not a quiet one.
+  desired: ['runtime/fsm.ts'],
+  connectCancelled: ['runtime/fsm.ts'],
+  transportLost: ['runtime/fsm.ts'],
+  reconnectAttempts: ['runtime/fsm.ts'],
+  error: ['runtime/fsm.ts'],
+  // Shared with the pure-UI progress line (it never touches `status`).
+  phase: ['runtime/fsm.ts', 'connect-progress.ts'],
+  progress: ['runtime/fsm.ts', 'connect-progress.ts'],
+  // Shared with the two action-scoped warning branches.
+  warning: ['runtime/fsm.ts', 'connect/launch.ts', 'connect/restart.ts'],
+  warningSource: ['runtime/fsm.ts', 'connect/launch.ts', 'connect/restart.ts'],
+  // Shared with the token/teardown plumbing (it owns the timer block).
+  closing: ['runtime/fsm.ts', 'host-lifecycle.ts'],
+  linkBusy: ['runtime/fsm.ts', 'host-lifecycle.ts'],
+  linkToken: ['runtime/fsm.ts', 'host-lifecycle.ts'],
+  // The watchdog owns liveness; host-lifecycle keeps only the timer primitive that resets them.
+  remoteFailures: ['host-lifecycle.ts', 'watchdog.ts'],
+  remoteEpisode: ['host-lifecycle.ts', 'watchdog.ts'],
+  episodeSource: ['host-lifecycle.ts', 'watchdog.ts'],
+  episodeCooldownUntil: ['host-lifecycle.ts', 'watchdog.ts'],
+  // Executor-held promises (§2.4.5): one owner each, by construction.
   connectPromise: ['connect/pipeline.ts'],
   restartPromise: ['connect/restart.ts'],
   reattachPromise: ['connect/reattach.ts'],
 }
 
 const SESSION_FIELDS = Object.keys(SESSION_WRITERS)
+
+/**
+ * The one field the guard forbids a second owner for. Everything else names the owners the staging
+ * still has (see the comment above the table); `status` is the field the whole step exists for.
+ */
+const SINGLE_WRITER = 'status'
+
+/** The session fields the `RuntimeSession` declaration lists, read from the source itself. */
+function declaredSessionFields(text) {
+  const stripped = stripComments(text)
+  const marker = 'export interface RuntimeSession {'
+  const open = stripped.indexOf(marker)
+  if (open < 0) return []
+  const brace = stripped.indexOf('{', open)
+  const close = matchingBracket(stripped, brace)
+  if (close < 0) return []
+  const body = stripped.slice(brace + 1, close)
+  const fields = []
+  for (const line of body.split('\n')) {
+    const match = /^ {2}([A-Za-z_$][\w$]*)\??:/.exec(line)
+    if (match) fields.push(match[1])
+  }
+  return fields
+}
 
 /**
  * One assignment to a session field of a runtime variable. Comparisons (`===`, `==`, `!==`) and
@@ -788,7 +826,23 @@ function sessionWrites(text) {
 }
 
 describe('runtime-writer-guard', () => {
-  test('the session block has exactly one writer per field', async () => {
+  test('the session block names every writer, and status has exactly one', async () => {
+    // The declaration the guard enforces, as data: one single-writer field, one owner list per
+    // field, and a table that covers exactly the fields `RuntimeSession` declares.
+    assert.deepEqual(
+      SESSION_WRITERS[SINGLE_WRITER],
+      ['runtime/fsm.ts'],
+      `${SINGLE_WRITER} is the one field with a single owner; a second writer needs a design change, not a table edit`,
+    )
+    for (const field of SESSION_FIELDS) {
+      assert.ok(SESSION_WRITERS[field].length > 0, `${field} has no registered owner`)
+    }
+    const declared = declaredSessionFields(await readFile(path.join(SRC, 'host-runtime.ts'), 'utf8'))
+    assert.deepEqual(
+      [...declared].sort(),
+      [...SESSION_FIELDS].sort(),
+      'a session field was added or removed without registering its owner',
+    )
     // Sources only: the emitted `.js` twins are the same text and would double every finding.
     const files = await walkFiles(SRC, { extensions: /\.ts$/ })
     assert.ok(files.includes(path.join(SRC, 'service.ts')), 'the scanner must cover src recursively')
@@ -799,11 +853,13 @@ describe('runtime-writer-guard', () => {
       for (const write of sessionWrites(text)) {
         const owners = SESSION_WRITERS[write.field]
         if (!owners.includes(relative)) {
-          failures.push(`${relative}:${write.line} — runtime.${write.field} is written outside ${owners.join(', ')}`)
+          failures.push(
+            `${relative}:${write.line} — runtime.${write.field} is written outside its registered owners (${owners.join(', ')})`,
+          )
         }
       }
     }
-    assert.deepEqual(failures, [], 'a module writes the session block the FSM owns')
+    assert.deepEqual(failures, [], 'a module writes a session field it does not own')
   })
 
   test('planted regression: a status write in a non-owner module is flagged', () => {

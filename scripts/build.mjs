@@ -4,8 +4,8 @@
 // `rootDir: "."`), so the source tree stays `.ts`-only: `index.ts` -> `dist/index.js`,
 // `src/x.ts` -> `dist/src/x.js`, and the `connect/`, `proxy/`, `remote-web/`, `runtime/` and
 // `node/` subdirectories keep their shape. The repository root and `src/` never receive an
-// emitted `.js` again (the P8 stage of .agents/refactor/PLAN.md; decision I still governs the
-// "artifacts are not committed" rule).
+// emitted `.js` again (decision I: artifacts are not committed; `package.json` `exports` and
+// `files[]` point at `dist/`).
 //
 // The package ships exactly this layout: `package.json` `exports` points at `./dist/index.js`
 // and `./dist/client.js`, `files[]` lists `dist`, and DSH resolves both through those exports

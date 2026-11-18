@@ -3,7 +3,7 @@
  * requests fail (B8): the tunnel, not the remote, is what broke.
  */
 import { REMOTE_REPAIR_BACKOFF_MAX_MS, REMOTE_REPAIR_BACKOFF_MS } from '../constants.js'
-import type { ConnectCtx } from '../context.js'
+import type { WatchdogCtx } from '../context.js'
 import { errors } from '../errors.js'
 import { beginLinkWork, endLinkWork, isLinkWorkCurrent } from '../host-lifecycle.js'
 import type { LifecycleVerdict } from '../host-lifecycle.js'
@@ -23,11 +23,16 @@ import { noteRemoteUnreachable } from '../watchdog.js'
  * `GET /hosts/:id/open` and navigates again (the desktop guest's URL is the loopback origin).
  * Existing WebSockets/downloads are dropped by closing the old listener - documented.
  *
- * @param ctx - service context.
+ * It reads five slices and never the persistence layer (`ctx.init`/`ctx.store`/`ctx.secrets`):
+ * the rebuild publishes through `ctx.emitState()` and logs through `ctx.progress`, so the type is
+ * `WatchdogCtx`, not the six-slice `ConnectCtx` the other five orchestration entries take. The
+ * architecture gate measures this, which is why this function is not in its `godCtxParams` list.
+ *
+ * @param ctx - the watchdog's five slices (state, config, transport, remote deps, reporter).
  * @param runtime - connected host runtime.
  * @returns whether the listener was rebuilt.
  */
-export async function repairTunnel(ctx: ConnectCtx, runtime: HostRuntime): Promise<LifecycleVerdict> {
+export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Promise<LifecycleVerdict> {
   if (
     ctx.state.disposed === true ||
     runtime.desired !== 'connected' ||

@@ -18,9 +18,13 @@
 //                                            stale ones. It NEVER adds an entry: a new hit has to
 //                                            be registered by hand with a reason, which is the
 //                                            whole point of the gate.
-//   node scripts/check-types.mjs --stage P7  warn about `until` entries that have come due
-//                                            (a warning, not a failure: it must not block the
-//                                            stage the entry is supposed to disappear in).
+//   node scripts/check-types.mjs --stage P6          warn about `until` entries that are due
+//   node scripts/check-types.mjs --stage P6 --strict  FAIL on them instead, so a stage that
+//                                            declares a suppression's expiry cannot keep it.
+//
+// "Due" means the entry's `until` stage is **at or before** the stage under review: `until: P7`
+// is due at P7 (that is the stage it promised to disappear in), not only at P8. Without `--strict`
+// the same list is only a warning, because a warning must not block the stage the entry names.
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
@@ -67,6 +71,7 @@ const DIRECTIVE = /^(?:\/|\*)*\s*@ts-(ignore|expect-error|nocheck)\b(.*)$/
 // ---- arguments -------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 const update = argv.includes('--update')
+const strict = argv.includes('--strict')
 const stageIndex = argv.indexOf('--stage')
 const stage = stageIndex === -1 ? null : (argv[stageIndex + 1] ?? '')
 
@@ -76,12 +81,17 @@ function fail(message) {
 }
 
 for (const [index, argument] of argv.entries()) {
-  if (argument === '--update' || argument === '--stage') continue
+  if (argument === '--update' || argument === '--stage' || argument === '--strict') continue
   if (argv[index - 1] === '--stage') continue
-  fail(`unknown argument ${JSON.stringify(argument)}; usage: node scripts/check-types.mjs [--update] [--stage P7]`)
+  fail(
+    `unknown argument ${JSON.stringify(argument)}; usage: node scripts/check-types.mjs [--update] [--stage P6] [--strict]`,
+  )
 }
 if (stage !== null && !STAGE_PATTERN.test(stage)) {
-  fail(`--stage expects a stage such as P7 (found ${JSON.stringify(stage)})`)
+  fail(`--stage expects a stage such as P6 (found ${JSON.stringify(stage)})`)
+}
+if (strict && stage === null) {
+  fail('--strict only means something with --stage; it fails the "until" entries that stage has reached')
 }
 
 // ---- findings, problems and their positions ---------------------------------------------
@@ -441,10 +451,11 @@ if (stage !== null) {
   const due = Number(stage.slice(1))
   for (const section of SECTIONS) {
     for (const [key, entry] of listed.get(section)) {
-      if (typeof entry.until !== 'string' || Number(entry.until.slice(1)) >= due) continue
-      warnings.push(
-        `${key} is marked until ${entry.until} but the stage is ${stage}; remove the entry or re-justify the reason`,
-      )
+      // Due when the promised stage has arrived: `until: P7` is due at P7, not at P8.
+      if (typeof entry.until !== 'string' || Number(entry.until.slice(1)) > due) continue
+      const message = `${key} is marked until ${entry.until} and the stage is ${stage}; remove the entry (the suppression must be gone) or give it a later \`until\` with a reason`
+      if (strict) problem(ALLOWLIST_FILE, 0, 0, 'due', message)
+      else warnings.push(message)
     }
   }
 }

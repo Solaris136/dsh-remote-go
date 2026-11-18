@@ -1,5 +1,5 @@
 /**
- * The `HostRuntime` session state machine (design-arch §2.4): the 34 events, the 8 statuses, and
+ * The `HostRuntime` session state machine (design-arch §2.4): the 31 events, the 8 statuses, and
  * the promise that every (state, event) pair has an explicit outcome.
  *
  * Nothing here imports the pipeline: the FSM is a pure table, so the test drives it with plain
@@ -18,7 +18,6 @@ import {
   isRefusal,
   stillWanted,
   transition,
-  watchable,
   writeBack,
 } from '../../dist/src/runtime/fsm.js'
 import { EVENT_TYPE_PARITY, EVENT_TYPES } from '../../dist/src/runtime/events.js'
@@ -74,9 +73,6 @@ const EVENT_SAMPLES = {
   'connect.failed': { view: ERROR_VIEW, phase: 'probe' },
   'disconnect.requested': {},
   'idle.elapsed': {},
-  'remote.suspected': { source: 'proxy' },
-  'remote.confirmed': { source: 'proxy', failures: 2 },
-  'remote.recovered': { source: 'proxy', needRepair: true },
   'repair.requested': { token: 2 },
   'repair.finished': { ok: true },
   'restart.requested': { token: 3, pid: 100, port: 8080 },
@@ -113,9 +109,7 @@ function stateOf(overrides = {}) {
     connectCancelled: false,
     transportLost: false,
     reconnectAttempts: 0,
-    remoteFailures: 0,
     epoch: 0,
-    episode: null,
     ...overrides,
   }
 }
@@ -132,7 +126,7 @@ function scopeOf(overrides = {}) {
     keepAlive: 'keep',
     remoteStarted: false,
     recoverable: false,
-    delays: { reconnectMs: 500, idleMs: 600000, heartbeatMs: 30000, remoteConfirmMs: 1000 },
+    delays: { reconnectMs: 500, idleMs: 600000, heartbeatMs: 30000 },
     ...overrides,
   }
 }
@@ -161,7 +155,7 @@ const patches = (result) =>
 /**
  * The hand-reviewed allow-matrix over the 48 (status × activity) cells an entry point can see.
  * `statuses` and `activities` are the two axes; a cell is allowed exactly when both match. Every
- * one of the 34 events must appear here — that is what makes "no unhandled branch" checkable by a
+ * one of the 31 events must appear here — that is what makes "no unhandled branch" checkable by a
  * human instead of by reading the table again.
  */
 const ALL = { statuses: [...STATUSES], activities: [...ACTIVITIES] }
@@ -191,9 +185,6 @@ const ALLOW_MATRIX = {
   },
   'disconnect.requested': ALL,
   'idle.elapsed': ONLY_STATUS(['unconfigured', 'disconnected']),
-  'remote.suspected': { statuses: ['connected'], activities: [null] },
-  'remote.confirmed': { statuses: ['connected'], activities: [null] },
-  'remote.recovered': ALL,
   'repair.requested': { statuses: ['connected'], activities: [null] },
   'repair.finished': ONLY_ACTIVITY(['repair']),
   'restart.requested': { statuses: ['connected', 'error'], activities: [null] },
@@ -213,9 +204,9 @@ const ALLOW_MATRIX = {
 }
 
 describe('fsm: declarations', () => {
-  test('declares exactly the 34 events of design-arch §2.4.2, once each', () => {
-    assert.equal(EVENT_TYPES.length, 34)
-    assert.equal(new Set(EVENT_TYPES).size, 34)
+  test('declares exactly the 31 events of design-arch §2.4.2, once each', () => {
+    assert.equal(EVENT_TYPES.length, 31)
+    assert.equal(new Set(EVENT_TYPES).size, 31)
     assert.equal(EVENT_TYPE_PARITY, true)
     assert.deepEqual(
       Object.keys(EVENT_SAMPLES).sort(),
@@ -247,7 +238,7 @@ describe('fsm: declarations', () => {
 })
 
 describe('fsm: completeness matrices', () => {
-  test('8 statuses × 6 activities × 2 desires × 2 closing flags × 34 events = 6528 explicit pairs', () => {
+  test('8 statuses × 6 activities × 2 desires × 2 closing flags × 31 events = 5952 explicit pairs', () => {
     let pairs = 0
     for (const status of STATUSES) {
       for (const activity of ACTIVITIES) {
@@ -274,8 +265,8 @@ describe('fsm: completeness matrices', () => {
         }
       }
     }
-    assert.equal(pairs, 8 * 6 * 2 * 2 * 34)
-    assert.equal(pairs, 6528)
+    assert.equal(pairs, 8 * 6 * 2 * 2 * 31)
+    assert.equal(pairs, 5952)
   })
 
   test('the 48 (status × activity) cells are allowed exactly where §2.4.2 says', () => {
@@ -297,7 +288,7 @@ describe('fsm: completeness matrices', () => {
         }
       }
     }
-    assert.equal(cells, 34 * 48)
+    assert.equal(cells, 31 * 48)
   })
 
   test('a refusal is distinguishable from an accepted move without reading effects', () => {
@@ -845,51 +836,6 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.equal(succeeded.state.reconnectAttempts, 0)
   })
 
-  test('a liveness episode is opened, confirmed and closed once', () => {
-    const connected = stateOf({ status: 'connected', desired: 'connected' })
-    const watchScope = scopeOf({ linkAlive: true, tunnelAlive: true })
-
-    const suspected = transition(connected, eventOf('remote.suspected'), watchScope)
-    assert.deepEqual(suspected.state.episode, { source: 'proxy', phase: 'suspected', cooldownUntil: 0 })
-    assert.deepEqual(effectsOf(suspected), ['log', 'episode', 'arm'])
-    assert.deepEqual(effectOf(suspected, 'arm'), { type: 'arm', timer: 'remoteCheck', ms: 1000 })
-
-    const confirmed = transition(suspected.state, eventOf('remote.confirmed'), watchScope)
-    assert.equal(confirmed.state.episode.phase, 'confirmed')
-    assert.equal(confirmed.state.remoteFailures, 2)
-    assert.deepEqual(effectOf(confirmed, 'bus'), {
-      type: 'bus',
-      event: { kind: 'confirmed', reason: 'probe-failed-2', source: 'proxy' },
-    })
-
-    const recovered = transition(confirmed.state, eventOf('remote.recovered'), watchScope)
-    assert.equal(recovered.state.episode, null)
-    assert.equal(recovered.state.remoteFailures, 0)
-    assert.equal(hasEffect(recovered, 'bus'), true)
-
-    const quiet = transition(
-      confirmed.state,
-      { type: 'remote.recovered', source: 'heartbeat', needRepair: false },
-      watchScope,
-    )
-    assert.equal(hasEffect(quiet, 'bus'), false)
-  })
-
-  test('a watchdog event for a host nobody watches is refused', () => {
-    const idle = stateOf({ status: 'disconnected', desired: 'idle' })
-    for (const type of ['remote.suspected', 'remote.confirmed']) {
-      const result = transition(idle, eventOf(type), scopeOf())
-      assert.equal(result.ok, false)
-      assert.equal(result.reason, 'illegal-transition')
-    }
-    // A live link with a one-shot action running is not watchable either.
-    const repairing = stateOf({ status: 'connected', desired: 'connected', activity: 'repair' })
-    assert.equal(
-      transition(repairing, eventOf('remote.suspected'), scopeOf({ linkAlive: true, tunnelAlive: true })).ok,
-      false,
-    )
-  })
-
   test('the conflict prompt publishes and clears its card', () => {
     const connecting = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect' })
     const pending = transition(connecting, eventOf('conflict.pending'), scopeOf({ promptsPending: false }))
@@ -965,17 +911,6 @@ describe('fsm: shared predicates', () => {
     assert.equal(stillWanted(wanted, scopeOf({ disposed: true })), false)
   })
 
-  test('watchable additionally needs a live link, a tunnel and a free activity', () => {
-    const connected = stateOf({ status: 'connected', desired: 'connected' })
-    const live = scopeOf({ linkAlive: true, tunnelAlive: true })
-    assert.equal(watchable(connected, live), true)
-    assert.equal(watchable({ ...connected, activity: 'repair' }, live), false)
-    assert.equal(watchable({ ...connected, status: 'error' }, live), false)
-    assert.equal(watchable(connected, scopeOf({ linkAlive: true, tunnelAlive: false })), false)
-    assert.equal(watchable(connected, scopeOf({ linkAlive: false, tunnelAlive: true })), false)
-    assert.equal(watchable({ ...connected, desired: 'idle' }, live), false)
-  })
-
   test('isActivityCurrent compares the epoch, never a flag', () => {
     assert.equal(isActivityCurrent(stateOf({ epoch: 4 }), 4), true)
     assert.equal(isActivityCurrent(stateOf({ epoch: 4 }), 3), false)
@@ -984,8 +919,15 @@ describe('fsm: shared predicates', () => {
 })
 
 describe('fsm: storage form', () => {
-  test('writeBack maps activity/epoch/episode back into the flat runtime', () => {
-    const runtime = { episodeCooldownUntil: 99 }
+  test('writeBack maps activity/epoch back into the flat runtime and leaves liveness alone', () => {
+    // The four liveness fields start at values the watchdog would have written; writeBack must not
+    // touch them (B9 in docs/invariants.md: the watchdog is their only writer).
+    const runtime = {
+      remoteFailures: 2,
+      remoteEpisode: true,
+      episodeSource: 'proxy',
+      episodeCooldownUntil: 1234,
+    }
     const state = stateOf({
       status: 'connected',
       desired: 'connected',
@@ -993,7 +935,6 @@ describe('fsm: storage form', () => {
       epoch: 7,
       phase: 'ready',
       progress: { code: 'ready' },
-      episode: { source: 'proxy', phase: 'confirmed', cooldownUntil: 1234 },
     })
     writeBack(runtime, state)
     assert.equal(runtime.status, 'connected')
@@ -1002,16 +943,16 @@ describe('fsm: storage form', () => {
     assert.equal(runtime.linkToken, 7)
     assert.equal(runtime.phase, 'ready')
     assert.deepEqual(runtime.progress, { code: 'ready' })
+    assert.equal(runtime.remoteFailures, 2)
     assert.equal(runtime.remoteEpisode, true)
     assert.equal(runtime.episodeSource, 'proxy')
     assert.equal(runtime.episodeCooldownUntil, 1234)
 
-    writeBack(runtime, stateOf({ episode: null }))
-    assert.equal(runtime.remoteEpisode, false)
-    assert.equal(runtime.episodeSource, null)
-    // A closed episode keeps the cooldown window it earned.
-    assert.equal(runtime.episodeCooldownUntil, 1234)
+    writeBack(runtime, stateOf())
     assert.equal(runtime.linkBusy, null)
+    assert.equal(runtime.remoteEpisode, true)
+    assert.equal(runtime.episodeSource, 'proxy')
+    assert.equal(runtime.episodeCooldownUntil, 1234)
   })
 
   test('IllegalTransition names the event and the reason but never reaches ErrorView', () => {

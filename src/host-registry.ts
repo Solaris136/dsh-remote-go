@@ -19,7 +19,7 @@ import { discoverSshAliases as discoverAliasesFromConfig, parseSshConfig } from 
 import type { DiscoveredAlias } from './ssh-config.js'
 import { startRemoteHeartbeat } from './watchdog.js'
 import type { HostEntry, Settings } from './settings.js'
-import type { Config, HostState, Reporter, Store, TeardownCtx, Transport, WatchdogCtx } from './context.js'
+import type { Config, ConnectCtx, HostState, Reporter, Store, Transport, WatchdogCtx } from './context.js'
 
 /** The raw, unsanitized host entry a Client posts; `store.upsertHost` owns validating it. */
 export type RawHostEntry = Record<string, unknown> | null | undefined
@@ -171,7 +171,13 @@ export async function saveHost(ctx: HostState & Config & Store & Reporter, rawHo
   return hostViewFor(ctx, runtime)
 }
 
-export async function removeHost(ctx: Store & TeardownCtx, id: string): Promise<{ ok: true }> {
+/**
+ * Delete one host. It is the whole context, not a slice: the teardown it runs needs the watchdog's
+ * five slices (`createRuntimeEffects`/`scopeFactsFor`) and the deletion itself needs `Store`, so
+ * `Store & TeardownCtx` was the full six written the long way. The gate registers this function
+ * (`godCtxParams` in the architecture budget) rather than pretending it is narrow.
+ */
+export async function removeHost(ctx: ConnectCtx, id: string): Promise<{ ok: true }> {
   await ctx.init()
   const runtime = ctx.state.runtimes.get(id)
   if (runtime) {
@@ -203,7 +209,12 @@ export function setActiveHost(ctx: HostState & Reporter, id: string | null): voi
   ctx.emitState()
 }
 
-export async function saveSettings(ctx: Store & WatchdogCtx, patch: unknown): Promise<Settings> {
+/**
+ * Persist settings and restart the heartbeat of every connected host. Saving needs `Store`; the
+ * heartbeat policy needs the watchdog's slice set, so the two together are the whole context (the
+ * gate's `godCtxParams` entry names it).
+ */
+export async function saveSettings(ctx: ConnectCtx, patch: unknown): Promise<Settings> {
   await ctx.init()
   const settings = await ctx.store.saveSettings(patch)
   // The liveness switch applies to hosts that are already connected, not just the next one.

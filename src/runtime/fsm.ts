@@ -4,12 +4,17 @@
  * This file is the only place allowed to decide what a host runtime's session block becomes next
  * (design-arch §2.4). It imports **no I/O**: no runtime object, no clock, no settings, no timers.
  * Everything outside the state arrives as a frozen `EventScope`; everything the executor has to do
- * arrives as an `Effect` it performs itself. `tests/unit/fsm.test.js` drives all
+ * arrives as an `Effect` it performs itself. `test/unit/fsm.test.ts` drives all
  * 8 statuses × 6 activities × 2 desires × 2 closing flags = 192 representative states against all
- * 34 events (6,528 pairs) and asserts every pair has an explicit outcome: `ok: true` with effects,
+ * 31 events (5,952 pairs) and asserts every pair has an explicit outcome: `ok: true` with effects,
  * or `ok: false` with a `RefusalReason` — never an "unhandled" third shape.
  *
- * The table is a `Record<EventType, Rule>` over the 34 names `events.ts` declares, so a missing
+ * This table does **not** own liveness. `remote.suspected/confirmed/recovered` used to live here and
+ * were never dispatched (nothing in `src/` ever emitted one); the watchdog (`watchdog.ts`) owns
+ * `remoteEpisode`/`episodeSource`/`remoteFailures`/`episodeCooldownUntil` and publishes its own
+ * bus events, so a second liveness writer in the FSM would have been a second source of truth.
+ *
+ * The table is a `Record<EventType, Rule>` over the 31 names `events.ts` declares, so a missing
  * event is a compile error and an unlisted event cannot reach a rule. A refused transition returns
  * the *same* state object: "invalid transitions never modify the state" is structural, not a
  * promise the implementation has to remember.
@@ -29,24 +34,22 @@ import type { BilingualText } from '../util.js'
 import type {
   Activity,
   Desired,
-  EpisodeState,
   ConnectPhase,
-  EpisodeSource,
   HostStatus,
   Progress,
   RuntimeSession,
   WarningSource,
 } from '../host-runtime.js'
-import type { Effect, Event, EventScope, EventType, StopSnapshot, TimerName } from './events.js'
+import type { ArmableTimer, Effect, Event, EventScope, EventType, StopSnapshot, TimerName } from './events.js'
 
 /* ── state ────────────────────────────────────────────────────────────────────────────────── */
 
 /**
  * The pure rendition of the session block (design-arch §2.4.1).
  *
- * It carries `activity`/`epoch`/`episode` where the storage form carries
- * `linkBusy`/`linkToken`/`remoteEpisode`+`episodeSource`+`episodeCooldownUntil`, and it drops the
- * three executor-held promises. `writeBack()` converts on the way out.
+ * It carries `activity`/`epoch` where the storage form carries `linkBusy`/`linkToken`, and it drops
+ * the three executor-held promises. The liveness fields are **not** part of it: the watchdog owns
+ * them (see the module comment). `writeBack()` converts on the way out.
  */
 export interface SessionState {
   status: HostStatus
@@ -64,10 +67,8 @@ export interface SessionState {
   transportLost: boolean
   /** (H2) the retry budget; only `connect.requested` and `connect.succeeded` reset it. */
   reconnectAttempts: number
-  remoteFailures: number
   /** (R10) the one-shot action token. Monotone; compared, never decremented. */
   epoch: number
-  episode: EpisodeState | null
 }
 
 /* ── results ─────────────────────────────────────────────────────────────────────────────── */
@@ -130,17 +131,6 @@ export function stillWanted(state: SessionState, scope: EventScope): boolean {
   return state.desired === 'connected' && !state.closing && scope.runtimeExists && !scope.disposed
 }
 
-/** "A liveness episode may be opened": really up, no one-shot action owning the link. */
-export function watchable(state: SessionState, scope: EventScope): boolean {
-  return (
-    stillWanted(state, scope) &&
-    state.status === 'connected' &&
-    state.activity === null &&
-    scope.linkAlive &&
-    scope.tunnelAlive
-  )
-}
-
 /** `state.epoch === token`: a one-shot action may write (R4). */
 export function isActivityCurrent(state: SessionState, token: number): boolean {
   return state.epoch === token
@@ -174,12 +164,8 @@ export function writeBack(runtime: RuntimeSession, state: SessionState): void {
   runtime.connectCancelled = state.connectCancelled
   runtime.transportLost = state.transportLost
   runtime.reconnectAttempts = state.reconnectAttempts
-  runtime.remoteFailures = state.remoteFailures
-  runtime.remoteEpisode = state.episode !== null
-  runtime.episodeSource = state.episode === null ? null : state.episode.source
-  // A recovery closes the episode but keeps the cooldown window it earned; only an open episode
-  // carries a (possibly refreshed) deadline.
-  if (state.episode !== null) runtime.episodeCooldownUntil = state.episode.cooldownUntil
+  // The liveness fields (`remoteFailures`/`remoteEpisode`/`episodeSource`/`episodeCooldownUntil`)
+  // are deliberately absent: `watchdog.ts` is their only writer (B9); see docs/invariants.md.
 }
 
 /* ── rule plumbing ───────────────────────────────────────────────────────────────────────── */
@@ -217,7 +203,7 @@ const emit = (): Effect => ({ type: 'emit' })
 const settlePrompts = (): Effect => ({ type: 'settlePrompts' })
 const closeLink = (): Effect => ({ type: 'closeLink' })
 const disarm = (timer: TimerName): Effect => ({ type: 'disarm', timer })
-const arm = (timer: TimerName, ms: number): Effect => ({ type: 'arm', timer, ms })
+const arm = (timer: ArmableTimer, ms: number): Effect => ({ type: 'arm', timer, ms })
 const log = (level: 'error' | 'warn' | 'info' | 'debug', message: string): Effect => ({ type: 'log', level, message })
 const logFailure = (phase: string | null, label?: BilingualText, view?: ErrorView): Effect => ({
   type: 'logFailure',
@@ -230,8 +216,6 @@ const logFailure = (phase: string | null, label?: BilingualText, view?: ErrorVie
 const apply = (patch: Extract<Effect, { type: 'apply' }>['patch']): Effect => ({ type: 'apply', patch })
 const teardown = (options: Extract<Effect, { type: 'teardown' }>['options']): Effect => ({ type: 'teardown', options })
 const run = (activity: Activity, token: number): Effect => ({ type: 'run', activity, token })
-const episodeEffect = (info: Extract<Effect, { type: 'episode' }>['info']): Effect => ({ type: 'episode', info })
-const bus = (event: Extract<Effect, { type: 'bus' }>['event']): Effect => ({ type: 'bus', event })
 
 /** The `transport.closed` branches (§2.4.2): today's `connect/pipeline.ts#watchTransport`, verbatim. */
 type TransportCloseBranch = 'ignored' | 'stale' | 'dropped' | 'handshake' | 'idle'
@@ -519,37 +503,6 @@ const TABLE: RuleTable = {
     apply: (state) => state,
     effects: () => [],
   },
-  'remote.suspected': {
-    guard: (state, _event, scope) => (watchable(state, scope) ? true : 'illegal-transition'),
-    apply: (state, event) => move(state, { episode: { source: event.source, phase: 'suspected', cooldownUntil: 0 } }),
-    effects: (_state, event, scope) => [
-      log('debug', `remote-unreachable suspected (${event.source}); confirming with probes`),
-      episodeEffect({ phase: 'suspected', source: event.source }),
-      arm('remoteCheck', scope.delays.remoteConfirmMs),
-    ],
-  },
-  'remote.confirmed': {
-    guard: (state, _event, scope) => (watchable(state, scope) ? true : 'illegal-transition'),
-    apply: (state, event) =>
-      move(state, {
-        episode: { ...(state.episode ?? { source: event.source, cooldownUntil: 0 }), phase: 'confirmed' },
-        remoteFailures: event.failures,
-      }),
-    effects: (_state, event) => [
-      episodeEffect({ phase: 'confirmed', source: event.source, failures: event.failures }),
-      bus({ kind: 'confirmed', reason: `probe-failed-${event.failures}`, source: event.source }),
-    ],
-  },
-  'remote.recovered': {
-    guard: () => true,
-    apply: (state) => move(state, { episode: null, remoteFailures: 0 }),
-    effects: (_state, event) => [
-      episodeEffect({ phase: 'recovered', source: event.source }),
-      // A transient episode (proxy/tunnel) rebuilds the local listener; a remote-side recovery does
-      // not need one (B8).
-      ...(event.needRepair ? [bus({ kind: 'recovered', source: event.source })] : []),
-    ],
-  },
   'repair.requested': {
     guard: (state, _event, scope) => {
       if (state.activity !== null) return 'busy'
@@ -811,8 +764,8 @@ function transportDropPatch(state: SessionState): Partial<SessionState> {
 
 /**
  * Look one rule up by its event name. Generic on the key so the returned rule keeps the *narrow*
- * event payload of that row: `TABLE[event.type]` in `transition` would otherwise be a union of 34
- * rule types with 34 different parameter types, which TypeScript cannot correlate with the event
+ * event payload of that row: `TABLE[event.type]` in `transition` would otherwise be a union of 31
+ * rule types with 31 different parameter types, which TypeScript cannot correlate with the event
  * it was indexed by.
  */
 function ruleFor<K extends EventType>(type: K): RuleOf<K> {
@@ -823,13 +776,13 @@ function ruleFor<K extends EventType>(type: K): RuleOf<K> {
  * Compute the next state and the effects of one event. Never mutates, never throws, never reads
  * anything but its three arguments.
  * @param state - the session state before the event.
- * @param event - the event to apply (one of the 34 declared types).
+ * @param event - the event to apply (one of the 31 declared types).
  * @param scope - read-only facts the guards and effects need.
  * @returns `{ok:true,state,effects}` for an accepted move; `{ok:false,reason,state}` (same state
  * object) for a refused one.
  */
 export function transition(state: SessionState, event: Event, scope: EventScope): TransitionResult {
-  // The table is a record over the 34 declared names, so this lookup cannot miss for a typed
+  // The table is a record over the 31 declared names, so this lookup cannot miss for a typed
   // caller; the `unknown-event` branch only protects a JavaScript caller from a name the types
   // forbid (and the completeness test asserts it never fires for a declared event).
   const rule: RuleOf<EventType> | undefined = ruleFor(event.type)

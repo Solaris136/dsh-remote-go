@@ -105,18 +105,6 @@ export function createRuntimeEffects(ctx: WatchdogCtx): DispatchHost {
       runtime.remote.uiReady = patch.uiReady === true
       runtime.remote.localPort = patch.localPort
     },
-    episode: (runtime, info) => {
-      ctx.onRemoteUnreachable?.(runtime, info)
-    },
-    bus: (runtime, event) => {
-      // The FSM's two watchdog requests reach the same bus the liveness detector publishes on;
-      // `connect/watchdog.ts` is the only subscriber (P2 step 9 retired both reverse callbacks).
-      if (event.kind === 'confirmed') {
-        ctx.bus.publish({ kind: 'confirmed', hostId: runtime.id, reason: event.reason, source: event.source })
-        return
-      }
-      ctx.bus.publish({ kind: 'recovered', hostId: runtime.id, source: event.source })
-    },
     flushLogs: () => {
       // `connect-progress` owns the coalescing flush timer; `log()` already scheduled it. No rule
       // emits `flushLogs` today, and this stays a no-op instead of reaching into that module.
