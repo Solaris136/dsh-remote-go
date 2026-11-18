@@ -1,7 +1,13 @@
 // client/src/toast.ts - the Toast list (region 14); after prompts.ts, before overlay-state.ts.
 //#region 14. toast
 
-function Toast(props) {
+/** What the toast region renders: either the list or the single toast an older caller passes. */
+interface ToastProps {
+  toasts?: ToastEntry[]
+  toast?: ToastEntry
+}
+
+function Toast(props: ToastProps) {
   const toasts = props && Array.isArray(props.toasts) ? props.toasts : props && props.toast ? [props.toast] : []
   if (toasts.length === 0) return null
   return h(

@@ -1,12 +1,20 @@
 // client/src/host-list.ts - LoadingBlock, EmptyHosts, HostCard and HostListView (region 8); after dialogs.ts, before connect-window.ts.
 //#region 8. host list view
 
-function LoadingBlock(props) {
+interface LoadingBlockProps extends LocaleProps {
+  label?: ReactNode
+}
+
+function LoadingBlock(props: LoadingBlockProps) {
   const t = translatorOf(props)
   return box('div', 'drg-loading', h(Spinner, { size: 20 }), h('span', null, props.label || t('loading')))
 }
 
-function EmptyHosts(props) {
+interface EmptyHostsProps extends LocaleProps {
+  onAdd?: () => void
+}
+
+function EmptyHosts(props: EmptyHostsProps) {
   const t = translatorOf(props)
   return h(
     'div',
@@ -26,10 +34,23 @@ function EmptyHosts(props) {
   )
 }
 
-function HostCard(props) {
+interface HostCardProps extends LocaleProps {
+  host?: Partial<HostView> | null
+  busy?: boolean
+  onOpen?: (host: Partial<HostView>) => void
+  onDisconnect?: (host: Partial<HostView>) => void
+  onReconnect?: (host: Partial<HostView>) => void
+  onRestart?: (host: Partial<HostView>) => void
+  onStopRemote?: (host: Partial<HostView>) => void
+  onEdit?: (host: Partial<HostView>) => void
+  onDelete?: (host: Partial<HostView>) => void
+  onDiagnose?: (host: Partial<HostView>) => void
+}
+
+function HostCard(props: HostCardProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  const host = props.host || {}
+  const host: Partial<HostView> = props.host || {}
   const busy = props.busy === true
   const meta = statusOf(host.status)
   const statusLabel = t(meta.label)
@@ -218,7 +239,27 @@ function HostCard(props) {
   )
 }
 
-function HostListView(props) {
+interface HostListViewProps extends LocaleProps {
+  state?: StateView | null
+  loading?: boolean
+  error?: unknown
+  busyHostId?: string | null
+  mode?: StreamMode
+  onRetryLive?: (() => void) | null
+  onAdd?: () => void
+  onRefresh?: () => void
+  onOpenSettings?: () => void
+  onOpenHost?: (host: Partial<HostView>) => void
+  onDisconnectHost?: (host: Partial<HostView>) => void
+  onReconnectHost?: (host: Partial<HostView>) => void
+  onRestartHost?: (host: Partial<HostView>) => void
+  onStopRemote?: (host: Partial<HostView>) => void
+  onEditHost?: (host: Partial<HostView>) => void
+  onDeleteHost?: (host: Partial<HostView>) => void
+  onDiagnoseHost?: (host: Partial<HostView>) => void
+}
+
+function HostListView(props: HostListViewProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   const state = props.state || null
@@ -228,7 +269,7 @@ function HostListView(props) {
   // A connecting host owns the connection window (docs/design.md §4.1), so it is not a card
   // here. Restart/stop progress is the exception: that host is not building a new link but
   // finishing a one-shot action, and its card is where the action lives (§5.5/§5.7).
-  const isOneShotLinkAction = (host) =>
+  const isOneShotLinkAction = (host: Partial<HostView>) =>
     host &&
     host.status === 'connecting' &&
     host.progress !== null &&
@@ -240,10 +281,10 @@ function HostListView(props) {
   const busyHostId = props.busyHostId || null
   // Stopping a remote DSH is destructive, so the card action only opens a confirmation;
   // the dialog owns the busy state until the Host answers.
-  const [pendingStop, setPendingStop] = useState(null)
+  const [pendingStop, setPendingStop] = useState<Partial<HostView> | null>(null)
   const [stopBusy, setStopBusy] = useState(false)
 
-  const requestStop = (host) => {
+  const requestStop = (host: Partial<HostView> | null | undefined) => {
     if (host) setPendingStop(host)
   }
   const confirmStop = () => {

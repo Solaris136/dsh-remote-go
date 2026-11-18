@@ -1,7 +1,43 @@
 // client/src/plugin.ts - apply(ctx), the components map, the __test face and the plugin face returned to the loader; last module.
 //#region 17. plugin registration
 
-function apply(ctx) {
+/** What `apply` reads from the shell: three services, nothing else. */
+interface PluginCtx {
+  effect(effect: () => unknown, id: string): unknown
+  locale: PluginLocale
+  slots: PluginSlots
+  get(name: string): PluginWorkspace | null | undefined
+}
+
+/** `ctx.locale`: the dictionary registration plus the snapshot other documents pass down. */
+interface PluginLocale {
+  register(namespace: string, dictionaries: Dictionaries): unknown
+  bind(namespace: string): Translate
+  getSnapshot?: () => { active?: unknown } | null
+  getLocale?: () => { active?: unknown } | null
+}
+
+/** `ctx.slots`: one overlay seat, injected with the shared panel stores. */
+interface PluginSlots {
+  inject(name: string, factory: () => unknown): unknown
+  register(options: SlotOptions, component: unknown): unknown
+}
+
+/** One slot registration (the shell reads `name`/`id`/`order`/`locale`/`inject`). */
+interface SlotOptions {
+  name: string
+  id: string
+  order: number
+  locale: string
+  inject: () => unknown
+}
+
+/** `ctx.get('uiWorkspace')`: the shell's own directory picker, when it has one. */
+interface PluginWorkspace {
+  pickDirectory?: () => unknown
+}
+
+function apply(ctx: PluginCtx) {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-remote-go: dictionaries')
   const t = ctx.locale.bind(NS)
 
@@ -34,7 +70,7 @@ function apply(ctx) {
   requestLocalPage = () => panelStore.requestIntent({ kind: 'local' })
   const wizardStore = createWizardStore()
   const toolStore = createToolRequestStore()
-  const openWizard = (draft) => {
+  const openWizard = (draft: WizardOpenInput) => {
     wizardStore.open(draft)
   }
   const sharedInject = () => ({
@@ -297,12 +333,12 @@ const __drgExport = {
     guestTools: () => GUEST_TOOLS_SCRIPT,
     /** The capability bridge's guest script (desktop carrier) and installer (browser frame). */
     capabilities: () => CAPABILITY_BRIDGE_SCRIPT,
-    bridge: (win) => mountCapabilityBridge(win),
+    bridge: (win: Window) => mountCapabilityBridge(win),
     /** Install the per-host `localStorage` partition into one framed page. */
-    partition: (win, hostId) => mountGuestStorage(win, hostId),
+    partition: (win: Window, hostId: unknown) => mountGuestStorage(win, hostId),
     /** Guest-side rail watcher, the atomic intent take, and the inset it maps to (issue #63). */
     sidebarMirror: () => SIDEBAR_MIRROR_SCRIPT,
     intentsScript: () => TAKE_INTENTS_SCRIPT,
-    captionMenuStart: (collapsed, start) => captionMenuStart(collapsed, start),
+    captionMenuStart: (collapsed: unknown, start?: unknown) => captionMenuStart(collapsed, start),
   },
 }

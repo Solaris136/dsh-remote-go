@@ -7,23 +7,23 @@
  * file row's absolute path into an intent the local half can fetch over SFTP.
  * It only touches `win` and its locals (the script is stringified into the guest).
  */
-function mountGuestTools(win) {
+function mountGuestTools(win: Window): string {
   try {
     var doc = win.document
     if (!doc || !doc.documentElement) return 'no-document'
     if (win.__drgGuestTools === true) return 'already'
     // The installed flag is set only once every listener is in place: setting it first made
     // a partial install permanent, because the retry then answered "already" (audit).
-    var emit =
+    var emit: (intent: GuestIntentLike) => IntentReceipt | boolean | undefined | void =
       typeof win.__drgBridgeSink === 'function'
         ? win.__drgBridgeSink
-        : function (intent) {
+        : function (intent: GuestIntentLike) {
             var queue = win.__drgBridgeQueue
             if (!queue || typeof queue.push !== 'function') queue = []
             queue.push(intent)
             win.__drgBridgeQueue = queue
           }
-    var lastFile = null
+    var lastFile: { kind: string; path: string; name: string } | null = null
     // The icon is the stable hook; the labels are a fallback for a future icon
     // rename (the eight languages shipped by the file-action plugin).
     var DOWNLOAD_LABELS = [
@@ -41,12 +41,12 @@ function mountGuestTools(win) {
       lastFile = null
     }
     var restoreMenus = function () {
-      var hidden = doc.querySelectorAll('[data-drg-guest-hidden]')
+      var hidden = doc.querySelectorAll<HTMLElement>('[data-drg-guest-hidden]')
       for (var index = 0; index < hidden.length; index += 1) {
         hidden[index].style.display = ''
         hidden[index].removeAttribute('data-drg-guest-hidden')
       }
-      var stale = doc.querySelectorAll('[data-drg-dir-download-wrap]')
+      var stale = doc.querySelectorAll<HTMLElement>('[data-drg-dir-download-wrap]')
       for (var staleIndex = 0; staleIndex < stale.length; staleIndex += 1) {
         if (stale[staleIndex].parentNode) stale[staleIndex].parentNode.removeChild(stale[staleIndex])
       }
@@ -57,12 +57,12 @@ function mountGuestTools(win) {
       // synthetic click: a hidden node cannot eat the next gesture, and the next
       // context menu restores it before the page opens it again.
       try {
-        var menus = doc.querySelectorAll('[role="menu"][data-context-menu]')
+        var menus = doc.querySelectorAll<HTMLElement>('[role="menu"][data-context-menu]')
         for (var menuIndex = 0; menuIndex < menus.length; menuIndex += 1) {
           menus[menuIndex].setAttribute('data-drg-guest-hidden', '1')
           menus[menuIndex].style.display = 'none'
         }
-        var backings = doc.querySelectorAll('[data-menu-backing]')
+        var backings = doc.querySelectorAll<HTMLElement>('[data-menu-backing]')
         for (var backingIndex = 0; backingIndex < backings.length; backingIndex += 1) {
           backings[backingIndex].setAttribute('data-drg-guest-hidden', '1')
           backings[backingIndex].style.display = 'none'
@@ -71,7 +71,7 @@ function mountGuestTools(win) {
         // swallow-ok: the menu also closes on the next pointer gesture
       }
     }
-    var directoryTimer = null
+    var directoryTimer: number | null = null
     /**
      * A directory has no native download item, so append one to the context menu.
      * React owns the menu but the appended wrapper uses the cloned item's classes;
@@ -85,8 +85,9 @@ function mountGuestTools(win) {
       var template = menu.querySelector('button[role="menuitem"]')
       if (!template) return false
       var wrapper = template.parentElement
-      var clone = (wrapper && wrapper !== menu ? wrapper : template).cloneNode(true)
-      var item = clone.tagName === 'BUTTON' ? clone : clone.querySelector('[role="menuitem"]')
+      // cloneNode is typed as Node; the menu item it copies is a button.
+      var clone = (wrapper && wrapper !== menu ? wrapper : template).cloneNode(true) as HTMLButtonElement
+      var item = clone.tagName === 'BUTTON' ? clone : clone.querySelector<HTMLButtonElement>('[role="menuitem"]')
       if (!item) return false
       item.removeAttribute('id')
       item.disabled = false
@@ -97,7 +98,7 @@ function mountGuestTools(win) {
       ).toLowerCase()
       var label = lang.indexOf('zh') === 0 ? '下载到本地' : 'Download to this computer'
       var leaf = null
-      var spans = item.querySelectorAll('span')
+      var spans = item.querySelectorAll<HTMLElement>('span')
       for (var spanIndex = spans.length - 1; spanIndex >= 0; spanIndex -= 1) {
         if (!spans[spanIndex].querySelector('svg') && spans[spanIndex].children.length === 0) {
           leaf = spans[spanIndex]
@@ -128,7 +129,7 @@ function mountGuestTools(win) {
       var addedFor = lastFile
       clone.addEventListener(
         'click',
-        function (event) {
+        function (event: GuestMouseEvent) {
           if (!addedFor || addedFor.kind !== 'directory') return
           event.preventDefault()
           event.stopPropagation()
@@ -160,7 +161,7 @@ function mountGuestTools(win) {
       }
       attempt()
     }
-    var remember = function (target) {
+    var remember = function (target: (EventTarget & Element) | null) {
       restoreMenus()
       lastFile = null
       if (!target || typeof target.closest !== 'function') return
@@ -178,7 +179,7 @@ function mountGuestTools(win) {
       lastFile = { kind: kind, path: path, name: name }
       if (kind === 'directory') queueDirectoryItem()
     }
-    var interceptDownload = function (item, event) {
+    var interceptDownload = function (item: HTMLButtonElement | null, event: GuestMouseEvent | GuestKeyboardEvent) {
       if (!item || !lastFile || lastFile.kind !== 'file') return
       if (item.hasAttribute('data-drg-dir-download')) return
       if (item.disabled === true || item.getAttribute('aria-disabled') === 'true') return
@@ -195,14 +196,14 @@ function mountGuestTools(win) {
     }
     doc.addEventListener(
       'contextmenu',
-      function (event) {
+      function (event: GuestMouseEvent) {
         remember(event.target)
       },
       true,
     )
     doc.addEventListener(
       'keydown',
-      function (event) {
+      function (event: GuestKeyboardEvent) {
         if (event.key === 'ContextMenu' || (event.shiftKey === true && event.key === 'F10')) {
           remember(event.target)
           return
@@ -215,7 +216,7 @@ function mountGuestTools(win) {
           var keyboardTarget = event.target
           var keyboardItem =
             keyboardTarget && typeof keyboardTarget.closest === 'function'
-              ? keyboardTarget.closest('[role="menuitem"]')
+              ? keyboardTarget.closest<HTMLButtonElement>('[role="menuitem"]')
               : null
           if (keyboardItem) interceptDownload(keyboardItem, event)
         }
@@ -226,10 +227,10 @@ function mountGuestTools(win) {
     // and hand a Blob to a download Chromium refuses for a guest session.
     doc.addEventListener(
       'click',
-      function (event) {
+      function (event: GuestMouseEvent) {
         var target = event.target
         if (!target || typeof target.closest !== 'function') return
-        interceptDownload(target.closest('[role="menuitem"]'), event)
+        interceptDownload(target.closest<HTMLButtonElement>('[role="menuitem"]'), event)
       },
       true,
     )
@@ -260,16 +261,16 @@ const GUEST_TOOLS_SCRIPT = '(' + mountGuestTools.toString() + ')(window)'
  * the clipboard one through `__drgCapabilityReply`, so the page can show ✓ or fail visibly.
  * It only touches `win` and its own locals (the script is stringified into the guest).
  */
-function mountCapabilityBridge(win) {
+function mountCapabilityBridge(win: Window): string {
   try {
     var doc = win.document
     if (!doc || !doc.documentElement) return 'no-document'
     if (win.__drgCapabilityBridge === true) return 'already'
-    var PromiseCtor = typeof win.Promise === 'function' ? win.Promise : Promise
-    var emit =
+    var PromiseCtor: PromiseConstructor = typeof win.Promise === 'function' ? win.Promise : Promise
+    var emit: (intent: GuestIntentLike) => IntentReceipt | boolean | undefined =
       typeof win.__drgBridgeSink === 'function'
         ? win.__drgBridgeSink
-        : function (intent) {
+        : function (intent: GuestIntentLike) {
             var queue = win.__drgBridgeQueue
             if (!queue || typeof queue.push !== 'function') queue = []
             queue.push(intent)
@@ -279,7 +280,7 @@ function mountCapabilityBridge(win) {
     var UrlCtor = typeof win.URL === 'function' ? win.URL : URL
     // A URL that may leave the frame: absolute http(s), a host, no credentials. Anything else
     // (javascript:, data:, blob:, a relative path) stays inside the framed page.
-    var externalUrl = function (value) {
+    var externalUrl = function (value: unknown): string | null {
       if (typeof value !== 'string' || value === '' || value.length > 8192) return null
       var url = null
       try {
@@ -292,7 +293,7 @@ function mountCapabilityBridge(win) {
       if (url.username !== '' || url.password !== '') return null
       return url.href
     }
-    var originOf = function () {
+    var originOf = function (): string | null {
       try {
         return win.location && win.location.origin ? win.location.origin : null
       } catch (_error) {
@@ -301,9 +302,12 @@ function mountCapabilityBridge(win) {
     }
 
     // --- clipboard: the top half performs the write, this half reports the answer ----------
-    var pending = {}
+    var pending: Record<
+      string,
+      { resolve: (value: boolean) => void; reject: (error: unknown) => void; timer: number | null }
+    > = {}
     var sequence = 0
-    var settle = function (id, result) {
+    var settle = function (id: string, result: GuestReceipt | null | undefined) {
       var entry = pending[id]
       if (!entry) return false
       delete pending[id]
@@ -313,11 +317,11 @@ function mountCapabilityBridge(win) {
       return true
     }
     // The desktop carrier cannot reach into the guest, so it answers through this slot.
-    win.__drgCapabilityReply = function (payload) {
+    win.__drgCapabilityReply = function (payload: GuestReceipt | null | undefined) {
       if (!payload || typeof payload !== 'object') return false
       return settle(String(payload.id === undefined || payload.id === null ? '' : payload.id), payload)
     }
-    var ask = function (intent, timeoutMs) {
+    var ask = function (intent: GuestIntentLike & { id?: string }, timeoutMs: number) {
       return new PromiseCtor(function (resolve, reject) {
         sequence += 1
         var id = 'drg' + String(sequence)
@@ -335,9 +339,9 @@ function mountCapabilityBridge(win) {
           answer = null
         }
         // The browser carrier calls this module directly and answers with the write's promise.
-        if (answer && typeof answer.then === 'function') {
+        if (answer && typeof answer === 'object' && typeof answer.then === 'function') {
           answer.then(
-            function (result) {
+            function (result: GuestReceipt) {
               settle(id, result)
             },
             function () {
@@ -349,7 +353,7 @@ function mountCapabilityBridge(win) {
     }
     // The frame is the document the user just clicked in, so the legacy path can still land
     // the text when the top half reports a refusal.
-    var legacyCopy = function (text) {
+    var legacyCopy = function (text: string) {
       try {
         if (!doc.body || typeof doc.execCommand !== 'function') return false
         var area = doc.createElement('textarea')
@@ -374,13 +378,13 @@ function mountCapabilityBridge(win) {
       clipboard = null
     }
     if (clipboard !== null && typeof clipboard.writeText === 'function') {
-      var bridgeWriteText = function (text) {
+      var bridgeWriteText = function (text: unknown) {
         var value = text === undefined || text === null ? '' : String(text)
         return ask({ action: 'clipboard-write', text: value }, 4000).then(
-          function () {
+          function (): undefined {
             return undefined
           },
-          function () {
+          function (): undefined {
             if (legacyCopy(value)) return undefined
             try {
               emit({ action: 'notify', tone: 'error', code: 'clipboard-failed' })
@@ -407,7 +411,7 @@ function mountCapabilityBridge(win) {
     }
 
     // --- links: capture a real external click before the page's own handler swallows it ------
-    var onLinkClick = function (event) {
+    var onLinkClick = function (event: GuestMouseEvent) {
       if (!event || event.defaultPrevented === true) return
       // A modified or non-primary click is the user asking for the browser's own behaviour
       // (new background tab, new window, middle-click paste): leave it to the page and the
@@ -447,9 +451,9 @@ function mountCapabilityBridge(win) {
     doc.addEventListener('click', onLinkClick, true)
 
     // --- window.open: a resolved web URL belongs to the top-level document --------------------
-    var nativeOpen = typeof win.open === 'function' ? win.open : null
+    var nativeOpen: Window['open'] | null = typeof win.open === 'function' ? win.open : null
     try {
-      win.open = function (url, name, features) {
+      win.open = function (url?: string | URL, name?: string, features?: string) {
         var raw = typeof url === 'string' ? url : url === undefined || url === null ? '' : String(url)
         var target = externalUrl(raw)
         if (target === null) {

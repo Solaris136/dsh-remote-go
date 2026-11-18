@@ -17,7 +17,7 @@ const STREAM_RETRY_BASE_MS = 500
 const STREAM_RETRY_MAX_MS = 15000
 /** One state fetch in a retry chain must not hold the stream down forever. */
 const STREAM_RETRY_MAX_ATTEMPTS = 8
-function streamRetryDelay(attempt) {
+function streamRetryDelay(attempt: number): number {
   const safe = Math.max(0, Math.min(30, Math.floor(Number(attempt) || 0)))
   return Math.min(STREAM_RETRY_MAX_MS, STREAM_RETRY_BASE_MS * 2 ** safe)
 }
@@ -72,7 +72,7 @@ const DIAGNOSE_IDS = [
   'model-credentials',
   'desktop-guard',
 ]
-const TONE_VARS = {
+const TONE_VARS: Record<Tone, string> = {
   idle: 'var(--dsw-alias-state-idle-primary)',
   info: 'var(--dsw-alias-state-business-primary)',
   success: 'var(--dsw-alias-state-success-primary)',
@@ -90,10 +90,19 @@ const STATUS = {
   disconnected: { tone: 'warn', action: 'cardConnect', connect: true, retry: true },
   error: { tone: 'error', action: 'cardConnect', connect: true, retry: true, window: true, strip: 'alert' },
   limited: { tone: 'limited', action: 'cardConnect', retry: true, strip: 'alert' },
+} satisfies Record<HostStatus, StatusEntry>
+/** The contract's own status ids, so a plain string from a prop can be narrowed without a cast. */
+function isHostStatus(value: unknown): value is HostStatus {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(STATUS, value)
 }
+
 /** That status' entry plus its dictionary keys; every status names them `status<Name>`. */
-function statusOf(status) {
-  const id = STATUS[status] === undefined ? 'unconfigured' : status
+function statusOf(status: unknown): StatusView {
+  const id: HostStatus = isHostStatus(status) ? status : 'unconfigured'
   const name = id.replace(/(?:^|-)([a-z])/g, (_all, letter) => letter.toUpperCase())
-  return { ...STATUS[id], label: 'status' + name, hint: 'statusHint' + name }
+  return {
+    ...STATUS[id],
+    label: dictionaryKey('status' + name),
+    hint: dictionaryKey('statusHint' + name),
+  }
 }

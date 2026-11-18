@@ -1,14 +1,21 @@
 // client/src/key-picker.ts - KeyFilePicker, the remote key-file chooser (region 9c); after carrier-overlay.ts, before wizard-draft.ts.
 //#region 9c. key-file picker
 
-function KeyFilePicker(props) {
+/** The key chooser: it browses directories inside the user's home and returns one file path. */
+interface KeyFilePickerProps extends LocaleProps {
+  initialDir?: string
+  onPick?: (path: string) => void
+  onClose?: () => void
+}
+
+function KeyFilePicker(props: KeyFilePickerProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   const [listing, setListing] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const load = useCallback((dir) => {
+  const load = useCallback((dir: string) => {
     let cancelled = false
     setLoading(true)
     setError(null)
@@ -34,8 +41,8 @@ function KeyFilePicker(props) {
   const entries = listing && Array.isArray(listing.entries) ? listing.entries : []
   // Directories first, then files; both rows are one button with a kind.
   const sorted = [
-    ...entries.filter((entry) => entry && entry.isDirectory),
-    ...entries.filter((entry) => entry && !entry.isDirectory),
+    ...entries.filter((entry: KeyFileEntry) => entry && entry.isDirectory),
+    ...entries.filter((entry: KeyFileEntry) => entry && !entry.isDirectory),
   ]
 
   let body

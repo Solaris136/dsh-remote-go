@@ -17,17 +17,17 @@ const DIALOG_FOCUSABLE =
  * focus restoration on unmount, `overflow:hidden` on `<body>`, `aria-modal` on the top dialog
  * only, and `inert` on every lower layer.
  */
-function createDialogStack() {
-  const layers = []
-  let doc = null
+function createDialogStack(): DialogStack {
+  const layers: DialogLayer[] = []
+  let doc: Document | null = null
   let installed = false
-  let savedOverflow = null
-  let initialFocus = null
+  let savedOverflow: string | null = null
+  let initialFocus: FocusableElement | null = null
 
   const top = () => layers[layers.length - 1] || null
-  const focusOf = (root) => {
+  const focusOf = (root: HTMLElement | null | undefined): FocusableElement[] => {
     if (!root || typeof root.querySelectorAll !== 'function') return []
-    let list = []
+    let list: FocusableElement[] = []
     try {
       list = Array.prototype.slice.call(root.querySelectorAll(DIALOG_FOCUSABLE))
     } catch (_error) {
@@ -39,20 +39,20 @@ function createDialogStack() {
       return typeof node.focus === 'function'
     })
   }
-  const firstFocusable = (root) => {
+  const firstFocusable = (root: HTMLElement | null | undefined): FocusableElement | null => {
     const list = focusOf(root)
     if (list.length === 0) return null
     // A form dialog opens on its first field rather than on its close button.
     return list.find((node) => /^(INPUT|SELECT|TEXTAREA)$/.test(String(node.tagName || ''))) || list[0]
   }
-  const focusNode = (node) => {
+  const focusNode = (node: FocusableElement | null | undefined) => {
     try {
       node.focus()
     } catch (_error) {
       // swallow-ok: a detached node cannot take focus; the dialog itself still opens
     }
   }
-  const setAttr = (node, name, value) => {
+  const setAttr = (node: HTMLElement | null | undefined, name: string, value: string | null) => {
     if (!node || typeof node.setAttribute !== 'function') return
     if (value === null) {
       if (typeof node.removeAttribute === 'function') node.removeAttribute(name)
@@ -65,7 +65,7 @@ function createDialogStack() {
    * stop confirmation lives in the management window) is a DOM descendant of the layer
    * below it, not a sibling of it.
    */
-  const holds = (root, node) => {
+  const holds = (root: HTMLElement | null | undefined, node: HTMLElement | null | undefined) => {
     if (!root || !node || root === node) return false
     try {
       return typeof root.contains === 'function' && root.contains(node) === true
@@ -90,7 +90,7 @@ function createDialogStack() {
       }
     }
   }
-  const trapTab = (layer, event) => {
+  const trapTab = (layer: DialogLayer, event: KeyboardEvent) => {
     const list = focusOf(layer.dialog)
     if (list.length === 0) {
       event.preventDefault()
@@ -98,7 +98,9 @@ function createDialogStack() {
       return
     }
     const active = doc ? doc.activeElement : null
-    const index = list.indexOf(active)
+    // `Document#activeElement` is typed as `Element`; by definition it is the focused element,
+    // which is the FocusableElement this stack filters for.
+    const index = list.indexOf(active as FocusableElement | null)
     if (index === -1) {
       event.preventDefault()
       focusNode(event.shiftKey ? list[list.length - 1] : list[0])
@@ -112,7 +114,7 @@ function createDialogStack() {
       focusNode(list[0])
     }
   }
-  const onKeyDown = (event) => {
+  const onKeyDown = (event: KeyboardEvent) => {
     const layer = top()
     if (layer === null || !event) return
     if (event.key === 'Escape') {
@@ -126,7 +128,7 @@ function createDialogStack() {
     }
     if (event.key === 'Tab') trapTab(layer, event)
   }
-  const install = (target) => {
+  const install = (target: Document | null | undefined) => {
     if (installed || !target) return
     doc = target
     doc.addEventListener('keydown', onKeyDown, true)
@@ -148,12 +150,12 @@ function createDialogStack() {
     doc.body.style.overflow = savedOverflow === null ? '' : savedOverflow
     savedOverflow = null
   }
-  const focusInitial = (layer) => {
+  const focusInitial = (layer: DialogLayer) => {
     // A destructive confirmation names its safe action: focus lands on Cancel, not on the
     // header × or the destructive button.
     const preferred =
       typeof layer.initialFocusTestId === 'string' && layer.initialFocusTestId !== ''
-        ? layer.dialog.querySelector(`[data-testid="${layer.initialFocusTestId}"]`)
+        ? layer.dialog.querySelector<FocusableElement>(`[data-testid="${layer.initialFocusTestId}"]`)
         : null
     // A control the dialog disabled in this frame cannot take focus: fall back to the
     // ordinary first-focusable rule instead of leaving focus outside the dialog.
@@ -168,7 +170,7 @@ function createDialogStack() {
     setAttr(layer.dialog, 'tabindex', '-1')
     focusNode(layer.dialog)
   }
-  const remove = (layer) => {
+  const remove = (layer: DialogLayer) => {
     const index = layers.indexOf(layer)
     if (index < 0) return
     layers.splice(index, 1)
@@ -193,16 +195,17 @@ function createDialogStack() {
   }
 
   return {
-    push(layer) {
+    push(layer: DialogLayer) {
       if (!layer || !layer.dialog) return () => {}
       const elementDocument = layer.dialog.ownerDocument || (typeof document === 'undefined' ? null : document)
       if (elementDocument === null) return () => {}
       install(elementDocument)
       if (layers.length === 0) {
-        initialFocus = doc && doc.activeElement ? doc.activeElement : null
+        // Same `activeElement` widening as above: the focused element of a live document.
+        initialFocus = (doc && doc.activeElement ? doc.activeElement : null) as FocusableElement | null
         lockScroll()
       } else {
-        layer.returnFocus = doc && doc.activeElement ? doc.activeElement : null
+        layer.returnFocus = (doc && doc.activeElement ? doc.activeElement : null) as FocusableElement | null
       }
       layers.push(layer)
       sync()
@@ -217,8 +220,8 @@ function createDialogStack() {
   }
 }
 
-let sharedDialogStack = null
-function dialogStack() {
+let sharedDialogStack: DialogStack | null = null
+function dialogStack(): DialogStack {
   if (sharedDialogStack === null) sharedDialogStack = createDialogStack()
   return sharedDialogStack
 }
@@ -227,7 +230,7 @@ function dialogStack() {
  * Register one rendered dialog with the shared stack. `onClose` is read through a ref, so a
  * render that creates a new callback does not re-register (the S1-1 trigger).
  */
-function useDialogLayer(options) {
+function useDialogLayer(options: DialogLayerOptions) {
   const closeRef = useRef(options.onClose)
   closeRef.current = options.onClose
   const dismissibleRef = useRef(options.dismissible !== false)
@@ -249,7 +252,7 @@ function useDialogLayer(options) {
   }, [])
 }
 
-function Field(props) {
+function Field(props: FieldProps) {
   return h(
     'label',
     {
@@ -262,7 +265,7 @@ function Field(props) {
   )
 }
 
-function TextInput(props) {
+function TextInput(props: TextInputProps) {
   return h('input', {
     className: 'drg-input',
     type: props.type || 'text',
@@ -273,7 +276,10 @@ function TextInput(props) {
     autoComplete: props.autoComplete || 'off',
     spellCheck: false,
     'data-testid': props.testId,
-    onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.value) : undefined,
+    onChange:
+      typeof props.onChange === 'function'
+        ? (event: ReactChangeEvent<HTMLInputElement>) => props.onChange(event.target.value)
+        : undefined,
     onKeyDown: typeof props.onKeyDown === 'function' ? props.onKeyDown : undefined,
     'aria-label': props.ariaLabel,
     'aria-invalid': props.invalid === true ? 'true' : undefined,
@@ -281,7 +287,7 @@ function TextInput(props) {
   })
 }
 
-function Select(props) {
+function Select(props: SelectProps) {
   const options = Array.isArray(props.options) ? props.options : []
   return h(
     'select',
@@ -303,11 +309,16 @@ function Select(props) {
 }
 
 /** One form field from a spec; `after` runs alongside the patch (touched/dirty flags). */
-function formRow(t, draft, patch, spec) {
+function formRow(
+  t: LooseTranslate,
+  draft: Record<string, unknown>,
+  patch: (patch: Record<string, unknown>) => void,
+  spec: FormRowSpec,
+): ReactElement {
   const label = t(spec.label)
   const error = spec.error ? t(spec.error) : undefined
   const errorId = error && spec.testId ? spec.testId + '-error' : undefined
-  const onChange = (next) => {
+  const onChange = (next: string) => {
     patch({ [spec.key]: next })
     if (spec.after) spec.after(next)
   }
@@ -337,7 +348,7 @@ function formRow(t, draft, patch, spec) {
   )
 }
 
-function CheckRow(props) {
+function CheckRow(props: CheckRowProps) {
   return box(
     'label',
     'drg-check',
@@ -346,13 +357,16 @@ function CheckRow(props) {
       checked: props.checked === true,
       disabled: props.disabled === true,
       'data-testid': props.testId,
-      onChange: typeof props.onChange === 'function' ? (event) => props.onChange(event.target.checked) : undefined,
+      onChange:
+        typeof props.onChange === 'function'
+          ? (event: ReactChangeEvent<HTMLInputElement>) => props.onChange(event.target.checked)
+          : undefined,
     }),
     h('span', null, props.label),
   )
 }
 
-function Notice(props) {
+function Notice(props: NoticeProps) {
   const tone = props.tone || 'info'
   return h(
     'div',
@@ -377,7 +391,23 @@ function Notice(props) {
 }
 
 let modalSequence = 0
-function Modal(props) {
+
+interface ModalProps {
+  wide?: boolean
+  title?: ReactNode
+  subtitle?: ReactNode
+  onClose?: (() => void) | null
+  closeLabel?: ReactNode
+  testId?: string
+  busy?: boolean
+  dismissible?: boolean
+  initialFocusTestId?: string
+  ariaLabel?: string
+  footer?: ReactNode
+  children?: ReactNode
+}
+
+function Modal(props: ModalProps) {
   const onClose = props.onClose
   const layerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -444,7 +474,20 @@ function Modal(props) {
   )
 }
 
-function ConfirmDialog(props) {
+interface ConfirmDialogProps {
+  title?: ReactNode
+  body?: ReactNode
+  testId?: string
+  busy?: boolean
+  cancelTestId?: string
+  confirmTestId?: string
+  cancelLabel?: ReactNode
+  confirmLabel?: ReactNode
+  onCancel?: () => void
+  onConfirm?: () => void
+}
+
+function ConfirmDialog(props: ConfirmDialogProps) {
   return h(
     Modal,
     {
@@ -482,7 +525,13 @@ function ConfirmDialog(props) {
  * The confirmation for the destructive stop action: one line on what happens, plus what
  * survives (the host, its settings and credentials).
  */
-function StopRemoteDialog(props) {
+interface StopRemoteDialogProps extends LocaleProps {
+  busy?: boolean
+  onConfirm?: () => void
+  onCancel?: () => void
+}
+
+function StopRemoteDialog(props: StopRemoteDialogProps) {
   const t = translatorOf(props)
   return h(ConfirmDialog, {
     title: t('stopRemoteTitle'),

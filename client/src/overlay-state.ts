@@ -8,7 +8,7 @@
  * connected host flipping to `connecting`, or `disconnected` after a newer frame). A Host
  * from before `rev` sends no number and keeps the old last-writer-wins behaviour.
  */
-function stateRevision(state) {
+function stateRevision(state: StateView | null | undefined): number | null {
   return state && typeof state.rev === 'number' && Number.isFinite(state.rev) ? state.rev : null
 }
 /**
@@ -16,10 +16,10 @@ function stateRevision(state) {
  * reload, so a Client holding the old high-water mark would reject every new frame forever.
  * A frame from another generation is accepted regardless of its revision.
  */
-function stateInstance(state) {
+function stateInstance(state: StateView | null | undefined): string | null {
   return state && typeof state.instance === 'string' && state.instance !== '' ? state.instance : null
 }
-function isNewerState(next, currentRev, currentInstance) {
+function isNewerState(next: StateView, currentRev: number | null, currentInstance: string | null): boolean {
   const instance = stateInstance(next)
   if (instance !== null && currentInstance !== null && instance !== currentInstance) return true
   const rev = stateRevision(next)
@@ -123,9 +123,9 @@ function createFrameBatch(run: () => void, schedule?: FrameSchedule, cancel?: Fr
 /** What the log pump needs from the hook: the live tree, the way back into React, and the panel. */
 interface LogPumpOptions {
   /** The tree a frame merges into, or `null`/`undefined` while the first `/state` read is in flight. */
-  read: () => unknown
+  read: () => StateView | null
   /** Hand a merged tree back (the hook keeps it as its live tree and asks React to paint). */
-  deliver: (state: unknown) => void
+  deliver: (state: StateView) => void
   /** The per-host `(attempt, seq)` cursors the merge advances. */
   cursors: () => LogCursors
   /** Once the panel is gone nothing may be delivered. */
@@ -137,7 +137,7 @@ interface LogPumpOptions {
 /** The connect-log channel's paint path. */
 interface LogPump {
   /** Queue one `log` frame: no merge and no paint happens here. */
-  push: (frame: unknown) => void
+  push: (frame: ConnectLogFrame) => void
   /** Apply and paint the queued frames now (the end of an attempt cannot wait a frame). */
   flush: () => void
   /** Drop the queued frames and the pending frame (the panel unmounted). */
@@ -161,7 +161,7 @@ interface LogPump {
  * the same tail (R2) and the log channel re-sends nothing it has not already sent.
  */
 function createLogPump(options: LogPumpOptions): LogPump {
-  const frames: unknown[] = []
+  const frames: ConnectLogFrame[] = []
   const batch = createFrameBatch(paint, options.schedule, options.cancel)
   function paint() {
     const current = options.read()
@@ -200,27 +200,27 @@ function createLogPump(options: LogPumpOptions): LogPump {
   }
 }
 
-function useRemoteState(initialState, onDownload) {
+function useRemoteState(initialState: StateView | null | undefined, onDownload?: DownloadJobHandler): RemoteState {
   const hasInitial = initialState !== undefined && initialState !== null
-  const [state, setState] = useState(hasInitial ? initialState : null)
-  const [error, setError] = useState(null)
+  const [state, setState] = useState<StateView | null>(hasInitial ? initialState : null)
+  const [error, setError] = useState<ErrorView | null>(null)
   const [loading, setLoading] = useState(!hasInitial)
-  const [mode, setMode] = useState('idle')
+  const [mode, setMode] = useState<StreamMode>('idle')
   const alive = useRef(true)
-  const revRef = useRef(stateRevision(initialState))
-  const instanceRef = useRef(stateInstance(initialState))
-  const streamRef = useRef(null)
+  const revRef = useRef<number | null>(stateRevision(initialState))
+  const instanceRef = useRef<string | null>(stateInstance(initialState))
+  const streamRef = useRef<StateStreamDispose | null>(null)
   // The last state this hook computed. `setState` alone cannot be read synchronously, and both
   // merge paths (a frame, a log row) need the current tree; keeping the ref ahead of the render
   // is what makes two frames arriving in one tick merge instead of overwrite each other.
-  const stateRef = useRef(hasInitial ? initialState : null)
+  const stateRef = useRef<StateView | null>(hasInitial ? initialState : null)
   /**
    * Per-host log cursors (docs/api.md `ConnectLogFrame`). They live beside the state, not inside
    * it: the cursor is transport bookkeeping and must never reach the DOM or a React key.
    */
   const cursorsRef = useRef<LogCursors | null>(null)
   if (cursorsRef.current === null) {
-    const cursors = new Map()
+    const cursors: LogCursors = new Map()
     // A server-rendered initial state carries the tail of a Host that may already be connecting:
     // seed from it so the first `reset` frame adds nothing on screen.
     if (hasInitial) seedLogsFromSnapshot(initialState, initialState, cursors)
@@ -244,7 +244,7 @@ function useRemoteState(initialState, onDownload) {
     })
   }
   /** R2: merge a payload's authoritative tail, whatever the revision gate later decides. */
-  const seedLogs = (next) => {
+  const seedLogs = (next: StateView) => {
     const current = stateRef.current
     if (current === null) return
     const seeded = seedLogsFromSnapshot(current, next, cursorsRef.current)
@@ -252,7 +252,7 @@ function useRemoteState(initialState, onDownload) {
     stateRef.current = seeded
     setState(seeded)
   }
-  const applyState = (next) => {
+  const applyState = (next: StateView): boolean => {
     seedLogs(next)
     if (!isNewerState(next, revRef.current, instanceRef.current)) return false
     instanceRef.current = stateInstance(next) ?? instanceRef.current
@@ -263,21 +263,21 @@ function useRemoteState(initialState, onDownload) {
     setState(merged)
     return true
   }
-  const applyLog = useCallback((frame) => {
+  const applyLog = useCallback((frame: ConnectLogFrame) => {
     if (!alive.current) return
     // W2: the frame is queued, not merged. `createLogPump` applies every frame that arrived inside
     // this display frame in arrival order and paints once; the merge rules themselves are
     // `applyLogFrame`'s and are unchanged.
     pumpRef.current.push(frame)
   }, [])
-  const applyLogEnd = useCallback((end) => {
+  const applyLogEnd = useCallback((end: ConnectLogEnd) => {
     // The host left the log-visible set: its cursor is spent. The rows stay until the next state
     // frame drops them with the connect window (R1), so nothing has to be painted here - but a
     // queued frame still belongs to the cursor this end retires, so it is merged first.
     pumpRef.current.flush()
     if (end && typeof end.hostId === 'string') cursorsRef.current.delete(end.hostId)
   }, [])
-  const downloadHandler = useRef(typeof onDownload === 'function' ? onDownload : () => {})
+  const downloadHandler = useRef<DownloadJobHandler>(typeof onDownload === 'function' ? onDownload : () => {})
   downloadHandler.current = typeof onDownload === 'function' ? onDownload : () => {}
   const refresh = useCallback(() => {
     setLoading(true)
@@ -286,7 +286,7 @@ function useRemoteState(initialState, onDownload) {
     const requestedAt = revRef.current
     const requestedInstance = instanceRef.current
     return api.getState().then(
-      (next) => {
+      (next: StateView) => {
         if (!alive.current) return
         // The log tail of a snapshot is append-only, so it merges even when the snapshot itself
         // is too old to paint (a slower `/state` must not lose rows the log channel missed).
@@ -299,7 +299,7 @@ function useRemoteState(initialState, onDownload) {
         setError(null)
         setLoading(false)
       },
-      (readError) => {
+      (readError: unknown) => {
         if (!alive.current) return
         setError(toErrorView(readError))
         setLoading(false)
@@ -309,7 +309,7 @@ function useRemoteState(initialState, onDownload) {
   useEffect(() => {
     alive.current = true
     const dispose = subscribeState({
-      onState: (next) => {
+      onState: (next: StateView) => {
         if (!alive.current) return
         if (!applyState(next)) return
         // A frame that is newer than the screen is also newer than any pending refresh: a
@@ -317,15 +317,15 @@ function useRemoteState(initialState, onDownload) {
         setError(null)
         setLoading(false)
       },
-      onStatus: (nextMode) => {
+      onStatus: (nextMode: StreamMode) => {
         if (alive.current) setMode(nextMode)
       },
-      onError: (readError) => {
+      onError: (readError: unknown) => {
         if (!alive.current) return
         setError(toErrorView(readError))
         setLoading(false)
       },
-      onDownload: (job) => {
+      onDownload: (job: DownloadJobView) => {
         if (alive.current) downloadHandler.current(job)
       },
     })
@@ -338,7 +338,7 @@ function useRemoteState(initialState, onDownload) {
       dispose()
     }
   }, [])
-  const patch = useCallback((updater) => {
+  const patch = useCallback((updater: (current: StateView) => StateView) => {
     setState((current) => {
       const next = current === null ? current : updater(current)
       if (next !== current) stateRef.current = next

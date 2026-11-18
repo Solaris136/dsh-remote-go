@@ -7,7 +7,7 @@
  * alone can tell whether an empty `logs` array means "no window" or "rows come on the other
  * channel" (docs/api.md v2.12).
  */
-const CONNECT_LOG_STATUSES = ['connecting', 'fingerprint-pending', 'error']
+const CONNECT_LOG_STATUSES: HostStatus[] = ['connecting', 'fingerprint-pending', 'error']
 
 /** The Client keeps the Host's window, so the panel never drifts from the `/state` tail. */
 const CONNECT_LOG_LIMIT = 120
@@ -27,12 +27,12 @@ interface LogCursor {
 type LogCursors = Map<string, LogCursor>
 
 /** Whether this host currently has a connect window (and therefore a log tail). */
-function connectLogVisible(host) {
+function connectLogVisible(host: HostView | null | undefined): boolean {
   return Boolean(host) && CONNECT_LOG_STATUSES.indexOf(host.status) >= 0
 }
 
 /** The `seq` of the newest row an array holds (`0` for an empty or absent one). */
-function lastLogSeq(entries) {
+function lastLogSeq(entries: unknown): number {
   if (!Array.isArray(entries) || entries.length === 0) return 0
   const last = entries[entries.length - 1]
   return last && typeof last.seq === 'number' ? last.seq : 0
@@ -43,7 +43,7 @@ function lastLogSeq(entries) {
  * an older Host only has the tail, so the newest `seq` is the cursor and the attempt is whatever
  * this page last saw (0 until a frame says otherwise).
  */
-function logCursorOfHost(host, instance, previous) {
+function logCursorOfHost(host: HostView, instance: string | null, previous: LogCursor | null): LogCursor {
   const tailSeq = lastLogSeq(host.logs)
   const claimed = typeof host.logSeq === 'number' && Number.isFinite(host.logSeq) ? host.logSeq : tailSeq
   const attempt =
@@ -59,11 +59,11 @@ function logCursorOfHost(host, instance, previous) {
 }
 
 /** Merge rows by `seq` (never twice), keeping them ordered and inside the tail window. */
-function mergeLogEntries(existing, incoming) {
+function mergeLogEntries(existing: ConnectLogEntry[], incoming: ConnectLogEntry[]): ConnectLogEntry[] {
   const current = Array.isArray(existing) ? existing : []
   if (!Array.isArray(incoming) || incoming.length === 0) return current
   const known = new Set(current.map((entry) => entry && entry.seq))
-  const added = []
+  const added: ConnectLogEntry[] = []
   for (const entry of incoming) {
     if (!entry || typeof entry.seq !== 'number') continue
     if (known.has(entry.seq)) continue
@@ -77,7 +77,7 @@ function mergeLogEntries(existing, incoming) {
 }
 
 /** Whether two row arrays hold the same cursors (then a frame changes nothing on screen). */
-function sameLogSeqs(left, right) {
+function sameLogSeqs(left: ConnectLogEntry[], right: ConnectLogEntry[]): boolean {
   if (left.length !== right.length) return false
   for (let index = 0; index < left.length; index += 1) {
     if (left[index].seq !== right[index].seq) return false
@@ -86,7 +86,7 @@ function sameLogSeqs(left, right) {
 }
 
 /** A copy of the state tree with one host's rows replaced. */
-function withHostLogs(state, index, host, logs) {
+function withHostLogs(state: StateView, index: number, host: HostView, logs: ConnectLogEntry[]): StateView {
   const hosts = state.hosts.slice()
   hosts[index] = Object.assign({}, host, { logs })
   return Object.assign({}, state, { hosts })
@@ -97,7 +97,11 @@ function withHostLogs(state, index, host, logs) {
  * A frame that *does* inline rows (an older Host, or a hand-fed fixture) is authoritative for its
  * own tail and re-anchors the cursor. A host that left the log-visible set loses its rows.
  */
-function mergeStatePreservingLogs(previous, next, cursors) {
+function mergeStatePreservingLogs(
+  previous: StateView | null,
+  next: StateView | null,
+  cursors: LogCursors,
+): StateView | null {
   if (!next || typeof next !== 'object' || !Array.isArray(next.hosts)) return next
   const instance = stateInstance(next)
   const previousHosts = previous && Array.isArray(previous.hosts) ? previous.hosts : []
@@ -122,7 +126,11 @@ function mergeStatePreservingLogs(previous, next, cursors) {
  * when the payload is too old to paint (the revision gate is about state, not about rows). This is
  * what keeps the panel complete while the log channel is unavailable (docs/api.md 降级).
  */
-function seedLogsFromSnapshot(state, snapshot, cursors) {
+function seedLogsFromSnapshot(
+  state: StateView | null,
+  snapshot: StateView | null,
+  cursors: LogCursors,
+): StateView | null {
   if (!state || !Array.isArray(state.hosts)) return state
   if (!snapshot || !Array.isArray(snapshot.hosts)) return state
   const instance = stateInstance(snapshot)
@@ -160,7 +168,11 @@ function seedLogsFromSnapshot(state, snapshot, cursors) {
  * rows past its cursor, and `reset` rebuilds from the frame. `applied: false` means the frame
  * changed nothing this page can see (so no render).
  */
-function applyLogFrame(state, frame, cursors) {
+function applyLogFrame(
+  state: StateView | null,
+  frame: ConnectLogFrame,
+  cursors: LogCursors,
+): { state: StateView | null; applied: boolean } {
   if (!state || !Array.isArray(state.hosts)) return { state, applied: false }
   if (!frame || typeof frame.hostId !== 'string') return { state, applied: false }
   const index = state.hosts.findIndex((host) => host && host.id === frame.hostId)

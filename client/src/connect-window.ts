@@ -1,9 +1,14 @@
 // client/src/connect-window.ts - ConnectProgress, FingerprintCard, ErrorCard, logClock, ConnectLog, ConnectWindow (region 9); after host-list.ts, before switcher.ts.
 //#region 9. takeover surface and carrier helpers
 
-function ConnectProgress(props) {
+interface ConnectProgressProps extends LocaleProps {
+  host?: Partial<HostView> | null
+  title?: ReactNode
+}
+
+function ConnectProgress(props: ConnectProgressProps) {
   const t = translatorOf(props)
-  const host = props.host || {}
+  const host: Partial<HostView> = props.host || {}
   const current = host.phase ? PHASES.indexOf(host.phase) : -1
   const name = host.name || host.id || ''
   return box(
@@ -42,10 +47,18 @@ function ConnectProgress(props) {
   )
 }
 
-function FingerprintCard(props) {
+interface FingerprintCardProps extends LocaleProps {
+  host?: Partial<HostView> | null
+  busy?: boolean
+  error?: unknown
+  onAccept?: (remember: boolean) => void
+  onReject?: () => void
+}
+
+function FingerprintCard(props: FingerprintCardProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  const host = props.host || {}
+  const host: Partial<HostView> = props.host || {}
   const fingerprint = host.fingerprint && typeof host.fingerprint === 'object' ? host.fingerprint : null
   const changed = fingerprint !== null && fingerprint.status === 'changed'
   const sha256 = fingerprint && typeof fingerprint.sha256 === 'string' ? fingerprint.sha256 : ''
@@ -113,7 +126,14 @@ function FingerprintCard(props) {
   )
 }
 
-function ErrorCard(props) {
+interface ErrorCardProps extends LocaleProps {
+  error?: unknown
+  onRetry?: () => void
+  onDiagnose?: () => void
+  onBack?: () => void
+}
+
+function ErrorCard(props: ErrorCardProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   const view = toErrorView(props.error)
@@ -154,10 +174,10 @@ function ErrorCard(props) {
   )
 }
 
-function logClock(iso) {
+function logClock(iso: unknown): string {
   const when = typeof iso === 'string' && iso !== '' ? new Date(iso) : null
   if (when === null || Number.isNaN(when.getTime())) return ''
-  const pad = (value) => String(value).padStart(2, '0')
+  const pad = (value: number) => String(value).padStart(2, '0')
   return pad(when.getHours()) + ':' + pad(when.getMinutes()) + ':' + pad(when.getSeconds())
 }
 
@@ -165,21 +185,25 @@ function logClock(iso) {
 const CONNECT_LOG_PHASES = new Set(['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready'])
 
 /** A line's text: the Host's bilingual line when present, otherwise the raw message. */
-function connectLogText(entry, locale) {
+function connectLogText(entry: ConnectLogEntry, locale: DictLocale): string {
   const localized = resolveText(entry.text, locale)
   return localized !== '' ? localized : String(entry.message ?? '')
 }
 
-function connectLogPhaseLabel(t, phase) {
+function connectLogPhaseLabel(t: LooseTranslate, phase: string): string {
   return CONNECT_LOG_PHASES.has(phase) ? t('connectLogPhase.' + phase) : String(phase)
 }
 
-function ConnectLog(props) {
+interface ConnectLogProps extends LocaleProps {
+  host?: Partial<HostView> | null
+}
+
+function ConnectLog(props: ConnectLogProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  const host = props.host || {}
-  const entries = Array.isArray(host.logs) ? host.logs : []
-  const bodyRef = useRef(null)
+  const host: Partial<HostView> = props.host || {}
+  const entries: ConnectLogEntry[] = Array.isArray(host.logs) ? host.logs : []
+  const bodyRef = useRef<HTMLDivElement | null>(null)
   const follow = useRef(true)
   const lastSeq = entries.length > 0 ? entries[entries.length - 1].seq : 0
   useEffect(() => {
@@ -238,10 +262,20 @@ function ConnectLog(props) {
   )
 }
 
-function ConnectWindow(props) {
+interface ConnectWindowProps extends LocaleProps {
+  host?: HostView | null
+  fingerprintBusy?: boolean
+  onAcceptFingerprint?: (remember: boolean) => void
+  onRejectFingerprint?: () => void
+  onRetry?: () => void
+  onDiagnose?: () => void
+  onBack?: () => void
+}
+
+function ConnectWindow(props: ConnectWindowProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  const host = props.host || {}
+  const host: Partial<HostView> = props.host || {}
   const status = host.status
   // A restart keeps the same host and link: its title says so instead of "connecting".
   const restarting = status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
@@ -269,7 +303,7 @@ function ConnectWindow(props) {
             locale,
             host,
             busy: props.fingerprintBusy === true,
-            onAccept: (remember) => props.onAcceptFingerprint(remember === true),
+            onAccept: (remember: boolean) => props.onAcceptFingerprint(remember === true),
             onReject: props.onRejectFingerprint,
           })
         : status === 'error'

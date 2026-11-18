@@ -6,6 +6,10 @@
  */
 interface WebviewElement extends HTMLElement {
   loadURL(url: string): Promise<void>
+  /** Electron's guest-eval channel: the only way into the framed page's own script. */
+  executeJavaScript<T = unknown>(code: string): Promise<T>
+  /** Reload the committed document (a failed main-frame load is retried through this). */
+  reload(): void
 }
 
 /** The guest's `did-fail-load` event; a sub-resource failure carries a negative `errorCode`. */
@@ -16,10 +20,10 @@ interface WebviewLoadFailure extends Event {
 
 /**
  * One desktop guest. The pool keeps it warm and every backend call takes it, so the fields a
- * later frame mutates (`installAttempts`, `ready`, `failed`, …) are declared with it.
+ * later frame mutates (`installAttempts`, `ready`, `failed`, …) live on the shared `CarrierEntry`.
  */
-interface DesktopCarrierEntry {
-  kind: string
+interface DesktopCarrierEntry extends CarrierEntry {
+  kind: 'desktop'
   backend: CarrierBackend
   hostId: string
   lease: string
@@ -41,7 +45,12 @@ interface DesktopCarrierEntry {
   installAttempts?: number
 }
 
-async function createDesktopCarrier(hostId, url, message, options) {
+async function createDesktopCarrier(
+  hostId: string,
+  url: string,
+  message: unknown,
+  options: CarrierShowOptions,
+): Promise<DesktopCarrierEntry | null> {
   const bridge = desktopBrowserBridge()
   if (bridge === null) return null
   let reservation = null

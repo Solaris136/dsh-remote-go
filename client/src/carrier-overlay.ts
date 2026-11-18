@@ -1,5 +1,5 @@
 // client/src/carrier-overlay.ts - show/reveal/hide/dispose/close for the carrier overlay (9b 11/11); after carrier-intents.ts, before key-picker.ts.
-function disposeWebCarrier(entry) {
+function disposeWebCarrier(entry: CarrierEntry) {
   stopCarrierInstall(entry)
   if (entry.loadGuard) entry.loadGuard.dispose()
   try {
@@ -24,17 +24,17 @@ interface CarrierShowResult {
  * Show one host's window, warming it on first visit. Creation is async (the bridge hands out a
  * lease), so `carrierPool.wanted` makes the last request win: a superseded creation is dropped.
  */
-async function showOverlay(options): Promise<CarrierShowResult> {
+async function showOverlay(options: CarrierShowOptions): Promise<CarrierShowResult> {
   const hostId = typeof options.hostId === 'string' ? options.hostId : ''
   carrierPool.wanted = hostId
   return whenCarrierIdle(() => showOverlayNow(hostId, options))
 }
 
 /** One frame of this page, so the compositor has committed what was just changed here. */
-function nextLocalFrame() {
+function nextLocalFrame(): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false
-    const finish = (value) => {
+    const finish = (value: boolean) => {
       if (settled) return
       settled = true
       resolve(value)
@@ -46,17 +46,17 @@ function nextLocalFrame() {
 }
 
 /** Resolve once the guest has painted frames of its own; false when it never answers. */
-function waitForGuestPaint(entry, timeoutMs) {
+function waitForGuestPaint(entry: CarrierEntry | null | undefined, timeoutMs: number): Promise<boolean> {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return Promise.resolve(false)
-  let timer = null
+  let timer: TimerHandle | null = null
   const painted = Promise.resolve()
     .then(() => view.executeJavaScript(GUEST_PAINT_SCRIPT))
     .then(
-      (value) => value === 'ok' || value === 'no-raf',
+      (value: unknown) => value === 'ok' || value === 'no-raf',
       () => false,
     )
-  const expired = new Promise((resolve) => {
+  const expired = new Promise<boolean>((resolve) => {
     timer = setTimeout(() => resolve(false), timeoutMs)
     unrefTimer(timer)
   })
@@ -67,7 +67,7 @@ function waitForGuestPaint(entry, timeoutMs) {
 }
 
 /** The guest committed a document (or failed to): a reveal no longer has to wait for it. */
-function markCarrierReady(entry) {
+function markCarrierReady(entry: CarrierEntry | null | undefined) {
   if (entry === null || entry === undefined) return
   entry.ready = true
   const waiters = Array.isArray(entry.readyWaiters) ? entry.readyWaiters : []
@@ -75,7 +75,7 @@ function markCarrierReady(entry) {
   for (const resolve of waiters) resolve(true)
 }
 
-function waitForCarrierReady(entry, timeoutMs) {
+function waitForCarrierReady(entry: CarrierEntry, timeoutMs: number): Promise<boolean> {
   if (entry.ready === true) return Promise.resolve(true)
   return new Promise((resolve) => {
     entry.readyWaiters.push(resolve)
@@ -91,7 +91,7 @@ function waitForCarrierReady(entry, timeoutMs) {
  * goes up transparent, waits for its content (guest paint, or the frame's own compositor), and
  * only then becomes opaque. A reveal that lost its turn leaves the carrier hidden.
  */
-async function revealCarrier(entry) {
+async function revealCarrier(entry: CarrierEntry) {
   const token = (entry.revealToken ?? 0) + 1
   entry.revealToken = token
   entry.root.style.display = ''
@@ -106,14 +106,14 @@ async function revealCarrier(entry) {
   entry.root.style.opacity = ''
 }
 
-async function showOverlayNow(hostId, options): Promise<CarrierShowResult> {
+async function showOverlayNow(hostId: string, options: CarrierShowOptions): Promise<CarrierShowResult> {
   const url = typeof options.url === 'string' ? options.url : ''
   let entry = carrierOf(hostId)
   const reused = entry !== null
   const surface = entry === null ? carrierSurface() : entry.kind
   // The revision of the attach this call actually navigated to. Only a real navigation
   // (a new carrier, or a reload of an existing one) may claim the new revision.
-  let navigatedRev = null
+  let navigatedRev: number | null = null
   if (entry === null) {
     if (surface === null) return { ok: false, reason: 'acquire-failed' }
     if (!acceptsCarrierUrl(surface, url)) return { ok: false, reason: 'bad-url' }
@@ -190,10 +190,10 @@ function hideOverlays() {
 }
 
 /** Set by the overlay host: a disposed carrier invalidates the launch URL kept for it. */
-let onCarrierDisposed = null
+let onCarrierDisposed: ((hostId: string) => void) | null = null
 
 /** Tear one carrier down. Safe for one that never entered the pool. */
-async function disposeCarrier(entry) {
+async function disposeCarrier(entry: CarrierEntry | null | undefined) {
   if (entry === null || entry === undefined) return
   stopCarrierInstall(entry)
   if (carrierPool.poll === entry) stopHostRowPoll()
@@ -213,7 +213,7 @@ async function disposeCarrier(entry) {
 }
 
 /** Hand one desktop guest back to the shell: injected row, DOM, then the lease itself. */
-async function disposeDesktopCarrier(entry) {
+async function disposeDesktopCarrier(entry: CarrierEntry) {
   if (entry.view !== null && entry.rowInstalled === true) {
     try {
       const destroyed = entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
@@ -233,7 +233,7 @@ async function disposeDesktopCarrier(entry) {
   }
 }
 
-async function closeCarrier(hostId) {
+async function closeCarrier(hostId: string) {
   const entry = carrierOf(hostId)
   if (entry === null) return
   await disposeCarrier(entry)

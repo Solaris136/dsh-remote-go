@@ -6,7 +6,7 @@
  * local proxy forwards it to the host's tunnel. Same origin is what lets the row and the file
  * bridge be injected below; it is also why the frame must never navigate off the view prefix.
  */
-function createWebCarrier(hostId, url, message, options) {
+function createWebCarrier(hostId: string, url: string, message: unknown, options: CarrierShowOptions): CarrierEntry {
   const root = document.createElement('div')
   root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
   root.setAttribute('data-testid', 'remote-overlay')
@@ -33,7 +33,7 @@ function createWebCarrier(hostId, url, message, options) {
   // sandboxed, so a popup already escapes into this origin.
   frame.setAttribute('allow', 'clipboard-read; clipboard-write; microphone; fullscreen; popups')
   frame.setAttribute('referrerpolicy', 'no-referrer')
-  const entry = {
+  const entry: CarrierEntry = {
     kind: 'web',
     backend: WEB_CARRIER,
     hostId,
@@ -68,7 +68,7 @@ function createWebCarrier(hostId, url, message, options) {
   return entry
 }
 
-function webWindow(entry) {
+function webWindow(entry: CarrierEntry): Window | null {
   try {
     const win = entry.frame && entry.frame.contentWindow
     if (!win) return null
@@ -80,7 +80,7 @@ function webWindow(entry) {
   }
 }
 
-function onWebFrameLoad(entry) {
+function onWebFrameLoad(entry: CarrierEntry) {
   if (entry === null || entry.kind !== 'web') return
   const win = webWindow(entry)
   // The initial about:blank of a freshly appended iframe can dispatch `load` before the
@@ -129,14 +129,14 @@ function onWebFrameLoad(entry) {
  * for the life of the window (audit "install failure never retried"). Retry with a growing
  * delay, capped, and stop once the carrier is gone or the row is live.
  */
-function stopCarrierInstall(entry) {
+function stopCarrierInstall(entry: CarrierEntry | null | undefined) {
   if (entry === null || entry === undefined) return
   if (entry.installTimer !== null && entry.installTimer !== undefined) {
     if (typeof clearTimeout === 'function') clearTimeout(entry.installTimer)
     entry.installTimer = null
   }
 }
-function scheduleCarrierInstall(entry) {
+function scheduleCarrierInstall(entry: CarrierEntry | null | undefined) {
   if (entry === null || entry === undefined || entry.installTimer) return
   if (!carrierPool.entries.includes(entry)) return
   if ((entry.installAttempts || 0) >= CARRIER_INSTALL_MAX_ATTEMPTS) return

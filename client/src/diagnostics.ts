@@ -2,16 +2,16 @@
 //#region 11. diagnostics drawer
 
 /** Sort diagnostic checks into the contract's fixed order, unknown ids last. */
-function sortDiagnoseChecks(checks) {
-  const list = Array.isArray(checks) ? checks.slice() : []
-  const rank = (check) => {
+function sortDiagnoseChecks(checks: unknown): DiagnoseCheck[] {
+  const list: DiagnoseCheck[] = Array.isArray(checks) ? checks.slice() : []
+  const rank = (check: DiagnoseCheck) => {
     const index = DIAGNOSE_IDS.indexOf(check && check.id)
     return index < 0 ? DIAGNOSE_IDS.length : index
   }
   return list.sort((a, b) => rank(a) - rank(b))
 }
 
-function checkStatusLabel(t, status) {
+function checkStatusLabel(t: Translate, status: unknown): string {
   if (status === 'pass') return t('diag.checkPass')
   if (status === 'fail') return t('diag.checkFail')
   return t('diag.checkUnknown')
@@ -22,9 +22,14 @@ function checkStatusLabel(t, status) {
  * never includes a token or remote URL. `report` is required: the only caller
  * branches on it and calls this with a real report.
  */
-function formatDiagnoseText(report, host, t, locale) {
+function formatDiagnoseText(
+  report: DiagnoseReport,
+  host: Partial<HostView> | null | undefined,
+  t: Translate,
+  locale: DictLocale,
+): string {
   const lines = ['dsh-remote-go · ' + t('diag.title')]
-  const target = host || {}
+  const target: Partial<HostView> = host || {}
   const address = displayAddress(target)
   lines.push(t('diag.host') + ': ' + (target.name || target.id || '') + (address ? ' (' + address + ')' : ''))
   if (typeof report.summary === 'string') lines.push('summary: ' + report.summary)
@@ -41,7 +46,17 @@ function formatDiagnoseText(report, host, t, locale) {
   return lines.join('\n')
 }
 
-function DiagnoseDrawer(props) {
+/** The drawer: a failed run shows the same error card the connect window does. */
+interface DiagnoseDrawerProps extends LocaleProps {
+  host?: Partial<HostView> | null
+  status?: string
+  report?: DiagnoseReport | null
+  error?: unknown
+  onClose?: () => void
+  onRun?: () => void
+}
+
+function DiagnoseDrawer(props: DiagnoseDrawerProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   const host = props.host || null

@@ -1,8 +1,24 @@
 // client/src/settings.ts - SettingsModal and the settings draft/patch/validation helpers (region 12); after diagnostics.ts, before prompts.ts.
 //#region 12. settings modal
 
-function settingsPatchFromDraft(draft) {
-  const clamp = (value, limit, fallback) => {
+/** The settings draft: the flat form fields the modal edits, before they become a patch. */
+interface SettingsDraft extends Record<string, unknown> {
+  defaultPort?: number
+  defaultAuth?: string
+  defaultKeyPath?: string
+  connectTimeoutSec?: number
+  autoReconnectEnabled?: boolean
+  maxAttempts?: number
+  baseDelayMs?: number
+  hostKeyPolicy?: string
+  saveTokens?: boolean
+  language?: 'auto' | 'zh' | 'en'
+  logLevel?: 'error' | 'warn' | 'info' | 'debug'
+  profile?: string
+}
+
+function settingsPatchFromDraft(draft: SettingsDraft): SettingsPatch {
+  const clamp = (value: unknown, limit: HostRange, fallback: number) => {
     const number = toInt(value, fallback)
     return Math.min(limit.max, Math.max(limit.min, number))
   }
@@ -26,10 +42,12 @@ function settingsPatchFromDraft(draft) {
   }
 }
 
-function settingsDraft(settings) {
-  const view = settings && typeof settings === 'object' ? settings : {}
-  const auto = view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
-  const bootstrap = view.bootstrap && typeof view.bootstrap === 'object' ? view.bootstrap : {}
+function settingsDraft(settings: SettingsView | null | undefined): SettingsDraft {
+  const view: Partial<SettingsView> = settings && typeof settings === 'object' ? settings : {}
+  const auto: Partial<SettingsView['autoReconnect']> =
+    view.autoReconnect && typeof view.autoReconnect === 'object' ? view.autoReconnect : {}
+  const bootstrap: Partial<SettingsView['bootstrap']> =
+    view.bootstrap && typeof view.bootstrap === 'object' ? view.bootstrap : {}
   return {
     defaultPort: view.defaultPort === undefined ? 22 : view.defaultPort,
     defaultAuth: view.defaultAuth === 'password' ? 'password' : 'key',
@@ -47,16 +65,22 @@ function settingsDraft(settings) {
 }
 
 /** Settings modal (contract SettingsView). */
-function SettingsModal(props) {
+interface SettingsModalProps extends LocaleProps {
+  settings?: SettingsView | null
+  onClose?: () => void
+  onSave?: (patch: SettingsPatch) => void | Promise<void>
+}
+
+function SettingsModal(props: SettingsModalProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  const [draft, setDraft] = useState(() => settingsDraft(props.settings))
+  const [draft, setDraft] = useState<SettingsDraft>(() => settingsDraft(props.settings))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   // Key-file picker overlay for the default key path.
   const [keyPicker, setKeyPicker] = useState(false)
-  const patch = (patchValue) => {
+  const patch = (patchValue: Record<string, unknown>) => {
     setDraft((current) => ({ ...current, ...patchValue }))
     setFieldErrors((current) => {
       const next = { ...current }
@@ -70,15 +94,15 @@ function SettingsModal(props) {
       return changed ? next : current
     })
   }
-  const set = (field) => (value) => patch({ [field]: value })
+  const set = (field: string) => (value: unknown) => patch({ [field]: value })
 
-  const fieldRow = (spec) => {
+  const fieldRow = (spec: FormRowSpec) => {
     const row = formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
     // The settings body is built from `.map(fieldRow)`: every element needs a stable key or
     // React reports a missing-key warning on every render.
     return React.cloneElement(row, { key: spec.key })
   }
-  const focusField = (field) => {
+  const focusField = (field: string) => {
     if (typeof document === 'undefined' || !document.querySelector) return
     const node = document.querySelector<HTMLElement>('[data-testid="settings-' + field + '"]')
     if (node && typeof node.focus === 'function') node.focus()

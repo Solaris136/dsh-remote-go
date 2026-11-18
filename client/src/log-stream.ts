@@ -3,8 +3,15 @@
 
 /** The two row sinks the overlay hands the channel (swapped per render, read through a ref). */
 interface ConnectLogHandlers {
-  applyLog: (frame: unknown) => void
-  applyLogEnd: (end: unknown) => void
+  applyLog: (frame: ConnectLogFrame) => void
+  applyLogEnd: (end: ConnectLogEnd) => void
+}
+
+/** What `subscribeConnectLog` is called with: the three sinks are all optional. */
+interface ConnectLogSubHandlers {
+  onFrame?: (frame: ConnectLogFrame) => void
+  onEnd?: (end: ConnectLogEnd) => void
+  onMode?: (mode: ConnectLogMode) => void
 }
 
 /** The handle `subscribeConnectLog` returns (and the overlay keeps for the banner's retry). */
@@ -26,20 +33,20 @@ interface ConnectLogStream {
  * degradation), and switch off for good when the endpoint does not exist (an older Host answering
  * 404), so an old Host does not get eight pointless reconnects a minute.
  */
-function subscribeConnectLog(handlers): ConnectLogStream {
-  const onFrame = typeof handlers.onFrame === 'function' ? handlers.onFrame : () => {}
-  const onEnd = typeof handlers.onEnd === 'function' ? handlers.onEnd : () => {}
-  const onMode = typeof handlers.onMode === 'function' ? handlers.onMode : () => {}
+function subscribeConnectLog(handlers: ConnectLogSubHandlers): ConnectLogStream {
+  const onFrame: (frame: ConnectLogFrame) => void = typeof handlers.onFrame === 'function' ? handlers.onFrame : () => {}
+  const onEnd: (end: ConnectLogEnd) => void = typeof handlers.onEnd === 'function' ? handlers.onEnd : () => {}
+  const onMode: (mode: ConnectLogMode) => void = typeof handlers.onMode === 'function' ? handlers.onMode : () => {}
   let disposed = false
   let enabled = false
   let offForGood = false
   let everLive = false
-  let source = null
-  let retryTimer = null
+  let source: EventSource | null = null
+  let retryTimer: TimerHandle | null = null
   let retryAttempt = 0
-  let mode = 'idle'
+  let mode: ConnectLogMode = 'idle'
 
-  const setMode = (next) => {
+  const setMode = (next: ConnectLogMode) => {
     if (mode === next) return
     mode = next
     if (!disposed) onMode(next)
@@ -91,7 +98,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
       return
     }
     stopStream()
-    let stream
+    let stream: EventSource
     try {
       stream = new EventSource(LOG_EVENT_PATH)
     } catch (_error) {
@@ -99,7 +106,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
       return
     }
     source = stream
-    stream.addEventListener('log', (event) => {
+    stream.addEventListener('log', (event: MessageEvent<string>) => {
       if (source !== stream) return
       let frame = null
       try {
@@ -111,7 +118,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
       markLive()
       if (frame && typeof frame === 'object') onFrame(frame)
     })
-    stream.addEventListener('log-end', (event) => {
+    stream.addEventListener('log-end', (event: MessageEvent<string>) => {
       if (source !== stream) return
       try {
         const end = JSON.parse(event.data)
@@ -143,7 +150,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
     // EventSource that opens and immediately dies must not look healthy.
   }
   /** Turn the channel on/off with the connect window; a disabled channel keeps no cursor. */
-  const setEnabled = (next) => {
+  const setEnabled = (next: boolean) => {
     const wanted = next === true
     if (wanted === enabled) return
     enabled = wanted
@@ -180,7 +187,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
  * that owns the state hands out stable callbacks, and a stale closure would silently drop rows.
  * @returns a stable `reconnect()` for the degraded-banner retry (both channels are retried).
  */
-function useConnectLogStream(remote) {
+function useConnectLogStream(remote: RemoteState): () => void {
   const streamRef = useRef<ConnectLogStream | null>(null)
   const handlersRef = useRef<ConnectLogHandlers>({ applyLog: () => {}, applyLogEnd: () => {} })
   handlersRef.current = { applyLog: remote.applyLog, applyLogEnd: remote.applyLogEnd }

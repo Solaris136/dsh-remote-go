@@ -5,7 +5,7 @@
  * through `win.__drgBridgeSink` (local page) or `win.__drgBridgeQueue` (guest, drained by the
  * carrier); both copies therefore need identical intents and identical tokens.
  */
-function mountHostRow(win) {
+function mountHostRow(win: Window): string | unknown {
   try {
     var doc = win.document
     if (!doc || !doc.head) return 'no-document'
@@ -17,7 +17,7 @@ function mountHostRow(win) {
     var emit =
       typeof win.__drgBridgeSink === 'function'
         ? win.__drgBridgeSink
-        : function (intent) {
+        : function (intent: GuestIntentLike) {
             var queue = win.__drgBridgeQueue
             if (!queue || typeof queue.push !== 'function') queue = []
             queue.push(intent)
@@ -108,18 +108,29 @@ function mountHostRow(win) {
     menuNode.setAttribute('role', 'menu')
     row.appendChild(menuNode)
 
-    var state = {
+    var state: { current: string; hosts: SwitcherHost[]; labels: SwitcherLabels } = {
       current: 'local',
       hosts: [],
       labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
     }
 
-    var dotFor = function (status) {
+    var dotFor = function (status: string | null | undefined) {
       var node = make('span', 'drg-hr-dot')
       node.setAttribute('data-state', status || 'idle')
       return node
     }
-    var itemFor = function (label, options) {
+    var itemFor = function (
+      label: string,
+      options?: {
+        target?: string
+        action?: string
+        active?: boolean
+        glyph?: string
+        state?: string
+        trailing?: string
+        exit?: string
+      },
+    ) {
       var opts = options || {}
       var node = make('span', 'drg-hr-item')
       node.setAttribute('role', 'menuitem')
@@ -159,7 +170,7 @@ function mountHostRow(win) {
       }
       return node
     }
-    var clear = function (node) {
+    var clear = function (node: Element) {
       while (node.firstChild) node.removeChild(node.firstChild)
     }
     var render = function () {
@@ -213,13 +224,13 @@ function mountHostRow(win) {
         if (box.width > 520) continue
         if (box.top > win.innerHeight * 0.4) continue
         if (!handles[index].parentNode) continue
-        var columnBox = handles[index].parentNode.getBoundingClientRect()
+        var columnBox = (handles[index].parentNode as Element).getBoundingClientRect()
         if (columnBox.left > 24) continue
         if (columnBox.width < 180) continue
         // macOS puts a drag strip *above* the brand row, and both qualify: the lower one
         // is the row the switcher belongs under.
         if (best === null || box.top > best.top) {
-          best = { column: handles[index].parentNode, anchor: handles[index], top: box.top }
+          best = { column: handles[index].parentNode as Element, anchor: handles[index], top: box.top }
         }
       }
       if (best !== null) return { column: best.column, anchor: best.anchor }
@@ -249,7 +260,7 @@ function mountHostRow(win) {
      * the same place; it is not in every engine yet, so its absence - or an implementation that
      * refuses the move - falls through to exactly the insertion this code made before.
      */
-    var moveRow = function (parent, ref) {
+    var moveRow = function (parent: Element, ref: Node | null) {
       if (typeof parent.moveBefore === 'function') {
         try {
           parent.moveBefore(row, ref)
@@ -267,7 +278,8 @@ function mountHostRow(win) {
       if (slot === null) {
         // The collapsed rail is ~56px wide and no longer a candidate column: hide the
         // row instead of leaving it squeezed into it.
-        var parent = row.parentNode
+        // Node.parentNode is typed as ParentNode; the row only ever lives under an Element.
+        var parent = row.parentNode as Element | null
         var parentBox = parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null
         if (parentBox !== null && parentBox.width < 180) {
           row.style.display = 'none'
@@ -292,17 +304,17 @@ function mountHostRow(win) {
       row.classList.remove('drg-open')
       row.setAttribute('aria-expanded', 'false')
     }
-    var menuItems = function () {
+    var menuItems = function (): HTMLElement[] {
       return Array.prototype.slice.call(menuNode.querySelectorAll('.drg-hr-item'))
     }
-    var focusItem = function (index) {
+    var focusItem = function (index: number) {
       var items = menuItems()
       if (items.length === 0) return
       var at = Math.max(0, Math.min(items.length - 1, index))
       var node = items[at]
       if (node && typeof node.focus === 'function') node.focus()
     }
-    var openMenu = function (focusFirst) {
+    var openMenu = function (focusFirst: boolean) {
       // The sidebar clips its children: anchor the fixed menu to the row so it can
       // escape that overflow and sit over the page like a native menu.
       var rect = row.getBoundingClientRect()
@@ -313,7 +325,7 @@ function mountHostRow(win) {
       row.setAttribute('aria-expanded', 'true')
       if (focusFirst === true) focusItem(0)
     }
-    row.addEventListener('click', function (event) {
+    row.addEventListener('click', function (event: GuestMouseEvent) {
       var target = event.target
       // A host's own exit control acts on that host without switching to it.
       if (target && target.classList && target.classList.contains('drg-hr-act')) {
@@ -323,7 +335,8 @@ function mountHostRow(win) {
         return
       }
       while (target && target !== row && !(target.classList && target.classList.contains('drg-hr-item'))) {
-        target = target.parentNode
+        // The walk goes up through elements; parentNode is typed as ParentNode.
+        target = target.parentNode as Element | null
       }
       if (target && target !== row && target.classList && target.classList.contains('drg-hr-item')) {
         var targetId = target.getAttribute('data-target')
@@ -341,14 +354,14 @@ function mountHostRow(win) {
     })
     // Keyboard parity (audit "host row unreachable by keyboard"): the row is a real button,
     // Enter/Space opens it, arrows walk the menu, Escape closes and returns focus to the row.
-    row.addEventListener('keydown', function (event) {
+    row.addEventListener('keydown', function (event: GuestKeyboardEvent) {
       var key = event.key
       var focusTarget = event.target
       // A real button inside the row keeps its native Enter/Space activation.
       if (focusTarget && focusTarget.classList && focusTarget.classList.contains('drg-hr-act')) return
       var items = menuItems()
       var active = doc.activeElement
-      var index = items.indexOf(active)
+      var index = items.indexOf(active as HTMLElement | null)
       var opened = row.classList.contains('drg-open')
       if (key === 'Enter' || key === ' ') {
         event.preventDefault()
@@ -392,12 +405,12 @@ function mountHostRow(win) {
         if (typeof row.focus === 'function') row.focus()
       }
     })
-    var outsideClick = function (event) {
+    var outsideClick = function (event: GuestMouseEvent) {
       if (row.contains && row.contains(event.target)) return
       closeMenu()
     }
     doc.addEventListener('click', outsideClick)
-    var update = function (payload) {
+    var update = function (payload: SwitcherPayload | null | undefined) {
       if (payload && typeof payload === 'object') {
         if (Object.prototype.toString.call(payload.hosts) === '[object Array]') state.hosts = payload.hosts
         if (typeof payload.current === 'string' && payload.current.length > 0) state.current = payload.current

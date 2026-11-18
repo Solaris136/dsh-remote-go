@@ -8,8 +8,13 @@
 // storage key or event may change here.
 
 const h = React.createElement
-/** Element whose only prop is its class: h(tag, { className }, ...children) without the noise. */
-const box = (tag, className, ...children) => h(tag, { className }, ...children)
+/**
+ * Element whose only prop is its class: h(tag, { className }, ...children) without the noise.
+ * The class argument is forwarded as given (a few call sites pass a props object and keep the
+ * old `{ className: … }` nesting), so its type is what the runtime already accepts.
+ */
+const box = (tag: string, className: string | Record<string, unknown>, ...children: ReactNode[]): ReactElement =>
+  h(tag, { className }, ...children)
 /** A dialog's action strip: one right-aligned row of buttons. */
-const footerRow = (...actions) => h('div', { className: 'drg-row drg-row-end' }, ...actions)
+const footerRow = (...actions: ReactNode[]): ReactElement => h('div', { className: 'drg-row drg-row-end' }, ...actions)
 const { useCallback, useEffect, useRef, useState } = React

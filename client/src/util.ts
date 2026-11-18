@@ -1,7 +1,7 @@
 // client/src/util.ts - address/URL validation, formatTime, unrefTimer, withTimeout, readBootVersion, copyText and the four stores; after i18n.ts, before errors.ts.
 //#region 4. misc utilities
 
-function isLoopbackAddress(address) {
+function isLoopbackAddress(address: unknown): boolean {
   const value = String(address === undefined || address === null ? '' : address)
     .trim()
     .toLowerCase()
@@ -12,7 +12,7 @@ function isLoopbackAddress(address) {
   return false
 }
 
-function looksLikeWebAddress(address) {
+function looksLikeWebAddress(address: string): boolean {
   const value = address.trim()
   return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
 }
@@ -23,7 +23,7 @@ function looksLikeWebAddress(address) {
  * host with `127.0.0.1:8080` as userinfo. The prefix is kept first so every shape the old check
  * refused stays refused, then the parsed URL must prove protocol, host, no credentials and port.
  */
-function isValidLoopbackUrl(url) {
+function isValidLoopbackUrl(url: unknown): url is string {
   if (typeof url !== 'string' || !url.startsWith(LOOPBACK_PREFIX)) return false
   let parsed
   try {
@@ -46,7 +46,7 @@ function isValidLoopbackUrl(url) {
  * prefix plus one host id plus a slash (the one-shot token rides in the query string).
  * Anything absolute, encoded or traversing is refused before it can reach an iframe.
  */
-function isValidViewPath(value) {
+function isValidViewPath(value: unknown): value is string {
   if (typeof value !== 'string' || !value.startsWith(REMOTE_VIEW_PREFIX)) return false
   if (value.includes('://') || value.includes('\\')) return false
   // The browser would collapse these before sending; refusing them keeps the check honest.
@@ -56,7 +56,7 @@ function isValidViewPath(value) {
   return match !== null
 }
 
-function formatTime(iso, locale) {
+function formatTime(iso: string | null | undefined, locale: DictLocale): string {
   if (!iso) return ''
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return String(iso)
@@ -72,34 +72,43 @@ function formatTime(iso, locale) {
   }
 }
 
-function displayAddress(host) {
+/** The two display-only address fields `HostView` carries (a draft may have neither). */
+interface AddressDisplay {
+  addressMasked?: string | null
+  address?: string | null
+}
+
+function displayAddress(host: AddressDisplay | null | undefined): string {
   if (!host) return ''
   if (typeof host.addressMasked === 'string' && host.addressMasked.length > 0) return host.addressMasked
   if (typeof host.address === 'string' && host.address.length > 0) return host.address
   return ''
 }
 
-/**
- * `setTimeout`'s handle: a number in the DOM and a `Timeout` object in Node, and only the latter
- * carries `unref`. The callers that keep a ticker alive under a non-browser test process use it.
- */
-type TimerHandle = ReturnType<typeof setTimeout> & { unref?: () => void }
+type TimerHandle = ReturnType<typeof setTimeout>
 
-function unrefTimer(timer) {
-  if (timer && typeof timer.unref === 'function') timer.unref()
+/**
+ * The one place the two timer shapes meet. A browser handle is a number and a Node `Timeout` is
+ * an object, so the guard is the object shape: reading `.unref` off a number is a no-op there,
+ * exactly as it was when the parameter was implicitly `any`.
+ */
+function unrefTimer(timer: unknown): void {
+  if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
+    timer.unref()
+  }
 }
 
 /** A guest call that never answers must not wedge the intent drain (it would stop forever). */
-function withTimeout(promise, timeoutMs) {
+function withTimeout<T>(promise: PromiseLike<T> | T, timeoutMs: number): Promise<T | null> {
   return new Promise((resolve) => {
     let settled = false
-    const finish = (value) => {
+    const finish = (value: T | null) => {
       if (settled) return
       settled = true
       if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
       resolve(value)
     }
-    let timer = null
+    let timer: TimerHandle | null = null
     if (typeof setTimeout === 'function') {
       timer = setTimeout(() => finish(null), timeoutMs)
       unrefTimer(timer)
@@ -108,13 +117,13 @@ function withTimeout(promise, timeoutMs) {
   })
 }
 
-function readBootVersion() {
+function readBootVersion(): string | undefined {
   const boot = typeof window === 'undefined' ? null : window.__DSH_BOOT__
   const release = boot && typeof boot === 'object' ? boot.release : null
   return release && typeof release.version === 'string' && release.version !== '' ? release.version : undefined
 }
 
-async function copyText(text) {
+async function copyText(text: string): Promise<boolean> {
   try {
     if (
       typeof navigator !== 'undefined' &&
@@ -145,7 +154,7 @@ async function copyText(text) {
   }
 }
 
-function progressText(t, progress) {
+function progressText(t: LooseTranslate, progress: Progress | null | undefined): string {
   if (!progress || typeof progress.code !== 'string' || progress.code.length === 0) {
     return t('progress.default')
   }
@@ -157,7 +166,7 @@ function progressText(t, progress) {
 }
 
 /** A one-slot store: `emit` wakes every listener, `subscribe` returns its release. */
-function createStore() {
+function createStore(): Store {
   const listeners = new Set<() => void>()
   return {
     emit() {
@@ -176,8 +185,8 @@ function createStore() {
   }
 }
 
-function createPanelRequestStore() {
-  let pending = null
+function createPanelRequestStore(): PanelRequestStore {
+  let pending: PanelRequest | null = null
   const store = createStore()
   return {
     request(hostId) {
@@ -207,8 +216,8 @@ function createPanelRequestStore() {
 }
 
 /** The wizard floats in the overlay seat, so it opens from any page without dragging a page along. */
-function createWizardStore() {
-  let draft = null
+function createWizardStore(): WizardStore {
+  let draft: HostDraft | null = null
   const store = createStore()
   return {
     open(next) {
@@ -233,8 +242,8 @@ function createWizardStore() {
  * overlay: currently "download this remote file" plus the capability bridge's
  * toast requests. Consumed in order.
  */
-function createToolRequestStore() {
-  let pending = []
+function createToolRequestStore(): ToolRequestStore {
+  let pending: ToolRequest[] = []
   const store = createStore()
   return {
     requestDownload(request) {

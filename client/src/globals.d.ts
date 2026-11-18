@@ -34,8 +34,41 @@ declare global {
      */
     __drgHostRow: HostRowHandle
 
-    /** The intent sink a page's row calls; set on this page and inside a framed guest page. */
-    __drgBridgeSink: (intent: unknown) => unknown
+    /**
+     * The intent sink a page's row calls; set on this page and inside a framed guest page.
+     */
+    __drgBridgeSink: (intent: unknown) => IntentReceipt | boolean | undefined
+
+    /** Guest-only: the queue the injected row, tools and capability bridge push intents into. */
+    __drgBridgeQueue?: unknown[]
+
+    /** Guest-only: `mountSidebarMirror`'s own idempotence flag. */
+    __drgSidebarMirror?: boolean
+
+    /** Guest-only: `mountGuestTools`'s installed flag. */
+    __drgGuestTools?: boolean
+
+    /** Guest-only: `mountCapabilityBridge`'s installed flag. */
+    __drgCapabilityBridge?: boolean
+
+    /** Guest-only: the clipboard receipt slot the desktop carrier answers through. */
+    __drgCapabilityReply?: (payload: unknown) => boolean
+
+    /** The guest page's own constructors, read off its window (never the host's). */
+    Promise: PromiseConstructor
+    URL: typeof URL
+
+    /** Guest-only: the row's single injected stylesheet (reused across installs). */
+    __drgHostRowStyle?: HTMLElement | null
+
+    /** Guest-only: the host id whose `drg:<id>:` key space the storage partition owns. */
+    __drgStoragePartition?: string
+
+    /**
+     * A browser global the injected caption script reads off the guest's own `window`
+     * (`win.MutationObserver`), which `lib.dom` declares only as a bare global.
+     */
+    MutationObserver: typeof MutationObserver
   }
 
   /** `window.__DSH_BOOT__`: only the release identity is read here (see `readBootVersion`). */
@@ -84,6 +117,27 @@ declare global {
    * scope and must not import anything, and a React prop such as `onChange` is typed with it.
    */
   type ReactChangeEvent<T extends Element> = ReactNamespace.ChangeEvent<T>
+
+  /**
+   * React's pointer-event type, for the download stack's drag: its `currentTarget` carries the
+   * pointer-capture calls a plain DOM `PointerEvent` types on the wrong node.
+   */
+  type ReactPointerEvent<T extends Element> = ReactNamespace.PointerEvent<T>
+
+  /** A keyboard event handler's parameter, for the same reason (`TextInput`'s Enter gate). */
+  type ReactKeyboardEvent<T extends Element> = ReactNamespace.KeyboardEvent<T>
+
+  /**
+   * React's node and element types, for the same reason: a component's prop interface lives in
+   * `contract.d.ts`, which is also a script (no `import`) and so cannot name `React.ReactNode`.
+   */
+  /** Element.moveBefore (the state-preserving move); not in lib.dom yet, and the caller checks. */
+  interface Element {
+    moveBefore?(node: Node, child: Node | null): void
+  }
+
+  type ReactNode = ReactNamespace.ReactNode
+  type ReactElement = ReactNamespace.ReactElement
 
   /**
    * The factory parameter (`factory(require)`). Only the template calls it, and it may only ever be

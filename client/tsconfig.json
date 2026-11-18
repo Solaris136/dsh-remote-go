@@ -5,7 +5,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "strict": false,
-    "noImplicitAny": false,
+    "noImplicitAny": true,
     "noEmit": true,
     "skipLibCheck": true,
     "types": [],

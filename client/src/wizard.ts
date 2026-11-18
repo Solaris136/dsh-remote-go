@@ -1,5 +1,17 @@
 // client/src/wizard.ts - WizardDialog and its add/edit steps (region 10); after wizard-draft.ts, before diagnostics.ts.
-function WizardDialog(props) {
+
+/** The wizard's props: the mode, the host being edited, the snapshot and the shell's callbacks. */
+interface WizardDialogProps extends LocaleProps {
+  mode?: string
+  initialHost?: HostLike | null
+  state?: StateView | null
+  onClose?: () => void
+  onRefresh?: () => void
+  onSaved?: (saved: HostLike | null | undefined, warning: string | null) => void
+  onConnect?: (host: HostLike, password: string | null, remember: boolean) => void
+}
+
+function WizardDialog(props: WizardDialogProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   const mode = props.mode === 'edit' ? 'edit' : 'add'
@@ -14,7 +26,7 @@ function WizardDialog(props) {
         (Array.isArray(stateView.hosts) &&
           stateView.hosts.some((entry) => entry && entry.passwordStorageAvailable === true))
       : initialHost !== null && initialHost.passwordStorageAvailable === true
-  const [draft, setDraft] = useState(() =>
+  const [draft, setDraft] = useState<HostDraftForm>(() =>
     initialDraft(mode, initialHost, props.state && props.state.settings ? props.state.settings : null),
   )
   const [password, setPassword] = useState('')
@@ -23,12 +35,12 @@ function WizardDialog(props) {
   const [authDirty, setAuthDirty] = useState(mode === 'add')
   const [nameTouched, setNameTouched] = useState(mode === 'edit')
   const hostId = initialHost && typeof initialHost.id === 'string' ? initialHost.id : ''
-  const [saving, setSaving] = useState(null)
-  const [formError, setFormError] = useState(null)
+  const [saving, setSaving] = useState<string | null>(null)
+  const [formError, setFormError] = useState<unknown>(null)
   /** Field-level messages keyed by draft field, cleared as soon as that field changes. */
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
-  const [aliases, setAliases] = useState([])
-  const [knownHosts, setKnownHosts] = useState(null)
+  const [aliases, setAliases] = useState<SshAliasEntry[]>([])
+  const [knownHosts, setKnownHosts] = useState<KnownHostsSummary | null>(null)
   const [aliasesLoading, setAliasesLoading] = useState(false)
   // Key-file picker overlay (browsing lives in the Host; this is only dialog state).
   const [keyPicker, setKeyPicker] = useState(false)
@@ -55,7 +67,7 @@ function WizardDialog(props) {
     }
   }, [])
 
-  const patchDraft = (patch) => {
+  const patchDraft = (patch: Record<string, unknown>) => {
     setDraft((current) => ({ ...current, ...patch }))
     // Correcting a field clears its own error (and the summary) instead of leaving a stale
     // message until the next save (audit S2-3).
@@ -72,8 +84,8 @@ function WizardDialog(props) {
     })
     if (formError !== null) setFormError(null)
   }
-  const row = (spec) => formRow(t, draft, patchDraft, { ...spec, error: fieldErrors[spec.key] })
-  const focusField = (field) => {
+  const row = (spec: FormRowSpec) => formRow(t, draft, patchDraft, { ...spec, error: fieldErrors[spec.key] })
+  const focusField = (field: string) => {
     if (typeof document === 'undefined' || !document.querySelector) return
     const testId = {
       name: 'wizard-name',
@@ -89,7 +101,7 @@ function WizardDialog(props) {
     if (node && typeof node.focus === 'function') node.focus()
   }
 
-  const onAddressChange = (value) => {
+  const onAddressChange = (value: string) => {
     patchDraft({ address: value })
     if (!nameTouched && mode === 'add') patchDraft({ name: value.trim() })
     const match = aliases.find((alias) => alias && alias.alias === value.trim())
@@ -102,7 +114,7 @@ function WizardDialog(props) {
       if (!nameTouched && mode === 'add') patchDraft({ name: match.alias })
     }
   }
-  const pickAlias = (alias) => {
+  const pickAlias = (alias: SshAliasEntry | null | undefined) => {
     if (!alias) return
     patchDraft({
       address: alias.alias || alias.host || '',
@@ -112,7 +124,7 @@ function WizardDialog(props) {
     if (!nameTouched && mode === 'add') patchDraft({ name: alias.alias || alias.host || '' })
   }
 
-  const submit = async (intent) => {
+  const submit = async (intent: 'save' | 'connect') => {
     // An edit that does not touch authentication keeps the stored credential, so it does
     // not need (and must not demand) a password: the connection asks for it later
     // (audit S2-2). A password typed into the wizard is saved by default; the box below

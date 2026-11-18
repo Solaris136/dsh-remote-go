@@ -12,12 +12,12 @@
  * for listeners registered after this script — a listener the page installed at boot already
  * ran.
  */
-function mountGuestStorage(win, hostId) {
+function mountGuestStorage(win: Window, hostId: unknown): string {
   try {
     if (typeof hostId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(hostId)) return 'bad-id'
     if (!win || typeof win !== 'object') return 'no-window'
     if (win.__drgStoragePartition === hostId) return 'already'
-    var raw = null
+    var raw: Storage | null = null
     try {
       raw = win.localStorage
     } catch (_error) {
@@ -25,11 +25,11 @@ function mountGuestStorage(win, hostId) {
     }
     if (!raw || typeof raw.getItem !== 'function' || typeof raw.setItem !== 'function') return 'no-storage'
     var prefix = 'drg:' + hostId + ':'
-    var prefixed = function (key) {
+    var prefixed = function (key: unknown) {
       return prefix + String(key)
     }
-    var ownKeys = function () {
-      var keys = []
+    var ownKeys = function (): string[] {
+      var keys: string[] = []
       try {
         for (var index = 0; index < raw.length; index += 1) {
           var key = raw.key(index)
@@ -44,18 +44,18 @@ function mountGuestStorage(win, hostId) {
       get length() {
         return ownKeys().length
       },
-      key: function (index) {
+      key: function (index: unknown) {
         var keys = ownKeys()
         var at = Number(index)
         return at >= 0 && at < keys.length && Math.floor(at) === at ? keys[at] : null
       },
-      getItem: function (key) {
+      getItem: function (key: string) {
         return raw.getItem(prefixed(key))
       },
-      setItem: function (key, value) {
+      setItem: function (key: string, value: unknown) {
         raw.setItem(prefixed(key), String(value))
       },
-      removeItem: function (key) {
+      removeItem: function (key: string) {
         raw.removeItem(prefixed(key))
       },
       clear: function () {
@@ -83,7 +83,7 @@ function mountGuestStorage(win, hostId) {
       try {
         win.addEventListener(
           'storage',
-          function (event) {
+          function (event: StorageEvent) {
             var key = event && typeof event.key === 'string' ? event.key : null
             if (key === null || key.indexOf(prefix) === 0) return
             if (typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation()

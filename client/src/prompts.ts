@@ -11,7 +11,15 @@
  * Enter after clearing `isComposing`, which is why the keyed `229` value is checked as well (MWG
  * `ime-safe-enter-submit`, its first strategy). Anything that is not an Enter is not a submit.
  */
-function passwordEnterSubmits(event) {
+/** The Enter gate sees a React synthetic event or a native one, so it names both shapes. */
+interface PasswordKeyEvent {
+  key: string
+  isComposing?: boolean
+  keyCode?: number
+  nativeEvent?: PasswordKeyEvent
+}
+
+function passwordEnterSubmits(event: PasswordKeyEvent): boolean {
   if (!event || event.key !== 'Enter') return false
   // The synthetic event is not required to expose these: fall back to it only when React handed
   // out no native one (a test double, or a host that wrapped the event).
@@ -21,9 +29,25 @@ function passwordEnterSubmits(event) {
   return native.keyCode !== 229 && event.keyCode !== 229
 }
 
-function PasswordPrompt(props) {
+/** What the password prompt submits: the one-shot password and whether to remember it. */
+interface PasswordSubmission {
+  password: string
+  remember: boolean
+}
+
+/** The password prompt's props. */
+interface PasswordPromptProps extends LocaleProps {
+  host?: Partial<HostView> | null
+  busy?: boolean
+  error?: unknown
+  storageAvailable?: boolean
+  onSubmit?: (submission: PasswordSubmission) => void
+  onCancel?: () => void
+}
+
+function PasswordPrompt(props: PasswordPromptProps) {
   const t = translatorOf(props)
-  const host = props.host || {}
+  const host: Partial<HostView> = props.host || {}
   const [password, setPassword] = useState('')
   // Remembering is the default: the user asked for a password they type once to be reused
   // later. It stays escapable for a borrowed or shared machine.
@@ -89,12 +113,12 @@ function PasswordPrompt(props) {
         disabled: props.busy === true,
         invalid: localError !== '' || (!serverErrorCleared && typeof props.error === 'string'),
         describedBy: 'password-prompt-error',
-        onChange: (value) => {
+        onChange: (value: string) => {
           setPassword(value)
           setServerErrorCleared(true)
           if (localError !== '') setLocalError('')
         },
-        onKeyDown: (event) => {
+        onKeyDown: (event: KeyboardEvent) => {
           if (passwordEnterSubmits(event)) submit()
         },
       }),
@@ -109,7 +133,7 @@ function PasswordPrompt(props) {
             h('input', {
               type: 'checkbox',
               checked: remember,
-              onChange: (event) => setRemember(event.target.checked === true),
+              onChange: (event: ReactChangeEvent<HTMLInputElement>) => setRemember(event.target.checked === true),
             }),
             h('span', null, t('passwordPromptRemember')),
           ),
@@ -120,13 +144,20 @@ function PasswordPrompt(props) {
 }
 
 /** The remote already runs a DSH this plugin did not start: the choices are explicit, the pipeline waits. */
-function RemoteConflictPrompt(props) {
+interface RemoteConflictPromptProps extends LocaleProps {
+  host?: HostView | null
+  busy?: boolean
+  error?: ReactNode
+  onResolve?: (host: Partial<HostView>, action: string) => void
+}
+
+function RemoteConflictPrompt(props: RemoteConflictPromptProps) {
   const t = translatorOf(props)
-  const host = props.host || {}
-  const conflict = host.conflict && typeof host.conflict === 'object' ? host.conflict : {}
-  const processes = Array.isArray(conflict.processes) ? conflict.processes : []
+  const host: Partial<HostView> = props.host || {}
+  const conflict: Partial<HostConflictView> = host.conflict && typeof host.conflict === 'object' ? host.conflict : {}
+  const processes: HostConflictView['processes'] = Array.isArray(conflict.processes) ? conflict.processes : []
   const busy = props.busy === true
-  const resolve = (action) => {
+  const resolve = (action: string) => {
     if (busy) return
     if (typeof props.onResolve === 'function') props.onResolve(host, action)
   }
@@ -162,7 +193,7 @@ function RemoteConflictPrompt(props) {
     box(
       'ul',
       'drg-conflict-processes',
-      processes.map((process) =>
+      processes.map((process: { pid: number; command: string }) =>
         h(
           'li',
           { key: String(process.pid) },

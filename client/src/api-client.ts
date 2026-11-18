@@ -1,7 +1,7 @@
 // client/src/api-client.ts - apiRequest, the api facade and subscribeState (the one /state feed); after errors.ts, before primitives.ts.
 //#region 6. HTTP + SSE API client
 
-function getFetch() {
+function getFetch(): typeof fetch | null {
   if (typeof fetch === 'function') return fetch
   if (typeof window !== 'undefined' && typeof window.fetch === 'function') return window.fetch.bind(window)
   return null
@@ -22,7 +22,7 @@ interface ApiFailure extends Error {
   view?: LocalErrorView
 }
 
-function apiError(view, cause?) {
+function apiError(view?: LocalErrorView, cause?: unknown): ApiFailure {
   const text =
     resolveText(view && view.detail, 'zh') || resolveText(view && view.title, 'zh') || 'dsh-remote-go request failed'
   const error: ApiFailure = new Error(text)
@@ -32,8 +32,20 @@ function apiError(view, cause?) {
   return error
 }
 
+/**
+ * The one runtime predicate on a response body: "it is an object". The old truthiness checks did
+ * exactly that, so the artifact keeps them; `T` is the endpoint's frozen response shape from
+ * docs/api.md, which the Host half of this same package is the only producer of.
+ */
+function isApiEnvelope<T>(value: unknown): value is T & ApiEnvelope {
+  return typeof value === 'object' && value !== null
+}
+
 /** One JSON request: the marker header and same-origin credentials are not optional (docs/api.md). */
-async function apiRequest(path, options?: ApiRequestOptions) {
+async function apiRequest<T = Record<string, unknown>>(
+  path: string,
+  options?: ApiRequestOptions,
+): Promise<T & ApiEnvelope> {
   const opts: ApiRequestOptions = options || {}
   const fetcher = getFetch()
   if (!fetcher) throw apiError(localErrorView('network'))
@@ -45,19 +57,19 @@ async function apiRequest(path, options?: ApiRequestOptions) {
     headers['content-type'] = 'application/json; charset=utf-8'
     init.body = JSON.stringify(opts.body)
   }
-  let response
+  let response: Response
   try {
     response = await fetcher(API_BASE + path, init)
   } catch (cause) {
     throw apiError(localErrorView('network'), cause)
   }
-  let payload = null
+  let payload: unknown = null
   try {
     payload = await response.json()
   } catch (_error) {
     payload = null
   }
-  if (payload && payload.ok === false) throw apiError(payload.error)
+  if (isApiEnvelope<T>(payload) && payload.ok === false) throw apiError(payload.error)
   if (!response || !response.ok) {
     // DSH admission answers without this plugin's JSON envelope. A 401 means the browser
     // session is gone and a 403 means Host/Origin was refused: neither is "internal", and
@@ -66,16 +78,17 @@ async function apiRequest(path, options?: ApiRequestOptions) {
     if (response && response.status === 403) throw apiError(localErrorView('forbidden', 'HTTP 403'))
     throw apiError(localErrorView('internal', 'HTTP ' + String(response && response.status)))
   }
-  if (!payload || payload.ok !== true) throw apiError(localErrorView('internal', 'malformed response'))
+  if (!isApiEnvelope<T>(payload) || payload.ok !== true)
+    throw apiError(localErrorView('internal', 'malformed response'))
   return payload
 }
 
 const api = {
-  async getState() {
-    const payload = await apiRequest('/state')
+  async getState(): Promise<StateView> {
+    const payload = await apiRequest<{ state: StateView }>('/state')
     return payload.state
   },
-  async reportLocalVersion(version) {
+  async reportLocalVersion(version: unknown): Promise<void> {
     if (typeof version !== 'string' || version.length === 0) return
     try {
       await apiRequest('/local-version', { method: 'POST', body: { version } })
@@ -83,25 +96,25 @@ const api = {
       // swallow-ok: the local half only backfills the Host's version probe; a failed report changes no UI state
     }
   },
-  async connect(hostId, options) {
+  async connect(hostId: string, options?: ConnectRequest) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/connect', {
       method: 'POST',
       body: options || {},
     })
   },
-  async confirmConflict(hostId, action) {
+  async confirmConflict(hostId: string, action: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/conflict', {
       method: 'POST',
       body: { action },
     })
   },
-  async disconnect(hostId, stopRemote) {
+  async disconnect(hostId: string, stopRemote: unknown) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/disconnect', {
       method: 'POST',
       body: { stopRemote: stopRemote === true },
     })
   },
-  async reconnect(hostId) {
+  async reconnect(hostId: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
   },
   /**
@@ -109,19 +122,21 @@ const api = {
    * reports progress through `/state` (progress code `restarting-remote`); the old
    * launch URL and its tunnel are gone once it finishes.
    */
-  async restart(hostId) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/restart', { method: 'POST', body: {} })
+  async restart(hostId: string) {
+    return apiRequest<RestartResult>('/hosts/' + encodeURIComponent(hostId) + '/restart', { method: 'POST', body: {} })
   },
   /**
    * Stop the remote DSH this connection manages and release the link. The Host refuses
    * with 409 `stop-unavailable` when the host is not stoppable or the bound pid cannot be
    * proven to be this connection's own; `/state` carries `stopping-remote` while it works.
    */
-  async stopRemote(hostId) {
+  async stopRemote(hostId: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/stop-remote', { method: 'POST', body: {} })
   },
-  async openHost(hostId) {
-    const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/open')
+  async openHost(hostId: string) {
+    const payload = await apiRequest<{ url: unknown; webUrl?: unknown }>(
+      '/hosts/' + encodeURIComponent(hostId) + '/open',
+    )
     // The desktop carrier takes the loopback origin; the browser carrier takes the same-origin
     // view path. Both are checked here, so neither backend can be handed anything else.
     if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
@@ -130,21 +145,21 @@ const api = {
     if (webUrl !== '' && !isValidViewPath(webUrl)) throw apiError(localErrorView('blocked-url'))
     return { url: payload.url, webUrl }
   },
-  async acceptFingerprint(hostId, accept, remember, sha256) {
+  async acceptFingerprint(hostId: string, accept: boolean, remember: boolean, sha256: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/fingerprint', {
       method: 'POST',
       body: { accept: accept === true, remember: remember === true, sha256: sha256 || '' },
     })
   },
-  async saveHost(host) {
-    const payload = await apiRequest('/hosts', { method: 'POST', body: { host } })
+  async saveHost(host: HostInputBody) {
+    const payload = await apiRequest<{ host: HostView }>('/hosts', { method: 'POST', body: { host } })
     return payload.host
   },
   /**
    * Remember (or forget) the SSH password without connecting. The Host keeps it in DSH's
    * credential store, never in `hosts.json`; `available:false` means nothing can persist it.
    */
-  async saveHostPassword(hostId, options) {
+  async saveHostPassword(hostId: string, options?: SavePasswordRequest) {
     const body = options || {}
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/password', {
       method: 'POST',
@@ -154,36 +169,36 @@ const api = {
       },
     })
   },
-  async deleteHost(hostId) {
+  async deleteHost(hostId: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId), { method: 'DELETE' })
   },
-  async diagnose(hostId) {
-    const payload = await apiRequest('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
+  async diagnose(hostId: string) {
+    const payload = await apiRequest<{ report: DiagnoseReport }>('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
       method: 'POST',
       body: {},
     })
     return payload.report
   },
-  async saveSettings(patch) {
-    const payload = await apiRequest('/settings', { method: 'POST', body: { patch } })
+  async saveSettings(patch: SettingsPatch): Promise<SettingsView> {
+    const payload = await apiRequest<{ settings: SettingsView }>('/settings', { method: 'POST', body: { patch } })
     return payload.settings
   },
-  async activate(hostId) {
+  async activate(hostId: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
   },
   async clearActive() {
     return apiRequest('/active', { method: 'POST', body: { id: null } })
   },
-  async getAliases() {
-    const payload = await apiRequest('/ssh/aliases')
+  async getAliases(): Promise<SshAliasesResult> {
+    const payload = await apiRequest<SshAliasesResult>('/ssh/aliases')
     return {
       aliases: Array.isArray(payload.aliases) ? payload.aliases : [],
       knownHosts: payload.knownHosts && typeof payload.knownHosts === 'object' ? payload.knownHosts : null,
     }
   },
-  async listKeyFiles(dir) {
+  async listKeyFiles(dir: string): Promise<KeyFileListing> {
     const query = dir ? '?path=' + encodeURIComponent(dir) : ''
-    const payload = await apiRequest('/keyfile/list' + query)
+    const payload = await apiRequest<Partial<KeyFileListing>>('/keyfile/list' + query)
     return {
       path: typeof payload.path === 'string' ? payload.path : '',
       parent: typeof payload.parent === 'string' ? payload.parent : null,
@@ -201,8 +216,8 @@ const api = {
    * @param {string} destination - local folder chosen by the user.
    * @returns {Promise<object>} the initial job view.
    */
-  async startDownload(hostId, remotePath, destination) {
-    const payload = await apiRequest('/downloads', {
+  async startDownload(hostId: string, remotePath: string, destination: string) {
+    const payload = await apiRequest<{ job?: DownloadJobView }>('/downloads', {
       method: 'POST',
       body: { hostId, path: remotePath, destination },
     })
@@ -212,15 +227,15 @@ const api = {
     return payload.job
   },
   /** Read one job's current status (fallback for a missed SSE frame). */
-  async downloadStatus(jobId) {
-    const payload = await apiRequest('/downloads/' + encodeURIComponent(jobId) + '/status')
+  async downloadStatus(jobId: string) {
+    const payload = await apiRequest<{ job?: DownloadJobView }>('/downloads/' + encodeURIComponent(jobId) + '/status')
     if (!payload.job || typeof payload.job !== 'object') {
       throw apiError(localErrorView('internal', 'malformed download status'))
     }
     return payload.job
   },
   /** Cancel a preparing/ready job; a missing job is treated as already gone. */
-  async cancelDownload(jobId) {
+  async cancelDownload(jobId: string) {
     try {
       await apiRequest('/downloads/' + encodeURIComponent(jobId), { method: 'DELETE' })
       return true
@@ -237,26 +252,27 @@ const api = {
  * `onState(frame)`, `onStatus('live' | 'polling')`, `onError(error)`, `onDownload(job)`.
  * The returned disposer also carries `reconnect()`, which the fallback banner uses.
  */
-function subscribeState(handlers) {
-  const onState = typeof handlers.onState === 'function' ? handlers.onState : () => {}
-  const onStatus = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
-  const onError = typeof handlers.onError === 'function' ? handlers.onError : () => {}
-  const onDownload = typeof handlers.onDownload === 'function' ? handlers.onDownload : () => {}
+function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
+  const onState: (state: StateView) => void = typeof handlers.onState === 'function' ? handlers.onState : () => {}
+  const onStatus: (status: StreamMode) => void = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
+  const onError: (error: unknown) => void = typeof handlers.onError === 'function' ? handlers.onError : () => {}
+  const onDownload: (job: DownloadJobView) => void =
+    typeof handlers.onDownload === 'function' ? handlers.onDownload : () => {}
   let disposed = false
-  let source = null
-  let timer = null
-  let retryTimer = null
+  let source: EventSource | null = null
+  let timer: TimerHandle | null = null
+  let retryTimer: TimerHandle | null = null
   let retryAttempt = 0
   let polling = false
-  let mode = 'idle'
+  let mode: StreamMode = 'idle'
   /** Every callback that settles a state frame, so a late frame can still land. */
-  const setMode = (next) => {
+  const setMode = (next: StreamMode) => {
     if (mode === next) return
     mode = next
     if (!disposed) onStatus(next)
   }
 
-  const deliver = (state) => {
+  const deliver = (state: StateView) => {
     if (disposed || !state || typeof state !== 'object') return
     onState(state)
   }
@@ -343,10 +359,10 @@ function subscribeState(handlers) {
     source.onopen = () => {
       if (source === stream) onStreamOpen()
     }
-    source.addEventListener('state', (event) => {
+    source.addEventListener('state', (event: MessageEvent<string>) => {
       if (source !== stream) return
       try {
-        const state = JSON.parse(event.data)
+        const state: StateView = JSON.parse(event.data)
         // The first frame proves the stream works even when `open` never fired.
         onStreamOpen()
         deliver(state)
@@ -354,10 +370,10 @@ function subscribeState(handlers) {
         // swallow-ok: one malformed state frame must not kill the stream; the next frame replaces it
       }
     })
-    source.addEventListener('download', (event) => {
+    source.addEventListener('download', (event: MessageEvent<string>) => {
       if (source !== stream) return
       try {
-        const job = JSON.parse(event.data)
+        const job: DownloadJobView = JSON.parse(event.data)
         if (job && typeof job === 'object') onDownload(job)
       } catch (_error) {
         // swallow-ok: one malformed download frame must not kill the stream; later jobs still arrive
@@ -398,7 +414,7 @@ function subscribeState(handlers) {
   fetchOnce()
   startStream()
 
-  const dispose = () => {
+  const dispose: StateStreamDispose = () => {
     disposed = true
     stopStream()
     stopPolling()

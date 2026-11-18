@@ -7,7 +7,17 @@
  * sides or rejected with a field error — never silently rewritten by the Host. `__test.limits`
  * keeps this table pinned to the Host's behaviour in `test/unit/client.test.js`.
  */
-const HOST_LIMITS = {
+interface HostRange {
+  min: number
+  max: number
+}
+
+/** What the host wizard keeps between renders: flat, string-or-number fields. */
+interface HostDraftForm {
+  [key: string]: unknown
+}
+
+const HOST_LIMITS: Record<string, HostRange> = {
   defaultPort: { min: 1, max: 65535 },
   connectTimeoutSec: { min: 5, max: 300 },
   idleMinutes: { min: 1, max: 1440 },
@@ -16,16 +26,16 @@ const HOST_LIMITS = {
 }
 /** A profile name DSH can boot: one safe path segment, and never `desktop`. */
 const PROFILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
-function isValidProfileName(value) {
+function isValidProfileName(value: unknown): boolean {
   const text = typeof value === 'string' ? value.trim() : ''
   return text !== '' && PROFILE_PATTERN.test(text) && text.toLowerCase() !== 'desktop'
 }
-function inRange(value, limit) {
+function inRange(value: unknown, limit: HostRange): boolean {
   const number = toInt(value, NaN)
   return Number.isInteger(number) && number >= limit.min && number <= limit.max
 }
 
-function toInt(value, fallback) {
+function toInt(value: unknown, fallback: number): number {
   const number =
     typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
   return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
@@ -37,9 +47,9 @@ function toInt(value, fallback) {
  * colon-separated group is not a port. New Hosts expose `port`/`username`, and the editor reads
  * those directly (see `initialDraft`).
  */
-function parseMaskedAddress(masked) {
+function parseMaskedAddress(masked: unknown): { username: string; port: number | null } {
   const text = String(masked || '')
-  const result = { username: '', port: null }
+  const result: { username: string; port: number | null } = { username: '', port: null }
   const at = text.lastIndexOf('@')
   if (at >= 0) result.username = text.slice(0, at)
   const tail = at >= 0 ? text.slice(at + 1) : text
@@ -81,7 +91,7 @@ interface HostDraftValidationOptions {
   requirePassword?: boolean
 }
 
-function buildHostInput(draft, hostId, includeAuth) {
+function buildHostInput(draft: HostDraftForm, hostId: string | undefined, includeAuth: boolean): HostInputBody {
   const host: HostInputBody = {
     name: String(draft.name || '').trim(),
     address: String(draft.address || '').trim(),
@@ -110,11 +120,11 @@ function buildHostInput(draft, hostId, includeAuth) {
 }
 
 /** One validation failure names the field so the form can mark and focus it, not only toast it. */
-function fieldError(field, code) {
+function fieldError(field: string, code: string): { field: string; code: string } {
   return { field, code }
 }
 
-function validateHostDraft(draft, options: HostDraftValidationOptions = {}) {
+function validateHostDraft(draft: HostDraftForm, options: HostDraftValidationOptions = {}) {
   if (!String(draft.name || '').trim()) return fieldError('name', 'wizard.validationName')
   const address = String(draft.address || '').trim()
   if (!address) return fieldError('address', 'wizard.validationAddress')
@@ -136,7 +146,7 @@ function validateHostDraft(draft, options: HostDraftValidationOptions = {}) {
 }
 
 /** The settings modal validates against the same table the Host clamps with. */
-function validateSettingsDraft(draft) {
+function validateSettingsDraft(draft: SettingsDraft) {
   if (!inRange(draft.defaultPort, HOST_LIMITS.defaultPort)) {
     return fieldError('defaultPort', 'settings.validationPort')
   }
@@ -153,9 +163,10 @@ function validateSettingsDraft(draft) {
   return null
 }
 
-function initialDraft(mode, host, settings) {
-  const defaults = settings && typeof settings === 'object' ? settings : {}
-  const auto = defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
+function initialDraft(mode: string, host: HostLike | null, settings: SettingsView | null | undefined): HostDraftForm {
+  const defaults: Partial<SettingsView> = settings && typeof settings === 'object' ? settings : {}
+  const auto: Partial<SettingsView['autoReconnect']> =
+    defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
   if (mode === 'edit' && host) {
     // Read the plain fields the Host exposes; the masked address is presentation only and
     // parsing it back used to invent a port (`user@fe80::1` -> 1) or overwrite the default

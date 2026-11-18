@@ -3,7 +3,7 @@
  * The caption band this page reserves, or null. A guest page has no preload, so the remote UI
  * would otherwise lay out as the Web build inside a window that is not one.
  */
-function desktopCaption() {
+function desktopCaption(): { height: number } | null {
   if (typeof document === 'undefined' || !document.documentElement) return null
   const root = document.documentElement
   if (!root.hasAttribute(CAPTION_MARKER)) return null
@@ -26,7 +26,7 @@ function desktopCaption() {
  * so a DSH that changes the number keeps working; the constants above are only the fallback for
  * a guest that cannot answer.
  */
-function captionMenuStart(collapsed, start = '') {
+function captionMenuStart(collapsed: unknown, start?: unknown): string {
   const raw = typeof start === 'string' ? start.trim() : ''
   // `getComputedStyle` normally resolves the custom property to px; a unitless value is read
   // as px as well, because the old px-only regex dropped a perfectly good number (audit).
@@ -42,7 +42,7 @@ function captionMenuStart(collapsed, start = '') {
  * which wins over that stylesheet without touching it — and removes the override again when the
  * local page takes the band back, leaving DSH's own rule in charge.
  */
-function setCaptionMenuStart(collapsed, start = '') {
+function setCaptionMenuStart(collapsed: unknown, start?: unknown): boolean {
   const target = typeof document === 'undefined' ? null : document.documentElement
   if (target === null || target === undefined || !target.style) return false
   if (typeof target.style.setProperty !== 'function') return false
@@ -62,7 +62,7 @@ function setCaptionMenuStart(collapsed, start = '') {
  * `collapsed === null` means "this document has not told us yet": the state is forgotten rather
  * than carried over from the page that navigated away.
  */
-function applyGuestSidebar(entry, collapsed, start = '') {
+function applyGuestSidebar(entry: CarrierEntry | null | undefined, collapsed: unknown, start?: unknown) {
   if (entry === null || entry === undefined) return
   entry.sidebarCollapsed = collapsed === true ? true : collapsed === false ? false : null
   entry.sidebarStart = typeof start === 'string' ? start : ''
@@ -71,7 +71,7 @@ function applyGuestSidebar(entry, collapsed, start = '') {
 }
 
 /** True when an intent is the guest's rail report rather than a click on the switcher row. */
-function isCaptionSidebarIntent(intent) {
+function isCaptionSidebarIntent(intent: GuestIntentLike | null | undefined): boolean {
   return intent !== null && typeof intent === 'object' && intent.action === CAPTION_SIDEBAR_INTENT
 }
 
@@ -82,7 +82,7 @@ function isCaptionSidebarIntent(intent) {
  * the row and the file bridge already use. Returns the same record at install time, which the
  * host adopts before waiting for the next drain.
  */
-function mountSidebarMirror(win) {
+function mountSidebarMirror(win: Window): unknown {
   try {
     var doc = win.document
     if (!doc || !doc.documentElement) return 'no-document'
@@ -110,7 +110,7 @@ function mountSidebarMirror(win) {
     var current = function () {
       return { collapsed: read(), start: readStart() }
     }
-    var last = null
+    var last: { collapsed: boolean; start: string } | null = null
     var report = function () {
       var state = current()
       if (last !== null && state.collapsed === last.collapsed && state.start === last.start) return
@@ -150,12 +150,12 @@ const TAKE_INTENTS_SCRIPT = '(function(){var q=window.__drgBridgeQueue||[];windo
  * Install the rail watcher in the shown guest and adopt what it reports right away; the row's
  * intent poll only carries the changes that follow.
  */
-async function installSidebarMirror(entry) {
+async function installSidebarMirror(entry: CarrierEntry | null | undefined): Promise<boolean> {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return false
-  let state = null
+  let state: GuestSidebarReport | null = null
   try {
-    state = await view.executeJavaScript(SIDEBAR_MIRROR_SCRIPT)
+    state = await view.executeJavaScript<GuestSidebarReport>(SIDEBAR_MIRROR_SCRIPT)
   } catch (_error) {
     state = null
   }
@@ -165,7 +165,7 @@ async function installSidebarMirror(entry) {
   return true
 }
 
-async function applyGuestCaption(entry) {
+async function applyGuestCaption(entry: CarrierEntry | null | undefined): Promise<boolean> {
   const caption = entry === null || entry === undefined ? null : entry.caption
   if (caption === null || caption === undefined) return false
   const view = entry.view
@@ -190,7 +190,7 @@ async function applyGuestCaption(entry) {
     (fullscreen === true ? 'true' : 'false') +
     ');' +
     'return "ok"})()'
-  let status = ''
+  let status: unknown = ''
   try {
     status = await view.executeJavaScript(source)
   } catch (_error) {
@@ -214,7 +214,7 @@ function watchCaptionState() {
 }
 
 /** Exactly one band, never two: the guest reserves it when the marker landed, else it is pushed below. */
-function syncCarrierCaption(entry, applied) {
+function syncCarrierCaption(entry: CarrierEntry | null | undefined, applied: unknown) {
   const caption = entry === null || entry === undefined ? null : entry.caption
   if (caption === null || caption === undefined) return
   entry.captionApplied = applied === true
@@ -225,7 +225,7 @@ function syncCarrierCaption(entry, applied) {
   if (carrierPool.current === entry.hostId) ownCaptionBand(entry, entry.captionApplied === true)
 }
 
-function setCaptionLive(live) {
+function setCaptionLive(live: unknown) {
   if (typeof document === 'undefined' || !document.documentElement) return
   if (live === true) document.documentElement.classList.add(CAPTION_LIVE_CLASS)
   else document.documentElement.classList.remove(CAPTION_LIVE_CLASS)
@@ -236,7 +236,7 @@ function setCaptionLive(live) {
  * in front — the shell's caption menus above the guest, and the menubar inset from the guest's
  * own rail — and the local page takes both back when no guest owns the band.
  */
-function ownCaptionBand(entry, owned) {
+function ownCaptionBand(entry: CarrierEntry | null | undefined, owned: unknown) {
   const mine = owned === true && entry !== null && entry !== undefined
   setCaptionLive(mine)
   // A guest that has not reported its rail yet keeps the band's own default (the shell's 48px),

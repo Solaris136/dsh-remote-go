@@ -1,49 +1,49 @@
 // client/src/plugin-overlay.ts - PluginOverlay: the overlay host's state, effects and render (its commands live in actions.ts); after actions.ts, before styles.ts.
 /** One job frame as the `/state` feed delivers it; the handler is swapped per render. */
 interface DownloadHandler {
-  (job: unknown): void
+  (job: DownloadJobView): void
 }
 
 /**
  * The overlay host: everything that is not the sidebar row. It sits above the remote window,
  * so opening or closing a dialog never changes what is behind it.
  */
-function PluginOverlay(props) {
+function PluginOverlay(props: PluginOverlayProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   // One `/state` feed for the whole plugin (docs/api.md): the row, the windows and the
   // remote window all read from it. Download jobs arrive on the same SSE stream.
-  const [downloadJobs, setDownloadJobs] = useState({})
-  const downloadJobsRef = useRef({})
-  const downloadPolls = useRef(new Map())
-  const downloadRemoval = useRef(new Map())
+  const [downloadJobs, setDownloadJobs] = useState<Record<string, DownloadCardView>>({})
+  const downloadJobsRef = useRef<Record<string, DownloadCardView>>({})
+  const downloadPolls = useRef<Map<string, TimerHandle>>(new Map())
+  const downloadRemoval = useRef<Map<string, TimerHandle>>(new Map())
   const downloadHandlerRef = useRef<DownloadHandler>(() => {})
-  const remote = useRemoteState(props.initialState, (job) => downloadHandlerRef.current(job))
+  const remote = useRemoteState(props.initialState, (job: DownloadJobView) => downloadHandlerRef.current(job))
   const state = remote.state
-  const [target, setTarget] = useState(() => {
+  const [target, setTarget] = useState<string | null>(() => {
     const initial = props.initialState
     return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
   })
   const [manageOpen, setManageOpen] = useState(false)
   /** Which body the floating window shows. Separate from the host status: 管理界面 always brings the list back. */
-  const [manageView, setManageView] = useState('list')
+  const [manageView, setManageView] = useState<string>('list')
   /**
    * Which host the connect window (progress + log) belongs to. Opening a host sets it, and so
    * do reconnect and restart: those are the same kind of link work, and the window is where
    * their progress and log are visible.
    */
-  const [connectHostId, setConnectHostId] = useState(null)
+  const [connectHostId, setConnectHostId] = useState<string | null>(null)
   // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
   // one-shot launch token, so it is fetched on demand and never persisted.
-  const [remoteUrl, setRemoteUrl] = useState(null)
-  const [busyHostId, setBusyHostId] = useState(null)
-  const [diagnose, setDiagnose] = useState(null)
+  const [remoteUrl, setRemoteUrl] = useState<RemoteUrlState | null>(null)
+  const [busyHostId, setBusyHostId] = useState<string | null>(null)
+  const [diagnose, setDiagnose] = useState<DiagnoseState | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [pendingDelete, setPendingDelete] = useState(null)
+  const [pendingDelete, setPendingDelete] = useState<HostLike | null>(null)
   const [deleting, setDeleting] = useState(false)
   // Deleting a host whose link is being built needs a second, explicit confirmation.
   const [deleteArmed, setDeleteArmed] = useState(false)
-  const [passwordPrompt, setPasswordPrompt] = useState(null)
+  const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null)
   // Synchronous guard: two Enter events in the same tick both see `pending.busy === false`
   // because React has not re-rendered yet, so the ref is what makes the submit idempotent.
   const passwordBusy = useRef(false)
@@ -51,21 +51,21 @@ function PluginOverlay(props) {
   const [fingerprintBusy, setFingerprintBusy] = useState(false)
   // A queue, not one slot: a second message used to replace the first before it could be
   // read (audit S3). Newest last, at most three, each with its own dismissal timer.
-  const [toasts, setToasts] = useState([])
+  const [toasts, setToasts] = useState<ToastEntry[]>([])
   const toastSeq = useRef(0)
-  const toastTimers = useRef(new Map())
-  const [wizard, setWizard] = useState(() => {
+  const toastTimers = useRef<Map<number, TimerHandle>>(new Map())
+  const [wizard, setWizard] = useState<HostDraft | null>(() => {
     const store = props.wizardStore
     return store && typeof store.current === 'function' ? store.current() : null
   })
 
-  const dismissToast = (id) => {
+  const dismissToast = (id: number) => {
     const timer = toastTimers.current.get(id)
     if (timer !== undefined && typeof clearTimeout === 'function') clearTimeout(timer)
     toastTimers.current.delete(id)
     setToasts((current) => current.filter((toast) => toast.id !== id))
   }
-  const notify = (text, tone) => {
+  const notify = (text: ReactNode, tone?: Tone) => {
     toastSeq.current += 1
     const id = toastSeq.current
     setToasts((current) => [...current, { id, text, tone: tone || 'info' }].slice(-3))
@@ -84,7 +84,7 @@ function PluginOverlay(props) {
     },
     [],
   )
-  const errorMessage = (error) => {
+  const errorMessage = (error: unknown) => {
     const viewOfError = toErrorView(error)
     const title = resolveText(viewOfError.title, locale)
     const detail = resolveText(viewOfError.detail, locale)
@@ -105,7 +105,7 @@ function PluginOverlay(props) {
     [],
   )
 
-  const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
+  const hosts: HostView[] = state && Array.isArray(state.hosts) ? state.hosts : []
   const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
   const activeHost = target ? hosts.find((host) => host && host.id === target) || null : null
   // The connect body names one host explicitly: a restart / reconnect of a host that is not
@@ -121,7 +121,7 @@ function PluginOverlay(props) {
   const activeViewRev =
     activeHost && activeHost.remote && Number.isInteger(activeHost.remote.viewRev) ? activeHost.remote.viewRev : null
   /** True when the warm carrier was navigated for the given attach. */
-  const carrierHoldsView = (hostId, viewRev) => {
+  const carrierHoldsView = (hostId: string, viewRev: number | null) => {
     const entry = carrierOf(hostId)
     if (entry === null) return false
     const entryRev = Number.isInteger(entry.viewRev) ? entry.viewRev : null
@@ -138,13 +138,13 @@ function PluginOverlay(props) {
     remote.reconnectStream()
     reconnectConnectLog()
   }
-  const hostsRef = useRef(hosts)
+  const hostsRef = useRef<HostView[]>(hosts)
   hostsRef.current = hosts
   // A host we asked for that still has to connect: the list stays up until it is ready.
-  const pendingSwitch = useRef(null)
-  const pendingIntent = useRef(null)
+  const pendingSwitch = useRef<string | null>(null)
+  const pendingIntent = useRef<PanelRequest | null>(null)
   // Host we already told the user cannot be shown here (no desktop window seat).
-  const noWindowNotified = useRef(null)
+  const noWindowNotified = useRef<string | null>(null)
 
   // The commands live in `actions.ts`; they are built from this render's state so every closure
   // sees the same values the inline declarations did.
@@ -342,7 +342,7 @@ function PluginOverlay(props) {
   // The management window's footer banner is not visible while a remote carrier fills the
   // window. Surface the same degradation through the shell's toast so it is visible on the
   // local page and over a guest, and announce the recovery (review feedback).
-  const lastStreamMode = useRef('idle')
+  const lastStreamMode = useRef<StreamMode>('idle')
   useEffect(() => {
     const degraded = remote.mode === 'polling' || remote.mode === 'reconnecting'
     const wasDegraded = lastStreamMode.current === 'polling' || lastStreamMode.current === 'reconnecting'
@@ -394,7 +394,7 @@ function PluginOverlay(props) {
     if (store && typeof store.close === 'function') store.close()
   }
 
-  const submitPassword = (submitted) => {
+  const submitPassword = (submitted: PasswordSubmission) => {
     const pending = passwordPrompt
     // The prompt's own handler guards Enter, but the doubling in the audit came from two
     // events in the same tick; the store-level guard is the last line (S2-2).

@@ -26,7 +26,7 @@ const GUEST_ACTIONS = new Set([
  *   - a host switch is only accepted for `local` or this carrier's own host; switching to a
  *     third host from a remote page goes through Local first (docs/design.md §4.8/§7).
  */
-function sanitizeGuestIntent(intent, hostId) {
+function sanitizeGuestIntent(intent: GuestIntentLike, hostId: string): SafeGuestIntent | null {
   if (!intent || typeof intent !== 'object') return null
   const action = typeof intent.action === 'string' ? intent.action : ''
   if (action !== '' && GUEST_ACTIONS.has(action)) {
@@ -65,7 +65,7 @@ function sanitizeGuestIntent(intent, hostId) {
 }
 
 /** The sink handed to a framed page: sanitize, then dispatch (and report a refusal). */
-function guestIntentSink(entry) {
+function guestIntentSink(entry: CarrierEntry): (intent: GuestIntentLike) => unknown {
   return (intent) => {
     const safe = sanitizeGuestIntent(intent, entry.hostId)
     if (safe === null) return { ok: false, reason: 'blocked-intent' }
@@ -73,7 +73,7 @@ function guestIntentSink(entry) {
   }
 }
 
-function installWebCarrier(entry, existingWindow) {
+function installWebCarrier(entry: CarrierEntry, existingWindow?: Window | null): boolean {
   const win = existingWindow ?? webWindow(entry)
   if (!win) {
     entry.rowInstalled = false
@@ -87,7 +87,7 @@ function installWebCarrier(entry, existingWindow) {
     return false
   }
   // `mountHostRow` reports one of its own status strings; a throw means the row is unusable.
-  let row
+  let row: unknown
   try {
     row = mountHostRow(win)
   } catch (_error) {
@@ -117,7 +117,7 @@ function installWebCarrier(entry, existingWindow) {
   return live
 }
 
-function pushWebCarrierRow(entry, payload) {
+function pushWebCarrierRow(entry: CarrierEntry, payload: unknown) {
   try {
     const win = entry.frame && entry.frame.contentWindow
     if (win && win.__drgHostRow && typeof win.__drgHostRow.update === 'function') {
@@ -129,7 +129,7 @@ function pushWebCarrierRow(entry, payload) {
 }
 
 /** Desktop guest backend: the shell hands out a Chromium guest lease per host. */
-const DESKTOP_CARRIER = {
+const DESKTOP_CARRIER: CarrierBackend = {
   kind: 'desktop',
   create: (hostId, url, message, options) => createDesktopCarrier(hostId, url, message, options),
   load: async (entry, url) => {
@@ -159,7 +159,7 @@ const DESKTOP_CARRIER = {
 }
 
 /** Web frame backend: a same-origin iframe, warmed and hidden exactly like the guest. */
-const WEB_CARRIER = {
+const WEB_CARRIER: CarrierBackend = {
   kind: 'web',
   create: (hostId, url, message, options) => createWebCarrier(hostId, url, message, options),
   load: (entry, url) => {
@@ -182,7 +182,12 @@ const WEB_CARRIER = {
 }
 
 /** Build the carrier that fits this window: guest when the shell offers one, frame otherwise. */
-function createCarrier(hostId, url, message, options) {
+function createCarrier(
+  hostId: string,
+  url: string,
+  message: unknown,
+  options: CarrierShowOptions,
+): CarrierEntry | Promise<CarrierEntry | null> | null {
   const surface = carrierSurface()
   if (surface === null) return null
   return surface === 'desktop'

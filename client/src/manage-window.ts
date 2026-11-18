@@ -1,5 +1,37 @@
 // client/src/manage-window.ts - ManageWindow, the remote host manager dialog; after overlay-state.ts, before plugin-overlay.ts.
-function ManageWindow(props) {
+
+/** The management window is a shell around two bodies: the host list and one host's connect view. */
+interface ManageWindowProps extends LocaleProps {
+  open?: boolean
+  view?: string
+  host?: HostView | null
+  state?: StateView | null
+  loading?: boolean
+  error?: ErrorView | null
+  busyHostId?: string | null
+  mode?: StreamMode
+  fingerprintBusy?: boolean
+  onRetryLive?: (() => void) | null
+  onClose?: () => void
+  onShowList?: () => void
+  onAdd?: () => void
+  onRefresh?: () => void
+  onOpenSettings?: () => void
+  onOpenHost?: (host: HostView) => void
+  onDisconnectHost?: (host: HostView) => void
+  onReconnectHost?: (host: HostView) => void
+  onRestartHost?: (host: HostView) => void
+  onStopRemoteHost?: (host: HostView) => void
+  onEditHost?: (host: HostView) => void
+  onDeleteHost?: (host: HostView) => void
+  onDiagnoseHost?: (host: HostView) => void
+  onAcceptFingerprint?: (host: HostView, remember: boolean) => void
+  onRejectFingerprint?: (host: HostView) => void
+  onRetry?: (host: HostView) => void
+  onDiagnose?: (host: HostView) => void
+}
+
+function ManageWindow(props: ManageWindowProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
   if (props.open !== true) return null
@@ -17,7 +49,7 @@ function ManageWindow(props) {
             locale,
             host,
             fingerprintBusy: props.fingerprintBusy === true,
-            onAcceptFingerprint: (remember) => props.onAcceptFingerprint(host, remember),
+            onAcceptFingerprint: (remember: boolean) => props.onAcceptFingerprint(host, remember),
             onRejectFingerprint: () => props.onRejectFingerprint(host),
             onRetry: () => props.onRetry(host),
             onDiagnose: () => props.onDiagnose(host),

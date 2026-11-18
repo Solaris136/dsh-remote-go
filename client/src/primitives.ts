@@ -1,7 +1,13 @@
 // client/src/primitives.ts - RemoteIcon/strokeIcon and the small primitives (StatusDot, Badge, Button, IconButton, DownloadCenter, Spinner); after api-client.ts, before dialogs.ts.
 //#region 7. icons and small UI primitives
 
-function RemoteIcon(props) {
+/** What an icon component reads: the CSS size in px, and whether it is the active nav item. */
+interface IconProps {
+  size?: number
+  active?: boolean
+}
+
+function RemoteIcon(props: IconProps) {
   const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 18
   const active = props && props.active === true
   return h(
@@ -27,8 +33,8 @@ function RemoteIcon(props) {
   )
 }
 
-function strokeIcon(paths, viewBox?: string) {
-  return function Icon(props) {
+function strokeIcon(paths: string[], viewBox?: string): (props: IconProps) => ReactElement {
+  return function Icon(props: IconProps) {
     const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
     return h(
       'svg',
@@ -45,7 +51,7 @@ function strokeIcon(paths, viewBox?: string) {
         focusable: 'false',
         style: { display: 'block' },
       },
-      paths.map((d, index) => h('path', { key: String(index), d })),
+      paths.map((d: string, index: number) => h('path', { key: String(index), d })),
     )
   }
 }
@@ -63,7 +69,12 @@ const IconClose = strokeIcon(['M6 6l12 12', 'M18 6L6 18'])
 const IconCheck = strokeIcon(['M5 12.5l4.5 4.5L19 7'])
 const IconAlert = strokeIcon(['M12 3.5 21 19H3L12 3.5Z', 'M12 9.5v4.5', 'M12 17h.01'])
 
-function StatusDot(props) {
+interface StatusDotProps {
+  status?: unknown
+  title?: string
+}
+
+function StatusDot(props: StatusDotProps) {
   const status = props && typeof props.status === 'string' ? props.status : 'unconfigured'
   const tone = statusOf(status).tone
   const label = props && typeof props.title === 'string' ? props.title : undefined
@@ -76,7 +87,13 @@ function StatusDot(props) {
   })
 }
 
-function Badge(props) {
+interface BadgeProps {
+  tone?: Tone
+  title?: ReactNode
+  children?: ReactNode
+}
+
+function Badge(props: BadgeProps) {
   const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
   return h(
     'span',
@@ -89,7 +106,18 @@ function Badge(props) {
   )
 }
 
-function Button(props) {
+interface ButtonProps {
+  variant?: string
+  onClick?: (() => void) | null
+  disabled?: boolean
+  busy?: boolean
+  title?: ReactNode
+  ariaLabel?: string
+  testId?: string
+  children?: ReactNode
+}
+
+function Button(props: ButtonProps) {
   const variant = props.variant || 'secondary'
   const className = ['drg-btn', 'drg-btn-' + variant].join(' ')
   const onClick = props.onClick
@@ -110,7 +138,15 @@ function Button(props) {
   )
 }
 
-function IconButton(props) {
+interface IconButtonProps {
+  onClick?: (() => void) | null
+  disabled?: boolean
+  label?: ReactNode
+  testId?: string
+  icon?: ReactNode
+}
+
+function IconButton(props: IconButtonProps) {
   return h(
     'button',
     {
@@ -127,7 +163,7 @@ function IconButton(props) {
 }
 
 /** Human-readable byte count for the download progress card. */
-function formatBytes(value) {
+function formatBytes(value: unknown): string {
   const bytes = Number(value)
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB']
@@ -146,13 +182,52 @@ function formatBytes(value) {
  * the bottom-right by CSS and is moved with a transform, so dragging never changes
  * layout or the guest behind it. Clamping keeps at least a corner on screen.
  */
-function DownloadCenter(props) {
-  const jobs = Array.isArray(props.jobs) ? props.jobs : []
-  const [offset, setOffset] = useState({ x: 0, y: 0 })
-  const stackRef = useRef(null)
-  const dragRef = useRef(null)
+/**
+ * The slice of a pointer event the drag reads. React's synthetic type widens `target` to
+ * `EventTarget`, but the handler calls `closest` on it, so the DOM shape is named here.
+ */
+interface PointerDragEvent {
+  button?: number
+  pointerId: number
+  clientX: number
+  clientY: number
+  target: EventTarget & Element
+  currentTarget: EventTarget & HTMLElement
+  preventDefault(): void
+}
 
-  const onPointerDown = (event) => {
+/** One drag in flight: the pointer it belongs to, where it started and the stack's rect then. */
+interface DownloadDragState {
+  pointerId: number
+  startX: number
+  startY: number
+  x: number
+  y: number
+  rect: DOMRect
+}
+
+interface DownloadProgressProps extends LocaleProps {
+  job?: DownloadCardView | null
+  onCancel?: (job: DownloadCardView) => void
+  onDismiss?: (job: DownloadCardView) => void
+  onDragStart?: (event: PointerDragEvent) => void
+  onDragMove?: (event: PointerDragEvent) => void
+  onDragEnd?: (event: PointerDragEvent) => void
+}
+
+interface DownloadCenterProps extends LocaleProps {
+  jobs?: DownloadCardView[]
+  onCancel?: (job: DownloadCardView) => void
+  onDismiss?: (job: DownloadCardView) => void
+}
+
+function DownloadCenter(props: DownloadCenterProps) {
+  const jobs = Array.isArray(props.jobs) ? props.jobs : []
+  const [offset, setOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const stackRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<DownloadDragState | null>(null)
+
+  const onPointerDown = (event: PointerDragEvent) => {
     if (event.button !== undefined && event.button !== 0) return
     const target = event.target
     if (target && typeof target.closest === 'function' && target.closest('button')) return
@@ -174,7 +249,7 @@ function DownloadCenter(props) {
     event.preventDefault()
   }
 
-  const onPointerMove = (event) => {
+  const onPointerMove = (event: PointerDragEvent) => {
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     const x = drag.x + (event.clientX - drag.startX)
@@ -190,7 +265,7 @@ function DownloadCenter(props) {
     event.preventDefault()
   }
 
-  const onPointerEnd = (event) => {
+  const onPointerEnd = (event: PointerDragEvent) => {
     const drag = dragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     dragRef.current = null
@@ -232,7 +307,7 @@ function DownloadCenter(props) {
  * determinate bar once the Host has an inventory, and stays indeterminate while a
  * folder is still being enumerated. The header is the drag handle.
  */
-function DownloadProgress(props) {
+function DownloadProgress(props: DownloadProgressProps) {
   const t = translatorOf(props)
   const job = props.job
   if (!job) return null
@@ -352,7 +427,11 @@ function DownloadProgress(props) {
   )
 }
 
-function Spinner(props) {
+interface SpinnerProps {
+  size?: number
+}
+
+function Spinner(props: SpinnerProps) {
   return h('span', {
     className: 'drg-spinner',
     style: {

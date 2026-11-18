@@ -3,31 +3,17 @@
  * The live guests, most recently shown first. A guest is hidden, never reloaded — that is what
  * makes switching instant — and is dropped only when its host goes away.
  */
-const carrierPool = {
+const carrierPool: CarrierPool = {
   entries: [],
   current: null,
   wanted: null,
   poll: null,
 }
 
-/**
- * The per-surface operations the pool drives. Both backends (`DESKTOP_CARRIER`, `WEB_CARRIER`)
- * implement exactly this, and the entry they build carries it unchanged.
- */
-interface CarrierBackend {
-  kind: string
-  create(hostId: string, url: string, message: string, options: unknown): unknown
-  load(entry: unknown, url: string): void | Promise<void>
-  pushRow(entry: unknown, payload: unknown): void
-  waitReady(entry: unknown): Promise<unknown>
-  dispose(entry: unknown): unknown
-  poll: ((entry: unknown) => void) | null
-}
-
 /** Show/hide operations run one at a time: two overlapping opens must not build two guests. */
-let carrierQueue = Promise.resolve()
+let carrierQueue: Promise<unknown> = Promise.resolve()
 
-let captionStateWatcher = null
+let captionStateWatcher: MutationObserver | null = null
 
 /**
  * Serialize one carrier operation behind the previous one and hand back its own result: the queue
@@ -36,22 +22,22 @@ let captionStateWatcher = null
 function whenCarrierIdle<T>(task: () => T | PromiseLike<T>): Promise<T> {
   const run = carrierQueue.then(task, task)
   carrierQueue = run.then(
-    () => undefined,
-    () => undefined,
+    (): undefined => undefined,
+    (): undefined => undefined,
   )
   return run
 }
 
-function carrierOf(hostId) {
+function carrierOf(hostId: unknown): CarrierEntry | null {
   if (typeof hostId !== 'string' || hostId === '') return null
   return carrierPool.entries.find((entry) => entry.hostId === hostId) || null
 }
 
-function shownCarrier() {
+function shownCarrier(): CarrierEntry | null {
   return carrierPool.current === null ? null : carrierOf(carrierPool.current)
 }
 
-function carrierWarm(hostId) {
+function carrierWarm(hostId: unknown): boolean {
   return carrierOf(hostId) !== null
 }
 
@@ -73,7 +59,7 @@ function desktopBrowserBridge(): DshDesktopBrowser | null {
  * is present, otherwise a same-origin frame (the browser build's carrier). Both paths keep the
  * same pool, switching and teardown behaviour — only how a page is embedded differs.
  */
-function carrierSurface() {
+function carrierSurface(): 'desktop' | 'web' | null {
   if (desktopBrowserBridge() !== null) return 'desktop'
   if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null
   // A page loaded from file:// (an Electron build without the guest bridge) cannot host the
@@ -84,7 +70,7 @@ function carrierSurface() {
 }
 
 /** Each surface accepts a different kind of seat: a loopback origin, or a path on this origin. */
-function acceptsCarrierUrl(surface, value) {
+function acceptsCarrierUrl(surface: string | null, value: unknown): boolean {
   return surface === 'desktop' ? isValidLoopbackUrl(value) : surface === 'web' ? isValidViewPath(value) : false
 }
 
@@ -109,8 +95,8 @@ const CARRIER_LOAD_TIMEOUT_MS = 25000
  * the timer only fires when no committed document arrived and is cancelled by the first real
  * `load`. Exposed for the fake-clock test (`__test.createLoadGuard`).
  */
-function createLoadGuard(timeoutMs, onTimeout) {
-  let timer = null
+function createLoadGuard(timeoutMs: number, onTimeout?: () => void): CarrierLoadGuard {
+  let timer: TimerHandle | null = null
   let disposed = false
   const cancel = () => {
     if (timer !== null && typeof clearTimeout === 'function') clearTimeout(timer)
@@ -139,14 +125,14 @@ const CARRIER_INSTALL_RETRY_MS = 1500
 const CARRIER_INSTALL_MAX_ATTEMPTS = 8
 
 /** Set by `apply` (the panel store lives there); a carrier's error layer asks for the local page. */
-let requestLocalPage = null
+let requestLocalPage: (() => void) | null = null
 
 /** The error layer's own handle on its text node, so a reload can rewrite the line in place. */
 interface CarrierErrorLayer extends HTMLDivElement {
   __drgText?: HTMLParagraphElement
 }
 
-function createCarrierErrorLayer(message, options) {
+function createCarrierErrorLayer(message: unknown, options: { localLabel?: unknown }): CarrierErrorLayer {
   const opts = options || {}
   const layer: CarrierErrorLayer = document.createElement('div')
   layer.className = 'drg-carrier-error'
@@ -171,13 +157,13 @@ function createCarrierErrorLayer(message, options) {
   return layer
 }
 
-function showCarrierError(layer, message?: string) {
+function showCarrierError(layer: CarrierErrorLayer | null | undefined, message?: string) {
   if (!layer) return
   if (layer.__drgText && typeof message === 'string' && message !== '') layer.__drgText.textContent = message
   layer.style.display = 'flex'
 }
 
-function hideCarrierError(layer) {
+function hideCarrierError(layer: CarrierErrorLayer | null | undefined) {
   if (!layer) return
   layer.style.display = 'none'
 }

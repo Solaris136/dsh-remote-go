@@ -2,7 +2,16 @@
 // i18n-exempt: these are ErrorView payloads the browser itself produces, and the contract keeps them as {zh,en} pairs.
 //#region 5. local error views
 
-const LOCAL_ERRORS = {
+/** One template entry: `localErrorView` copies it into a fresh view and adds `technical`. */
+interface LocalErrorTemplate {
+  code: string
+  retryable: boolean
+  title: LocalizedText
+  detail: LocalizedText
+  nextSteps: LocalizedText[]
+}
+
+const LOCAL_ERRORS: Record<string, LocalErrorTemplate> = {
   network: {
     code: 'network',
     retryable: true,
@@ -97,7 +106,7 @@ interface LocalErrorView {
   technical?: string
 }
 
-function localErrorView(code, technical?: string) {
+function localErrorView(code: string, technical?: string): LocalErrorView {
   const base = LOCAL_ERRORS[code] || LOCAL_ERRORS.internal
   const view: LocalErrorView = {
     code: base.code,
@@ -110,11 +119,29 @@ function localErrorView(code, technical?: string) {
   return view
 }
 
-function toErrorView(error) {
-  if (error && typeof error === 'object') {
+/**
+ * The object the plugin's own failures carry. It extends the view because the old body returned
+ * the object itself once `title` and `detail` were present, and callers render it as one.
+ */
+interface FailureLike extends ErrorView {
+  view?: ErrorView
+  message?: unknown
+}
+
+/**
+ * The only predicate the body ever applied: "it is an object". Declaring the result as the
+ * failure shape is what lets the two branches below read exactly the members they already
+ * tested for - the runtime checks, and therefore the artifact, are unchanged.
+ */
+function isFailureLike(value: unknown): value is FailureLike {
+  return typeof value === 'object' && value !== null
+}
+
+function toErrorView(error: unknown): ErrorView {
+  if (isFailureLike(error)) {
     if (error.view && typeof error.view === 'object') return error.view
     if (error.title && error.detail) return error
   }
-  const technical = error && typeof error.message === 'string' ? error.message : String(error)
+  const technical = isFailureLike(error) && typeof error.message === 'string' ? error.message : String(error)
   return localErrorView('internal', technical)
 }

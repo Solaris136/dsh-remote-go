@@ -1,5 +1,5 @@
 // client/src/carrier-install.ts - install the row/tools/bridge into a guest, replyToGuest and the host-row poll (9b 6/11); after carrier-pool.ts, before carrier-caption.ts.
-async function installHostRow(entry) {
+async function installHostRow(entry: CarrierEntry | null | undefined): Promise<boolean> {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return false
   let status
@@ -20,7 +20,7 @@ async function installHostRow(entry) {
  * Install the guest-side download bridge after every load stop. It shares the
  * row's intent queue, so its install is independent of where the row landed.
  */
-async function installGuestTools(entry) {
+async function installGuestTools(entry: CarrierEntry | null | undefined): Promise<boolean> {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return false
   try {
@@ -32,7 +32,7 @@ async function installGuestTools(entry) {
 }
 
 /** The capability bridge's guest copy: same channel as the download bridge, one per load stop. */
-async function installCapabilityBridge(entry) {
+async function installCapabilityBridge(entry: CarrierEntry | null | undefined): Promise<boolean> {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return false
   try {
@@ -44,7 +44,11 @@ async function installCapabilityBridge(entry) {
 }
 
 /** Hand one bridge answer back to the guest; the desktop carrier has no direct callback. */
-function replyToGuest(entry, id, result) {
+function replyToGuest(
+  entry: CarrierEntry | null | undefined,
+  id: unknown,
+  result: { ok?: unknown } | null | undefined,
+) {
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return
   const payload = JSON.stringify({ id: String(id), ok: Boolean(result && result.ok === true) })
@@ -56,7 +60,7 @@ function replyToGuest(entry, id, result) {
   }
 }
 
-function startHostRowPoll(entry) {
+function startHostRowPoll(entry: CarrierEntry) {
   stopHostRowPoll()
   const view = entry && entry.view
   if (!view || typeof view.executeJavaScript !== 'function') return
@@ -66,7 +70,7 @@ function startHostRowPoll(entry) {
   entry.timer = setInterval(() => {
     if (carrierPool.poll !== entry || carrierPool.current !== entry.hostId) return
     if (draining) return
-    let pending = null
+    let pending: Promise<unknown> | null = null
     try {
       pending = view.executeJavaScript(TAKE_INTENTS_SCRIPT)
     } catch (_error) {
@@ -93,7 +97,9 @@ function startHostRowPoll(entry) {
           // A capability intent carries the id its guest is waiting on; answer it even when
           // the dispatch refused it (`ok:false`) so the page can fail instead of hanging.
           if (intent && typeof intent.id === 'string' && intent.id !== '') {
-            if (answer && typeof answer.then === 'function') {
+            // A receipt is an object with `then`; a boolean has never been thenable, so the
+            // object test narrows without changing which answers take the promise path.
+            if (answer && typeof answer === 'object' && typeof answer.then === 'function') {
               answer.then(
                 (result) => replyToGuest(entry, intent.id, result),
                 () => replyToGuest(entry, intent.id, { ok: false }),

@@ -4,7 +4,7 @@
 const SWITCHER_TICK_MS = 1500
 
 /** What both copies of the row show. The row is plain DOM: it must outlive React re-renders. */
-const switcher = {
+const switcher: SwitcherState = {
   current: 'local',
   hosts: [],
   labels: { local: 'Local', addHost: 'Add host', manage: 'Manage hosts', exit: 'Exit remote' },
@@ -13,8 +13,8 @@ const switcher = {
   installed: false,
 }
 
-function switcherPayload() {
-  const hosts = []
+function switcherPayload(): SwitcherPayload {
+  const hosts: SwitcherHost[] = []
   for (const host of switcher.hosts) {
     if (!host || typeof host.id !== 'string') continue
     hosts.push({
@@ -39,7 +39,7 @@ function switcherPayload() {
   }
 }
 
-function updateSwitcher(patch?) {
+function updateSwitcher(patch?: SwitcherPatch): SwitcherPayload {
   if (patch && typeof patch === 'object') {
     if (Array.isArray(patch.hosts)) {
       switcher.hosts = patch.hosts.filter((host) => host && typeof host.id === 'string')
@@ -55,16 +55,16 @@ function updateSwitcher(patch?) {
   return payload
 }
 
-function localWindow() {
+function localWindow(): Window | null {
   return typeof window === 'undefined' || !window.document ? null : window
 }
 
-function pushLocalHostRow(payload) {
+function pushLocalHostRow(payload: SwitcherPayload): boolean {
   const win = localWindow()
   if (win === null) return false
   // The local row talks to this module directly instead of being polled.
   win.__drgBridgeSink = dispatchSwitcherIntent
-  let status = 'absent'
+  let status: unknown = 'absent'
   if (win.__drgHostRow && typeof win.__drgHostRow.update === 'function') {
     try {
       status = win.__drgHostRow.update(payload)
@@ -95,7 +95,7 @@ function pushLocalHostRow(payload) {
  * refused by `sanitizeGuestIntent` (audit review). So the projection is `local + own host`;
  * cross-host switching from a remote page goes through Local first.
  */
-function guestSwitcherPayload(hostId) {
+function guestSwitcherPayload(hostId: string): SwitcherPayload {
   const payload = switcherPayload()
   return {
     ...payload,
@@ -114,7 +114,7 @@ function pushGuestHostRow() {
   }
 }
 
-function dispatchSwitcherIntent(intent) {
+function dispatchSwitcherIntent(intent: SafeGuestIntent | null | undefined): IntentReceipt | boolean | undefined {
   if (!intent || typeof intent !== 'object') return undefined
   if (typeof switcher.dispatch === 'function') return switcher.dispatch(intent)
   return undefined
@@ -126,7 +126,7 @@ function dispatchSwitcherIntent(intent) {
  * address with a host and no credentials. `javascript:`, `data:`, `file:` and `blob:` are the
  * obvious ways a framed page could escalate, and they all end here.
  */
-function externalUrlOf(value) {
+function externalUrlOf(value: unknown): string | null {
   if (typeof value !== 'string' || value === '' || value.length > 8192) return null
   let url
   try {
@@ -151,7 +151,7 @@ function externalUrlOf(value) {
  * nothing about whether the browser's popup blocker refused the tab; the click that started it
  * is a real gesture, which is what the blocker actually checks.
  */
-function openExternalUrl(value) {
+function openExternalUrl(value: unknown): 'blocked' | 'unavailable' | 'opened' {
   const url = externalUrlOf(value)
   if (url === null) return 'blocked'
   const win = localWindow()
