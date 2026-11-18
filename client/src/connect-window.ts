@@ -33,7 +33,9 @@ function ConnectProgress(props) {
             { className: 'drg-phase-mark', 'aria-hidden': 'true' },
             state === 'done' ? h(IconCheck, { size: 12 }) : null,
           ),
-          h('span', null, t('phase.' + phase)),
+          // PHASES is the contract list and every id has a `phase.<id>` label (i18n.test.ts keeps
+          // the pair honest), so this runtime-built key is sound even though it cannot be a literal.
+          h('span', null, t(dictionaryKey('phase.' + phase))),
         )
       }),
     ),

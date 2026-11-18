@@ -246,6 +246,21 @@ const __test = {
   loadTimeoutMs: CARRIER_LOAD_TIMEOUT_MS,
   captionMenuStart,
   withTimeout,
+  // The i18n seam: `test/unit/i18n.test.ts` proves the two dictionaries agree and drives both
+  // fallbacks (requested language missing, key missing everywhere) on the real `t()` factory.
+  STRINGS,
+  zh,
+  en,
+  interpolate,
+  makeFallbackT,
+  localeKey: dictionaryKey,
+  localeOf,
+  translatorOf,
+  resolveText,
+  resolveTextList,
+  // The second bilingual table: client-side failures are `ErrorView` payloads, not dictionary
+  // entries, so their pairs are proved separately (the CJK rule exempts errors.ts for this reason).
+  LOCAL_ERRORS,
 }
 
 const __drgExport = {

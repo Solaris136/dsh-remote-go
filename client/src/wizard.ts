@@ -211,7 +211,11 @@ function WizardDialog(props) {
       ? h(
           Notice,
           { tone: 'error' },
-          typeof formError === 'string' ? t(formError) : resolveText(toErrorView(formError).detail, locale),
+          // A local validation message is a dictionary key; a Host failure carries an ErrorView
+          // instead and goes through resolveText below.
+          typeof formError === 'string'
+            ? t(dictionaryKey(formError))
+            : resolveText(toErrorView(formError).detail, locale),
         )
       : null,
     box(
@@ -229,7 +233,7 @@ function WizardDialog(props) {
         {
           label: t('wizard.address'),
           hint: t('wizard.addressHint'),
-          error: fieldErrors.address ? t(fieldErrors.address) : undefined,
+          error: fieldErrors.address ? t(dictionaryKey(fieldErrors.address)) : undefined,
           errorId: fieldErrors.address ? 'wizard-address-error' : undefined,
         },
         [
@@ -310,7 +314,7 @@ function WizardDialog(props) {
           Field,
           {
             label: t('wizard.keyPath'),
-            error: fieldErrors.keyPath ? t(fieldErrors.keyPath) : undefined,
+            error: fieldErrors.keyPath ? t(dictionaryKey(fieldErrors.keyPath)) : undefined,
             errorId: fieldErrors.keyPath ? 'wizard-key-path-error' : undefined,
           },
           box(
@@ -355,7 +359,7 @@ function WizardDialog(props) {
                   : storageAvailable
                     ? t('wizard.passwordPlaceholder')
                     : t('passwordPromptNoStorage'),
-              error: fieldErrors.password ? t(fieldErrors.password) : undefined,
+              error: fieldErrors.password ? t(dictionaryKey(fieldErrors.password)) : undefined,
               errorId: fieldErrors.password ? 'wizard-password-error' : undefined,
             },
             h(TextInput, {

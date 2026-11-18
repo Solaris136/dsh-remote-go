@@ -1,4 +1,5 @@
 // client/src/guest-tools.ts - mountGuestTools/mountCapabilityBridge and the two guest scripts they become (9b 3/11); after guest-host-row.ts, before guest-storage.ts.
+// i18n-exempt: this function is serialized into the remote page, which cannot reach the host's t() or its dictionary.
 /**
  * The remote DSH page's file menu already offers "Download", but a desktop
  * guest session explicitly cancels Chromium downloads. This injected script

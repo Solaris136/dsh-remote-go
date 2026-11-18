@@ -303,8 +303,13 @@ const MARKER_WINDOW_LINES = 5
  * One pass on purpose: stripping comments first would read the `//` in `'http://x'` as a comment
  * and destroy the closing quote, which then hides the rest of the file from every later rule. A
  * `catch {` written inside a literal therefore cannot be located here.
+ *
+ * `keepStrings: true` blanks the comments but leaves literal bodies in place. That is the shape the
+ * CJK rule needs ("is this Chinese text a comment or a string?"), and it is the same scanner: a rule
+ * that had its own comment stripper would eventually disagree with this one about what a comment is.
  */
-function codeOnly(source) {
+function codeOnly(source, options = {}) {
+  const keepStrings = options.keepStrings === true
   let out = ''
   let index = 0
   let previous = ''
@@ -342,10 +347,10 @@ function codeOnly(source) {
       while (index < source.length) {
         const current = source[index]
         if (current === '\\') {
-          out += ' '
+          out += keepStrings ? current : ' '
           index += 1
           if (index < source.length) {
-            out += source[index] === '\n' ? '\n' : ' '
+            out += keepStrings ? source[index] : source[index] === '\n' ? '\n' : ' '
             index += 1
           }
           continue
@@ -358,7 +363,7 @@ function codeOnly(source) {
         if (current === '\n' && quote !== '`') break
         if (regex && current === '[') inClass = true
         else if (regex && current === ']') inClass = false
-        out += current === '\n' ? '\n' : ' '
+        out += keepStrings ? current : current === '\n' ? '\n' : ' '
         index += 1
       }
       previous = 'x'
@@ -449,6 +454,69 @@ for (const failure of catchFailures) fail(failure)
 check(
   catchFailures.length === 0,
   `${catchFailures.length} empty catch(es) state no reason; add // swallow-ok: <why it is safe to ignore>`,
+)
+
+// 4c. Visible client copy goes through t(). A CJK literal in a client module is copy that skipped
+// the dictionary: it cannot be translated, and the parity suite has no way to see it. Comments are
+// blanked first (Chinese in a comment explains the code, it is not copy) while string bodies stay,
+// which is the whole distinction this rule needs. Three files are exempt for structural reasons,
+// each must say so with a `// i18n-exempt:` header, and the counts are printed so the list cannot
+// grow quietly. The Host's `src/**` `{zh,en}` literals are deliberately out of scope: they must
+// cross the API boundary, so they stay inline by contract (design-contract §1.2).
+const CJK_LITERAL = /[\u3400-\u9FFF\uFF00-\uFFEF]/
+const I18N_EXEMPT_MARKER = /\/\/\s*i18n-exempt:\s*(\S[^\n]*)/
+const I18N_EXEMPT_FILES = new Map([
+  ['client/src/i18n-dict.ts', 'the dictionary itself'],
+  ['client/src/errors.ts', 'LOCAL_ERRORS keeps the ErrorView {zh,en} shape of client-side failures'],
+  ['client/src/guest-tools.ts', 'the script is serialized into the remote page, which has no access to t()'],
+])
+
+const i18nFailures = []
+const exemptCounts = []
+let scannedLines = 0
+for (const rel of await walk('client/src', (file) => file.endsWith('.ts') && !file.endsWith('.d.ts'))) {
+  const text = await readText(rel)
+  if (text === null) {
+    fail(`${rel}: unreadable while checking for visible copy outside the dictionary`)
+    continue
+  }
+  // Comments blanked, literals kept: a Chinese comment is documentation, a Chinese string is copy.
+  const scanned = codeOnly(text, { keepStrings: true })
+  const lines = scanned.split('\n')
+  const hits = []
+  lines.forEach((line, index) => {
+    if (CJK_LITERAL.test(line)) hits.push(index + 1)
+  })
+  if (hits.length === 0) {
+    pass()
+    continue
+  }
+  scannedLines += hits.length
+  const exemption = I18N_EXEMPT_FILES.get(rel)
+  if (exemption === undefined) {
+    i18nFailures.push(
+      `${rel}:${listLines(hits)} — CJK literal outside the dictionary; add a zh/en pair to client/src/i18n-dict.ts and render it with t()`,
+    )
+    continue
+  }
+  const marker = I18N_EXEMPT_MARKER.exec(text)
+  const words = marker === null ? 0 : marker[1].trim().split(/\s+/).filter(Boolean).length
+  if (words < 3) {
+    i18nFailures.push(
+      `${rel}: this file needs its "// i18n-exempt: <at least three words saying why>" header (${exemption})`,
+    )
+    continue
+  }
+  exemptCounts.push(`${rel}: ${hits.length}`)
+}
+const i18nDetail = exemptCounts.length === 0 ? 'none' : exemptCounts.join(', ')
+for (const failure of i18nFailures) fail(failure)
+check(
+  i18nFailures.length === 0,
+  `${i18nFailures.length} client file(s) carry visible copy outside t(); see the lines above`,
+)
+console.log(
+  `[check-repo] client i18n: ${scannedLines} CJK literal line(s) in ${exemptCounts.length} exempt file(s) (${i18nDetail})`,
 )
 
 // 5. Secret hygiene. vendor/ stays out of scope: the vendored ssh2 bundle embeds a

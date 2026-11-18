@@ -822,7 +822,12 @@ test('shared inject face carries the command channels, not a panel', () => {
 })
 
 test('client code never logs and never persists remote URLs / tokens', () => {
-  assert.doesNotMatch(SOURCE, /console\.(log|debug|info|warn|error)\s*\(/)
+  // One deliberate exception, and exactly one: a missing dictionary entry is reported once per key
+  // by `makeFallbackT` (DECISIONS §G1 — the alternative is a silently empty cell the user sees).
+  // Quoting that call out keeps the ban exact for every other logging call site.
+  const I18N_WARNING = "console.warn('[dsh-remote-go] ' + message)"
+  assert.equal(SOURCE.split(I18N_WARNING).length - 1, 1, 'the i18n missing-key warning must stay the only console call')
+  assert.doesNotMatch(SOURCE.replace(I18N_WARNING, '<i18n warning>'), /console\.(log|debug|info|warn|error)\s*\(/)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*token/i)
   assert.doesNotMatch(SOURCE, /localStorage\.setItem\([^)]*url/i)
   assert.match(SOURCE, /'x-dsh-remote-go':\s*'1'/)

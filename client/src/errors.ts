@@ -1,4 +1,5 @@
 // client/src/errors.ts - LOCAL_ERRORS and the ErrorView builders every surface renders; after util.ts, before api-client.ts.
+// i18n-exempt: these are ErrorView payloads the browser itself produces, and the contract keeps them as {zh,en} pairs.
 //#region 5. local error views
 
 const LOCAL_ERRORS = {
