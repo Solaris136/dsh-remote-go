@@ -169,7 +169,7 @@ function DownloadCenter(props) {
     try {
       event.currentTarget.setPointerCapture(event.pointerId)
     } catch (_captureError) {
-      // pointer capture is an enhancement; dragging still works inside the head
+      // swallow-ok: pointer capture is an enhancement; dragging still works inside the head
     }
     event.preventDefault()
   }
@@ -199,7 +199,7 @@ function DownloadCenter(props) {
         event.currentTarget.releasePointerCapture(event.pointerId)
       }
     } catch (_releaseError) {
-      // already released
+      // swallow-ok: the pointer was already released; nothing else is pending
     }
   }
 

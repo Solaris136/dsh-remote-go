@@ -125,7 +125,7 @@ async function copyText(text) {
       return true
     }
   } catch (_error) {
-    // fall through to the legacy path
+    // swallow-ok: a refused clipboard write falls through to the legacy copy path
   }
   try {
     if (typeof document === 'undefined' || !document.body) return false
@@ -165,7 +165,7 @@ function createStore() {
         try {
           listener()
         } catch (_error) {
-          // a stale listener must not break the update
+          // swallow-ok: a stale listener must not break the update for the other listeners
         }
       }
     },

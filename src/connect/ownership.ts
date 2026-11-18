@@ -163,6 +163,13 @@ export interface ProveOwnershipOptions {
   profile: string
   /** Which records may authorize the pid; default `['launched']` (the restart shape). */
   sources?: readonly OwnershipSource[]
+  /**
+   * Refuse an empty `profile` up front with `profile-mismatch`; default false. The stop and restart
+   * shapes always know the profile they manage, so an empty value there is a bug or a corrupted
+   * record, never "nothing to compare". The idle shape may genuinely have forgotten it after a
+   * teardown, which is the one case where an empty profile keeps the check skipped.
+   */
+  requireProfile?: boolean
   /** The pid must be the instance this connection is bound to (`remote.pid`); default false. */
   requireBoundPid?: boolean
   /**
@@ -171,6 +178,13 @@ export interface ProveOwnershipOptions {
    * cannot be looser by omission.
    */
   forbidAlongside?: boolean
+  /**
+   * Check the ownership record before `alongsidePids` (default false: alongside first). The
+   * restart shape is an implicit kill whose historic order was record-first, so a pid that is both
+   * unlaunched and kept alongside must keep the frozen `not-launched-by-this-connection` reason
+   * (DECISIONS H5). Both orders refuse; only the reason differs.
+   */
+  proofBeforeAlongside?: boolean
   /** `run/web.json` must name this pid with the same home and profile; default false. */
   requireRegistry?: boolean
   /**
@@ -195,12 +209,15 @@ export type OwnershipShape = Omit<ProveOwnershipOptions, 'pid' | 'layout' | 'pro
  *   registry check belongs to the caller, because a registry mismatch is a conflict prompt, not a
  *   refusal (design.md §5.5). `strict` because a `launched` record always carries the `/proc`
  *   start time; one without it is a broken record, and an unprovable pid must not be stopped.
+ *   It proves the record before `alongsidePids`, which is the order its pre-merge form used, and it
+ *   always knows the profile it manages.
  * - `stop` is the user pointing at the instance this connection is bound to: it may stop a
  *   re-attached pid (design.md §5.7), but only that exact pid, and only while `run/web.json` still
  *   names it with the same home and profile — the written evidence of "the instance this
- *   connection manages".
+ *   connection manages". It knows the profile too; `kept-alongside` stays its first refusal.
  * - `idle` has nobody pointing at anything, only a timer: no registry (it may be stale by then),
- *   but it needs a record of its own; `bound-first` preserves the order the timer always used.
+ *   but it needs a record of its own; `bound-first` preserves the order the timer always used, and
+ *   an empty profile (a teardown that forgot it) skips the profile comparison instead of refusing.
  *
  * `noProofReason` and `prefer` exist only to keep the existing wording and order (DECISIONS H5);
  * a fourth call site must be registered here with its reason.
@@ -210,6 +227,8 @@ export const OWNERSHIP_OPTIONS = {
     sources: ['launched'],
     startTime: 'strict',
     noProofReason: 'not-launched-by-this-connection',
+    proofBeforeAlongside: true,
+    requireProfile: true,
   },
   stop: {
     sources: ['launched', 'bound'],
@@ -218,6 +237,7 @@ export const OWNERSHIP_OPTIONS = {
     startTime: 'when-recorded',
     prefer: 'launched-first',
     noProofReason: 'not-launched-by-this-connection',
+    requireProfile: true,
   },
   idle: {
     sources: ['launched', 'bound'],
@@ -235,16 +255,18 @@ export const OWNERSHIP_OPTIONS = {
  *
  * ```
  * 1 pid is a pid                                                   → pid-unknown
- * 2 requireBoundPid && remote.pid !== pid                           → not-the-bound-instance
- * 3 forbidAlongside && alongsidePids includes pid                   → kept-alongside
- * 4 no record of the allowed sources                                → noProofReason
- * 5 requireRegistry && the registry does not name it               → registry-mismatch
- * 6 /proc identity unreadable                                       → identity-unreadable
+ * 2 requireProfile && profile is empty                             → profile-mismatch
+ * 3 requireBoundPid && remote.pid !== pid                          → not-the-bound-instance
+ * 4 !proofBeforeAlongside && forbidAlongside && alongside has pid   → kept-alongside
+ * 5 no record of the allowed sources                                → noProofReason
+ * 6 proofBeforeAlongside && forbidAlongside && alongside has pid    → kept-alongside
+ * 7 requireRegistry && the registry does not name it               → registry-mismatch
+ * 8 /proc identity unreadable                                       → identity-unreadable
  *   /proc says it is gone                                           → identity-missing
  *   any other read failure                                          → identity-<reason>
- * 7 start time differs                                             → pid-reused
- * 8 the process runs under another DSH home                        → dsh-home-mismatch
- * 9 the command line carries another profile                       → profile-mismatch
+ * 9 start time differs                                             → pid-reused
+ * 10 the process runs under another DSH home                        → dsh-home-mismatch
+ * 11 the command line carries another profile                       → profile-mismatch
  * ```
  *
  * @param ctx - transport (the `/proc` reader) and, when `requireRegistry` is set, the registry.
@@ -288,9 +310,14 @@ export async function proveOwnership(
   const refuse = (reason: OwnershipReason): OwnershipVerdict => ({ ok: false, reason, evidence })
 
   if (!isPid(pid)) return refuse('pid-unknown')
+  // Only the shapes that always know their profile enforce this; the idle timer may have lost it
+  // in a teardown, which must stay "unknown" rather than become a refusal.
+  if (options.requireProfile === true && profile === '') return refuse('profile-mismatch')
   if (options.requireBoundPid === true && Number(runtime.remote.pid) !== pid) return refuse('not-the-bound-instance')
-  if (forbidAlongside && alongside.includes(pid)) return refuse('kept-alongside')
+  const keptAlongside = forbidAlongside && alongside.includes(pid)
+  if (keptAlongside && options.proofBeforeAlongside !== true) return refuse('kept-alongside')
   if (proof === null) return refuse(noProofReason)
+  if (keptAlongside) return refuse('kept-alongside')
 
   if (options.requireRegistry === true) {
     const registry = await readRegistryQuietly(ctx, runtime, layout)

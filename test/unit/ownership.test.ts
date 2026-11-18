@@ -116,14 +116,17 @@ const EXPECTED = {
 }
 
 /** Run one row: the real service context, a real runtime, the call site's own option set. */
-async function verdictFor(callSite, shape) {
+async function verdictFor(callSite, shape, overrides = {}) {
   const { service } = await makeTestService({
-    processIdentity: async () => shape.identity ?? identity(),
-    readRegistry: async () => REGISTRY,
+    processIdentity: async () => {
+      if (overrides.identityThrows === true) throw new Error('the ssh session went away')
+      return overrides.identity ?? shape.identity ?? identity()
+    },
+    readRegistry: async () => (overrides.registry === undefined ? REGISTRY : overrides.registry),
   })
   const host = await createHost(service)
   const runtime = service.runtimes.get(host.id)
-  runtime.remote.pid = PID
+  runtime.remote.pid = overrides.remotePid ?? PID
   runtime.remote.profile = PROFILE
   runtime.launched = new Map()
   if (shape.launched) runtime.launched.set(PID, shape.launched)
@@ -132,9 +135,9 @@ async function verdictFor(callSite, shape) {
   try {
     return await proveOwnership(service.ctx, runtime, {
       ...OWNERSHIP_OPTIONS[callSite],
-      pid: PID,
+      pid: overrides.pid ?? PID,
       layout: LAYOUT,
-      profile: PROFILE,
+      profile: overrides.profile ?? PROFILE,
     })
   } finally {
     await service.shutdown()
@@ -179,6 +182,79 @@ test('an idle policy with no remembered profile skips the profile check instead 
   })
   assert.equal(verdict.ok, true)
   await service.shutdown()
+})
+
+test('a restart reports not-launched-by-this-connection for a pid kept alongside but never launched', async () => {
+  // Both orders refuse, only the reason differs. The restart's pre-merge form (`killAuthorized`)
+  // proved the record before reading `alongsidePids`, so "no record" keeps its frozen wording here
+  // instead of becoming `kept-alongside` (DECISIONS H5, security review M-2).
+  const verdict = await verdictFor('restart', { alongside: true })
+  assert.equal(verdict.ok, false)
+  assert.equal(verdict.reason, 'not-launched-by-this-connection')
+})
+
+test('a stop keeps kept-alongside for that same pid kept alongside but never launched', async () => {
+  // The stop shape keeps the alongside-first order: the user asked to keep this pid, so that is
+  // the fact the stop card explains (security review M-2 must not change this side).
+  const verdict = await verdictFor('stop', { alongside: true })
+  assert.equal(verdict.ok, false)
+  assert.equal(verdict.reason, 'kept-alongside')
+})
+
+test('stop and restart refuse an empty profile, while the idle shape still allows one', async () => {
+  // A stop/restart always knows the profile it manages: an empty one is a bug or a corrupted
+  // record, and skipping the comparison would authorize any process on the matching home
+  // (security review L-2). `OWNERSHIP_OPTIONS.requireProfile` is what makes the difference.
+  for (const callSite of ['restart', 'stop']) {
+    const verdict = await verdictFor(callSite, SHAPES[0], { profile: '' })
+    assert.equal(verdict.ok, false, `${callSite} must not authorize an empty profile`)
+    assert.equal(verdict.reason, 'profile-mismatch')
+  }
+  const idle = await verdictFor('idle', SHAPES[0], { profile: '' })
+  assert.equal(idle.ok, true, 'the idle timer may have forgotten the profile and must still stop its own pid')
+})
+
+/**
+ * The reason table in `docs/invariants.md` B1 is the frozen vocabulary of stop cards, restart logs
+ * and idle verdicts (DECISIONS H5). This test reaches every literal `OwnershipReason` declares, so
+ * a removed or renamed code fails here instead of silently changing a user-facing message.
+ */
+test('the gate still answers every OwnershipReason literal, so the frozen table stays real', async () => {
+  const reasonFor = async (callSite, shape, overrides) => {
+    const verdict = await verdictFor(callSite, shape, overrides)
+    assert.equal(verdict.ok, false, 'expected the gate to refuse the constructed pid')
+    return verdict.reason
+  }
+  const refused = {
+    'pid-unknown': await reasonFor('stop', SHAPES[0], { pid: 0 }),
+    'not-the-bound-instance': await reasonFor('stop', SHAPES[0], { remotePid: 9999 }),
+    'kept-alongside': await reasonFor('stop', { launched: SHAPES[0].launched, alongside: true }),
+    'not-launched-by-this-connection': await reasonFor('restart', {}),
+    'not-owned': await reasonFor('idle', {}),
+    'registry-mismatch': await reasonFor('stop', SHAPES[0], { registry: { ...REGISTRY, pid: 7777 } }),
+    'identity-unreadable': await reasonFor('stop', SHAPES[0], { identityThrows: true }),
+    'identity-missing': await reasonFor('stop', SHAPES[0], { identity: { ok: false, reason: 'missing' } }),
+    'identity-<reason>': await reasonFor('stop', SHAPES[0], { identity: { ok: false, reason: 'unreadable' } }),
+    'pid-reused': await reasonFor('stop', SHAPES[3]),
+    'dsh-home-mismatch': await reasonFor('stop', SHAPES[4]),
+    'profile-mismatch': await reasonFor('stop', SHAPES[5]),
+  }
+  assert.deepEqual(refused, {
+    'pid-unknown': 'pid-unknown',
+    'not-the-bound-instance': 'not-the-bound-instance',
+    'kept-alongside': 'kept-alongside',
+    'not-launched-by-this-connection': 'not-launched-by-this-connection',
+    'not-owned': 'not-owned',
+    'registry-mismatch': 'registry-mismatch',
+    'identity-unreadable': 'identity-unreadable',
+    'identity-missing': 'identity-missing',
+    // The template arm keeps `/proc`'s own suffix. `unreadable` is the suffix a live session can
+    // produce, and it collides with the literal above by design.
+    'identity-<reason>': 'identity-unreadable',
+    'pid-reused': 'pid-reused',
+    'dsh-home-mismatch': 'dsh-home-mismatch',
+    'profile-mismatch': 'profile-mismatch',
+  })
 })
 
 test('only the stop shape reads the run registry', async () => {
@@ -247,4 +323,73 @@ test('proveOwnership has exactly one implementation and three call sites', async
       assert.equal(source.includes(gone), false, `${path.basename(file)} still names ${gone}`)
     }
   }
+})
+
+/** The top-level function that encloses `lineIndex` (0-based): its name and its source range. */
+function enclosingFunction(lines, lineIndex) {
+  let start = 0
+  let name = '(top-level)'
+  for (let index = lineIndex; index >= 0; index -= 1) {
+    const match = /^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)/.exec(lines[index])
+    if (match !== null) {
+      start = index
+      name = match[1]
+      break
+    }
+  }
+  let end = lines.length
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^(?:export\s+)?(?:async\s+)?function\s+/.test(lines[index])) {
+      end = index
+      break
+    }
+  }
+  return { name, body: lines.slice(start, end).join('\n') }
+}
+
+/**
+ * The M-3 known gap, frozen (docs/invariants.md B1): three `stopWeb` calls do not pass through
+ * `proveOwnership` — the adopt/stale-version stops inside `connectPipeline` and teardown's
+ * `stopRemote`. A fourth ungated call would widen the window in which a reused pid can be killed,
+ * so the census is locked here: every call site must be one of the registered functions, and
+ * exactly the three known sites may skip the gate.
+ */
+test('every stopWeb call site is registered, and exactly three skip the ownership gate', async () => {
+  const census = new Map()
+  for (const file of await walkFiles(path.join(REPO_ROOT, 'src'), { extensions: /\.ts$/ })) {
+    const relative = path.relative(path.join(REPO_ROOT, 'src'), file).split(path.sep).join('/')
+    const lines = (await readFile(file, 'utf8')).split('\n')
+    lines.forEach((line, index) => {
+      if (!/\.stopWeb\(/.test(line)) return
+      const { name, body } = enclosingFunction(lines, index)
+      const key = `${relative}:${name}`
+      const entry = census.get(key) ?? { calls: 0, gated: /proveOwnership\(/.test(body) }
+      entry.calls += 1
+      census.set(key, entry)
+    })
+  }
+  const registered = [...census.entries()].sort(([left], [right]) => left.localeCompare(right))
+  assert.deepEqual(registered, [
+    ['connect/pipeline.ts:connectPipeline', { calls: 2, gated: false }],
+    ['connect/restart.ts:runRestart', { calls: 1, gated: true }],
+    ['connect/stop.ts:runStopRemote', { calls: 1, gated: true }],
+    ['host-lifecycle.ts:stopRemoteForIdle', { calls: 1, gated: true }],
+    ['host-lifecycle.ts:teardownRuntime', { calls: 1, gated: false }],
+  ])
+  const ungated = registered.filter(([, entry]) => entry.gated === false)
+  assert.deepEqual(
+    ungated.map(([key]) => key),
+    ['connect/pipeline.ts:connectPipeline', 'host-lifecycle.ts:teardownRuntime'],
+    'the three ungated calls live in exactly these two functions',
+  )
+  assert.equal(
+    ungated.reduce((total, [, entry]) => total + entry.calls, 0),
+    3,
+    'only the three registered stopWeb calls may skip proveOwnership (security review M-3)',
+  )
+  assert.deepEqual(
+    [...new Set(ungated.map(([key]) => key.split(':')[0]))],
+    ['connect/pipeline.ts', 'host-lifecycle.ts'],
+    'the ungated stopWeb calls exist in exactly these files',
+  )
 })

@@ -49,7 +49,7 @@ function createDialogStack() {
     try {
       node.focus()
     } catch (_error) {
-      // a detached node cannot take focus
+      // swallow-ok: a detached node cannot take focus; the dialog itself still opens
     }
   }
   const setAttr = (node, name, value) => {

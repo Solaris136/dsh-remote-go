@@ -7,6 +7,11 @@
  * parser when one is exposed. A kernel whose grammar moved (`changed`) does not change the keys
  * this plugin generates — the stored form is the one already on users' machines — but it is
  * reported once, because a save the moved grammar later refuses must not look like a silent no-op.
+ *
+ * The same applies to a credential service that is present but whose members changed shape: the
+ * store answers "not stored" exactly as it does without a service, so that `changed` would make a
+ * remembered password look forgotten. It is warned about once per store, at the same level as the
+ * grammar warning.
  */
 import { credentialRecordKey, createKernelAdapter } from './kernel-adapter.js'
 import type { CredentialRecordApi } from './kernel-adapter.js'
@@ -68,6 +73,7 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
   const logger = options.logger ?? console
   const kernel = createKernelAdapter(options.ctx)
   let grammarChecked = false
+  let serviceChangedNoted = false
 
   /**
    * Report a moved key grammar once per store. The keys stay in their stored form on purpose: a
@@ -90,6 +96,19 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
     if (probe.state === 'ok' && probe.value !== null) {
       noteGrammar()
       return probe.value
+    }
+    // A service that exists but no longer has the record members is not "no credential service":
+    // answering null silently would present every remembered password as forgotten. Report it
+    // once per store, like the grammar warning; repeated lookups stay quiet.
+    if (probe.state === 'changed') {
+      if (!serviceChangedNoted) {
+        serviceChangedNoted = true
+        logger.warn?.(
+          '[dsh-remote-go] the kernel credential service changed shape; saved passwords cannot be read or written:',
+          probe.detail,
+        )
+      }
+      return null
     }
     if (probe.reason === 'lookup-failed') {
       logger.warn?.('[dsh-remote-go] credential service lookup failed:', probe.detail)

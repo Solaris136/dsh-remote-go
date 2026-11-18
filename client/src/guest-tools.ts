@@ -68,7 +68,7 @@ function mountGuestTools(win) {
           backings[backingIndex].style.display = 'none'
         }
       } catch (_error) {
-        /* the menu also closes on the next pointer gesture */
+        // swallow-ok: the menu also closes on the next pointer gesture
       }
     }
     var directoryTimer = null
@@ -385,7 +385,7 @@ function mountCapabilityBridge(win) {
             try {
               emit({ action: 'notify', tone: 'error', code: 'clipboard-failed' })
             } catch (_error) {
-              /* the local half may be gone */
+              // swallow-ok: the local half may be gone; the clipboard error is thrown right below
             }
             throw new Error('clipboard-write-failed')
           },
@@ -401,7 +401,7 @@ function mountCapabilityBridge(win) {
         try {
           clipboard.writeText = bridgeWriteText
         } catch (_error2) {
-          /* a browser that freezes the Clipboard object keeps its own writeText */
+          // swallow-ok: a frozen Clipboard object keeps its own writeText, which still works
         }
       }
     }
@@ -441,7 +441,7 @@ function mountCapabilityBridge(win) {
       try {
         emit({ action: 'open-external', url: url })
       } catch (_error) {
-        /* the local half may be gone */
+        // swallow-ok: the local half may be gone; the link still opens natively
       }
     }
     doc.addEventListener('click', onLinkClick, true)
@@ -465,12 +465,12 @@ function mountCapabilityBridge(win) {
         try {
           emit({ action: 'open-external', url: target })
         } catch (_error) {
-          /* the local half may be gone */
+          // swallow-ok: the local half may be gone; the popup was already handled
         }
         return null
       }
     } catch (_error) {
-      /* a browser that freezes `window.open` keeps the native one */
+      // swallow-ok: a frozen window.open keeps the native one, which still opens the tab
     }
     // Only claim the bridge once every shim above is in place: a half-installed page must be
     // retried by the next load stop instead of reporting `already` forever.

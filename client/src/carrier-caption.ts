@@ -14,7 +14,7 @@ function desktopCaption() {
       const parsed = Number.parseFloat(String(raw))
       if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 200) height = parsed
     } catch (_error) {
-      // keep the fallback height
+      // swallow-ok: a titlebar height that cannot be read keeps the measured fallback
     }
   }
   return { height }

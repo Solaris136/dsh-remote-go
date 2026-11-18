@@ -67,9 +67,46 @@
   `an existing target pin never reaches the jump host connection`；
   `editing the jump host re-asks for its key instead of reporting host-key-changed`；
   `a re-attach to a pid this connection did not launch grants no kill rights`；
-  `stop never signals a pid this connection did not launch or take over`。
+  `stop never signals a pid this connection did not launch or take over`；
+  `a restart reports not-launched-by-this-connection for a pid kept alongside but never launched`；
+  `a stop keeps kept-alongside for that same pid kept alongside but never launched`；
+  `stop and restart refuse an empty profile, while the idle shape still allows one`；
+  `the gate still answers every OwnershipReason literal, so the frozen table stays real`；
+  `every stopWeb call site is registered, and exactly three skip the ownership gate`。
 - **代码位置**：`src/connect/pipeline.ts:148`、`:164`、`:354`、`:357`、`src/host-runtime.ts:281`、`:283`、
   `src/prompts.ts:124`、`:134`、`:194`、`:222`、`:251`、`:264`、`src/runtime/fsm.ts:331`
+- **已知缺口（安全审查 M-3，P7b 登记，不改行为）**：有三处 `stopWeb` 调用**不经过** `proveOwnership`：
+  `src/connect/pipeline.ts:366`（adopt 到一个版本不匹配的旧实例后停止它）、`:395`（registry 里
+  "不可 adopt 的遗留实例"）和 `src/host-lifecycle.ts:393`（teardown 的 `stopRemote`）。三处与 `main` 同源，
+  都只信运行态/registry 记录里的 pid（`:395` 另核对 home/profile），没有 `/proc` 起始时间与命令行的复验。
+  风险是 **pid 复用可能误杀**：记录写入后远端重启或 pid 回绕，停止信号会落到一个恰好复用了该 pid 的无关
+  进程上；`proveOwnership` 的 `pid-reused` 检查正是为这个窗口准备的，这三条路径绕过了它。为什么 P7b 不改：
+  让它们也走闸门会改变 connect/teardown 的停止时机与失败路径，超出"行为零变化"的边界；本次只做登记与
+  锁定——`every stopWeb call site is registered, and exactly three skip the ownership gate` 会枚举全部
+  `stopWeb` 调用点，多出第四处（或把已有闸门调用挪出闸门）立刻失败。后续收口时，pipeline 两处应先
+  `rememberLaunched`/`rememberBound` 再 prove，teardown 一处需在清空 `remote` 之前保留 home/profile。
+- **`OwnershipReason` 理由码全集**（DECISIONS §H5：字面量逐字冻结；改动即改用户可见文案）：
+
+  | 理由码 | 何时产生（`proveOwnership` 判定顺序） | 冻结字面量 | 出现位置 |
+  |---|---|---|---|
+  | `pid-unknown` | 步骤 1：`!isPid(pid)` | 是 | 停止卡片 `technical: reason=<code> pid=<n>`；空闲停止 verdict/日志（restart 调用前已要求合法 pid） |
+  | `not-the-bound-instance` | 步骤 3：stop 形态 `remote.pid !== pid` | 是 | 停止卡片 technical |
+  | `kept-alongside` | 步骤 4/6：pid 在 `alongsidePids` 里（stop/idle 先查，restart 在记录之后查） | 是 | 停止卡片 technical；重启日志；空闲停止日志 |
+  | `not-launched-by-this-connection` | 步骤 5：restart/stop 形态没有任何可授权记录 | 是 | 停止卡片 technical；重启日志 `restart: not stopping pid … (<reason>)` |
+  | `not-owned` | 步骤 5：idle 形态没有任何可授权记录 | 是 | 空闲停止 verdict（`idle-stop.test.ts` deep-equal）与日志 |
+  | `registry-mismatch` | 步骤 7：stop 形态 `run/web.json` 不认这个 pid/home/profile | 是 | 停止卡片 technical |
+  | `identity-missing` | 步骤 8：`/proc` 说进程已不存在 | 是 | stop 视为"已经没了"（清 stale registry，不报错）；restart/idle 记日志 |
+  | `identity-unreadable` | 步骤 8：读取 `/proc` 抛异常（模板臂也可能产生同值） | 是 | 停止卡片 technical；重启日志；空闲停止日志 |
+  | `identity-<reason>` | 步骤 8：`/proc` 的其它失败原样带出 | 前缀冻结，后缀取 `ProcessIdentity.reason` | 停止卡片 technical；重启日志；空闲停止日志 |
+  | `pid-reused` | 步骤 9：`/proc` 起始时间与记录不符 | 是 | 停止卡片 technical；重启日志；空闲停止日志 |
+  | `dsh-home-mismatch` | 步骤 10：进程的 `DSH_HOME` 与 layout 不同 | 是 | 停止卡片 technical；重启日志；空闲停止日志 |
+  | `profile-mismatch` | 步骤 11：命令行 profile 不符；stop/restart 的空 profile 在步骤 2 也归入此码 | 是 | 停止卡片 technical；重启日志；空闲停止日志 |
+
+  上表 12 个码与 `src/connect/ownership.ts` 的 `OwnershipReason` 联合类型一一对应（最后一行是模板字面量
+  `` `identity-${string}` ``）。`the gate still answers every OwnershipReason literal, so the frozen table
+  stays real` 逐码造出拒绝并断言返回值，`stop-remote.test.ts` / `idle-stop.test.ts` / `remote-restart.test.ts`
+  另有停止卡片、空闲 verdict 与重启日志的逐字断言。当前唯一可产生的 `identity-<reason>` 后缀是
+  `unreadable`（与 `identity-unreadable` 同值；`missing` 已单独映射，`invalid-pid` 在合法 pid 下不可达）。
 - **状态**：COVERED
 
 ### B4 — 接管必须以非空 launch token 为前提
@@ -305,15 +342,18 @@ P7a 起 `src/runtime/fsm.ts` 那条抄来的 `(B8)` 随三条 `remote.*` 死规�
 - **规则**：**空 `catch` body（裸的，或只有注释的）必须带 `// swallow-ok: <理由>`**，理由至少两个词。
   非空 body 不受这条规则管（它归 `test/unit/guards.test.ts` 的 `swallow-guard`：把未知失败包装成
   typed reason 时必须可区分或同样带 `swallow-ok:`）。
-- **机验**：`scripts/check-repo.mjs` 的 `4b. Empty catch hygiene` 扫描 `src/**/*.ts`（源码，不是 `dist/`
-  产物），报告 `${rel}:${line} — empty catch without "// swallow-ok: <reason>"`。三种写法都覆盖：
-  `catch {}`、`catch (e) {}`、`catch { /* 只注释 */ }`；`.catch(() => {})` 与有语句的 catch 不误报。
+- **机验**：`scripts/check-repo.mjs` 的 `4b. Empty catch hygiene` 扫描 `src/**/*.ts` **与**
+  `client/src/**/*.ts`（两半都是产品源码；`dist/` 是发射产物，不重复扫），报告
+  `${rel}:${line} — empty catch without "// swallow-ok: <reason>"`。规则同时断言**每一半扫到的文件数 > 0**
+  ——此前 walk 到 0 个文件会静默通过（安全审查指出的绕过：目录改名或扩展名变化等于关掉规则）。三种写法都
+  覆盖：`catch {}`、`catch (e) {}`、`catch { /* 只注释 */ }`；`.catch(() => {})` 与有语句的 catch 不误报。
 - **标记窗口**：catch body 内、catch 上方**连续注释块**（最多 5 行）、或该 `try` 上方连续注释块（最多 5 行）；
   空行或代码行会截断窗口，避免上一段的注释"隔空"为这一处担保。
-- **当前状态**：`src/**/*.ts` 共 **40 处空 catch**（P7a 复核：`scripts/check-repo.mjs` 的 4b 规则全绿，逐处点在
-  `src/` 源码上数得；旧文写的 42 是重复计入了两处非空的 `catch`）；治理前为 19 裸 + 23 仅注释，现在
-  **40 处全部带 `swallow-ok:`**。
-  对照 review 基线的 34 处未标记（17 裸 + 17 仅注释）：本次处置 36 处（34 处基线 + P4 SSE 拆通道后新增的
-  2 处日志通道驱逐/关闭），其余 4 处此前已带标记（34 + 2 + 4 = 40）。全部只加注释，**零逻辑改动**。
-- **确认**：`test/unit/guards.test.ts` 的 `swallow-ok` 扫描器已按 P8 迁到 `src/**/*.ts`（不再是产物），
-  并在本文件 §4 与 `docs/implementation.md` 同步说明。
+- **当前状态**：Host 半端 `src/**/*.ts` **40 处**、client 半端 `client/src/**/*.ts` **39 处**，共 **79 处全部带
+  `swallow-ok:`**。P7b 补齐 client 半端：39 处中 38 处为本次新增 marker（逐处复核后都是浏览器 API/增强路径的
+  确该吞的失败），1 处（`client/src/guest-host-row.ts:258`）此前已带 marker；P7a 复核的 Host 40 处不变。
+  对照 review 基线的 34 处未标记（17 裸 + 17 仅注释）：P4 处置 36 处（34 处基线 + 2 处 SSE 拆通道新增），
+  其余 4 处此前已带标记（34 + 2 + 4 = 40）。全部只加注释，**零逻辑改动**。
+- **确认**：`test/unit/guards.test.ts` 的 `swallow-ok` 扫描器覆盖 `src/**/*.ts`（不再是产物）；
+  client 半端由 `scripts/check-repo.mjs` 的 4b 规则覆盖（含上面的非零文件数断言），并在本文件 §4 与
+  `docs/implementation.md` 同步说明。

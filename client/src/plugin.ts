@@ -24,7 +24,7 @@ function apply(ctx) {
       const current = typeof locale.getLocale === 'function' ? locale.getLocale() : null
       if (current && typeof current.active === 'string') return current.active
     } catch (_error) {
-      // fall back to the default dictionary
+      // swallow-ok: a missing locale snapshot falls back to the default dictionary
     }
     return 'zh'
   }
@@ -51,7 +51,7 @@ function apply(ctx) {
           return typeof picked === 'string' && picked !== '' ? picked : null
         }
       } catch (_error) {
-        // fall back to the desktop preload picker below
+        // swallow-ok: without the workspace UI the desktop preload picker below is used
       }
       return undefined
     },

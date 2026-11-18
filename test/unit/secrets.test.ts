@@ -82,6 +82,23 @@ test('without a credential service nothing is persisted and available() says so'
   assert.equal(await secrets.remove('h_1'), false)
 })
 
+test('a credential service that changed shape is reported once instead of looking like "nothing stored"', async () => {
+  // `changed` is not `absent`: the service exists, but its record members moved. Answering null
+  // silently would present every remembered password as forgotten (security review L-1).
+  const warnings = []
+  const moved = { readRecord: 'not-a-function', modifyRecord: 42 }
+  const secrets = createSecretStore({
+    ctx: { get: (name) => (name === 'credentials' ? moved : undefined) },
+    logger: { warn: (...args) => warnings.push(args) },
+  })
+  assert.equal(secrets.available(), false)
+  assert.equal(await secrets.get('h_1'), null)
+  assert.equal(await secrets.set('h_1', 's3cret'), false)
+  assert.equal(await secrets.remove('h_1'), false)
+  assert.equal(warnings.length, 1, 'a changed credential service must warn exactly once per store')
+  assert.match(String(warnings[0][0]), /credential service changed shape/)
+})
+
 test('a throwing credential service never breaks the caller', async () => {
   const secrets = createSecretStore({
     ctx: ctxWith({

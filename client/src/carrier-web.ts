@@ -89,7 +89,7 @@ function onWebFrameLoad(entry) {
   try {
     if (win && win.location && win.location.href === 'about:blank') return
   } catch (_error) {
-    // a cross-origin document is handled below (the frame is reset to its view path)
+    // swallow-ok: a cross-origin document throws on location reads and is handled below
   }
   if (entry.loadGuard) entry.loadGuard.cancel()
   if (win === null) {
@@ -98,7 +98,7 @@ function onWebFrameLoad(entry) {
     try {
       entry.frame.src = entry.url
     } catch (_error) {
-      // a detached frame reports through the next load
+      // swallow-ok: a detached frame reports the refused navigation through the next load event
     }
     return
   }

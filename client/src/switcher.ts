@@ -110,7 +110,7 @@ function pushGuestHostRow() {
   try {
     entry.backend.pushRow(entry, guestSwitcherPayload(entry.hostId))
   } catch (_error) {
-    // the framed page or guest may still be navigating
+    // swallow-ok: the framed page or guest may still be navigating; the next push updates it
   }
 }
 

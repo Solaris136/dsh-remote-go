@@ -99,20 +99,20 @@ function installWebCarrier(entry, existingWindow) {
   try {
     mountGuestTools(win)
   } catch (_error) {
-    // the download bridge is optional; the remote window itself still works
+    // swallow-ok: the download bridge is optional; the remote window still works without it
   }
   // Links, clipboard writes and notices cross the same channel; each install is independent,
   // so a page that refuses one of them still gets the others.
   try {
     mountCapabilityBridge(win)
   } catch (_error) {
-    // the capability bridge is best effort: the framed page keeps its own behaviour
+    // swallow-ok: the capability bridge is best effort; the framed page keeps its own behaviour
   }
   try {
     // The frame shares this origin's store; give it the host's own key space.
     mountGuestStorage(win, entry.hostId)
   } catch (_error) {
-    // an unpartitioned frame is the old behaviour, not a broken window
+    // swallow-ok: an unpartitioned frame is the old behaviour, not a broken window
   }
   return live
 }
@@ -124,7 +124,7 @@ function pushWebCarrierRow(entry, payload) {
       win.__drgHostRow.update(payload)
     }
   } catch (_error) {
-    // the frame may still be navigating
+    // swallow-ok: the frame may still be navigating; the next row push updates it
   }
 }
 
@@ -137,7 +137,7 @@ const DESKTOP_CARRIER = {
     try {
       await entry.view.loadURL(url)
     } catch (_error) {
-      // the guest reports navigation failures through did-fail-load
+      // swallow-ok: navigation failures arrive through did-fail-load; this call is fire and forget
     }
   },
   pushRow: (entry, payload) => {
@@ -147,7 +147,7 @@ const DESKTOP_CARRIER = {
       )
       if (answer && typeof answer.catch === 'function') answer.catch(() => {})
     } catch (_error) {
-      // the guest may still be navigating
+      // swallow-ok: the guest may still be navigating; the next row push retries
     }
   },
   waitReady: async (entry) => {
@@ -172,7 +172,7 @@ const WEB_CARRIER = {
       entry.frame.src = url
       if (entry.loadGuard) entry.loadGuard.arm()
     } catch (_error) {
-      // a frame that refuses a navigation reports it through the load event
+      // swallow-ok: a frame that refuses a navigation reports it through the load event
     }
   },
   pushRow: (entry, payload) => pushWebCarrierRow(entry, payload),

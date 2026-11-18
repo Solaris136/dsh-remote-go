@@ -5,7 +5,7 @@ function disposeWebCarrier(entry) {
   try {
     entry.frame.src = 'about:blank'
   } catch (_error) {
-    // the frame may already be detached
+    // swallow-ok: the frame may already be detached; removing its root below is the cleanup
   }
   if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
 }
@@ -151,7 +151,7 @@ async function showOverlayNow(hostId, options): Promise<CarrierShowResult> {
     try {
       entry.view.reload()
     } catch (_error) {
-      // the guest may already be gone
+      // swallow-ok: the guest may already be gone; reload is a best-effort retry
     }
   }
   for (const other of carrierPool.entries) {
@@ -219,7 +219,7 @@ async function disposeDesktopCarrier(entry) {
       const destroyed = entry.view.executeJavaScript('window.__drgHostRow && window.__drgHostRow.destroy()')
       if (destroyed && typeof destroyed.catch === 'function') destroyed.catch(() => {})
     } catch (_error) {
-      // the guest may already be gone
+      // swallow-ok: the guest may already be gone; its DOM is removed right below
     }
   }
   if (entry.root.parentNode !== null) entry.root.parentNode.removeChild(entry.root)
@@ -228,7 +228,7 @@ async function disposeDesktopCarrier(entry) {
     try {
       await bridge.release(entry.lease)
     } catch (_error) {
-      // a lease the shell already dropped is a no-op
+      // swallow-ok: a lease the shell already dropped is already released
     }
   }
 }

@@ -253,7 +253,7 @@ issue 给的另一条路是「精确路由改挂 `ctx.connection.fetch.register`
 五条结构性约定（全部由 `test/unit/guards.test.js` 扫描源码强制；浏览器半端的行为用例在
 `test/unit/client.test.js`，两个测试文件共同守住 `client.js`）：
 
-1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.ts`；空 `catch`（裸的或只有注释）另由 `check-repo` 的 `swallow-ok` 规则管。
+1. `swallow-guard`：任何把未知异常转成 `reason:` 的 `catch` 必须可区分（`internal-error`、error 级日志或重抛）或带 `// swallow-ok: <理由>`；递归扫 `src/**/*.ts`；空 `catch`（裸的或只有注释）另由 `check-repo` 的 `swallow-ok` 规则管，扫描 `src/**/*.ts` 与 `client/src/**/*.ts`，并断言每一半的文件数 > 0。
 2. `predicate-guard`：E2E 的等待谓词必须覆盖其后断言读取的字段；允许项必须有理由，条目失效判失败。
 3. `e2e-child-process`：所有测试/脚本子进程必须 `windowsHide`。
 4. `client-styles`：样式注释必须闭合、界面选择器必须有生效声明块；禁止 `--drg-*` 自有 token 与颜色字面量（含 `var()` 兜底）；对话框 / 菜单 / 输入框必须用宿主 Dialog / MenuSurface / 字段的 token 组合；引用的 `--dsw-*` 必须在白名单里。

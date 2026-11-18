@@ -52,7 +52,7 @@ function replyToGuest(entry, id, result) {
     const answer = view.executeJavaScript('window.__drgCapabilityReply && window.__drgCapabilityReply(' + payload + ')')
     if (answer && typeof answer.catch === 'function') answer.catch(() => {})
   } catch (_error) {
-    // the guest may have navigated away before the write finished
+    // swallow-ok: the guest may have navigated away before the reply was written
   }
 }
 

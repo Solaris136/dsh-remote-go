@@ -49,7 +49,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
       try {
         source.close()
       } catch (_error) {
-        // ignore close failures
+        // swallow-ok: EventSource.close is idempotent; a lost close leaves no resource
       }
       source = null
     }
@@ -105,7 +105,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
       try {
         frame = JSON.parse(event.data)
       } catch (_error) {
-        // a malformed frame must not kill the stream
+        // swallow-ok: one malformed log frame must not kill the stream; the next frame is parsed
       }
       // A frame proves the stream works even when `open` never fired.
       markLive()
@@ -118,7 +118,7 @@ function subscribeConnectLog(handlers): ConnectLogStream {
         markLive()
         if (end && typeof end === 'object') onEnd(end)
       } catch (_error) {
-        // a malformed frame must not kill the stream
+        // swallow-ok: one malformed log-end frame must not kill the stream
       }
     })
     stream.addEventListener('ping', () => {

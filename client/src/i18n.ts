@@ -80,7 +80,7 @@ function localeOf(props?: LocaleProps | null): DictLocale {
       const id = props.getLocaleId()
       if (id === 'en' || id === 'zh') return id
     } catch (_error) {
-      // fall through to the default
+      // swallow-ok: a throwing getLocaleId falls through to the static locale prop
     }
   }
   if (props && (props.localeId === 'en' || props.localeId === 'zh')) return props.localeId

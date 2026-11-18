@@ -91,7 +91,7 @@ function mountGuestStorage(win, hostId) {
           true,
         )
       } catch (_error) {
-        /* a window without events still gets the partitioned store */
+        // swallow-ok: a window without event listeners still gets the partitioned store
       }
     }
     return 'installed'

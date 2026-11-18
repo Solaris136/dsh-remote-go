@@ -80,7 +80,7 @@ const api = {
     try {
       await apiRequest('/local-version', { method: 'POST', body: { version } })
     } catch (_error) {
-      // Tolerated by contract: this only backfills the Host's probe.
+      // swallow-ok: the local half only backfills the Host's version probe; a failed report changes no UI state
     }
   },
   async connect(hostId, options) {
@@ -271,7 +271,7 @@ function subscribeState(handlers) {
       try {
         source.close()
       } catch (_error) {
-        // ignore close failures
+        // swallow-ok: EventSource.close is idempotent; a lost close leaves no resource to recover
       }
       source = null
     }
@@ -351,7 +351,7 @@ function subscribeState(handlers) {
         onStreamOpen()
         deliver(state)
       } catch (_error) {
-        // a malformed frame must not kill the stream
+        // swallow-ok: one malformed state frame must not kill the stream; the next frame replaces it
       }
     })
     source.addEventListener('download', (event) => {
@@ -360,7 +360,7 @@ function subscribeState(handlers) {
         const job = JSON.parse(event.data)
         if (job && typeof job === 'object') onDownload(job)
       } catch (_error) {
-        // a malformed frame must not kill the stream
+        // swallow-ok: one malformed download frame must not kill the stream; later jobs still arrive
       }
     })
     source.addEventListener('ping', () => {

@@ -444,12 +444,26 @@ function emptyCatchFindings(rel, text) {
   return findings
 }
 
+// Both halves are product source (`src/` is the Host, `client/src/` the browser side); `dist/` is
+// the emitter's copy of the same text and would double-report. An empty walk used to pass this
+// rule silently - a moved directory or a renamed extension would disable it without a word - so
+// each half must yield at least one file.
+const CATCH_SCAN_DIRS = ['src', 'client/src']
 const catchFailures = []
-for (const rel of await walk('src', (path_) => path_.endsWith('.ts') && !path_.endsWith('.d.ts'))) {
-  const text = await readText(rel)
-  if (text === null) fail(`${rel}: unreadable while checking empty catch bodies`)
-  else catchFailures.push(...emptyCatchFindings(rel, text))
+const catchScanCounts = {}
+for (const dir of CATCH_SCAN_DIRS) {
+  const files = await walk(dir, (path_) => path_.endsWith('.ts') && !path_.endsWith('.d.ts'))
+  catchScanCounts[dir] = files.length
+  check(files.length > 0, `empty catch hygiene scanned no .ts file under ${dir}/; the rule would pass vacuously`)
+  for (const rel of files) {
+    const text = await readText(rel)
+    if (text === null) fail(`${rel}: unreadable while checking empty catch bodies`)
+    else catchFailures.push(...emptyCatchFindings(rel, text))
+  }
 }
+console.log(
+  `[check-repo] empty catch hygiene: scanned ${CATCH_SCAN_DIRS.map((dir) => `${catchScanCounts[dir]} under ${dir}/`).join(', ')}`,
+)
 for (const failure of catchFailures) fail(failure)
 check(
   catchFailures.length === 0,
