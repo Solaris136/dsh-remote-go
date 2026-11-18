@@ -67,8 +67,8 @@ async function installDesktopProfile(input) {
     0,
     `installing the plugin into the desktop profile failed (exit ${install.code})\n${tail(install.stdout, install.stderr)}`,
   )
-  const installed = path.join(profileDir, 'node_modules', 'dsh-remote-go', 'client.js')
-  assert.equal(existsSync(installed), true, `the desktop profile install is missing client.js at ${installed}`)
+  const installed = path.join(profileDir, 'node_modules', 'dsh-remote-go', 'dist', 'client.js')
+  assert.equal(existsSync(installed), true, `the desktop profile install is missing dist/client.js at ${installed}`)
   return profileDir
 }
 
@@ -243,7 +243,7 @@ test('the desktop shell renders the host-management window with legible buttons'
         env: childEnv,
         runCommand,
       })
-      assert.equal(existsSync(path.join(profileDir, 'node_modules', 'dsh-remote-go', 'index.js')), true)
+      assert.equal(existsSync(path.join(profileDir, 'node_modules', 'dsh-remote-go', 'dist', 'index.js')), true)
     })
     const port = await freePort()
     app = launchDesktop({ exe, dshHome, userDataDir, port, env: childEnv })

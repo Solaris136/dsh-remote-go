@@ -280,7 +280,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       await assertLightAndDark(page, 'web')
     })
     await t.test('every theme token the plugin reads is published by the host', async () => {
-      // The built artifact: the package-root `client.js` only exists between prepack and postpack.
+      // The built artifact: `exports["./client"]` names this file in the installed package too.
       const source = await readFile(path.join(REPO_ROOT, 'dist', 'client.js'), 'utf8')
       const tokens = [...new Set([...source.matchAll(/--dsw-[a-z0-9-]+/g)].map((found) => found[0]))]
       assert.ok(

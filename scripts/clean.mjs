@@ -1,10 +1,9 @@
 // Remove the generated JavaScript without rebuilding.
 //
-// The build output lives in `dist/` (tsconfig `outDir`), and the published layout at the package
-// root (`index.js`, `client.js`, `src/**/*.js`) only exists between `prepack` and `postpack`
-// (scripts/stage-publish.mjs / unstage-publish.mjs). `pnpm build` regenerates everything, and
-// every `pnpm test*` entry point runs it first, so a tree with no artifacts is still a working
-// checkout - it just cannot be loaded by Node until built.
+// The build output lives in `dist/` (tsconfig `outDir`) and `pnpm build` regenerates it; every
+// `pnpm test*` entry point runs that build first, so a tree with no artifacts is still a working
+// checkout - it just cannot be loaded by Node until built. A few legacy in-place copies from the
+// pre-dist layout are removed too, in case an older checkout left them behind.
 //
 // Only generated output is removed: `client/template.js`, `client/src/*.ts`, `vendor/*` and
 // `scripts/*.mjs` are sources and are left alone. `--dry-run` reports what would go.

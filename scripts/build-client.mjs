@@ -1,7 +1,6 @@
 // Build the published browser half: the modules listed in `SOURCES` -> `dist/client.js`.
-// `scripts/stage-publish.mjs` copies it to `client.js` for the packed tarball (prepack), and
-// `scripts/unstage-publish.mjs` removes that copy again (postpack), so the repository root has
-// no generated file while the published layout is unchanged.
+// `package.json` `exports["./client"]` points at that file and `files[]` ships `dist`, so the
+// repository root holds no generated file and the published layout is the build output itself.
 //
 // Three parts, and the contract-bearing one is never rewritten by a tool:
 //
@@ -93,8 +92,7 @@ const SOURCES = [
   'plugin',
 ].map((name) => `${SOURCE_DIR}/${name}.ts`)
 const TEMPLATE = 'client/template.js'
-// Inside `dist/` like every other emitted file: the staged copy at the package root is what the
-// published `client.js` is, and it only exists between `prepack` and `postpack`.
+// Inside `dist/` like every other emitted file: this is the file `exports["./client"]` names.
 const OUT = 'dist/client.js'
 const BUNDLE_MARKER = '/* @@BUNDLE@@ */'
 // Bindings the artifact legitimately declares with a `__` prefix (`__drgExport` is the plugin face

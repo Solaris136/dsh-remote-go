@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url'
 // space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 // `dist/` is the build output (tsconfig outDir) and the only place the published `.js` lives in
-// the working tree; the root `index.js` / `client.js` / `src/**/*.js` copies exist only between
-// `prepack` and `postpack`, so they are covered by walking `dist/` instead.
+// the working tree; the package root holds no generated copy, so walking `dist/` covers every
+// emitted file.
 // `e2e/` holds the simulated remote and its fixtures; they run in CI, so parse them too.
 // `test/` is TypeScript since the test migration; the runner parses it, this scanner cannot
 // (`vm.SourceTextModule` has no type-stripping), so it contributes no `.js` target.

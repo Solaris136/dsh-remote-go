@@ -95,17 +95,16 @@ if (pkg === null) {
   check(semver, `package.json: "version" must be an exact SemVer version (found ${JSON.stringify(pkg.version)})`)
 
   const shipped = Array.isArray(pkg.files) ? pkg.files : []
-  // A directory entry (`src`) covers its files; an explicit file stays exact. Tarball-wise
-  // `vendor/ssh2-entry.mjs` is a build input, so only the bundle and notices must ship.
+  // A directory entry (`dist`) covers its files; an explicit file stays exact. The published
+  // layout is `dist/` since the exports point into it, so there is no root `index.js`/`client.js`
+  // and no root `src/` to ship. `vendor/ssh2-entry.mjs` is a build input, so only the notices
+  // need to ship from `vendor/` (the runtime bundle ships as `dist/vendor/`).
   const ships = (needed) =>
     shipped.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
   for (const needed of [
-    'index.js',
-    'client.js',
-    'src',
+    'dist',
     'locale',
     'cordis.patch.yml',
-    'vendor/ssh2.bundle.cjs',
     'vendor/THIRD_PARTY_NOTICES.md',
     'README.md',
     'LICENSE',
@@ -526,11 +525,9 @@ for (const name of workflowNames) {
 
 // 7. No build artifact in the index. `pnpm build` writes the published layout into `dist/`
 // (tsconfig outDir; the browser half is `dist/client.js`, built from the modules under
-// `client/src/` + `client/template.js`), and `prepack` stages copies at the package root
-// (`index.js`, `client.js`, `src/**/*.js`) for the duration of a `pnpm pack` only
-// (`.gitignore`, decision I in .agents/refactor/DECISIONS.md). `pnpm build` recreates them for
-// every consumer, so a tracked one is a stale copy or a `git add -f` accident - and an
-// accidental commit would resurrect the two-mode layout the decision retired.
+// `client/src/` + `client/template.js`), and `exports` points into that directory, so a tracked
+// artifact is a stale copy or a `git add -f` accident - and an accidental commit would put
+// generated code back under review.
 const isArtifact = (rel) =>
   (rel.startsWith('dist/') && rel.endsWith('.js')) ||
   rel === 'index.js' ||

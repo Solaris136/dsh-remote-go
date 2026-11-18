@@ -9,11 +9,9 @@
 // means "the build emitted one artifact per source at `dist/<source>.js`", and the only other
 // state to reject is an orphan artifact left behind by a deleted `.ts`.
 //
-// The package root is deliberately NOT checked here: `index.js`, `client.js` and `src/**/*.js`
-// exist only while `prepack` has staged them (`scripts/stage-publish.mjs`) and are removed by
-// `postpack` again, so asserting on them would fail on a normal checkout. The gate is one-way:
-// no committedness checks, no "commit the artifacts" path and no switch that could restore the
-// two-mode layout.
+// The package root is deliberately NOT checked: `exports` points into `dist/`, so the root may
+// legitimately hold no generated file at all. The gate is one-way: no committedness checks, no
+// "commit the artifacts" path and no switch that could restore the two-mode layout.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'

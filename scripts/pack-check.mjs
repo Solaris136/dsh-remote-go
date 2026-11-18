@@ -50,12 +50,10 @@ async function walkTs(dir, out = []) {
   return out
 }
 
-// The tarball must ship one `.js` per TypeScript source under `src/`. Since P1e those files are
-// not committed: `files[]` plus a real `pnpm build` (run by `prepack`) are the only things that
-// put them in the package, so a packaging regression here publishes a package whose `exports`
-// point at nothing. Since the dist move the build output lives in `dist/`, and `prepack`'s
-// `scripts/stage-publish.mjs` copies it to the published root layout before pnpm reads `files[]`.
-// `index.ts` -> `dist/index.js` -> `index.js` is covered by the entries below.
+// The tarball ships built JavaScript, and the build output lives in `dist/`: `exports["."]` and
+// `exports["./client"]` point into it directly, so there is no staged copy at the package root.
+// DSH's client loader reads `exports["./client"]` (dsh-client-modules/clientExportOf), which is
+// what makes the dist layout safe to publish instead of a root copy.
 const sourceCount = (await walkTs('src')).length
 
 const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
@@ -64,17 +62,15 @@ const problems = []
 // The vendored ssh2 bundle is imported at runtime by src/ssh.js, so a missing vendor/
 // entry is an install-time crash, not a cosmetic packaging bug.
 //
-// Two lists, because the two sides genuinely differ: the working tree holds the build output in
-// `dist/`, and the tarball holds the staged copy at the package root (`index.js`, `client.js`,
-// `src/**/*.js`). Asserting the tarball layout is what keeps DSH's loader and `exports` working;
-// asserting the `dist/` layout is what proves a `pnpm pack` from this tree would have something
-// to stage.
+// Two lists for the two places the same contract is checked: the working tree holds the build
+// output in `dist/`, and the tarball must carry exactly that layout - a root `index.js` or
+// `client.js` in the tarball would mean the package and its `exports` disagreed.
 const REPOSITORY_FILES = `package.json dist/index.js dist/client.js cordis.patch.yml locale/en.json
-locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js vendor/ssh2.bundle.cjs
+locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js dist/vendor/ssh2.bundle.cjs
 vendor/THIRD_PARTY_NOTICES.md README.md LICENSE`.split(/\s+/)
-const TARBALL_FILES = `index.js client.js cordis.patch.yml locale/en.json locale/zh.json src/index.js
-src/api.js src/service.js vendor/ssh2.bundle.cjs vendor/THIRD_PARTY_NOTICES.md README.md LICENSE
-package.json`.split(/\s+/)
+const TARBALL_FILES = `package.json dist/index.js dist/client.js cordis.patch.yml locale/en.json
+locale/zh.json dist/src/index.js dist/src/api.js dist/src/service.js dist/vendor/ssh2.bundle.cjs
+vendor/THIRD_PARTY_NOTICES.md README.md LICENSE`.split(/\s+/)
 
 for (const file of REPOSITORY_FILES) {
   if (!existsSync(path.join(root, file))) problems.push(`missing file: ${file}`)
@@ -83,20 +79,15 @@ const files = pkg.files ?? []
 // A directory entry (`src`) covers its files; an explicit file stays exact.
 const ships = (needed) =>
   files.some((entry) => entry === needed || entry.startsWith(`${needed}/`) || needed.startsWith(`${entry}/`))
-for (const needed of [
-  'index.js',
-  'client.js',
-  'src',
-  'vendor/ssh2.bundle.cjs',
-  'vendor/THIRD_PARTY_NOTICES.md',
-  'README.md',
-  'LICENSE',
-]) {
+for (const needed of ['dist', 'vendor/THIRD_PARTY_NOTICES.md', 'README.md', 'LICENSE']) {
   if (!ships(needed)) problems.push(`files[] must ship ${needed}`)
 }
-// The sources are `.ts` (P1e): without the negation the tarball would ship them next to the
-// emitted `.js`, which is neither the published contract nor needed by a consumer.
-if (!files.includes('!src/**/*.ts')) problems.push('files[] must exclude the TypeScript sources with "!src/**/*.ts"')
+// The loader contract: DSH imports the host half through `exports["."]` and resolves the browser
+// bundle through `exports["./client"]` (dsh-client-modules/clientExportOf). If either string drifts
+// from the build output, every install breaks at load time rather than at pack time.
+const exportPaths = pkg.exports && typeof pkg.exports === 'object' ? pkg.exports : {}
+if (exportPaths['.'] !== './dist/index.js') problems.push('exports["."] must be "./dist/index.js"')
+if (exportPaths['./client'] !== './dist/client.js') problems.push('exports["./client"] must be "./dist/client.js"')
 if (pkg.private === true) problems.push('package.json is private; publishing is refused')
 
 if (tarball) {
@@ -122,27 +113,27 @@ if (tarball) {
       file.startsWith('test/') || file.startsWith('e2e/') || file.startsWith('_research/') || file.startsWith('docs/'),
   )
   if (stray.length > 0) problems.push(`tarball contains development files: ${stray.slice(0, 10).join(', ')}`)
-  // `dist/` is the working tree's build output, never a published path: the tarball must carry
-  // the staged root layout instead (asserted by `TARBALL_FILES`).
-  const distEntries = entries.filter((file) => file === 'dist' || file.startsWith('dist/'))
-  if (distEntries.length > 0)
-    problems.push(`tarball contains the local build directory: ${distEntries.slice(0, 10).join(', ')}`)
-  if (!entries.some((file) => file.startsWith('src/') && file.endsWith('.js')))
-    problems.push('tarball does not contain src/*.js')
+  // The published layout is `dist/`. A root entry or a root `src/` in the tarball means some older
+  // staging step leaked back in, and the package would then disagree with its own `exports`.
+  if (entries.includes('index.js')) problems.push('tarball contains a root index.js; the entry lives in dist/')
+  if (entries.includes('client.js')) problems.push('tarball contains a root client.js; the bundle lives in dist/')
+  const rootSources = entries.filter((file) => file.startsWith('src/'))
+  if (rootSources.length > 0)
+    problems.push(`tarball contains root src/ entries: ${rootSources.slice(0, 10).join(', ')}`)
   // P1e: the `.js` files are build output, so the only guarantee that a published module exists
   // is the tarball itself. Every `.ts` source must be represented, and no `.ts` may slip in.
   const typescriptSources = entries.filter((file) => file.endsWith('.ts'))
   if (typescriptSources.length > 0)
     problems.push(`tarball contains TypeScript sources: ${typescriptSources.slice(0, 10).join(', ')}`)
-  const shippedArtifacts = entries.filter((file) => file.startsWith('src/') && file.endsWith('.js'))
+  const shippedArtifacts = entries.filter((file) => file.startsWith('dist/src/') && file.endsWith('.js'))
   if (shippedArtifacts.length < sourceCount)
     problems.push(
-      `tarball ships ${shippedArtifacts.length} src/**/*.js but the repository has ${sourceCount} TypeScript source(s); run pnpm build before packing`,
+      `tarball ships ${shippedArtifacts.length} dist/src/**/*.js but the repository has ${sourceCount} TypeScript source(s); run pnpm build before packing`,
     )
-  // Assert the vendor runtime explicitly: `mustShip` covers the two files, this catches a
-  // `files[]` regression that drops the whole directory from the published tarball.
-  if (!entries.some((file) => file.startsWith('vendor/')))
-    problems.push('tarball does not contain vendor/ (the runtime ssh2 bundle)')
+  // Assert the vendor runtime explicitly: the mirror lives next to the emitted adapter, so a
+  // `files[]` or build regression that drops it is an install-time crash, not a cosmetic one.
+  if (!entries.includes('dist/vendor/ssh2.bundle.cjs'))
+    problems.push('tarball does not contain dist/vendor/ssh2.bundle.cjs (the runtime ssh2 bundle)')
   // `vendor/ssh2-entry.mjs` is the esbuild input, not runtime code: it must stay out of
   // the published tarball even though it is versioned in the repository.
   if (entries.includes('vendor/ssh2-entry.mjs'))

@@ -7,11 +7,10 @@
 // emitted `.js` again (the P8 stage of .agents/refactor/PLAN.md; decision I still governs the
 // "artifacts are not committed" rule).
 //
-// The package still has to *ship* the published layout (`exports` addresses `./index.js`,
-// DSH loads `client.js` and `src/**/*.js`), so `prepack` copies `dist/` to the package root
-// (`scripts/stage-publish.mjs`) and `postpack` removes those copies again
-// (`scripts/unstage-publish.mjs`). The tarball layout is therefore byte-identical to the one
-// the plugin has always shipped, while the working tree has one generated directory.
+// The package ships exactly this layout: `package.json` `exports` points at `./dist/index.js`
+// and `./dist/client.js`, `files[]` lists `dist`, and DSH resolves both through those exports
+// (`dsh-client-modules/clientExportOf` reads `exports["./client"]`). The tarball is therefore
+// byte-identical to the working tree's build output minus nothing - no staged root copies.
 //
 // Clean before compiling: deleting or renaming a `.ts` leaves its old `.js` in `dist/`, and
 // that stale artifact would be packed as a module that no longer exists. The cleanup removes
@@ -41,8 +40,7 @@ const LEGACY_DIRECTORIES = ['src']
 // The ssh2 adapter imports the vendored bundle by a relative path (`../vendor/ssh2.bundle.cjs`).
 // Inside `dist/` the emitted module sits one directory deeper, so the same specifier would point
 // at `dist/vendor/` - mirroring the one runtime file there keeps the build output a complete,
-// runnable package root. The published tarball never sees this copy: `src/**/*.js` is staged back
-// to the package root, where `../vendor/` is the vendored file itself.
+// runnable package root, and the published tarball ships that mirror as-is.
 const VENDOR_FILES = ['vendor/ssh2.bundle.cjs']
 
 /** Repository-relative paths under `dir` whose name matches `accept`. */

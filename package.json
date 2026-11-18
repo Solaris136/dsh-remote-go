@@ -28,20 +28,16 @@
     "node": ">=24"
   },
   "sideEffects": [
-    "./client.js"
+    "./dist/client.js"
   ],
   "exports": {
-    ".": "./index.js",
-    "./client": "./client.js",
+    ".": "./dist/index.js",
+    "./client": "./dist/client.js",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
-    "index.js",
-    "client.js",
-    "src",
-    "!src/**/*.ts",
-    "vendor/ssh2.bundle.cjs",
+    "dist",
     "vendor/THIRD_PARTY_NOTICES.md",
     "locale",
     "cordis.patch.yml",
@@ -109,15 +105,12 @@
     "build": "node scripts/build.mjs && node scripts/build-client.mjs",
     "clean": "node scripts/clean.mjs",
     "build:client": "node scripts/build-client.mjs",
-    "stage:publish": "node scripts/stage-publish.mjs",
-    "unstage:publish": "node scripts/unstage-publish.mjs",
     "typecheck:client": "node node_modules/typescript/bin/tsc -p client/tsconfig.json --noEmit",
     "verify:artifacts": "node scripts/verify-artifacts.mjs",
     "verify:types": "node scripts/build.mjs --noEmit && pnpm run typecheck:client && node scripts/check-types.mjs",
     "build:vendor": "node scripts/build-vendor.mjs",
     "pack:check": "node scripts/pack-check.mjs",
     "pack:check:tarball": "node scripts/pack-check.mjs --find artifacts",
-    "prepack": "node scripts/build-vendor.mjs && git diff --exit-code -- vendor/ && pnpm build && node scripts/verify-artifacts.mjs && node scripts/stage-publish.mjs",
-    "postpack": "node scripts/unstage-publish.mjs"
+    "prepack": "node scripts/build-vendor.mjs && git diff --exit-code -- vendor/ && pnpm build && node scripts/verify-artifacts.mjs"
   }
 }

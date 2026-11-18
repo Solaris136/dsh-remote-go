@@ -208,16 +208,16 @@ export async function packPlugin(input) {
 
 const REQUIRED_PACKAGE_FILES = [
   'package.json',
-  'index.js',
-  'client.js',
+  'dist/index.js',
+  'dist/client.js',
   'cordis.patch.yml',
-  'src/index.js',
-  'src/api.js',
-  'src/proxy/index.js',
-  'src/tools.js',
+  'dist/src/index.js',
+  'dist/src/api.js',
+  'dist/src/proxy/index.js',
+  'dist/src/tools.js',
   'locale/en.json',
   'locale/zh.json',
-  'vendor/ssh2.bundle.cjs',
+  'dist/vendor/ssh2.bundle.cjs',
 ]
 
 export function assertPackedDependency(profileDir) {
