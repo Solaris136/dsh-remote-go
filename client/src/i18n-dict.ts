@@ -67,6 +67,7 @@ const STRINGS = {
   statusHintLimited: ['能连上，但远端无法提供界面', 'Reachable, but the remote UI is unavailable'],
   confirmFingerprint: ['确认指纹', 'Confirm fingerprint'],
   cardOpen: ['打开', 'Open'],
+  cardViewProgress: ['查看进度', 'View progress'],
   cardConnect: ['连接', 'Connect'],
   cardDisconnect: ['断开', 'Disconnect'],
   cardReconnect: ['重连', 'Reconnect'],
@@ -401,10 +402,6 @@ const STRINGS = {
     'The remote DSH {remote} differs from this machine ({local})',
   ],
   versionUnknown: ['无法确认远端 DSH 版本', 'The remote DSH version could not be confirmed'],
-  managingConnectingHosts: [
-    '正在连接的主机显示在连接窗口里，不在此清单中。',
-    'Hosts that are connecting appear in the connection window, not in this list.',
-  ],
   deleteConnectingWarning: [
     '这台主机正在连接；删除会立即中断连接。',
     'This host is connecting; deleting it interrupts the connection immediately.',

@@ -216,6 +216,8 @@ window.__ModuleLoader__.load({
       background: var(--dsw-alias-bg-layer-1); transition: border-color 160ms ease, background-color 160ms ease;
     }
     .drg-host-card:hover { border-color: var(--dsw-alias-border-l4); }
+    /* A connecting host's card is a click target: anywhere on it opens the progress window. */
+    .drg-host-card[data-interactive="true"] { cursor: pointer; }
     .drg-host-card[data-status="connected"] { border-color: color-mix(in srgb, var(--dsw-alias-state-success-primary) 35%, var(--dsw-alias-border-l1)); }
     .drg-card-strip {
       display: flex; align-items: center; gap: 6px; margin: -16px -16px 0; padding: 6px 14px;

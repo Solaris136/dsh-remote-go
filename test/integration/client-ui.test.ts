@@ -587,6 +587,50 @@ window.ReactDOM = { createRoot }`,
         await closeManage()
       })
 
+      await t.test('a connecting host stays listed and its card reopens the progress window', async () => {
+        const setHost = (hostId, patch) =>
+          page.evaluate(
+            ({ hostId, patch }) => {
+              window.__pushState({
+                ...window.__state,
+                rev: window.__state.rev + 1,
+                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
+              })
+            },
+            { hostId, patch },
+          )
+        await openManage()
+        await setHost('h_v6', { status: 'connecting', phase: 'ssh', progress: { code: 'ssh-connecting' }, logs: [] })
+        // A connecting host is no longer filtered out of the list, so closing the connect window
+        // never leaves the connection without a progress view.
+        await page.waitForSelector('[data-testid="host-card"][data-host-id="h_v6"][data-status="connecting"]', {
+          timeout: 5000,
+        })
+        const viewProgress = '[data-testid="host-card"][data-host-id="h_v6"] [data-testid="host-view-progress"]'
+        assert.equal(
+          await page.$eval(viewProgress, (node) => node.textContent),
+          '查看进度',
+          'the connecting card offers the way back to its progress',
+        )
+        // Clicking the host itself is the same gesture as its button: the card opens the window.
+        await page.click('[data-testid="host-card"][data-host-id="h_v6"] .drg-card-name')
+        await page.waitForSelector('[data-testid="manage-live"] [data-progress="ssh-connecting"]', { timeout: 5000 })
+        assert.match(
+          await page.$eval('[data-testid="manage-live"]', (node) => node.textContent),
+          /正在连接「ipv6-host」/,
+          "the card reopens the connecting host's own progress window",
+        )
+        assert.equal(
+          await page.evaluate(() => Boolean(document.querySelector('[data-testid="connect-log"]'))),
+          true,
+          'the log comes back with the window',
+        )
+        // Put the harness fixture back for the scenarios that follow.
+        await setHost('h_v6', { status: 'disconnected', phase: null, progress: null, logs: [] })
+        await page.waitForSelector('[data-testid="host-list"]', { timeout: 5000 })
+        await closeManage()
+      })
+
       await t.test('Tab stays inside the dialog', async () => {
         await openWizard('add')
         const inside = await page.evaluate(async () => {

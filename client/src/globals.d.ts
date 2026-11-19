@@ -127,6 +127,9 @@ declare global {
   /** A keyboard event handler's parameter, for the same reason (`TextInput`'s Enter gate). */
   type ReactKeyboardEvent<T extends Element> = ReactNamespace.KeyboardEvent<T>
 
+  /** A click handler's parameter, for a card whose own controls must not re-trigger it. */
+  type ReactMouseEvent<T extends Element> = ReactNamespace.MouseEvent<T>
+
   /**
    * React's node and element types, for the same reason: a component's prop interface lives in
    * `contract.d.ts`, which is also a script (no `import`) and so cannot name `React.ReactNode`.

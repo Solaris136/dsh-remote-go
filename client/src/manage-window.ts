@@ -18,6 +18,7 @@ interface ManageWindowProps extends LocaleProps {
   onRefresh?: () => void
   onOpenSettings?: () => void
   onOpenHost?: (host: HostView) => void
+  onViewProgress?: (host: HostView) => void
   onDisconnectHost?: (host: HostView) => void
   onReconnectHost?: (host: HostView) => void
   onRestartHost?: (host: HostView) => void
@@ -69,6 +70,7 @@ function ManageWindow(props: ManageWindowProps) {
             onRefresh: props.onRefresh,
             onOpenSettings: props.onOpenSettings,
             onOpenHost: props.onOpenHost,
+            onViewProgress: props.onViewProgress,
             onDisconnectHost: props.onDisconnectHost,
             onReconnectHost: props.onReconnectHost,
             onRestartHost: props.onRestartHost,
