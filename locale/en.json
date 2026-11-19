@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "dsh-remote-go",
-    "description": "Use a remote DSH over SSH inside your local DSH: the sidebar host bar switches between Local and each host, the remote UI takes over the whole window and comes back without reloading; the connect flow shows staged progress and a live log, and you can restart or stop the remote DSH, download remote files and folders, and expose a read-only host list to local AI sessions. The remote runs on a plugin-managed Node with npx pinned to the local version, keeping its data in the remote ~/.dsh."
+    "description": "Use a remote DSH over SSH inside your local DSH: the sidebar host bar switches between Local and each host, the remote UI takes over the whole window and comes back without reloading; the connect flow shows staged progress and a live log, and you can restart or stop the remote DSH, download remote files and folders, and give local AI sessions a host list, a diagnosis report and a guarded remote command (hidden until the session unlocks them). The remote runs on a plugin-managed Node with npx pinned to the local version, keeping its data in the remote ~/.dsh."
   }
 }

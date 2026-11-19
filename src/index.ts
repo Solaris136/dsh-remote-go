@@ -58,6 +58,12 @@ interface PluginConfig {
   home?: string
   localVersion?: string
   hostKeyConfirmTimeoutMs?: number
+  /**
+   * The model tools' switches (`remote_exec` is the only one with a switch). `allowWrite` is off
+   * unless the human turns it on in the plugin's own configuration: a session cannot widen its own
+   * authority, which is the confirmation gate `docs/design.md` §4.9 asks every write action for.
+   */
+  exec?: { allowWrite?: boolean }
 }
 
 /** The facts `describeSelf` reports about this installation. */
@@ -164,7 +170,11 @@ export function apply(ctx: PluginContext, config: PluginConfig = {}): RemoteGoSe
     })
     // The model-facing host list lives on the Host half only: a local LLM session reads the same
     // snapshot the switcher renders, and the remote DSH never loads this package.
-    const disposeTools = registerHostTools(ctx, { service, logger })
+    const disposeTools = registerHostTools(ctx, {
+      service,
+      logger,
+      exec: { allowWrite: config.exec?.allowWrite === true },
+    })
     const syncViewRoutes = () => proxy.sync(service.hostIds())
     service.on('state', syncViewRoutes)
     logger.info(`API mounted at ${API_PREFIX} (state dir ${stateDir})`)

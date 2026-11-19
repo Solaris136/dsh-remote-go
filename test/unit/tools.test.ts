@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { LIST_TOOL_NAME, registerHostTools } from '../../dist/src/tools.js'
+import { LIST_TOOL_NAME, REVEAL_TOOL_NAME, registerHostTools } from '../../dist/src/tools.js'
+import { REPORT_TOOL_NAME } from '../../dist/src/tools-report.js'
+import { EXEC_TOOL_NAME } from '../../dist/src/tools-exec.js'
 import { errors, toErrorView } from '../../dist/src/errors.js'
 
 // ---- fixtures ----------------------------------------------------------------------------------
@@ -16,6 +18,8 @@ function hostView(overrides = {}) {
     id: 'h_prod',
     name: 'prod',
     address: 'prod.example.com',
+    username: 'dev',
+    port: 2222,
     status: 'connected',
     phase: 'ready',
     progress: { code: 'ready' },
@@ -45,6 +49,7 @@ function hostView(overrides = {}) {
  */
 function makeHarness(options = {}) {
   const registered = new Map()
+  const whens = new Map()
   const labels = []
   const logs = []
   const injects = []
@@ -57,10 +62,14 @@ function makeHarness(options = {}) {
     ...(options.service ?? {}),
   }
   const tools = {
-    register(definition) {
+    register(definition, registration = {}) {
       assert.equal(registered.has(definition.name), false, `duplicate tool ${definition.name}`)
       registered.set(definition.name, definition)
-      return () => registered.delete(definition.name)
+      if (typeof registration.when === 'function') whens.set(definition.name, registration.when)
+      return () => {
+        registered.delete(definition.name)
+        whens.delete(definition.name)
+      }
     },
   }
   const logger = {
@@ -103,7 +112,19 @@ function makeHarness(options = {}) {
     },
   }
   const dispose = registerHostTools(ctx, { service, logger })
-  return { registered, labels, logs, injects, fibers, service, logger, dispose, list: registered.get(LIST_TOOL_NAME) }
+  return {
+    registered,
+    whens,
+    labels,
+    logs,
+    injects,
+    fibers,
+    service,
+    logger,
+    dispose,
+    list: registered.get(LIST_TOOL_NAME),
+    reveal: registered.get(REVEAL_TOOL_NAME),
+  }
 }
 
 /**
@@ -138,6 +159,12 @@ function assertMatchesSchema(schema, value, path = 'value') {
   else if (schema.type === 'boolean') assert.equal(typeof value, 'boolean', `${path} must be a boolean`)
 }
 
+/**
+ * The three tools the reveal entry unlocks. Every one of them is registered at mount behind a
+ * `when` condition, so a session that never reveals never sees their schemas and cannot call them.
+ */
+const GATED_TOOLS = ['remote_hosts_list', 'remote_host_report', 'remote_exec']
+
 /** The credentials, fingerprints and key material that must never appear in a result. */
 const FORBIDDEN = [
   SECRET,
@@ -162,7 +189,7 @@ function assertNoSecrets(value) {
 
 test('the host list registers with a read-only contract and a working disposer', () => {
   const harness = makeHarness()
-  assert.deepEqual([...harness.registered.keys()], [LIST_TOOL_NAME])
+  assert.deepEqual([...harness.registered.keys()], [...GATED_TOOLS, REVEAL_TOOL_NAME])
   assert.deepEqual(harness.injects, [['tools']], 'registration goes through the injected service')
   assert.ok(harness.labels.includes('dsh-remote-go: model tools'))
 
@@ -214,7 +241,7 @@ test('the tool is registered through ctx.inject even when the service is already
   // `ctx.get` fast path would leave the tool registered against the dead service.
   const harness = makeHarness()
   assert.deepEqual(harness.injects, [['tools']])
-  assert.equal(harness.registered.size, 1)
+  assert.equal(harness.registered.size, 4, 'three gated tools plus the entry they are reached through')
 })
 
 test('a tools service that arrives later still gets the tool', () => {
@@ -225,7 +252,11 @@ test('a tools service that arrives later still gets the tool', () => {
     'the parked state is logged, not silent',
   )
   harness.fibers[0].deliver()
-  assert.deepEqual([...harness.registered.keys()], [LIST_TOOL_NAME], 'the parked fiber registers on arrival')
+  assert.deepEqual(
+    [...harness.registered.keys()],
+    [...GATED_TOOLS, REVEAL_TOOL_NAME],
+    'the parked fiber registers on arrival',
+  )
   harness.dispose()
   assert.equal(harness.registered.size, 0)
 })
@@ -261,7 +292,7 @@ test('a composition without ctx.inject falls back to the lookup', () => {
     },
     { service, logger: { info() {}, warn() {} } },
   )
-  assert.deepEqual([...registered.keys()], [LIST_TOOL_NAME])
+  assert.deepEqual([...registered.keys()], [...GATED_TOOLS, REVEAL_TOOL_NAME])
   direct()
   assert.equal(registered.size, 0)
 
@@ -296,8 +327,8 @@ test('a kernel that refuses the definition costs the tool, never the plugin', ()
     service: { snapshot: () => ({ hosts: [] }) },
     logger: { warn: (...a) => warnings.push(a) },
   })
-  assert.equal(warnings.length, 1)
-  assert.match(String(warnings[0][0]), /could not register remote_hosts_list/)
+  assert.equal(warnings.length, 4, 'each refused definition is reported, and none stops the plugin')
+  assert.ok(warnings.some((warning) => /could not register remote_hosts_list/.test(String(warning[0]))))
   assert.equal(typeof fiber, 'function')
 })
 
@@ -331,9 +362,55 @@ test('an unregister that throws is contained like every other teardown failure',
   })
   assert.doesNotThrow(() => dispose())
   assert.ok(
-    warnings.some((line) => /could not unregister remote_hosts_list/.test(String(line[0]))),
+    warnings.some((line) => /could not unregister a model tool/.test(String(line[0]))),
     'the teardown failure is logged instead of escaping',
   )
+})
+
+// ---- on-demand reveal ------------------------------------------------------------------------
+
+test('all three tools are suspended behind one condition until the entry is called', async () => {
+  const harness = makeHarness()
+  const agentA = { id: 'agent_a' }
+  const agentB = { id: 'agent_b' }
+  assert.deepEqual(
+    [...harness.registered.keys()],
+    [...GATED_TOOLS, REVEAL_TOOL_NAME],
+    'the definitions are registered up front: a `when` condition, not late registration, is the gate',
+  )
+  assert.equal(harness.whens.size, 3, 'one condition per suspended tool')
+  assert.equal(harness.whens.has(REVEAL_TOOL_NAME), false, 'the entry itself is always offered')
+  for (const name of GATED_TOOLS) {
+    assert.equal(harness.whens.get(name)({ agent: agentA }), false, `${name} is hidden before the reveal`)
+  }
+
+  const first = await harness.reveal.execute({}, { agent: agentA })
+  assert.equal(first.ok, true)
+  assert.deepEqual(first.revealed, GATED_TOOLS)
+  assert.deepEqual(first.available, [LIST_TOOL_NAME, REPORT_TOOL_NAME, EXEC_TOOL_NAME, REVEAL_TOOL_NAME])
+  for (const name of GATED_TOOLS) {
+    assert.equal(harness.whens.get(name)({ agent: agentA }), true, `${name} is admitted for the revealing agent`)
+    assert.equal(harness.whens.get(name)({ agent: agentB }), false, 'another conversation stays hidden')
+  }
+
+  const second = await harness.reveal.execute({}, { agent: agentA })
+  assert.deepEqual(second.revealed, GATED_TOOLS, 'the entry is idempotent')
+  assert.equal(harness.registered.size, 4, 'and registers nothing twice')
+
+  harness.dispose()
+  assert.equal(harness.registered.size, 0, 'unloading removes every tool with the rest')
+})
+
+test('the reveal result renders and survives a hostile value', async () => {
+  const harness = makeHarness()
+  const value = await harness.reveal.execute({}, { agent: {} })
+  const [block] = harness.reveal.output.render({}, value)
+  assert.match(block.text, /已解锁 remote_hosts_list, remote_host_report, remote_exec/)
+  for (const hostile of [undefined, null, {}, { ok: false, error: { code: 'X', message: 'boom' } }]) {
+    const [fallback] = harness.reveal.output.render({}, hostile)
+    assert.equal(fallback.type, 'text')
+    assert.match(fallback.text, /\[dsh-remote-go\]/)
+  }
 })
 
 // ---- output contract ---------------------------------------------------------------------------
@@ -390,10 +467,35 @@ test('the host list projects a whitelist and never echoes a credential', async (
     state: 'connected',
     connected: true,
     address: 'prod.example.com',
+    username: 'dev',
+    port: 2222,
     progressCode: 'ready',
     remoteVersion: '0.2.2-rc.3',
   })
   assertNoSecrets(result)
+})
+
+test('the endpoint fields are projected, and a broken port is dropped instead of stringified', async () => {
+  const harness = makeHarness({
+    views: [
+      hostView({ id: 'h_default', username: null, port: 22 }),
+      hostView({ id: 'h_broken', username: '', port: 'not-a-port' }),
+    ],
+  })
+  const result = await harness.list.execute({}, {})
+  assertMatchesSchema(harness.list.output.schema, result)
+  const [defaults, broken] = result.hosts
+  assert.equal(defaults.port, 22, '22 is the default the entry carries, and it is still projected')
+  assert.equal(defaults.username, undefined, 'no username means no field')
+  assert.equal(broken.port, undefined, 'a non-integer port is dropped, not passed through')
+  assert.equal(broken.username, undefined, 'an empty username is dropped')
+  assertNoSecrets(result)
+})
+
+test('the render line names the endpoint the model would talk about', async () => {
+  const harness = makeHarness()
+  const [block] = harness.list.output.render({}, await harness.list.execute({}, {}))
+  assert.match(block.text, /- prod · connected · dev@prod\.example\.com:2222/)
 })
 
 test('the host list filters disconnected hosts and counts what it returns', async () => {
@@ -508,7 +610,7 @@ test('redaction covers case, short tokens and key files outside .ssh', async () 
           code: 'host-key-unknown',
           detail: {
             zh: '指纹 sha256:lowercaselowercaselowercase00=',
-            en: 'fingerprint SHA256:abc and key D:\\keys\\prod.pem',
+            en: 'fingerprint SHA256:abc and could not read D:\\keys\\prod.ppk: permission denied',
           },
         },
       }),
