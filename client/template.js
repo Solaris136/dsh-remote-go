@@ -560,6 +560,12 @@ window.__ModuleLoader__.load({
     html.drg-caption-live body > [data-windows-menu] { z-index: 2147483002; }
 `
 
+    // Both bindings are read by the spliced bundle below - its `h` calls read `React`, its
+    // stylesheet component reads `CSS` - but a file-local analyzer sees only this shell and calls
+    // them dead (CodeQL js/unused-local-variable). Naming them here states that contract.
+    void React
+    void CSS
+
     /* @@BUNDLE@@ */
 
     return __drgExport
