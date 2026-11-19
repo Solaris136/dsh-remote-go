@@ -491,6 +491,9 @@ function PluginOverlay(props: PluginOverlayProps) {
       onRefresh: remote.refresh,
       onOpenSettings: () => setSettingsOpen(true),
       onOpenHost: openHost,
+      // A connecting host is not reconnected here: its card reopens the connect window that shows
+      // the progress and the log, so closing that window never strands the connection.
+      onViewProgress: (host) => openHost(host),
       onDisconnectHost: disconnectHost,
       onReconnectHost: reconnectHost,
       onRestartHost: restartHost,

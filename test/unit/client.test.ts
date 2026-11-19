@@ -1106,6 +1106,39 @@ test('a connected host card offers a remote restart and a restarting one shows i
   assert.match(unreachable, /data-testid="host-reconnect"/)
 })
 
+test('a connecting host keeps its card and the way back to the connect window', () => {
+  const noop = () => {}
+  const markup = render(
+    React.createElement(plugin.components.HostListView, {
+      t,
+      state: stateWith({
+        hosts: [hostView({ id: 'h_conn', status: 'connecting', phase: 'probing', progress: { code: 'probing' } })],
+      }),
+      loading: false,
+      error: null,
+      onAdd: noop,
+      onRefresh: noop,
+      onOpenHost: noop,
+      onViewProgress: noop,
+      onEditHost: noop,
+      onDeleteHost: noop,
+      onDiagnoseHost: noop,
+    }),
+  )
+  // The card no longer disappears while the link is being built: it carries the phase, the
+  // progress line and the way back to the window the user may have closed.
+  assert.match(markup, /data-testid="host-card"[^>]*data-host-id="h_conn"/)
+  assert.match(markup, /data-status="connecting"/)
+  assert.match(markup, /data-progress="probing"/)
+  const button = buttonOf(markup, 'host-view-progress')
+  assert.match(button, />查看进度</, 'a connecting card opens the connect window instead of offering "connect"')
+  assert.doesNotMatch(button, /disabled=""/, 'the way back to the progress must stay clickable')
+  // The card body is a click target too: the button is the keyboard/AT path, not the only one.
+  assert.match(markup, /data-interactive="true"/)
+  // The notice that used to explain the card's absence is gone with the absence itself.
+  assert.doesNotMatch(markup, /connecting-hosts-note/)
+})
+
 test('a connected host card offers stopping the remote DSH and a stopping one shows its progress', () => {
   const noop = () => {}
   const listOf = (host) =>
@@ -3819,15 +3852,25 @@ test('host warning, version parity and the connecting-host filter render', () =>
   assert.match(warned, /data-testid="host-version-parity"/)
   assert.match(warned, /0\.2\.1/)
   assert.match(warned, /0\.2\.2-rc\.3/)
+  // Only a connecting card is a click target; a connected one keeps its plain card body.
+  assert.doesNotMatch(warned, /data-interactive="true"/)
 
+  // A connecting host is a card like any other now: it carries the progress line and the way back
+  // to the connect window, and the notice that used to explain its absence is gone.
   const connecting = listOf([hostView({ status: 'connecting', progress: { code: 'ssh-connecting' } })])
-  assert.doesNotMatch(connecting, /data-testid="host-card"/)
-  assert.match(connecting, /data-testid="connecting-hosts-note"/)
+  assert.match(connecting, /data-testid="host-card"/)
+  assert.match(connecting, /data-testid="host-view-progress"/)
+  assert.match(connecting, /data-progress="ssh-connecting"/)
+  assert.doesNotMatch(connecting, /connecting-hosts-note/)
+  const connectingEdit = /<button[^>]*data-testid="host-edit"[^>]*>/.exec(connecting)
+  assert.ok(connectingEdit)
+  assert.match(connectingEdit[0], /disabled=""/)
 
   // A restart/stop action keeps its card and progress, but editing it while the link action runs
   // is disabled.
   const restarting = listOf([hostView({ status: 'connecting', progress: { code: 'restarting-remote' } })])
   assert.match(restarting, /data-testid="host-card"/)
+  assert.match(restarting, /data-testid="host-restart"/)
   const editButton = /<button[^>]*data-testid="host-edit"[^>]*>/.exec(restarting)
   assert.ok(editButton)
   assert.match(editButton[0], /disabled=""/)

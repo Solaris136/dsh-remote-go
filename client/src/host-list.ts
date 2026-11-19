@@ -38,6 +38,7 @@ interface HostCardProps extends LocaleProps {
   host?: Partial<HostView> | null
   busy?: boolean
   onOpen?: (host: Partial<HostView>) => void
+  onViewProgress?: (host: Partial<HostView>) => void
   onDisconnect?: (host: Partial<HostView>) => void
   onReconnect?: (host: Partial<HostView>) => void
   onRestart?: (host: Partial<HostView>) => void
@@ -67,6 +68,19 @@ function HostCard(props: HostCardProps) {
     host.status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
   // The explicit stop is the same kind of one-shot link action, under its own progress code.
   const stopping = host.status === 'connecting' && host.progress !== null && host.progress.code === 'stopping-remote'
+  // A connecting host's primary action is not "connect" (it is already doing that): it is the way
+  // back to the window that prints the progress and the log, after the user closed it.
+  const connecting = host.status === 'connecting'
+  /**
+   * Clicking the card is the same gesture as the switcher's host item: it opens the connecting
+   * host's window. The card's own controls (restart, stop, diagnose, edit, delete) keep their own
+   * action - a click that starts inside a button belongs to that button only.
+   */
+  const openProgress = (event: ReactMouseEvent<HTMLElement>) => {
+    const target = event.target as Element | null
+    if (target && typeof target.closest === 'function' && target.closest('button')) return
+    if (typeof props.onViewProgress === 'function') props.onViewProgress(host)
+  }
   // `remote-unreachable` keeps the SSH session on purpose, so a restart is the other way
   // back besides reconnecting (docs/design.md §5.6).
   const recoverable = host.status === 'error' && host.error !== null && host.error.code === 'remote-unreachable'
@@ -75,7 +89,16 @@ function HostCard(props: HostCardProps) {
 
   return h(
     'li',
-    { className: 'drg-host-card', 'data-status': host.status, 'data-testid': 'host-card', 'data-host-id': host.id },
+    {
+      className: 'drg-host-card',
+      'data-status': host.status,
+      'data-testid': 'host-card',
+      'data-host-id': host.id,
+      // The card body is a click target while the link is being built, so a click anywhere on the
+      // host opens its progress window (the visible button stays the keyboard/AT path).
+      'data-interactive': connecting ? 'true' : undefined,
+      onClick: connecting ? openProgress : undefined,
+    },
     meta.strip
       ? h(
           'div',
@@ -150,14 +173,18 @@ function HostCard(props: HostCardProps) {
         Button,
         {
           variant: host.status === 'connected' ? 'primary' : 'secondary',
-          testId: 'host-open',
+          testId: connecting ? 'host-view-progress' : 'host-open',
           onClick: () => {
+            if (connecting) {
+              if (typeof props.onViewProgress === 'function') props.onViewProgress(host)
+              return
+            }
             if (typeof props.onOpen === 'function') props.onOpen(host)
           },
-          disabled: primaryDisabled,
+          disabled: connecting ? busy : primaryDisabled,
           busy: busy && host.status !== 'connected' && host.status !== 'connecting',
         },
-        t(meta.action),
+        connecting ? t('cardViewProgress') : t(meta.action),
       ),
       host.status === 'connected'
         ? h(
@@ -250,6 +277,7 @@ interface HostListViewProps extends LocaleProps {
   onRefresh?: () => void
   onOpenSettings?: () => void
   onOpenHost?: (host: Partial<HostView>) => void
+  onViewProgress?: (host: Partial<HostView>) => void
   onDisconnectHost?: (host: Partial<HostView>) => void
   onReconnectHost?: (host: Partial<HostView>) => void
   onRestartHost?: (host: Partial<HostView>) => void
@@ -266,16 +294,10 @@ function HostListView(props: HostListViewProps) {
   const loading = props.loading === true
   const error = props.error || null
   const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
-  // A connecting host owns the connection window (docs/design.md §4.1), so it is not a card
-  // here. Restart/stop progress is the exception: that host is not building a new link but
-  // finishing a one-shot action, and its card is where the action lives (§5.5/§5.7).
-  const isOneShotLinkAction = (host: Partial<HostView>) =>
-    host &&
-    host.status === 'connecting' &&
-    host.progress !== null &&
-    (host.progress.code === 'restarting-remote' || host.progress.code === 'stopping-remote')
-  const connectingHosts = hosts.filter((host) => host && host.status === 'connecting' && !isOneShotLinkAction(host))
-  const visibleHosts = hosts.filter((host) => host && (host.status !== 'connecting' || isOneShotLinkAction(host)))
+  // Every host keeps its card, a connecting one included: the card carries the phase, the
+  // progress line and the way back to the connect window the user may have closed
+  // (docs/design.md §4.1). A stale Host with no status is the only thing this list never draws.
+  const visibleHosts = hosts.filter((host) => Boolean(host))
   const connected = hosts.filter((host) => host && host.status === 'connected').length
   const total = hosts.length
   const busyHostId = props.busyHostId || null
@@ -326,9 +348,6 @@ function HostListView(props: HostListViewProps) {
         h(StatusDot, { status: connected > 0 ? 'connected' : 'idle' }),
         h('span', null, t('summary', { connected, total })),
       ),
-      connectingHosts.length > 0
-        ? h(Notice, { tone: 'info', testId: 'connecting-hosts-note' }, t('managingConnectingHosts'))
-        : null,
       visibleHosts.length > 0
         ? h(
             'ul',
@@ -341,6 +360,7 @@ function HostListView(props: HostListViewProps) {
                 host,
                 busy: busyHostId === host.id,
                 onOpen: props.onOpenHost,
+                onViewProgress: props.onViewProgress,
                 onDisconnect: props.onDisconnectHost,
                 onReconnect: props.onReconnectHost,
                 onRestart: props.onRestartHost,
