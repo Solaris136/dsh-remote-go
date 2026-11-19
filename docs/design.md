@@ -24,7 +24,7 @@
 | SSH 认证、主机指纹、跳板机 | ✅ | — |
 | 启动 / 收养 / 停止远端 `dsh web`；本地回环隧道 | ✅ | — |
 | 远端文件/文件夹下载（用户从文件树右键选择） | ✅ 经 SSH/SFTP 读取；文件流式、文件夹逐个文件写入用户选择的本地目录；保存位置由用户选择 | 文件树与右键菜单、右下角进度卡 |
-| AI 会话查看主机列表与连接状态（§4.9） | ✅ 一个只读工具（白名单投影） | — |
+| AI 会话查看主机列表与连接状态（§4.9） | ✅ 只读清单 + 体检报告 + 受控远端命令（三者默认按需解锁） | — |
 | 界面呈现 | 提供承载与主机条：桌面端 Chromium guest / 浏览器端同源 iframe + 代理 | 渲染完整 DSH Web UI |
 | 数据（会话、工作区、凭据） | 只读版本/诊断信息 | ✅ 用户自己的 `~/.dsh` |
 
@@ -165,15 +165,17 @@
 - **桌面载体**：guest 有自己的分区，但 `<webview>` 的 `window-open` 处理在 DSH 桌面主进程里（`shell.openExternal` 也只有那边能调），插件客户端半端装不上 `setWindowOpenHandler`。桌面路径因此复用同一条桥：guest 里的链接/`window.open` 经队列回到本地页面，由该页面打开。**边界**：桌面壳若不让渲染进程开新窗口，链接就只是被丢掉（`noopener` 让返回值无法区分「打开了」和「被拦了」，桥不猜）；这一路的需求侧修复是 DSH 桌面桥暴露一个 `openExternal(url)`，属于后续工作，本 PR 没有假装覆盖。
 - **不在本仓库**：前端 bundle 里的 `writeClipboard`（reject 后不回退、失败不提示）与 `openExternalLink`（在 frame 内自开侧栏/`window.open`）无法在插件里改。桥在**调用点**上等效修好了它们：`writeText` 现在总是成功或可见失败，外链总是在顶层打开；但前端自己仍可能选择「侧栏 browser」分支（那是 DSH 的设置），那个嵌套页面不是本插件能改的。
 
-### 4.9 AI 工具（本地 LLM 会话查看主机）
+### 4.9 AI 工具（本地 LLM 会话使用主机）
 
-本地会话里的模型不需要用户先点主机条就能知道「有哪些主机、哪台连着、那台为什么失败」：Host 半端向 DSH 的 `tools` 服务注册**一个只读工具**。它只注册在**本地 Host**（浏览器半端是 UI bundle，远端 DSH 也不加载本插件），所以远端会话看不到它，也不新增 HTTP 路由。
+本地会话里的模型不需要用户先点主机条就能知道「有哪些主机、哪台连着、那台为什么失败」，必要时还能在**已连接**的主机上跑一条命令。Host 半端向 DSH 的 `tools` 服务注册四个定义：`remote_tools`（入口）加 `remote_hosts_list` / `remote_host_report` / `remote_exec`。它们只注册在**本地 Host**（浏览器半端是 UI bundle，远端 DSH 也不加载本插件），所以远端会话看不到它们，也不新增 HTTP 路由。
 
-- `remote_hosts_list`（只读）：参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，超出时 `truncated` 为 true），每行 `id` / 名字 / 状态 / 是否已连接 / 地址 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。声明 `isConcurrencySafe`（只读可并发）；**不声明 `timeoutMs`**——函数体只有一次本地快照读取加同步投影，没有可协作取消的等待，声明了反而误导。
-- **没有写操作面**：增删改、连接 / 断开 / 重连、重启或关闭远端 DSH 一律留在主机条的「添加主机 / 管理界面」里。因此工具既不需要审批门，也不需要 `confirm` / `dryRun` 参数——它不改变任何状态。
-- **白名单投影**：字段按名字挑（不 spread 配置或 HostView），再过 `redactText` 并按字段限长；**在 `redactText` 之外再抹掉两类只有主机才有的标识**：整段 `SHA256:<base64>` 指纹（大小写都认，连算法前缀一起去掉——`host-key-unknown` / `host-key-changed` 的失败原因原文带它）与密钥文件路径（`.ssh` 必须是完整路径段，另外 `.pem` / `.key` / `.ppk` 结尾或 `id_*` 命名的密钥文件也算——`auth` 失败会引用配置的密钥文件）。密码、token、cookie 与私钥路径都不进结果，`output.schema` 是 `additionalProperties: false`，投影里多一个未声明字段会让调用失败而不是漏出去。**匹配一律线性**且先按字段上限切输入再跑正则：`address` 在 `settings.js` 里只做 trim、上游没有长度上限，而投影是同步的，不能让一条超长字段把宿主事件循环拖住（嵌套量词的路径正则在这种输入上是二次复杂度）。返回值里的远端主机名、版本与错误文本是不可信数据。
-- **可选服务**：`tools` 不写进 `inject`；注册**总是**走 `ctx.inject(['tools'], …)`，由 cordis 在服务缺失时 park 该子 fiber、服务出现**或被替换**时重新 apply，所以既不因缺服务停掉插件（主机条与 HTTP API 照常工作），也不会因为启动顺序或服务重载永久丢工具。`ctx.inject` 返回的是 **fiber 而不是 disposer**，卸载时对它调用 `dispose()`；老内核没有 `ctx.inject` 时退回 `ctx.get('tools')`（取不到就跳过并记一条日志）。
-- **不做的事**：不碰远端 `~/.dsh`；不改已有 API 语义；不提供任何写动作（将来若要加，必须同时补上「不依赖 DSH 审批」的确认门——`approval.policy='never'` 的会话会确定性拒绝 `tools/pre-execute` 的 ask）。
+- **默认全部隐藏，只留一个入口**：三个真工具在装配时就注册，但都带 `when` 条件（`ToolRegistrationOptions.when`）。DSH 的 `ToolsService.resolve()` 在**每一步**的模型请求前评估一次，`false` 时既不出现在工具声明里、也不进入分发（`executable()` 判 `UNKNOWN_TOOL`），所以没解锁的会话不为 schema 付任何上下文。`remote_tools` 不带条件：它是唯一默认可见的东西，也是三个工具的发现入口；调用它把**当前 agent** 记进 `WeakSet`，解锁因此是**按 agent** 的（正常的「一个会话一个 agent」下等价于按会话；同一个窗口里新建的子代理仍看不到），并在**下一步**生效。解锁状态只活在进程内，插件重载即回收。
+- `remote_hosts_list`（只读）：参数只有 `includeDisconnected`（默认 true）；返回 `{ ok, hosts, count, connected, truncated? }`（最多 500 行，超出时 `truncated` 为 true），每行 `id` / 名字 / 状态 / 是否已连接 / 地址 / 可能存在的 SSH 用户 / 端口 / 最近一次失败 / 当前进度码 / 远端 DSH 版本。用户与端口是接口事实、不是秘密（`host-view.ts` 明确写了）；没有它们，模型能看见主机却说不清在说哪一条连接，也没法把「这台」和体检结果对上。声明 `isConcurrencySafe`；**不声明 `timeoutMs`**——只有一次本地快照读取加同步投影。
+- `remote_host_report`（只读）：参数 `id` / `parts`（`checks` / `logs`，默认两者）/ `limit`（日志条数 1–60，默认 40）。`checks` 来自 `diagnose()` 的十项体检（SSH 可达、认证、主机指纹、隧道、远端服务、远端界面、远端 Node、版本、模型凭据、桌面守卫），`logs` 来自 `logView()` 环形缓冲的尾部。`diagnose()` 的 detail 会把运行时指纹**原文**拼进去（`diagnostics.ts`），所以它的每个字符串都走与清单同一条 `safeText` 出口；体检不新建连接，因此同样并发安全、不声明 `timeoutMs`。
+- `remote_exec`（受控写入口）：参数 `id` / `command` / `mode`（`read` 默认、`write`）/ `confirm` / `timeoutMs`（默认 20s，上限 120s）/ `maxBytes`（每流默认 32KB）。它**复用主机条已经认证好的 SSH 会话**（`runtime.ssh.exec`），从不自己拨号、不认证、不读 known_hosts；主机没连上直接拒绝。`read` 模式把命令按 `;` / `&&` / `||` / `|` 切段，要求每段首个 token 落在只读程序允许列表里（`ls` / `cat` / `tail` / `grep` / `ps` / `df`…，`systemctl` 只认查询子命令，`journalctl` 拒绝 `--vacuum` 之类），并拒绝重定向、`$( )`、反引号与行内赋值——这是**收窄**，不是沙箱，真正的边界是「只有已连接的主机」。`write` 模式要两个人类开关同时成立：插件配置 `exec.allowWrite === true` 与调用参数 `confirm: true`。远端输出按不可信数据走完 strip-ANSI → `redactText` → 指纹/私钥路径抹除 → `maxBytes` 截断；超时是**结果字段**（`timedOut`）而不是异常。
+- **白名单投影**：字段按名字挑（不 spread 配置或 HostView），再过 `redactText` 并按字段限长；**在 `redactText` 之外再抹掉两类只有主机才有的标识**：整段 `SHA256:<base64>` 指纹（大小写都认，连算法前缀一起去掉）与密钥文件路径（`.ssh` 必须是完整路径段，`.pem` / `.key` / `.ppk` 结尾或 `id_*` 命名的密钥文件也算）。三个工具共用 `tool-shared.ts` 这一条出口，`output.schema` 都是 `additionalProperties: false`，投影里多一个未声明字段会让调用失败而不是漏出去。**匹配一律线性**且先按字段上限切输入再跑正则：`address` 上游没有长度上限，而投影是同步的。
+- **可选服务**：`tools` 不写进 `inject`；注册**总是**走 `ctx.inject(['tools'], …)`，由 cordis 在服务缺失时 park 该子 fiber、服务出现**或被替换**时重新 apply；`ctx.inject` 返回的是 **fiber 而不是 disposer**，卸载时对它调用 `dispose()`。老内核没有 `ctx.inject` 时退回 `ctx.get('tools')`。定义被内核拒绝只记一条 warn，不影响其余工具，也不影响插件激活。
+- **不做的事**：不碰远端 `~/.dsh`；不改已有 API 语义；不提供主机增删改 / 连接 / 断开 / 重启——那是主机条的事。`remote_exec` 是唯一的写入口，它的确认门由插件自己持有（配置开关 + `confirm`），不挂 `tools/pre-execute` 的 ask：`approval.policy='never'` 的会话会确定性拒绝那种 ask。
 
 ## 5. 连接生命周期
 ### 5.1 状态、阶段与进度
@@ -382,11 +384,11 @@ stop-remote(id)（同一条 SSH 会话，同步执行；期间 /state = connecti
   直接访问父文档。它们都建立在「frame 里的页面 = 用户自己连的那台远端 DSH」这一信任前提上，intent 收口只是让这条
   通道的行为收敛到「对自己的主机」，不宣称把远端页关进沙箱。`localStorage` 分区（`configurable:false`，页面不能
   `delete` 后回落到共享存储）是数据卫生（防止偏好互相覆盖），不是同源隔离的安全边界。
-- **模型工具的返回值同样是「对外输出」**：`remote_hosts_list` 只做字段白名单投影（再过 `redactText`、按字段
-  限长），密码、token、cookie、指纹原文与私钥路径都不进结果；`output.schema` 的 `additionalProperties: false`
-  让多出来的字段变成失败而不是泄漏。工具**没有写操作面**（维护仍在管理界面），所以不需要审批门；若将来加写动作，
-  必须自带确认门——DSH 的审批在 `policy='never'` 时会确定性拒绝，不能把「问用户」寄托在审批上。返回值里的远端
-  主机名、版本与错误文本属于不可信数据。
+- **模型工具的返回值同样是「对外输出」**：三个工具都只做字段白名单投影（再过 `redactText` + 指纹/私钥路径抹除、
+  按字段限长），密码、token、cookie、指纹原文与私钥路径都不进结果；`output.schema` 的 `additionalProperties: false`
+  让多出来的字段变成失败而不是泄漏。**唯一的写入口是 `remote_exec`**，它的两道人类开关由插件自己持有
+  （配置 `exec.allowWrite` + 调用参数 `confirm`），不挂 `tools/pre-execute` 的 ask——DSH 的审批在 `policy='never'`
+  时会确定性拒绝，不能把「问用户」寄托在审批上。返回值里的远端主机名、版本、命令输出与错误文本属于不可信数据。
 
 ### 7.1 同源 iframe 的威胁模型（产品级）
 
