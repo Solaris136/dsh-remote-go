@@ -7,7 +7,7 @@
 本文件记录用户可感知的变更，格式遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)，日期为 `YYYY-MM-DD`。
 
-## [Unreleased]
+## [0.3.0] - 2026-11-20
 
 这一轮把插件从手写 JS 单体重构为 TypeScript 模块树，并把它依赖的行为写成十二条不变量（`docs/invariants.md`）。
 用户能感知的差异集中在连接窗口的日志通道、浏览器端的绘制与输入处理，以及发布物的布局。
@@ -383,6 +383,7 @@
   命令模板，下载校验 SHA-256。
 - **脱敏**：诊断导出默认屏蔽 token、密码、私钥与家目录。
 
-[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.1.0
