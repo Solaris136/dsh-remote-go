@@ -11,9 +11,18 @@ import { fileURLToPath } from 'node:url'
 // fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
 // space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
+// `dist/` is the build output (tsconfig outDir) and the only place the published `.js` lives in
+// the working tree; the package root holds no generated copy, so walking `dist/` covers every
+// emitted file.
 // `e2e/` holds the simulated remote and its fixtures; they run in CI, so parse them too.
-const includeDirs = ['src', 'scripts', 'test', 'e2e']
-const includeFiles = ['index.js', 'client.js']
+// `test/` is TypeScript since the test migration; the runner parses it, this scanner cannot
+// (`vm.SourceTextModule` has no type-stripping), so it contributes no `.js` target.
+const includeDirs = ['dist', 'scripts', 'test', 'e2e']
+// `client/template.js` is the one hand-written `.js` of the client half (the shell
+// `scripts/build-client.mjs` wraps around the typed body). It is not under `dist/` and not under a
+// walked directory, so without this entry the only untyped script in the repository is the only
+// one nobody parses.
+const includeFiles = ['client/template.js']
 const skipDirs = new Set('node_modules _research _tools artifacts home home-published logs vendor'.split(' '))
 
 /** Runs in the child process: parse every file, report failures as JSON on stdout. */
@@ -52,7 +61,15 @@ const files = []
 for (const dir of includeDirs) await walk(path.join(root, dir), files)
 for (const file of includeFiles) {
   const full = path.join(root, file)
-  if (existsSync(full)) files.push(full)
+  if (!existsSync(full)) {
+    console.error(`[check-syntax] missing ${file}; the client shell is a source and must be parsed`)
+    process.exit(1)
+  }
+  files.push(full)
+}
+if (files.length === 0) {
+  console.error('[check-syntax] no JavaScript found to parse; run pnpm build first')
+  process.exit(1)
 }
 
 const parsed = spawnSync(process.execPath, ['--experimental-vm-modules', '--no-warnings', '-e', PARSE_SCRIPT], {

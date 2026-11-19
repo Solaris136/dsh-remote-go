@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "dsh-remote-go type-policy exemptions",
+  "description": "Read by scripts/check-types.mjs, which validates it by hand (no ajv). A hit that is not registered fails the gate, and an entry that no longer hits fails it too.",
+  "type": "object",
+  "required": ["version", "any", "doubleAssertion", "suppressions"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "policy": { "type": "string" },
+    "any": { "$ref": "#/definitions/entries" },
+    "doubleAssertion": { "$ref": "#/definitions/entries" },
+    "suppressions": { "$ref": "#/definitions/entries" }
+  },
+  "definitions": {
+    "entries": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[^:]+:[1-9][0-9]*$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["reason"],
+        "additionalProperties": false,
+        "properties": {
+          "reason": { "type": "string", "minLength": 12 },
+          "match": { "type": "string", "minLength": 1 },
+          "until": { "type": "string", "pattern": "^P[1-9]$" }
+        }
+      }
+    }
+  }
+}

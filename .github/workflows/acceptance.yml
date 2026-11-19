@@ -111,8 +111,8 @@ jobs:
           DSH_WEB_E2E_ARTIFACTS: ${{ runner.temp }}/web-e2e-artifacts
         run: |
           node --test --test-concurrency=1 \
-            test/integration/web.e2e.js \
-            test/integration/browser-carrier.test.js
+            test/integration/web.e2e.ts \
+            test/integration/browser-carrier.test.ts
 
       - name: Upload failure artifacts
         if: failure()
@@ -270,7 +270,7 @@ jobs:
       - name: Run the desktop E2E
         env:
           DSH_DESKTOP_E2E_ARTIFACTS: ${{ runner.temp }}\desktop-e2e-artifacts
-        run: node --test test/integration/desktop.e2e.js
+        run: node --test test/integration/desktop.e2e.ts
 
       - name: Upload failure artifacts
         if: failure()

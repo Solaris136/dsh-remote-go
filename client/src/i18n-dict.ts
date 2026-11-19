@@ -1,0 +1,455 @@
+// client/src/i18n-dict.ts - the STRINGS dictionary (zh/en pairs) and its two renderings; after constants.ts, before i18n.ts.
+// i18n-exempt: the visible copy lives here, one pair per key, and nowhere else in the client.
+//#region 2. i18n dictionaries
+
+/**
+ * Every visible string, zh and en side by side. `status*` / `statusHint*` are read through
+ * statusOf() in the constants region, which builds them from the HostStatus id.
+ */
+const STRINGS = {
+  panelSubtitle: [
+    '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
+    'Manage remote hosts and hand the whole window to one of their DSH instances.',
+  ],
+  addHost: ['添加主机', 'Add host'],
+  addFirstHost: ['添加第一台服务器', 'Add your first server'],
+  emptyTitle: ['还没有远程主机', 'No remote hosts yet'],
+  emptyBody: [
+    '还没有远程主机。添加一台，然后打开它的远端 DSH 界面。',
+    'No remote hosts yet. Add one, then open its remote DSH interface.',
+  ],
+  refresh: ['刷新状态', 'Refresh status'],
+  settings: ['设置', 'Settings'],
+  close: ['关闭', 'Close'],
+  cancel: ['取消', 'Cancel'],
+  save: ['保存', 'Save'],
+  back: ['返回', 'Back'],
+  retry: ['重试', 'Retry'],
+  diagnose: ['诊断', 'Diagnose'],
+  connect: ['连接', 'Connect'],
+  connecting: ['连接中…', 'Connecting…'],
+  loading: ['加载中…', 'Loading…'],
+  copied: ['已复制', 'Copied'],
+  next: ['下一步', 'Next'],
+  hostsTitle: ['远程主机', 'Remote hosts'],
+  summary: ['已连接 {connected} / 共 {total}', '{connected} connected / {total} total'],
+  lastOpened: ['上次打开', 'Last opened'],
+  neverOpened: ['尚未打开', 'Never opened'],
+  remoteVersion: ['远端 DSH', 'Remote DSH'],
+  versionPending: ['连接后显示', 'Shown after connecting'],
+  addHostTitle: ['添加服务器', 'Add server'],
+  editHostTitle: ['编辑服务器', 'Edit server'],
+  deleteTitle: ['删除这台服务器？', 'Delete this server?'],
+  deleteBody: [
+    '将删除「{name}」的连接配置，并断开当前连接。远端任务不受影响，之后可以重新添加。',
+    'This removes the connection settings for "{name}" and disconnects it. Remote tasks keep running; you can add it again later.',
+  ],
+  deleteConfirm: ['删除', 'Delete'],
+  deleteBusy: ['正在删除…', 'Deleting…'],
+  statusUnconfigured: ['未配置', 'Not configured'],
+  statusConnecting: ['连接中', 'Connecting'],
+  statusFingerprintPending: ['指纹待确认', 'Fingerprint pending'],
+  statusConflictPending: ['远端冲突待确认', 'Remote conflict'],
+  statusConnected: ['已连接', 'Connected'],
+  statusDisconnected: ['断线', 'Disconnected'],
+  statusError: ['错误', 'Error'],
+  statusLimited: ['受限', 'Limited'],
+  statusHintUnconfigured: ['尚未连接过', 'Never connected'],
+  statusHintConnecting: ['正在建立连接', 'Establishing the connection'],
+  statusHintFingerprintPending: ['需要确认主机指纹', 'Confirm the host fingerprint'],
+  statusHintConflictPending: [
+    '远端已有手工启动的 DSH，需要你选择如何处理',
+    'A manually started DSH is already running; choose how to proceed',
+  ],
+  statusHintConnected: ['远端界面可用', 'The remote UI is available'],
+  statusHintDisconnected: ['连接断开，可重连', 'Connection lost — reconnect available'],
+  statusHintError: ['连接失败', 'Connection failed'],
+  statusHintLimited: ['能连上，但远端无法提供界面', 'Reachable, but the remote UI is unavailable'],
+  confirmFingerprint: ['确认指纹', 'Confirm fingerprint'],
+  cardOpen: ['打开', 'Open'],
+  cardConnect: ['连接', 'Connect'],
+  cardDisconnect: ['断开', 'Disconnect'],
+  cardReconnect: ['重连', 'Reconnect'],
+  cardRestart: ['重启', 'Restart'],
+  cardRestarting: ['正在重启…', 'Restarting…'],
+  // The visible action is short; the accessible name stays the full one, so a screen
+  // reader does not hear a bare "关闭" next to "断开" on the same card.
+  cardRestartName: ['重启远端 DSH', 'Restart the remote DSH'],
+  remoteRestartBusy: [
+    '远端链路正在重建隧道，请稍后再试。',
+    'The remote link is rebuilding its tunnel; try again shortly.',
+  ],
+  cardStopRemote: ['关闭', 'Stop'],
+  cardStopping: ['正在关闭…', 'Stopping…'],
+  cardStopRemoteName: ['关闭远端 DSH', 'Stop the remote DSH'],
+  stopRemoteTitle: ['关闭远端 DSH？', 'Stop the remote DSH?'],
+  stopRemoteBody: [
+    '会停止远端进程并断开连接；配置与凭据保留，可随时重连。',
+    'Stops the remote process and disconnects. Settings and credentials are kept, so you can reconnect later.',
+  ],
+  stopRemoteConfirm: ['关闭', 'Stop'],
+  stopRemoteBusy: ['正在关闭…', 'Stopping…'],
+  cardDiagnose: ['诊断', 'Diagnose'],
+  cardEdit: ['编辑', 'Edit'],
+  cardDelete: ['删除', 'Delete'],
+  errorReason: ['原因：{detail}', 'Reason: {detail}'],
+  loopbackNote: [
+    '远端界面只经 SSH 隧道映射为 127.0.0.1，再由本地同源代理承载；不会直接使用该地址，也不会暴露到公网。',
+    'The remote UI is only reached through an SSH tunnel mapped to 127.0.0.1, then carried by the local same-origin proxy; the address itself is never used directly or exposed publicly.',
+  ],
+  viewportConnecting: ['正在连接「{name}」…', 'Connecting to "{name}"…'],
+  viewportOverlayLoadFailed: [
+    '远端界面加载失败。点侧边栏主机条里的「本地」离开远端，再点该主机重新接管。',
+    'The remote UI failed to load. Pick “Local” in the sidebar switcher and open the host again.',
+  ],
+  carrierUnavailable: [
+    '当前窗口没有可用的远端承载方式，无法打开远端界面。',
+    'This window has no seat for the remote UI, so it cannot be opened here.',
+  ],
+  externalLinkBlocked: [
+    '无法打开这个链接：只支持 http 或 https 外链。',
+    'Cannot open that link: only http or https links are allowed.',
+  ],
+  clipboardWriteFailed: [
+    '复制失败：远端界面没能写入剪贴板。',
+    'Copy failed: the remote view could not write the clipboard.',
+  ],
+  remoteNoticePrefix: ['远端界面：', 'Remote view: '],
+  connectLogTitle: ['连接日志', 'Connect log'],
+  connectLogHint: ['关窗不中断连接', 'Closing keeps it running'],
+  connectLogCount: ['{count} 行', '{count} lines'],
+  connectLogEmpty: ['等待日志输出…', 'Waiting for log output…'],
+  'connectLogPhase.ssh': ['SSH', 'SSH'],
+  'connectLogPhase.probe': ['探测', 'Probe'],
+  'connectLogPhase.bootstrap': ['准备运行时', 'Runtime'],
+  'connectLogPhase.start': ['启动远端', 'Start'],
+  'connectLogPhase.tunnel': ['隧道', 'Tunnel'],
+  'connectLogPhase.verifying': ['校验界面', 'Verify'],
+  'connectLogPhase.ready': ['就绪', 'Ready'],
+  switcherLocal: ['本地', 'Local'],
+  switcherAddHost: ['添加主机', 'Add host'],
+  switcherManage: ['管理界面', 'Manage hosts'],
+  switcherExit: ['断开', 'Disconnect'],
+  downloadStarted: ['已开始下载「{name}」', 'Download started: "{name}"'],
+  downloadPreparing: ['正在下载「{name}」…', 'Downloading "{name}"…'],
+  downloadSaved: ['已保存「{name}」', 'Saved "{name}"'],
+  downloadSavedTo: ['已保存到 {path}', 'Saved to {path}'],
+  downloadCancelled: ['已取消下载', 'Download cancelled'],
+  downloadCancel: ['取消下载', 'Cancel download'],
+  downloadClose: ['关闭', 'Close'],
+  downloadDrag: ['拖动下载进度', 'Drag download progress'],
+  downloadFailed: ['下载失败', 'Download failed'],
+  downloadFolderDesktopOnly: [
+    '文件夹下载需要在桌面端选择保存文件夹。',
+    'Folder downloads need the desktop app to choose a destination folder.',
+  ],
+  downloadFolderChoose: ['请选择保存文件夹…', 'Choose a destination folder…'],
+  downloadFiles: ['{done} / {total} 个文件', '{done} / {total} files'],
+  downloadProgress: ['下载进度：{name}', 'Download progress: {name}'],
+  downloadInProgress: ['正在下载', 'Downloading'],
+  'progress.ssh-connecting': ['正在连接 SSH…', 'Connecting over SSH…'],
+  'progress.host-key-confirm': ['等待确认主机指纹…', 'Waiting for you to confirm the host key…'],
+  'progress.auth-checking': ['正在认证…', 'Authenticating…'],
+  'progress.probing': ['正在探测远端环境…', 'Probing the remote environment…'],
+  'progress.remote-dsh-running': [
+    '远端已有手工启动的 DSH，等待你的选择…',
+    'A manually started DSH is running; waiting for your choice…',
+  ],
+  'progress.bootstrapping': ['正在准备远端运行时…', 'Preparing the remote runtime…'],
+  'progress.installing-node': [
+    '正在自动准备远端 Node（{version}）…',
+    'Preparing a managed Node on the remote ({version})…',
+  ],
+  'progress.downloading-node': [
+    '正在下载 Node {version}（已下载 {mb} MB）…',
+    'Downloading Node {version} ({mb} MB so far)…',
+  ],
+  'progress.bootstrap-first-run': [
+    '首次运行：正在下载 @deepseek-ai/dsh@{version}…',
+    'First run: fetching @deepseek-ai/dsh@{version}…',
+  ],
+  'progress.bootstrap-fetching': ['正在下载 DSH 依赖包…', 'Fetching DSH packages…'],
+  'progress.bootstrap-installed': ['依赖已安装，正在启动…', 'Packages installed; starting…'],
+  'progress.bootstrap-progress': ['自举进度：{detail}', 'Bootstrap: {detail}'],
+  'progress.starting-remote': ['正在启动远端 DSH…', 'Starting the remote DSH…'],
+  'progress.tunneling': ['正在建立本地回环隧道…', 'Opening the loopback tunnel…'],
+  'progress.verifying': ['正在验证远端界面…', 'Verifying the remote UI…'],
+  'progress.ready': ['就绪', 'Ready'],
+  'progress.reconnecting': ['断线重连中（第 {attempt}/{max} 次）…', 'Reconnecting ({attempt}/{max})…'],
+  'progress.restarting-remote': [
+    '远端 DSH 正在重启，正在重新挂载界面…',
+    'The remote DSH is restarting; re-attaching the remote UI…',
+  ],
+  progressRestartingTitle: ['正在重启「{name}」的远端 DSH…', 'Restarting the remote DSH on "{name}"…'],
+  'progress.stopping-remote': ['正在关闭远端 DSH…', 'Stopping the remote DSH…'],
+  'progress.default': ['正在连接…', 'Connecting…'],
+  'phase.ssh': ['SSH', 'SSH'],
+  'phase.probe': ['探测', 'Probe'],
+  'phase.bootstrap': ['准备运行时', 'Preparing runtime'],
+  'phase.start': ['启动', 'Start'],
+  'phase.tunnel': ['隧道', 'Tunnel'],
+  'phase.verifying': ['校验界面', 'Verify UI'],
+  'phase.ready': ['就绪', 'Ready'],
+  fingerprintTitle: ['主机指纹待确认', 'Confirm the host fingerprint'],
+  fingerprintBody: [
+    '首次连接需要确认这台服务器的 SSH 主机指纹。确认后会记住；指纹变化时会再次提示。',
+    "Confirm this server's SSH host key on first use. It is remembered after acceptance, and you are asked again if it changes.",
+  ],
+  fingerprintChanged: ['主机指纹已变化', 'The host key has changed'],
+  fingerprintChangedBody: [
+    '这台服务器的主机指纹与上次记录不一致，可能重装过系统，也可能存在中间人风险。确认无误后再继续。',
+    'The host key differs from the recorded one. The server may have been reinstalled — or this could be a man-in-the-middle. Continue only if you are sure.',
+  ],
+  fingerprintKeyType: ['密钥类型', 'Key type'],
+  fingerprintSha: ['SHA256 指纹', 'SHA256 fingerprint'],
+  fingerprintPinned: ['已记录指纹', 'Recorded fingerprint'],
+  fingerprintAccept: ['接受并记住', 'Accept and remember'],
+  fingerprintAcceptOnce: ['仅本次接受', 'Accept once'],
+  fingerprintReject: ['取消', 'Cancel'],
+  passwordPromptTitle: ['输入 SSH 密码', 'Enter the SSH password'],
+  passwordPromptBody: [
+    '「{name}」使用密码认证。密码默认保存到 DSH 凭据存储，之后（包括 DSH 重启后）自动使用；取消勾选「记住密码」则只用于本次连接。',
+    '"{name}" uses password authentication. The password is saved in the DSH credential store by default and reused later, including after a DSH restart; clear "Remember password" to use it for this connection only.',
+  ],
+  passwordPromptBodyNoStorage: [
+    '「{name}」使用密码认证。当前环境没有可用的凭据存储，密码只用于本次连接。',
+    '"{name}" uses password authentication. No credential store is available here, so the password is used for this connection only.',
+  ],
+  passwordPromptRemember: ['记住密码（保存到 DSH 凭据存储）', 'Remember the password (DSH credential store)'],
+  passwordPromptForgetHint: [
+    '取消勾选会同时清除这台主机已保存的密码。',
+    'Clearing the box also forgets the password already saved for this host.',
+  ],
+  passwordPromptNoStorage: [
+    '当前环境没有可用的凭据存储，密码只用于本次连接。',
+    'No credential store is available here, so the password is used for this connection only.',
+  ],
+  passwordPromptLabel: ['密码', 'Password'],
+  passwordPromptSubmit: ['连接', 'Connect'],
+  passwordPromptRequired: ['请输入密码', 'Enter the password'],
+  conflictTitle: ['远端已有手工启动的 DSH', 'A DSH is already running on the remote host'],
+  conflictBody: [
+    '「{name}」的远端检测到不是本插件启动的 DSH 进程（共 {count} 个）。它们与插件共用 ~/.dsh，同时运行可能争用同一会话或凭据文件。请选择如何处理：',
+    'The remote for "{name}" has {count} DSH process(es) this plugin did not start. They share ~/.dsh with the plugin, so running both may contend over the same session or credential files. Choose how to proceed:',
+  ],
+  conflictHint: [
+    '「停止」会向这些进程发送 SIGTERM / SIGKILL；「并存」会另起一个受管实例并保留它们。',
+    '"Stop" sends SIGTERM / SIGKILL to those processes; "Keep alongside" starts a managed instance and leaves them running.',
+  ],
+  conflictStop: ['停止它并启动受管实例', 'Stop it and start the managed instance'],
+  conflictAlongside: ['保留它，另起一个', 'Keep it and start alongside'],
+  conflictCancel: ['取消连接', 'Cancel connection'],
+  conflictBusy: ['正在提交选择…', 'Submitting…'],
+  'wizard.name': ['显示名', 'Display name'],
+  'wizard.namePlaceholder': ['例如：腾讯云测试机', 'e.g. Tencent test server'],
+  'wizard.address': ['SSH 地址或别名', 'SSH address or alias'],
+  'wizard.addressPlaceholder': ['例如：ubuntu@192.0.2.10 或 my-server', 'e.g. ubuntu@192.0.2.10 or my-server'],
+  'wizard.addressHint': ['支持 ~/.ssh/config 中配置的别名。', 'Aliases from ~/.ssh/config are supported.'],
+  'wizard.port': ['端口', 'Port'],
+  'wizard.username': ['用户名', 'User'],
+  'wizard.usernamePlaceholder': ['例如：ubuntu', 'e.g. ubuntu'],
+  'wizard.auth': ['认证方式', 'Authentication'],
+  'wizard.authKey': ['密钥文件', 'Key file'],
+  'wizard.authPassword': ['密码（可保存）', 'Password (can be saved)'],
+  'wizard.keyPath': ['密钥文件路径', 'Key file path'],
+  'wizard.keyPathPlaceholder': ['例如：~/.ssh/id_rsa', 'e.g. ~/.ssh/id_rsa'],
+  'wizard.keyPathPick': ['选择文件…', 'Choose file…'],
+  'wizard.password': ['密码', 'Password'],
+  'wizard.passwordPlaceholder': [
+    '保存到 DSH 凭据存储，之后自动复用',
+    'Saved in the DSH credential store and reused later',
+  ],
+  'wizard.passwordRemember': ['记住密码（保存到 DSH 凭据存储）', 'Remember the password (DSH credential store)'],
+  'wizard.passwordRememberHint': [
+    '取消勾选则只用于本次连接；已有保存的密码会一并清除。',
+    'Clear the box to use this password for this connection only; a saved password is forgotten as well.',
+  ],
+  'wizard.passwordSaveFailed': [
+    '主机已保存，但密码没能写入 DSH 凭据存储；下次连接时会再询问。',
+    'The host was saved, but the password could not be stored in the DSH credential store; the next connection asks again.',
+  ],
+  'wizard.authHint': [
+    '使用私钥文件认证；也可以改用密码，密码默认保存在 DSH 凭据存储。',
+    'Authenticates with a private-key file; a password also works and is saved in the DSH credential store by default.',
+  ],
+  'wizard.jumpHost': ['跳板机（可选）', 'Jump host (optional)'],
+  'wizard.jumpHostPlaceholder': ['例如：另一台已添加主机的地址', 'e.g. another saved host address'],
+  'wizard.keepAlive': ['远端存活策略', 'Remote keep-alive'],
+  'wizard.keepAliveKeep': ['保持运行（推荐）', 'Keep running (recommended)'],
+  'wizard.keepAliveStop': ['退出即停', 'Stop on exit'],
+  'wizard.keepAliveIdle': ['空闲停止', 'Stop when idle'],
+  'wizard.idleMinutes': ['空闲分钟数', 'Idle minutes'],
+  'wizard.autoReconnect': ['断线后自动重连', 'Reconnect automatically'],
+  'wizard.advanced': ['高级选项', 'Advanced options'],
+  'wizard.actionHint': [
+    '保存只记下配置；连接会保存并立即连上去，首次连接需要确认主机指纹。',
+    'Save only records the entry; Connect saves it and connects right away — the host key is confirmed on first use.',
+  ],
+  'wizard.saved': ['已保存', 'Saved'],
+  'wizard.savingHost': ['正在保存…', 'Saving…'],
+  'wizard.aliases': ['从 SSH 配置选择', 'Pick from SSH config'],
+  'wizard.aliasesLoading': ['正在读取 ~/.ssh/config…', 'Reading ~/.ssh/config…'],
+  'wizard.aliasesEmpty': ['没有发现可用的 SSH 别名', 'No SSH aliases found'],
+  'wizard.knownHosts': ['已知主机 {count} 条', '{count} known hosts'],
+  'wizard.validationName': ['请填写显示名', 'Enter a display name'],
+  'wizard.validationAddress': ['请填写 SSH 地址或别名', 'Enter an SSH address or alias'],
+  'wizard.validationAddressUrl': [
+    '请填写 SSH 地址或别名，不要填写网页地址',
+    'Enter an SSH address or alias, not a web URL',
+  ],
+  'wizard.validationPort': ['端口应为 1-65535', 'The port must be 1–65535'],
+  'wizard.validationUsername': ['请填写用户名', 'Enter a user name'],
+  'wizard.validationKeyPath': ['请填写密钥文件路径', 'Enter the key file path'],
+  'wizard.validationPassword': ['请输入密码，或改用密钥文件', 'Enter the password, or switch to a key file'],
+  'diag.title': ['连接诊断', 'Connection diagnostics'],
+  'diag.running': ['正在执行检查…', 'Running checks…'],
+  'diag.summaryOk': ['全部通过', 'All checks passed'],
+  'diag.summaryWarning': ['有需要留意的问题', 'Some checks need attention'],
+  'diag.summaryError': ['存在失败项', 'Some checks failed'],
+  'diag.checkPass': ['通过', 'Pass'],
+  'diag.checkFail': ['失败', 'Fail'],
+  'diag.checkUnknown': ['未知', 'Unknown'],
+  'diag.empty': ['还没有诊断结果。', 'No diagnostics yet.'],
+  'diag.rerun': ['重新检查', 'Run again'],
+  'diag.copy': ['复制诊断信息', 'Copy diagnostics'],
+  'diag.copyDone': ['诊断信息已复制。', 'Diagnostics copied.'],
+  'diag.redacted': ['诊断信息已脱敏，不包含访问令牌。', 'Diagnostics are redacted and contain no access tokens.'],
+  'diag.generatedAt': ['生成时间', 'Generated'],
+  'diag.host': ['主机', 'Host'],
+  'diag.failed': ['诊断执行失败', 'Diagnostics failed'],
+  'diag.close': ['关闭', 'Close'],
+  'settings.title': ['设置', 'Settings'],
+  'settings.ssh': ['SSH 默认值', 'SSH defaults'],
+  'settings.defaultPort': ['默认端口', 'Default port'],
+  'settings.defaultAuth': ['默认认证方式', 'Default authentication'],
+  'settings.defaultAuthKey': ['密钥文件', 'Key file'],
+  'settings.defaultAuthPassword': ['密码（默认保存）', 'Password (saved by default)'],
+  'settings.defaultKeyPath': ['默认密钥文件', 'Default key file'],
+  'settings.defaultKeyPathHint': [
+    '新增主机时预填这个路径；仍可在向导里改。',
+    'Pre-filled for a new host; the wizard can still override it.',
+  ],
+  'settings.keyPathPick': ['选择文件…', 'Choose file…'],
+  'keyFile.title': ['选择 SSH 私钥文件', 'Choose an SSH private key'],
+  'keyFile.hint': [
+    '只列出用户主目录内的文件；点击目录进入，点击文件选中。',
+    'Only files under your home directory are listed. Click a folder to enter it, a file to select it.',
+  ],
+  'keyFile.parent': ['上一级', 'Up'],
+  'keyFile.loading': ['正在读取目录…', 'Reading the directory…'],
+  'keyFile.empty': ['这个目录里没有可选项', 'Nothing selectable in this directory'],
+  'settings.connectTimeout': ['连接超时（秒）', 'Connect timeout (seconds)'],
+  'settings.security': ['安全', 'Security'],
+  'settings.hostKeyPolicy': ['主机指纹策略', 'Host key policy'],
+  'settings.hostKeyPolicyFirstUse': ['首次连接时询问', 'Ask on first use'],
+  'settings.hostKeyPolicyStrict': ['严格校验（指纹变化即失败）', 'Strict (fail when the key changes)'],
+  'settings.saveTokens': ['允许保存访问令牌', 'Allow saving access tokens'],
+  'settings.saveTokensHint': [
+    '默认关闭。开启后访问令牌会以 0600 权限保存在远端 DSH_HOME 下，仍存在被同机其他进程读取的风险。',
+    'Off by default. When enabled, tokens are saved under the remote DSH_HOME with 0600 permissions, which still risks access by other processes on that machine.',
+  ],
+  'settings.saveTokensRisk': [
+    '风险提示：令牌落盘后更难撤销，请只在受控服务器上开启。',
+    'Risk: a persisted token is harder to revoke. Enable only on controlled servers.',
+  ],
+  'settings.reconnect': ['自动重连', 'Auto reconnect'],
+  'settings.reconnectEnabled': ['断线后自动重连', 'Reconnect after a drop'],
+  'settings.maxAttempts': ['最大重试次数', 'Max attempts'],
+  'settings.baseDelay': ['重试间隔（毫秒）', 'Retry delay (ms)'],
+  'settings.other': ['其他', 'Other'],
+  'settings.language': ['语言', 'Language'],
+  'settings.languageAuto': ['跟随 DSH', 'Follow DSH'],
+  'settings.languageZh': ['中文', '中文'],
+  'settings.languageEn': ['English', 'English'],
+  'settings.logLevel': ['日志级别', 'Log level'],
+  'settings.bootstrap': ['远端运行时', 'Remote runtime'],
+  'settings.profile': ['DSH profile', 'DSH profile'],
+  'settings.profileHint': [
+    '默认 web；profile 配置在 ~/.dsh/profiles/<profile>',
+    'Defaults to web; profile config lives in ~/.dsh/profiles/<profile>',
+  ],
+  'settings.bootstrapHint': [
+    '用 npx 固定本机 DSH 版本启动；远端缺 Node 或版本过低时，插件自动装一份到 ~/.dsh/remote-go/node',
+    'Launched with npx pinned to the local DSH version; when the remote Node is missing or too old, the plugin installs one under ~/.dsh/remote-go/node',
+  ],
+  'settings.saveSettings': ['保存设置', 'Save settings'],
+  'settings.saved': ['设置已保存。', 'Settings saved.'],
+  'settings.validationPort': ['端口应为 1-65535', 'The port must be 1–65535'],
+  'settings.validationTimeout': ['连接超时应为 5-300 秒', 'The connect timeout must be 5–300 seconds'],
+  'settings.validationAttempts': ['最大重试次数应为 0-20', 'Max attempts must be 0–20'],
+  'settings.validationBaseDelay': ['重试间隔应为 100-30000 毫秒', 'The retry delay must be 100–30000 ms'],
+  'settings.validationProfile': [
+    'profile 只能包含字母、数字与 . _ -，且不能是 desktop',
+    'A profile may only contain letters, digits and . _ -, and cannot be desktop',
+  ],
+  'wizard.validationIdleMinutes': ['空闲分钟数应为 1-1440', 'Idle minutes must be 1–1440'],
+  'wizard.passwordSavedHint': [
+    '已保存的密码会在连接时自动使用；只有它失效时才会再询问。',
+    'A saved password is used automatically when connecting; you are asked only if it stops working.',
+  ],
+  liveStreamLostTitle: ['实时连接已断开，正在轮询', 'Live updates lost; polling instead'],
+  liveStreamLostBody: [
+    '状态更新已退回轮询（每 {seconds} 秒一次）。可以手动重新建立实时连接。',
+    'State updates fell back to polling every {seconds}s. You can reconnect the live stream.',
+  ],
+  liveReconnect: ['重新连接', 'Reconnect'],
+  liveReconnecting: ['正在重新连接…', 'Reconnecting…'],
+  liveStreamRestored: ['实时连接已恢复。', 'Live updates restored.'],
+  hostWarnings: ['提示', 'Notice'],
+  versionDifferent: [
+    '远端 DSH {remote} 与本机 {local} 不一致',
+    'The remote DSH {remote} differs from this machine ({local})',
+  ],
+  versionUnknown: ['无法确认远端 DSH 版本', 'The remote DSH version could not be confirmed'],
+  managingConnectingHosts: [
+    '正在连接的主机显示在连接窗口里，不在此清单中。',
+    'Hosts that are connecting appear in the connection window, not in this list.',
+  ],
+  deleteConnectingWarning: [
+    '这台主机正在连接；删除会立即中断连接。',
+    'This host is connecting; deleting it interrupts the connection immediately.',
+  ],
+  deleteStillConfirm: ['仍要删除（会中断连接）', 'Delete anyway (interrupts the connection)'],
+  carrierBackToLocal: ['返回本地', 'Back to local'],
+  carrierNotDsh: [
+    '远端页面不是 DSH 界面（可能是代理错误或版本不兼容）。',
+    'The remote page is not a DSH UI (proxy error or incompatible version).',
+  ],
+  'settings.defaultPortHint': ['新增主机时预填的端口', 'Prefilled as the port for new hosts'],
+  'settings.connectTimeoutHint': ['SSH 连接与远端就绪的整体超时', 'Overall timeout for SSH and remote readiness'],
+  'error.actionFailed': ['操作失败', 'Action failed'],
+} as const satisfies Record<string, readonly [zh: string, en: string]>
+
+/**
+ * Every key the dictionary defines. `keyof typeof STRINGS` and `keyof typeof zh` are the same union
+ * (zh is declared over it below); the pairs are the source because a key exists once, not twice.
+ */
+type DictKey = keyof typeof STRINGS
+/** Interpolation parameters: `{name}` is replaced only when a value is present. */
+type DictParams = Record<string, string | number>
+/** The two languages the plugin ships; the Host's locale service selects one. */
+type DictLocale = 'zh' | 'en'
+/**
+ * What every component calls. A literal key is checked against `DictKey` at compile time, so a
+ * typo fails `pnpm run verify:types` instead of rendering the key at runtime.
+ */
+type Translate = (key: DictKey, params?: DictParams) => string
+type Dictionaries = Record<DictLocale, Record<DictKey, string>>
+/** A language pack that may be incomplete, for the fallback path's own tests. */
+type PartialDictionaries = Partial<Record<DictLocale, Partial<Record<DictKey, string>>>>
+
+/**
+ * One language's flat dictionary, built from the pairs. `Object.keys` widens the key set to
+ * `string`, and `Object.fromEntries` keeps that widening, so the rebuilt record needs one
+ * assertion to get the literal key union back. It is sound because the loop visits exactly the
+ * keys the `satisfies` above accepted, and none of them can be missing.
+ */
+function dictionarySide(side: 0 | 1): Record<DictKey, string> {
+  const out: Partial<Record<DictKey, string>> = {}
+  for (const [key, pair] of Object.entries(STRINGS)) out[key as DictKey] = pair[side]
+  return out as Record<DictKey, string>
+}
+const zh = dictionarySide(0)
+const en = dictionarySide(1)
+/** What `makeFallbackT` reads by default; the test seam can pass an incomplete pack instead. */
+const STRINGS_BY_LOCALE: Dictionaries = { zh, en }
