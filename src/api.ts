@@ -1,10 +1,5 @@
-/**
- * Local HTTP API for the browser half (contract: docs/api.md); every request passes DSH's own
- * admission when the kernel provides it, then the marker header and, with an Origin, same-origin.
- *
- * This module is routing only: authentication, the JSON envelope and the status codes. The two
- * SSE channels live in `events.ts` (own subscriber sets, caps and replay).
- */
+/** Local HTTP API for the browser half (contract: docs/api.md): DSH's own admission when the kernel provides it, then
+ * the marker header and, with an Origin, same-origin. Routing only; the two SSE channels live in `events.ts`. */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { API_HEADER, API_PREFIX, API_VERSION, PLUGIN_VERSION } from './constants.js'
 import { errors, isRemoteGoError, toErrorView } from './errors.js'
@@ -16,64 +11,33 @@ import { redactObject } from './redact.js'
 import { sameServerHost, sameServerOrigin } from './request-trust.js'
 import type { RemoteGoService } from './service.js'
 import { nowIso } from './util.js'
-
 const MAX_BODY_BYTES = 1 * 1024 * 1024
-
-/** HTTP status for one `invalid-input` refusal: an oversized body is not a business conflict. */
+/** An oversized body is the caller's mistake, not a business conflict (409). */
 const PAYLOAD_TOO_LARGE = 413
-
-/** `/version` and `/diagnostics/self` share one version row. */
 const VERSION_ROW = { version: PLUGIN_VERSION, apiVersion: API_VERSION }
 const PLUGIN_ROW = { id: 'dsh-remote-go', version: PLUGIN_VERSION }
-
-/** The logger this module reports through; both methods are optional (a test passes `{}`). */
-interface ApiLogger {
-  warn?: (...args: unknown[]) => void
-  error?: (...args: unknown[]) => void
-}
-
-/**
- * One authorization verdict: `ok: true` lets the route proceed; a rejection also carries the status
- * the dispatcher answers with and its coded body. Not a discriminated union on purpose — the route
- * code reads `!verdict.ok` (the idiom `!` cannot narrow a literal discriminant here).
- */
+/** An authorization verdict: `ok` proceeds, else a status and coded body (not a union; route code reads `!ok`). */
 interface AuthVerdict {
   ok: boolean
   status?: number
   error?: ErrorView
 }
-
-/** One JSON request body: a parsed document this module narrows field by field. */
 type JsonBody = Record<string, unknown>
-
-/** One route handler: the dispatcher owns auth, init and the status codes around it. */
 type RouteHandler = (req?: IncomingMessage, url?: URL) => unknown | Promise<unknown>
-
-/** One `/hosts/:id[/action]` handler: the id from the path, plus the request for a POST body. */
 type HostAction = (id: string, req?: IncomingMessage) => unknown | Promise<unknown>
-
-/** Everything `createApi` needs from its composition. */
 export interface ApiOptions {
   service: RemoteGoService
-  /** The listener origin as the kernel names it, or null while it cannot be named. */
   getOrigin?: () => string | null
-  /** DSH's own admission for the route, when the kernel provides the Connection service. */
   admit?: (req: IncomingMessage) => number | undefined
-  logger?: ApiLogger
+  /** The logger this module reports through; both methods are optional (a test passes `{}`). */
+  logger?: { warn?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void }
   diagnostics?: () => Record<string, unknown>
 }
-
-/** What one mounted API exposes: the route handler and the listener cleanup. */
 export interface Api {
   handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>
   dispose: () => void
 }
-
-/**
- * The HTTP status one ErrorView maps to (docs/api.md). `internal` used to fall through to 409,
- * which made a plugin bug look like a state conflict; only the two explicit codes are special,
- * everything else is a business refusal of the current state.
- */
+/** The HTTP status for an ErrorView: only `invalid-input` (400) and `internal` (500) are special, the rest is 409. */
 export function statusForErrorCode(code: string): number {
   if (code === 'invalid-input') return 400
   if (code === 'internal') return 500
@@ -81,12 +45,10 @@ export function statusForErrorCode(code: string): number {
 }
 
 export function createApi(options: ApiOptions): Api {
-  const { service } = options
-  const logger = options.logger ?? console
+  const { service, logger = console } = options
   const kernelAdmit = typeof options.admit === 'function' ? options.admit : null
   // Both SSE channels: subscriber sets, caps, heartbeat, 150 ms coalescing and cursor replay.
   const hub: EventHub = createEventHub({ service, logger })
-
   const crossSite = (): AuthVerdict => ({
     ok: false,
     status: 403,
@@ -94,8 +56,6 @@ export function createApi(options: ApiOptions): Api {
       errors.invalidInput('origin', { zh: '跨站请求被拒绝。', en: 'Cross-site requests are rejected.' }),
     ),
   })
-
-  /** The listener origin as a URL, or null while the kernel cannot name it yet. */
   function parseOrigin(value: unknown): URL | null {
     if (typeof value !== 'string' || value === '') return null
     try {
@@ -104,19 +64,6 @@ export function createApi(options: ApiOptions): Api {
       return null
     }
   }
-
-  /**
-   * The kernel's own admission (`ctx.connection.requestRejection`): its Host/Origin fence plus
-   * browser authentication against a live Peer — the gate every DSH route passes. Absent on a
-   * kernel without the Connection service, where the marker-header fence below stays the fallback.
-   * @returns rejection status, or undefined when the route may proceed.
-   */
-  function admission(req: IncomingMessage): number | undefined {
-    if (kernelAdmit === null) return undefined
-    const rejection = kernelAdmit(req)
-    return typeof rejection === 'number' ? rejection : undefined
-  }
-
   /** Response body for an admission rejection: the kernel decided, and this route never ran. */
   function admissionView(status: number): { ok: false; error: ErrorView } {
     // A gate that could not decide is this plugin's problem, not a client mistake.
@@ -135,21 +82,8 @@ export function createApi(options: ApiOptions): Api {
           }
     return { ok: false, error: toErrorView(errors.invalidInput('request', detail)) }
   }
-
-  /**
-   * Browser trust for same-origin reads (used by SSE, which cannot set custom
-   * headers): an absent Origin is a non-browser local caller; a present Origin
-   * must be this GUI's origin and the request must not be cross-site. The Host
-   * fence is checked for both kinds of caller, because a DNS-rebinding page
-   * reaches the socket under its own hostname: it sends no Origin, its
-   * Fetch-Metadata says same-origin, and `Host` is the one header it cannot forge.
-   *
-   * The Origin comparison is the shared `sameServerOrigin`, not a string compare: the kernel
-   * names its listener as `127.0.0.1:<port>`, while a user may open the GUI on
-   * `http://localhost:<port>`, and `localhost` / `127.0.0.1` / `[::1]` are the same server.
-   * The old equality check locked those users out of every write while `/state` still worked
-   * without an Origin.
-   */
+  /** Browser trust for same-origin reads (SSE cannot set custom headers): a present Origin must be this GUI, and the
+   * Host fence is checked for both kinds of caller because a DNS-rebinding page cannot forge `Host`. */
   function authorizeOrigin(req: IncomingMessage): AuthVerdict {
     const local = parseOrigin(options.getOrigin())
     const origin = req.headers.origin
@@ -157,8 +91,7 @@ export function createApi(options: ApiOptions): Api {
       if (local === null || !sameServerOrigin(origin, local)) return crossSite()
     }
     if (req.headers['sec-fetch-site'] === 'cross-site') return crossSite()
-    // An origin the kernel cannot name yet is no reason to reject local traffic; the kernel's own
-    // admission (when present) has already judged Host, and this fence is the fallback.
+    // An unknown local origin is no reason to reject: admission (when present) already judged Host.
     if (local !== null && !sameServerHost(req.headers.host, local)) return crossSite()
     return { ok: true }
   }
@@ -166,29 +99,17 @@ export function createApi(options: ApiOptions): Api {
   function authorize(req: IncomingMessage): AuthVerdict {
     const origin = authorizeOrigin(req)
     if (!origin.ok) return origin
-    if (req.headers[API_HEADER] !== '1') {
-      return {
-        ok: false,
-        status: 403,
-        error: toErrorView(
-          errors.invalidInput(API_HEADER, {
-            zh: '请求缺少本地插件标识头。',
-            en: 'The request is missing the local plugin header.',
-          }),
-        ),
-      }
+    if (req.headers[API_HEADER] === '1') return { ok: true }
+    return {
+      ok: false,
+      status: 403,
+      error: toErrorView(
+        errors.invalidInput(API_HEADER, {
+          zh: '请求缺少本地插件标识头。',
+          en: 'The request is missing the local plugin header.',
+        }),
+      ),
     }
-    return { ok: true }
-  }
-
-  /** The 413 the API answers once a body crosses `MAX_BODY_BYTES`. */
-  function payloadTooLarge() {
-    const error = errors.invalidInput('body', {
-      zh: `请求体超过上限（${MAX_BODY_BYTES} 字节）。`,
-      en: `The request body exceeds the limit (${MAX_BODY_BYTES} bytes).`,
-    })
-    error.httpStatus = PAYLOAD_TOO_LARGE
-    return error
   }
 
   function readJson(req: IncomingMessage): Promise<JsonBody> {
@@ -200,12 +121,16 @@ export function createApi(options: ApiOptions): Api {
         if (refused) return
         size += chunk.length
         if (size > MAX_BODY_BYTES) {
-          // Answer 413 with a JSON body *before* the socket goes away. Destroying the request
-          // here (the old behavior) made the client see ECONNRESET instead of the refusal, and
-          // the rest of the body is drained rather than buffered so the response can flush.
           refused = true
           chunks.length = 0
-          reject(payloadTooLarge())
+          // Answer 413 with a JSON body *before* the socket goes away: destroying the request made the client see
+          // ECONNRESET instead of the refusal. The rest is drained, not buffered.
+          const error = errors.invalidInput('body', {
+            zh: `请求体超过上限（${MAX_BODY_BYTES} 字节）。`,
+            en: `The request body exceeds the limit (${MAX_BODY_BYTES} bytes).`,
+          })
+          error.httpStatus = PAYLOAD_TOO_LARGE
+          reject(error)
           req.resume()
           return
         }
@@ -239,22 +164,13 @@ export function createApi(options: ApiOptions): Api {
     })
     res.end(body)
   }
-
-  /**
-   * Which SSE channel a GET path names, or null. Both routes pass the same pre-condition: DSH's
-   * admission (above) plus the Origin/Host fence, because an EventSource cannot set the marker
-   * header. Keeping the pair in one place is what stops the two routes from drifting apart.
-   */
+  /** Which SSE channel a GET path names, or null; both routes share one pre-condition. */
   function sseRoute(path: string, method: string): 'state' | 'logs' | null {
     if (method !== 'GET') return null
     if (path === '/events') return 'state'
     if (path === '/events/logs') return 'logs'
     return null
   }
-
-  // One entry per route: `(req, url) => response body`. The dispatcher owns auth,
-
-  // init, status codes and the error envelope, so handlers only shape data.
   const ROUTES: Record<string, RouteHandler> = {
     // A liveness probe only: no state, no version, nothing worth reading without a session.
     'GET /health': () => ({ ok: true }),
@@ -265,8 +181,7 @@ export function createApi(options: ApiOptions): Api {
       ok: true,
       ...(await service.listKeyFiles(url.searchParams.get('path') ?? '')),
     }),
-    // Machine paths (`home`, `stateDir`) and the client-module row are troubleshooting data,
-    // not the user's business: redact them like any other diagnostic export.
+    // Machine paths and the client-module row are troubleshooting data: redact them like any export.
     'GET /diagnostics/self': () =>
       redactObject({
         ok: true,
@@ -276,8 +191,6 @@ export function createApi(options: ApiOptions): Api {
       }),
     'POST /hosts': async (req) => {
       const body = await readJson(req)
-      // The store's own sanitizer is the validator; the body is only restated as the document
-      // shape it accepts (a JSON body can be anything, and this route never parses it further).
       return { ok: true, host: await service.saveHost((body.host ?? body) as RawHostEntry) }
     },
     'POST /settings': async (req) => {
@@ -286,8 +199,7 @@ export function createApi(options: ApiOptions): Api {
     },
     'POST /local-version': async (req) => {
       const { version } = await readJson(req)
-      // The client only backfills a *missing* probe result; the service decides whether this
-      // one may be adopted (unknown locally, and not below DSH's `engines.dsh` floor).
+      // The client backfills only a missing probe: the service adopts it when unknown and above the engines floor.
       return { ok: true, accepted: service.setLocalVersion(String(version ?? ''), 'client') }
     },
     'POST /active': async (req) => {
@@ -296,8 +208,6 @@ export function createApi(options: ApiOptions): Api {
       return { ok: true }
     },
   }
-
-  // `/hosts/:id` and `/hosts/:id/<action>`, keyed the same way.
   const HOST_ACTIONS: Record<string, HostAction> = {
     DELETE: async (id) => {
       await service.removeHost(id)
@@ -305,17 +215,13 @@ export function createApi(options: ApiOptions): Api {
     },
     'POST connect': async (id, req) => {
       const body = await readJson(req)
+      // Remembering is the default when a password is supplied; the Client sends false only with its box unchecked.
       const result = await service.connect(id, {
         password: typeof body.password === 'string' ? body.password : undefined,
-        // Remembering is the default for a password that is actually supplied; the Client
-        // sends false only when its "remember" box is unchecked.
         rememberPassword: body.rememberPassword !== false,
       })
       return { ok: true, ...result }
     },
-    // Remember (or forget) the SSH password without connecting: the wizard's save action and
-    // an explicit credential refresh. The value never enters hosts.json; `available:false`
-    // means nothing can be persisted here.
     'POST password': async (id, req) => {
       const body = await readJson(req)
       const result = await service.saveHostPassword(id, {
@@ -356,7 +262,6 @@ export function createApi(options: ApiOptions): Api {
     },
   }
 
-  /** Resolve `/hosts/:id[/action]` to `{ id, run }`, or null for an unknown shape. */
   function hostHandler(hostPath: string, method: string): { id: string; run: HostAction } | null {
     const segments = hostPath.split('/').filter(Boolean)
     if (segments[0] !== 'hosts' || segments.length < 2) return null
@@ -366,8 +271,7 @@ export function createApi(options: ApiOptions): Api {
     try {
       id = decodeURIComponent(segments[1])
     } catch {
-      // A malformed escape (`/hosts/%E0%A4%A/activate`) is a client mistake, not an internal
-      // failure: answer 400 with a readable field error instead of leaking URIError as 500.
+      // A malformed escape is a client mistake: answer 400 with a field error instead of leaking URIError as 500.
       throw errors.invalidInput('id', {
         zh: '主机 id 不是合法的 URL 编码。',
         en: 'The host id is not valid URL encoding.',
@@ -388,19 +292,17 @@ export function createApi(options: ApiOptions): Api {
       }
       const path = url.pathname.slice(API_PREFIX.length) || '/'
       const method = (req.method ?? 'GET').toUpperCase()
-
-      // `/health` stays the documented unauthenticated liveness probe (it carries no state), and
-      // still passes the Host/Origin fence below. Everything else passes DSH's own admission
-      // first, so a rebound page or an unauthenticated local caller cannot read state or change it.
+      // `/health` is the one unauthenticated probe (it carries no state) but still passes the Host fence; the rest of
+      // the routes pass DSH's own admission first.
       const probe = path === '/health' && method === 'GET'
       if (!probe) {
-        const rejection = admission(req)
-        if (rejection !== undefined) {
-          sendJson(res, rejection, admissionView(rejection))
+        const rejection = kernelAdmit === null ? undefined : kernelAdmit(req)
+        const rejected = typeof rejection === 'number' ? rejection : undefined
+        if (rejected !== undefined) {
+          sendJson(res, rejected, admissionView(rejected))
           return
         }
       }
-
       if (probe) {
         const trust = authorizeOrigin(req)
         if (!trust.ok) {
@@ -410,11 +312,8 @@ export function createApi(options: ApiOptions): Api {
         sendJson(res, 200, ROUTES['GET /health']())
         return
       }
-
-      // SSE cannot carry the custom header. It already passed DSH's admission above; the fence
-      // here covers kernels without the Connection service, and browsers block a cross-origin
-      // EventSource anyway because these routes never send CORS headers. The state channel
-      // (`/events`) and the connect-log channel (`/events/logs`) share this one pre-condition.
+      // SSE cannot carry the custom header; it already passed admission, and this fence covers kernels without
+      // `connection` (browsers block a cross-origin EventSource anyway).
       const sse = sseRoute(path, method)
       if (sse !== null) {
         const originOnly = authorizeOrigin(req)
@@ -427,22 +326,15 @@ export function createApi(options: ApiOptions): Api {
         else hub.handleState(req, res)
         return
       }
-
       const auth = authorize(req)
       if (!auth.ok) {
         sendJson(res, auth.status, { ok: false, error: auth.error })
         return
       }
-
       await service.init()
-
-      // Download jobs save through the Host directly; no binary response route is
-      // needed, so these handlers only shape JSON.
       const segments = path.split('/').filter(Boolean)
       if (method === 'POST' && path === '/downloads') {
         const body = await readJson(req)
-        // Both paths are opaque strings the job layer validates (`runtimeOf` refuses an unknown
-        // id, the downloader refuses a bad path); the body is a JSON document, not a schema.
         const job = await service.startRemoteDownload(body.hostId as string, body.path, {
           destination: body.destination as string | undefined,
         })
@@ -469,19 +361,16 @@ export function createApi(options: ApiOptions): Api {
           return
         }
       }
-
       const routeKey = `${method} ${path}`
       if (Object.hasOwn(ROUTES, routeKey)) {
         sendJson(res, 200, await ROUTES[routeKey](req, url))
         return
       }
-
       const host = hostHandler(path, method)
       if (host) {
         sendJson(res, 200, await host.run(host.id, req))
         return
       }
-
       sendJson(res, 404, {
         ok: false,
         error: toErrorView(
@@ -503,11 +392,9 @@ export function createApi(options: ApiOptions): Api {
       }
     }
   }
-
   return {
     handler,
     dispose() {
-      // One entry point for the whole listener teardown: the hub owns both channel sets.
       hub.dispose()
     },
   }

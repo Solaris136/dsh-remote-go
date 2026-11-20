@@ -1,40 +1,21 @@
-// The type policy of decision A in .agents/refactor/DECISIONS.md, executable: no explicit `any`,
-// no `as any`, no `as unknown as X` double assertion, and no suppression directive that has not
-// been registered in types/any-allowlist.json.
-//
-// The TypeScript compiler API is the source of truth, not a grep: `any` mentioned in a comment or
-// a string literal is not a type, and `'// @ts-ignore'` inside a fixture is not a directive. The
-// AST catches `any` and the assertions; comments are read through the compiler's own scanner, so
-// no string masking is needed here either.
-//
-// Scope: src/**/*.ts, index.ts, types/**/*.d.ts and client/src/**/*.ts (that directory arrives in
-// P3; its absence is not an error). test/**, scripts/** and e2e/** stay out: a fixture may need a
-// loose type, and the allowlist is meant for product code. A `.d.ts` next to a source under `src/`
-// is not scanned - ambient declarations belong in `types/`, which is.
-//
-// Usage:
-//   node scripts/check-types.mjs             check; exits 1 on any problem
-//   node scripts/check-types.mjs --update    re-anchor drifted entries by their `match`, drop the
-//                                            stale ones. It NEVER adds an entry: a new hit has to
-//                                            be registered by hand with a reason, which is the
-//                                            whole point of the gate.
-//   node scripts/check-types.mjs --stage P6          warn about `until` entries that are due
-//   node scripts/check-types.mjs --stage P6 --strict  FAIL on them instead, so a stage that
-//                                            declares a suppression's expiry cannot keep it.
-//
-// "Due" means the entry's `until` stage is **at or before** the stage under review: `until: P7`
-// is due at P7 (that is the stage it promised to disappear in), not only at P8. Without `--strict`
-// the same list is only a warning, because a warning must not block the stage the entry names.
+// The type policy, executable: no explicit `any`, no `as any`, no `as unknown as X` double assertion, no suppression
+// directive missing from types/any-allowlist.json. The compiler API is the source of truth, not a grep: `any` in a
+// comment is not a type and `'// @ts-ignore'` in a fixture is not a directive, so comments are read through the
+// compiler's own scanner and no string masking is needed. Scope: src/**/*.ts, index.ts, types/**/*.d.ts and
+// client/src/**/*.ts; test/**, scripts/** and e2e/** stay out (a fixture may need a loose type, the allowlist is for
+// product code), and a `.d.ts` beside a `src/` source is not scanned because ambient declarations belong in `types/`,
+// which is. `--update` re-anchors drifted entries by `match` and drops the stale ones but never adds one; `--stage P6`
+// warns about due `until` entries and `--strict` fails them. "Due" means at or before the stage under review, so
+// `until: P7` is due at P7 (the stage it promised to disappear in), not only at P8; without `--strict` that list is
+// only a warning, which must not block the stage the entry names.
 import { readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
-// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
-// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+// fileURLToPath, not URL#pathname: it percent-encodes the space in "C:\Work\my repo" and resolved the wrong root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
-
 const ALLOWLIST_FILE = 'types/any-allowlist.json'
 const SOURCE_DIRS = ['src', 'client/src']
 const SOURCE_FILES = ['index.ts']
@@ -42,7 +23,6 @@ const DECLARATION_DIRS = ['types']
 const MAX_SNIPPET = 96
 const MIN_REASON_LENGTH = 12
 const MIN_EXPECT_ERROR_WORDS = 6
-
 const SECTIONS = ['any', 'doubleAssertion', 'suppressions']
 const SECTION_OF_KIND = {
   any: 'any',
@@ -59,65 +39,45 @@ const ADVICE = {
     'unlisted; `as unknown as X` switches off both directions of assignability, so add a type guard or extend the local declaration, or register it in types/any-allowlist.json with a reason',
   suppression: 'unlisted; register the directive in types/any-allowlist.json under "suppressions" with a reason',
 }
-
 const ALLOWLIST_KEY = /^[^:]+:[1-9][0-9]*$/
 const STAGE_PATTERN = /^P[1-9]$/
 const ENTRY_FIELDS = new Set(['reason', 'match', 'until'])
 const TOP_LEVEL_FIELDS = new Set(['$schema', 'version', 'policy', 'any', 'doubleAssertion', 'suppressions'])
-// TypeScript only honours a directive that opens the comment, and so does this scan:
-// `// the old @ts-ignore is gone` is documentation, not a suppression.
+// TS only honours a directive that opens the comment, and so does this scan: `// old @ts-ignore` is documentation.
 const DIRECTIVE = /^(?:\/|\*)*\s*@ts-(ignore|expect-error|nocheck)\b(.*)$/
-
-// ---- arguments -------------------------------------------------------------------------
 const argv = process.argv.slice(2)
 const update = argv.includes('--update')
 const strict = argv.includes('--strict')
 const stageIndex = argv.indexOf('--stage')
 const stage = stageIndex === -1 ? null : (argv[stageIndex + 1] ?? '')
-
 function fail(message) {
   console.error(`[check-types] FAIL: ${message}`)
   process.exit(1)
 }
-
 for (const [index, argument] of argv.entries()) {
   if (argument === '--update' || argument === '--stage' || argument === '--strict') continue
   if (argv[index - 1] === '--stage') continue
-  fail(
-    `unknown argument ${JSON.stringify(argument)}; usage: node scripts/check-types.mjs [--update] [--stage P6] [--strict]`,
-  )
+  const message = `unknown argument ${JSON.stringify(argument)}; usage: node scripts/check-types.mjs [--update] [--stage P6] [--strict]`
+  fail(message)
 }
-if (stage !== null && !STAGE_PATTERN.test(stage)) {
+if (stage !== null && !STAGE_PATTERN.test(stage))
   fail(`--stage expects a stage such as P6 (found ${JSON.stringify(stage)})`)
-}
-if (strict && stage === null) {
+if (strict && stage === null)
   fail('--strict only means something with --stage; it fails the "until" entries that stage has reached')
-}
-
-// ---- findings, problems and their positions ---------------------------------------------
-/** @type {{file: string, line: number, col: number, rule: string, detail: string}[]} */
 const problems = []
-/** @type {string[]} */
 const warnings = []
-
 function problem(file, line, col, rule, detail) {
   problems.push({ file, line, col, rule, detail })
 }
-
 const relative = (file) => path.relative(root, file).replace(/\\/g, '/')
 const fileOf = (key) => key.slice(0, key.lastIndexOf(':'))
 const lineOfKey = (key) => Number(key.slice(key.lastIndexOf(':') + 1))
-
 function snippetOf(line) {
   const text = (line ?? '').trim()
   return text.length <= MAX_SNIPPET ? text : `${text.slice(0, MAX_SNIPPET - 1)}…`
 }
-
-// ---- scan scope -------------------------------------------------------------------------
-/**
- * Repository-relative TypeScript files under `dir`. A missing directory is not an error:
- * `client/src` only exists once P3 lands, and `types/` arrived with the SSH declarations.
- */
+/** Repository-relative TypeScript files under `dir`. A missing directory is not an error: `client/src` only exists
+ * once the client half lands, and `types/` arrived with the SSH declarations. */
 async function collectSources(dir, { declarations = false } = {}) {
   const found = []
   const entries = await readdir(path.join(root, dir), { withFileTypes: true }).catch(() => [])
@@ -134,7 +94,6 @@ async function collectSources(dir, { declarations = false } = {}) {
   }
   return found
 }
-
 const scanned = new Set()
 for (const dir of SOURCE_DIRS) for (const file of await collectSources(dir)) scanned.add(file)
 for (const file of SOURCE_FILES) if (ts.sys.fileExists(path.join(root, file))) scanned.add(file)
@@ -144,60 +103,40 @@ for (const dir of DECLARATION_DIRS)
 const rootNames = [...scanned].sort().map((file) => path.join(root, file))
 if (rootNames.length === 0)
   fail('no TypeScript sources were found; the scan scope is src/, index.ts, types/ and client/src')
-
-// compilerOptions come from tsconfig.json, the FILE LIST is ours on purpose: tsconfig "include"
-// does not cover client/src until P3, and a program without the client half would pass silently.
+// compilerOptions from tsconfig.json; the file list is ours on purpose, because "include" misses client/src
+// and a program without the client half would pass silently.
 const configFile = ts.readConfigFile(path.join(root, 'tsconfig.json'), ts.sys.readFile)
-if (configFile.error) {
+if (configFile.error)
   fail(`tsconfig.json is unreadable: ${ts.flattenDiagnosticMessageText(configFile.error.messageText, ' ')}`)
-}
 const parsed = ts.parseJsonConfigFileContent(configFile.config ?? {}, ts.sys, root)
 const program = ts.createProgram({
   rootNames,
   options: { ...parsed.options, noEmit: true, allowJs: false, checkJs: false, skipLibCheck: true },
 })
 const own = new Set(rootNames.map((file) => path.resolve(file)))
-
-// ---- AST scan ---------------------------------------------------------------------------
 const ANY_KEYWORD = ts.SyntaxKind.AnyKeyword
-const AS_EXPRESSION = ts.SyntaxKind.AsExpression
-const TYPE_ASSERTION = ts.SyntaxKind.TypeAssertionExpression
-const UNKNOWN_KEYWORD = ts.SyntaxKind.UnknownKeyword
-const isAssertion = (node) => node.kind === AS_EXPRESSION || node.kind === TYPE_ASSERTION
-
-/** @type {{file: string, line: number, col: number, kind: string, snippet: string, directive?: string, words?: number}[]} */
+const isAssertion = (node) =>
+  node.kind === ts.SyntaxKind.AsExpression || node.kind === ts.SyntaxKind.TypeAssertionExpression
 const findings = []
-/** @type {Map<string, string[]>} */
 const sourceLines = new Map()
-
-/**
- * Walk one source file. The parent is threaded through the walk instead of read from
- * `node.parent`: parent pointers are filled in by the binder, which only runs once a type checker
- * exists, and this gate only needs the parse tree.
- */
+/** Walk one source file. The parent is threaded instead of read from `node.parent`: parent pointers are filled in by
+ * the binder (it needs a type checker), and this gate only needs the parse tree. */
 function scanAst(sourceFile, file) {
   const lines = sourceFile.text.split('\n')
   const locate = (node, kind) => {
     const { line, character } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
-    return {
-      file,
-      line: line + 1,
-      col: character + 1,
-      kind,
-      snippet: snippetOf(lines[line]),
-    }
+    return { file, line: line + 1, col: character + 1, kind, snippet: snippetOf(lines[line]) }
   }
   const visit = (node, parent) => {
     if (node.kind === ANY_KEYWORD) {
-      // `x as any` also produces an AnyKeyword for the asserted type: report the assertion only,
-      // so one construct needs one allowlist key and the column points at the expression.
+      // `x as any` yields an AnyKeyword: report the assertion only, one key per construct, column on the expression.
       const insideAssertion = parent !== undefined && isAssertion(parent) && parent.type === node
       if (!insideAssertion) findings.push(locate(node, 'any'))
     } else if (isAssertion(node)) {
       if (node.type.kind === ANY_KEYWORD) findings.push(locate(node, 'as-any'))
       else if (
         isAssertion(node.expression) &&
-        (node.expression.type.kind === ANY_KEYWORD || node.expression.type.kind === UNKNOWN_KEYWORD)
+        (node.expression.type.kind === ANY_KEYWORD || node.expression.type.kind === ts.SyntaxKind.UnknownKeyword)
       )
         findings.push(locate(node, 'double-assertion'))
     }
@@ -206,10 +145,8 @@ function scanAst(sourceFile, file) {
   visit(sourceFile, undefined)
 }
 
-/**
- * Suppression directives are comments, so there is no AST node to match. The compiler's scanner
- * is still the parser here: a `'// @ts-ignore'` string literal is a string token, never a comment.
- */
+/** Suppression directives are comments, so no AST node matches them; the compiler's scanner is still the parser here:
+ * a `'// @ts-ignore'` string literal is a string token, never a comment. */
 function scanDirectives(sourceFile, file) {
   const text = sourceFile.text
   const lines = text.split('\n')
@@ -235,7 +172,6 @@ function scanDirectives(sourceFile, file) {
     })
   }
 }
-
 for (const sourceFile of program.getSourceFiles()) {
   // lib.*.d.ts and @types/* are not ours; without this filter the report drowns in their `any`.
   if (!own.has(path.resolve(sourceFile.fileName))) continue
@@ -245,26 +181,19 @@ for (const sourceFile of program.getSourceFiles()) {
   scanDirectives(sourceFile, file)
 }
 findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col)
-
-// ---- allowlist --------------------------------------------------------------------------
-// The key is `<repo-relative-path>:<1-based-line>`; the entry carries the reason plus an optional
-// `match` (a substring of that line) that turns a shifted line into a stale entry instead of
-// silently allowing whatever moved into the old slot.
+// The key is `<repo-relative-path>:<1-based-line>` plus a reason and an optional `match` (a substring of that line) so
+// a shifted line becomes a stale entry instead of silently allowing whatever moved into that slot.
 const allowlistText = await readFile(path.join(root, ALLOWLIST_FILE), 'utf8').catch(() => null)
-if (allowlistText === null) {
+if (allowlistText === null)
   fail(`${ALLOWLIST_FILE} is missing; it must exist even when empty ({ "version": 1 } plus the three empty sections)`)
-}
-
 let allowlist
 try {
   allowlist = JSON.parse(allowlistText)
 } catch (error) {
   fail(`${ALLOWLIST_FILE} is not valid JSON: ${error.message}`)
 }
-if (allowlist === null || typeof allowlist !== 'object' || Array.isArray(allowlist)) {
+if (allowlist === null || typeof allowlist !== 'object' || Array.isArray(allowlist))
   fail(`${ALLOWLIST_FILE} must contain a JSON object`)
-}
-
 const schemaProblem = (detail) => problem(ALLOWLIST_FILE, 0, 0, 'schema', detail)
 for (const field of Object.keys(allowlist)) {
   if (!TOP_LEVEL_FIELDS.has(field)) schemaProblem(`unknown top-level key ${JSON.stringify(field)}`)
@@ -274,8 +203,6 @@ for (const field of ['$schema', 'policy']) {
   if (allowlist[field] !== undefined && typeof allowlist[field] !== 'string')
     schemaProblem(`"${field}" must be a string`)
 }
-
-/** section -> key -> entry; only structurally usable entries are kept (the rest is already reported). */
 const listed = new Map(SECTIONS.map((section) => [section, new Map()]))
 for (const section of SECTIONS) {
   const entries = allowlist[section]
@@ -297,21 +224,16 @@ for (const section of SECTIONS) {
         schemaProblem(`"${section}" entry ${JSON.stringify(key)} has unknown field ${JSON.stringify(field)}`)
     }
     if (typeof entry.reason !== 'string' || entry.reason.trim().length < MIN_REASON_LENGTH) {
-      schemaProblem(
-        `"${section}" entry ${JSON.stringify(key)} needs a "reason" of at least ${MIN_REASON_LENGTH} characters saying why a narrower type is impossible`,
-      )
+      const message = `"${section}" entry ${JSON.stringify(key)} needs a "reason" of at least ${MIN_REASON_LENGTH} characters saying why a narrower type is impossible`
+      schemaProblem(message)
     }
-    if (entry.match !== undefined && (typeof entry.match !== 'string' || entry.match === '')) {
+    if (entry.match !== undefined && (typeof entry.match !== 'string' || entry.match === ''))
       schemaProblem(`"${section}" entry ${JSON.stringify(key)}: "match" must be a non-empty string`)
-    }
-    if (entry.until !== undefined && (typeof entry.until !== 'string' || !STAGE_PATTERN.test(entry.until))) {
+    if (entry.until !== undefined && (typeof entry.until !== 'string' || !STAGE_PATTERN.test(entry.until)))
       schemaProblem(`"${section}" entry ${JSON.stringify(key)}: "until" must be a stage such as P7`)
-    }
     listed.get(section).set(key, entry)
   }
 }
-
-// ---- bucket the findings by allowlist section --------------------------------------------
 const grouped = new Map(SECTIONS.map((section) => [section, new Map()]))
 for (const finding of findings) {
   if (finding.kind === 'suppression' && finding.directive !== 'expect-error') continue // zero tolerance
@@ -320,10 +242,8 @@ for (const finding of findings) {
   if (!grouped.get(section).has(key)) grouped.get(section).set(key, [])
   grouped.get(section).get(key).push(finding)
 }
-
 const lineOf = (file, line) => sourceLines.get(file)?.[line - 1]
 const lineIncludes = (file, line, needle) => (lineOf(file, line) ?? '').includes(needle)
-
 /** The single entry key of `section` whose line still contains `match`, or null when ambiguous. */
 function reanchor(section, file, match) {
   let found = null
@@ -336,8 +256,7 @@ function reanchor(section, file, match) {
   return found
 }
 
-// `--update` only ever re-anchors by `match` and prunes: a hit with no entry stays a failure, so a
-// mistake in this script can never widen the gate.
+// `--update` only re-anchors by `match` and prunes: a hit with no entry stays a failure, so this cannot widen the gate.
 const changes = []
 if (update) {
   for (const section of SECTIONS) {
@@ -369,84 +288,51 @@ if (update) {
       const what = change.action === 'dropped' ? 'dropped' : `re-anchored to ${JSON.stringify(change.to)}`
       console.log(`[check-types] UPDATED: ${change.section} ${JSON.stringify(change.from)} ${what}`)
     }
-    console.log(
-      `[check-types] UPDATED: ${ALLOWLIST_FILE} rewritten, ${changes.length} change(s); --update never adds an entry`,
-    )
+    const message = `[check-types] UPDATED: ${ALLOWLIST_FILE} rewritten, ${changes.length} change(s); --update never adds an entry`
+    console.log(message)
   } else {
     console.log(`[check-types] UPDATED: ${ALLOWLIST_FILE} needed no change`)
   }
 }
-
-// ---- check: every hit is registered, every entry still hits -------------------------------
+// A forbidden directive cannot be allowlisted at all; @ts-expect-error can, but only with a stated reason.
+const FORBIDDEN = {
+  ignore:
+    '`@ts-ignore` is forbidden and cannot be allowlisted: it never expires, so a later fix leaves a permanent blind spot. Use `@ts-expect-error` with a reason instead (it reports itself once the error is gone)',
+  nocheck: '`@ts-nocheck` is forbidden and cannot be allowlisted: it removes the whole file from `verify:types`',
+}
 for (const finding of findings) {
   if (finding.kind !== 'suppression') continue
-  if (finding.directive === 'ignore') {
-    problem(
-      finding.file,
-      finding.line,
-      finding.col,
-      'suppression',
-      `\`${finding.snippet}\` — \`@ts-ignore\` is forbidden and cannot be allowlisted: it never expires, so a later fix leaves a permanent blind spot. Use \`@ts-expect-error\` with a reason instead (it reports itself once the error is gone)`,
-    )
-    continue
+  const { file, line, col, snippet, words, directive } = finding
+  const forbidden = FORBIDDEN[directive]
+  if (forbidden !== undefined) problem(file, line, col, 'suppression', `\`${snippet}\` — ${forbidden}`)
+  else if (words < MIN_EXPECT_ERROR_WORDS) {
+    const needs = `needs a reason on the same line (at least ${MIN_EXPECT_ERROR_WORDS} words), so the expiry is explainable`
+    problem(file, line, col, 'suppression', `\`${snippet}\` — \`@ts-expect-error\` ${needs}`)
   }
-  if (finding.directive === 'nocheck') {
-    problem(
-      finding.file,
-      finding.line,
-      finding.col,
-      'suppression',
-      `\`${finding.snippet}\` — \`@ts-nocheck\` is forbidden and cannot be allowlisted: it removes the whole file from \`verify:types\``,
-    )
-    continue
-  }
-  if (finding.words < MIN_EXPECT_ERROR_WORDS) {
-    problem(
-      finding.file,
-      finding.line,
-      finding.col,
-      'suppression',
-      `\`${finding.snippet}\` — \`@ts-expect-error\` needs a reason on the same line (at least ${MIN_EXPECT_ERROR_WORDS} words), so the expiry is explainable`,
-    )
-  }
-  // Fall through: an expect-error directive still has to be registered below.
 }
-
 for (const section of SECTIONS) {
   const hits = grouped.get(section)
   const entries = listed.get(section)
   for (const [key, group] of hits) {
     if (entries.has(key)) continue
-    for (const finding of group) {
+    for (const finding of group)
       problem(finding.file, finding.line, finding.col, finding.kind, `\`${finding.snippet}\` — ${ADVICE[finding.kind]}`)
-    }
   }
   for (const [key, entry] of entries) {
     const file = fileOf(key)
     const group = hits.get(key)
     if (group === undefined) {
       const scope = scanned.has(file) ? '' : ' (the file is not in the scan scope)'
-      problem(
-        ALLOWLIST_FILE,
-        0,
-        0,
-        'stale',
-        `${JSON.stringify(key)} matches no ${SECTION_LABEL[section]} hit${scope}; drop it with \`node scripts/check-types.mjs --update\``,
-      )
+      const stale = `${JSON.stringify(key)} matches no ${SECTION_LABEL[section]} hit${scope}; drop it with \`node scripts/check-types.mjs --update\``
+      problem(ALLOWLIST_FILE, 0, 0, 'stale', stale)
       continue
     }
     if (typeof entry.match === 'string' && !lineIncludes(file, lineOfKey(key), entry.match)) {
-      problem(
-        ALLOWLIST_FILE,
-        0,
-        0,
-        'stale',
-        `${JSON.stringify(key)} no longer contains ${JSON.stringify(entry.match)}; the line moved, so re-anchor it with \`node scripts/check-types.mjs --update\``,
-      )
+      const moved = `${JSON.stringify(key)} no longer contains ${JSON.stringify(entry.match)}; the line moved, so re-anchor it with \`node scripts/check-types.mjs --update\``
+      problem(ALLOWLIST_FILE, 0, 0, 'stale', moved)
     }
   }
 }
-
 if (stage !== null) {
   const due = Number(stage.slice(1))
   for (const section of SECTIONS) {
@@ -459,28 +345,20 @@ if (stage !== null) {
     }
   }
 }
-
-// ---- report -----------------------------------------------------------------------------
 problems.sort(
   (a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.col - b.col || a.rule.localeCompare(b.rule),
 )
-const tally = {
-  any: findings.filter((finding) => finding.kind === 'any' || finding.kind === 'as-any').length,
-  'double-assertion': findings.filter((finding) => finding.kind === 'double-assertion').length,
-  suppression: findings.filter((finding) => finding.kind === 'suppression').length,
-}
-const counts = `${tally.any} any / ${tally['double-assertion']} double-assertion / ${tally.suppression} suppression`
+const count = (kind) => findings.filter((finding) => finding.kind === kind).length
+const counts = `${count('any') + count('as-any')} any / ${count('double-assertion')} double-assertion / ${count('suppression')} suppression`
 const allowlisted = SECTIONS.reduce((total, section) => total + listed.get(section).size, 0)
-
 for (const message of warnings) console.warn(`[check-types] WARN: ${message}`)
 if (problems.length > 0) {
   for (const reported of problems) {
     const position = reported.line > 0 ? `${reported.file}:${reported.line}:${reported.col}` : reported.file
     console.error(`[check-types] FAIL: ${position} — ${reported.rule} — ${reported.detail}`)
   }
-  console.error(
-    `[check-types] ${problems.length} problem(s) found; ${rootNames.length} file(s) scanned, ${counts}, ${allowlisted} allowlisted`,
-  )
+  const summary = `[check-types] ${problems.length} problem(s) found; ${rootNames.length} file(s) scanned, ${counts}, ${allowlisted} allowlisted`
+  console.error(summary)
   process.exit(1)
 }
 console.log(`[check-types] OK: ${rootNames.length} files scanned, ${counts}, ${allowlisted} allowlisted`)

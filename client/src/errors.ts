@@ -1,7 +1,6 @@
 // client/src/errors.ts - LOCAL_ERRORS and the ErrorView builders every surface renders; after util.ts, before api-client.ts.
 // i18n-exempt: these are ErrorView payloads the browser itself produces, and the contract keeps them as {zh,en} pairs.
 //#region 5. local error views
-
 /** One template entry: `localErrorView` copies it into a fresh view and adds `technical`. */
 interface LocalErrorTemplate {
   code: string
@@ -50,11 +49,7 @@ const LOCAL_ERRORS: Record<string, LocalErrorTemplate> = {
       { zh: '运行诊断检查隧道状态', en: 'Run diagnostics to check the tunnel' },
     ],
   },
-  /**
-   * DSH's admission fence answered without a JSON envelope (401: no browser session, 403:
-   * Host/Origin refused). Neither is a plugin failure, and retrying the same request cannot
-   * help, so they are their own views instead of the old "internal error".
-   */
+  // DSH's admission fence has no envelope (401: no session, 403: Host/Origin refused) and is not a plugin failure.
   'session-expired': {
     code: 'session-expired',
     retryable: false,
@@ -119,20 +114,13 @@ function localErrorView(code: string, technical?: string): LocalErrorView {
   return view
 }
 
-/**
- * The object the plugin's own failures carry. It extends the view because the old body returned
- * the object itself once `title` and `detail` were present, and callers render it as one.
- */
+/** The object the plugin's own failures carry: the old body returned the view itself once complete. */
 interface FailureLike extends ErrorView {
   view?: ErrorView
   message?: unknown
 }
 
-/**
- * The only predicate the body ever applied: "it is an object". Declaring the result as the
- * failure shape is what lets the two branches below read exactly the members they already
- * tested for - the runtime checks, and therefore the artifact, are unchanged.
- */
+/** The only predicate: "it is an object"; narrowing to the failure shape is what lets the branches read members. */
 function isFailureLike(value: unknown): value is FailureLike {
   return typeof value === 'object' && value !== null
 }

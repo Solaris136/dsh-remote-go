@@ -1,8 +1,5 @@
-/**
- * Starting the remote DSH web: the launch command, the browser-carrier overlay probe, the
- * detached launch script and the `dsh web:` handshake. A launch that fails after its process
- * started stops that pid, so a failed connect leaves nothing running (M2).
- */
+/** Starting the remote DSH web: the launch command, the browser-carrier overlay probe, the detached launch script
+ * and the `dsh web:` handshake. A launch that fails after its process started stops that pid. */
 import type { LaunchPlan } from '../bootstrap.js'
 import { DEFAULT_REMOTE_PROFILE, REMOTE_START_TIMEOUT_MS } from '../constants.js'
 import { errors } from '../errors.js'
@@ -15,36 +12,24 @@ import { LAUNCH_MARKER } from './registry.js'
 import { parseWebLine, remotePidAlive } from './resolve.js'
 import { stopRemoteWeb } from './stop.js'
 
-/** Overlay file the launch passes with `--patch` when the profile disables the carrier. */
 export const BROWSER_CARRIER_PATCH_FILE = 'browser-carrier.patch.yml'
 
-/**
- * The window shows the remote DSH *web* UI, so the `api-remotes` Remote-Event
- * carrier must stay mounted. A profile bundle aimed at a native companion can
- * disable that row (e.g. goldenpigeon's patch does), which leaves the browser
- * client with `typert gateway: $events: forwarded Remote event source is
- * unavailable` and a blank "failed to load plugins" page. Re-enable the row with
- * a launch-only overlay instead of editing the user's profile.
- */
 const BROWSER_CARRIER_PATCH = `# Written by dsh-remote-go. The remote window is a browser client, so the
 # Remote-Event carrier (api-remotes) must stay enabled even when a profile
 # bundle disables it for a native-UI companion.
 - id: api-remotes
   disabled: false`
 
-/** What the launch script announced about the process it started. */
 export interface LaunchedPid {
   pid: number
   port: number
 }
 
-/** The browser-carrier probe's outcome: patched, not needed, or unproven. */
 export interface BrowserCarrierResult {
   status: 'patched' | 'clear' | 'unknown'
   patchPath: string | null
 }
 
-/** One started remote web instance, as the connect pipeline records it. */
 export interface StartedRemoteWeb {
   pid: number
   port: number
@@ -74,8 +59,6 @@ export function buildBrowserCarrierProbe(plan: LaunchPlan, layout: RemoteLayout,
   const pathPrefix = plan.start.nodeBinDir ? `PATH=${shellQuote(plan.start.nodeBinDir)}:"$PATH" ` : ''
   const dumpFile = shellQuote(`${layout.root}/profile-dump.yml`)
   const patchFile = shellQuote(`${layout.root}/${BROWSER_CARRIER_PATCH_FILE}`)
-  // The dump contains the profile's effective configuration: it is created 0600 and removed
-  // again before this script returns, on both the success and the failure path (M3).
   return `set -u
 umask 077
 mkdir -p ${shellQuote(layout.root)}
@@ -107,10 +90,7 @@ export async function ensureBrowserCarrier(
     })
     if (result.code === 0 && result.stdout.includes('PATCH')) {
       options.onLine?.('browser carrier: the profile disables api-remotes; re-enabling it for this launch')
-      return {
-        status: 'patched',
-        patchPath: `${options.layout.root}/${BROWSER_CARRIER_PATCH_FILE}`,
-      }
+      return { status: 'patched', patchPath: `${options.layout.root}/${BROWSER_CARRIER_PATCH_FILE}` }
     }
     if (result.code === 0 && result.stdout.includes('CLEAR')) {
       options.onLine?.('browser carrier: api-remotes is enabled by the profile')
@@ -119,8 +99,7 @@ export async function ensureBrowserCarrier(
     options.onLine?.(`browser carrier: profile probe failed (${headTail(result.stdout + result.stderr, 300)})`)
     return { status: 'unknown', patchPath: null }
   } catch (error) {
-    // swallow-ok: probe failure — launching without the overlay keeps the start
-    // error (missing profile, npx failure) as the actionable one.
+    // swallow-ok: launching without the overlay keeps the start error (missing profile, npx failure)
     options.onLine?.(`browser carrier: probe failed (${messageOf(error)})`)
     return { status: 'unknown', patchPath: null }
   }
@@ -136,11 +115,9 @@ export function buildStartScript(
   const profile = options.profile ?? DEFAULT_REMOTE_PROFILE
   const logFile = shellQuote(layout.logFile)
   const runFile = shellQuote(layout.runFile)
+  // `umask 077` keeps the log (which carries the launch URL with its token) private; the run registry is written to
+  // a temp file and renamed, so a reader never sees a half-written record.
   const startedAtPlaceholder = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-  // `umask 077` keeps the log (and the launch's state directory) private: the log carries the
-  // launch URL with its token, and the default umask used to leave it world-readable (M3).
-  // The run registry is written to a temp file and renamed, so a reader never sees a
-  // half-written record (M4).
   return `set -eu
 umask 077
 mkdir -p ${shellQuote(layout.logsDir)} ${shellQuote(layout.runDir)} ${shellQuote(layout.stateHome)}
@@ -181,47 +158,12 @@ echo "DONE:$PID:$PORT"
 `
 }
 
-/** The pid the launch script announced, from `DONE:` or the earlier `PID:` line. */
 export function parseLaunchedPid(text: unknown): LaunchedPid {
   const combined = String(text ?? '')
   const done = /DONE:(\d+):(\d+)/.exec(combined)
   if (done) return { pid: Number(done[1]), port: Number(done[2]) }
   const started = /(?:^|\n)PID:(\d+)\s*(?:\n|$)/.exec(combined)
-  if (started) return { pid: Number(started[1]), port: 0 }
-  return { pid: 0, port: 0 }
-}
-
-/**
- * Stop a launch that failed *after* it started: the detached process must not be left
- * running on the remote just because its readiness line never parsed (M2).
- *
- * Only the pid this launch script printed is ours to stop. `run/web.json` may name another
- * instance (a re-attached process, or a previous launch), so it is deliberately not used as
- * a fallback here: killing that pid would be exactly the "a re-attached instance is not
- * stopped" rule the connect pipeline enforces (review blocker 2).
- */
-async function stopFailedLaunch(
-  ssh: SshPort,
-  layout: RemoteLayout,
-  startedPid: number,
-  onLine?: (line: string) => void,
-): Promise<{ ok: boolean; pid: number | null; output?: string }> {
-  if (!isPid(startedPid)) return { ok: false, pid: null }
-  let alive = false
-  try {
-    alive = await remotePidAlive(ssh, startedPid)
-  } catch {
-    // swallow-ok: an unreadable liveness check means "cannot prove it is ours", so no signal
-    return { ok: false, pid: null }
-  }
-  if (!alive) return { ok: false, pid: null }
-  const stopped = await stopRemoteWeb(ssh, layout, { pid: startedPid })
-  onLine?.(
-    `start failed after pid ${startedPid} was launched; ${
-      stopped.ok === true ? 'it was stopped' : 'it could not be stopped'
-    }`,
-  )
-  return { ok: stopped.ok === true, pid: startedPid, output: stopped.output }
+  return started ? { pid: Number(started[1]), port: 0 } : { pid: 0, port: 0 }
 }
 
 export async function startRemoteWeb(
@@ -250,24 +192,32 @@ export async function startRemoteWeb(
     maxBytes: 200_000,
     onStdout: (chunk) => {
       for (const line of chunk.split(/\r?\n/)) {
-        if (line !== '') {
-          lines.push(line)
-          options.onLine?.(line)
-        }
+        if (line === '') continue
+        lines.push(line)
+        options.onLine?.(line)
       }
     },
   })
+  // The launch script prints its pid before it waits, so a failure can still stop what it started.
   const combined = `${result.stdout}\n${result.stderr}`
-  // The launch script prints its pid before it waits for the readiness line: keep it even
-  // when the wait itself fails, so a failure can stop what it started (M2).
   const launched = parseLaunchedPid(combined)
   const failed = async (error: unknown): Promise<unknown> => {
-    await stopFailedLaunch(ssh, layout, launched.pid, options.onLine)
+    if (isPid(launched.pid)) {
+      let alive = false
+      try {
+        alive = await remotePidAlive(ssh, launched.pid)
+      } catch {
+        // swallow-ok: an unreadable liveness check means "cannot prove it is ours", so no signal
+      }
+      if (alive) {
+        const stopped = await stopRemoteWeb(ssh, layout, { pid: launched.pid })
+        const outcome = stopped.ok === true ? 'it was stopped' : 'it could not be stopped'
+        options.onLine?.(`start failed after pid ${launched.pid} was launched; ${outcome}`)
+      }
+    }
     return error
   }
-  if (result.code !== 0) {
-    throw await failed(errors.remoteDshStartFailed(headTail(combined, 1500)))
-  }
+  if (result.code !== 0) throw await failed(errors.remoteDshStartFailed(headTail(combined, 1500)))
   const parsed = parseWebLine(combined)
   if (!parsed) throw await failed(errors.remoteDshStartFailed(headTail(combined, 1500)))
   if (!isLoopbackHost(parsed.host)) {
@@ -278,15 +228,13 @@ export async function startRemoteWeb(
       }),
     )
   }
-  const pid = launched.pid
-  const startedAt = new Date().toISOString()
   return {
-    pid,
+    pid: launched.pid,
     port: parsed.port,
     token: parsed.token,
     url: parsed.url,
     logPath: layout.logFile,
-    startedAt,
+    startedAt: new Date().toISOString(),
     rawLine: parsed.rawLine,
     profile,
     dshHome: layout.dshHome,

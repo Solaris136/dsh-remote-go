@@ -1,17 +1,9 @@
-/**
- * The per-host cookie jar of the same-origin proxy.
- *
- * The remote hands its session cookie to a browser that speaks to the local origin, so those
- * cookies are kept here instead: one jar per host, bounded, and never handed to the local GUI's
- * own cookie jar (both GUIs answer on 127.0.0.1, so browser cookies are shared across ports).
- */
+/** The per-host cookie jar of the same-origin proxy: the remote's session cookies are kept here, bounded, and never in
+ * the local GUI's jar (both GUIs answer on 127.0.0.1, so browser cookies are shared across ports). */
 import type { ProxyTarget } from './headers.js'
 
-/**
- * Bounds of one host's cookie jar. The remote decides what to set, so the jar needs a ceiling:
- * 64 cookies of at most 4 KiB keep a hostile or simply broken remote from growing the process,
- * and a cookie the remote marks `Secure` never lands in this plaintext, in-memory jar at all.
- */
+/** Bounds of one host's cookie jar: the remote decides what to set, so the jar needs a ceiling and a hostile or broken
+ * remote must not grow the process. A `Secure` cookie never lands in this plaintext, in-memory jar at all. */
 export const MAX_JAR_COOKIES = 64
 export const MAX_COOKIE_VALUE = 4096
 export const MAX_COOKIE_NAME = 128
@@ -24,11 +16,8 @@ export interface ParsedCookie {
   expiresAt: number
   secure: boolean
 }
-
-/**
- * One cookie as the jar keeps it. `name` is repeated because a jar entry has to be complete on its
- * own when it is read back; `secure` is absent because such a cookie is never stored.
- */
+/** One cookie as the jar keeps it. `name` is repeated because a jar entry has to be complete on its own when it is read
+ * back; `secure` is absent because such a cookie is never stored. */
 export interface StoredCookie {
   name: string
   value: string
@@ -39,19 +28,15 @@ export interface StoredCookie {
 /** One host's cookies, keyed by name; values never leave this process. */
 export type CookieJar = Map<string, StoredCookie>
 
-/**
- * Parse one `Set-Cookie` line into the jar entry it should replace.
- * Only the attributes that decide whether and where the value is sent are kept.
- * @param line - one Set-Cookie header value.
- */
+/** Parse one `Set-Cookie` line into the jar entry it should replace: only the attributes that decide whether and where
+ * the value is sent are kept. */
 export function parseSetCookie(line: string): ParsedCookie | null {
   const [pair, ...attributes] = String(line ?? '').split(';')
   const equals = pair.indexOf('=')
   if (equals <= 0) return null
   const name = pair.slice(0, equals).trim()
   const value = pair.slice(equals + 1).trim()
-  if (name === '' || name.length > MAX_COOKIE_NAME) return null
-  if (value.length > MAX_COOKIE_VALUE) return null
+  if (name === '' || name.length > MAX_COOKIE_NAME || value.length > MAX_COOKIE_VALUE) return null
   let cookiePath = '/'
   let expiresAt = Number.POSITIVE_INFINITY
   let secure = false
@@ -73,28 +58,15 @@ export function parseSetCookie(line: string): ParsedCookie | null {
   return { name, value, path: cookiePath, expiresAt, secure }
 }
 
-/** One host's cookies, keyed by name; values never leave this process. */
-function createCookieJar(): CookieJar {
-  return new Map()
-}
-
-/**
- * Store every non-expired cookie from one response and drop the ones it cleared.
- * @param jar - host jar.
- * @param setCookie - raw Set-Cookie value(s).
- */
+/** Store every non-expired cookie from one response and drop the ones it cleared. */
 export function storeCookies(jar: CookieJar, setCookie: string | string[] | undefined): void {
   if (setCookie === undefined) return
   for (const line of Array.isArray(setCookie) ? setCookie : [setCookie]) {
     const entry = parseSetCookie(line)
     if (entry === null) continue
-    if (entry.value === '' || entry.expiresAt <= Date.now()) {
-      jar.delete(entry.name)
-      continue
-    }
-    // The tunnel is plain HTTP to 127.0.0.1, so a `Secure` cookie is not one this jar may
-    // keep: storing and replaying it would downgrade a flag the remote asked for.
-    if (entry.secure) {
+    // A `Secure` cookie is refused too: the tunnel is plain HTTP to 127.0.0.1, so replaying it would downgrade a
+    // flag the remote asked for.
+    if (entry.value === '' || entry.expiresAt <= Date.now() || entry.secure) {
       jar.delete(entry.name)
       continue
     }
@@ -103,11 +75,7 @@ export function storeCookies(jar: CookieJar, setCookie: string | string[] | unde
   }
 }
 
-/**
- * Cookies whose path covers the upstream path, as one Cookie header value.
- * @param jar - host jar.
- * @param path - upstream request path.
- */
+/** Cookies whose path covers the upstream path, as one `Cookie` header value. */
 export function cookieHeader(jar: CookieJar, path: string): string {
   const now = Date.now()
   const parts: string[] = []
@@ -116,22 +84,17 @@ export function cookieHeader(jar: CookieJar, path: string): string {
       jar.delete(name)
       continue
     }
-    const covers =
-      entry.path === '/' ||
-      path === entry.path ||
-      path.startsWith(`${entry.path.endsWith('/') ? entry.path.slice(0, -1) : entry.path}/`)
-    if (covers) parts.push(`${name}=${entry.value}`)
+    const base = entry.path.endsWith('/') ? entry.path.slice(0, -1) : entry.path
+    if (entry.path === '/' || path === entry.path || path.startsWith(`${base}/`)) {
+      parts.push(`${name}=${entry.value}`)
+    }
   }
   return parts.join('; ')
 }
 
 /** One host's jar, bound to the remote authority it was filled from (see `jarFor`). */
-interface HostJar {
-  authority: string
-  jar: CookieJar
-}
+type HostJar = { authority: string; jar: CookieJar }
 
-/** The per-host jars one proxy activation owns. */
 export interface JarBook {
   /** The jar for one host, rebuilt whenever the remote authority behind it changed. */
   jarFor: (hostId: string, target: ProxyTarget) => CookieJar
@@ -141,33 +104,21 @@ export interface JarBook {
   get: (hostId: string) => CookieJar | undefined
 }
 
-/**
- * Create the per-host jar book.
- *
- * `authorityOf` is injected instead of imported: `remoteAuthority` is defined next to the header
- * rewriting, and `headers.ts` already imports `cookieHeader` from here, so reaching back would
- * make the two leaf modules import each other.
- */
+/** Create the per-host jar book. `authorityOf` is injected instead of imported: `remoteAuthority` lives with header
+ * rewriting, which already imports `cookieHeader` here, so reaching back would make two leaves import each other. */
 export function createJarBook(authorityOf: (target: ProxyTarget) => string): JarBook {
   const jars = new Map<string, HostJar>()
-
-  /**
-   * The per-host cookie jar is bound to the remote authority it was filled from: after a
-   * restart or a re-attach the remote comes back on a new random port, and cookies issued
-   * by the old instance must not be sent to the new one (nor kept after the host is gone).
-   */
-  function jarFor(hostId: string, target: ProxyTarget): CookieJar {
-    const authority = authorityOf(target)
-    let entry = jars.get(hostId)
-    if (entry === undefined || entry.authority !== authority) {
-      entry = { authority, jar: createCookieJar() }
-      jars.set(hostId, entry)
-    }
-    return entry.jar
-  }
-
   return {
-    jarFor,
+    // A jar is bound to the authority it was filled from: after a restart or a re-attach the remote comes back on a
+    // new random port, and cookies issued by the old instance must not be sent to the new one.
+    jarFor(hostId: string, target: ProxyTarget): CookieJar {
+      const authority = authorityOf(target)
+      const entry = jars.get(hostId)
+      if (entry !== undefined && entry.authority === authority) return entry.jar
+      const fresh: HostJar = { authority, jar: new Map<string, StoredCookie>() }
+      jars.set(hostId, fresh)
+      return fresh.jar
+    },
     clear(hostId?: string): void {
       if (hostId === undefined) jars.clear()
       else jars.delete(hostId)

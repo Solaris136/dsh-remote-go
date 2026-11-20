@@ -1,6 +1,4 @@
-/**
- * Local SSH material (read-only): `~/.ssh/config` and `~/.ssh/known_hosts`; never writes, never prompts.
- */
+/** Local SSH material (read-only): `~/.ssh/config` and `~/.ssh/known_hosts`; never writes, never prompts. */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -27,17 +25,15 @@ export async function loadLocalSshMaterial(input: LocalSshInput): Promise<LocalS
   const knownHostsPath = path.join(sshDir, 'known_hosts')
   const exists = input.exists ?? existsSync
   const read = input.readFileImpl ?? readFile
-  let configText = ''
-  let knownHostsText = ''
-  try {
-    if (exists(configPath)) configText = await read(configPath, 'utf8')
-  } catch {
-    configText = ''
+  // A missing or unreadable file reads as empty: the wizard has nothing to offer either way.
+  const readIf = async (target: string): Promise<string> => {
+    try {
+      return exists(target) ? await read(target, 'utf8') : ''
+    } catch {
+      return ''
+    }
   }
-  try {
-    if (exists(knownHostsPath)) knownHostsText = await read(knownHostsPath, 'utf8')
-  } catch {
-    knownHostsText = ''
-  }
+  const configText = await readIf(configPath)
+  const knownHostsText = await readIf(knownHostsPath)
   return { sshDir, configText, knownHostsText, configPath, knownHostsPath }
 }

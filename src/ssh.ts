@@ -1,22 +1,13 @@
-/**
- * The ssh2 adapter for `SshPort` (design-ssh §4).
- *
- * `SshConnection` is the only class in `src/` that talks to `vendor/ssh2.bundle.cjs`; every other
- * module depends on `src/ssh-port.ts`. The class name and its constructor are frozen until P7
- * because four integration suites construct it directly against a real (simulated) SSH server.
- *
- * What lives here is the transport itself: auth-candidate fallback, the five-step host-key
- * decision, the handshake lifecycle (including "emit `close` before rejecting during a
- * handshake"), `exec`, `forwardOut` and `dispose`. Two concerns moved out without changing a call
- * site: the SFTP capability (`ssh-sftp.ts`) and the failure classification (`ssh-failures.ts`).
- */
+/** The ssh2 adapter for `SshPort`, the only class here that talks to `vendor/ssh2.bundle.cjs`; its name and constructor
+ * are frozen (four integration suites build it directly). It owns auth fallback, the host-key decision, the handshake
+ * lifecycle, `exec`/`forwardOut`/`dispose`; SFTP and failure classification live in the two sibling modules. */
 import { EventEmitter } from 'node:events'
 import { open } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
 import ssh2 from '../vendor/ssh2.bundle.cjs'
-import type { Client as Ssh2Client, ClientChannel, ConnectConfig, SftpSession } from '../vendor/ssh2.bundle.cjs'
+import type { Client as Ssh2Client, ClientChannel, SftpSession } from '../vendor/ssh2.bundle.cjs'
 import { errors } from './errors.js'
 import { fingerprintFromBlob } from './known-hosts.js'
 import { classifySshFailure, closedError, isHostKeyError } from './ssh-failures.js'
@@ -24,9 +15,7 @@ import {
   DEFAULT_EXEC_MAX_BYTES,
   DEFAULT_EXEC_TIMEOUT_MS,
   type ConnectInfo,
-  type HostKeyInfo,
   type SftpDownloadOptions,
-  type SshAuthOptions,
   type SshConnectOptions,
   type SshExecOptions,
   type SshExecResult,
@@ -40,17 +29,10 @@ import { expandHome } from './util.js'
 
 const { Client } = ssh2
 
-/**
- * The adapter's own options: the port's connect options plus the one seam unit tests need.
- * `clientFactory` is internal — production never sets it; tests hand in a scripted ssh2 client.
- */
-export interface Ssh2PortOptions extends SshConnectOptions {
-  clientFactory?: () => Ssh2Client
-}
-
+/** The adapter's own options: the port's connect options plus the one seam unit tests need (`clientFactory`). */
+export type Ssh2PortOptions = SshConnectOptions & { clientFactory?: () => Ssh2Client }
 /** The options object after the constructor applied its defaults. */
-interface SshResolvedOptions {
-  host: string
+interface SshResolvedOptions extends SshConnectOptions {
   port: number
   hostKeyPolicy: SshHostKeyPolicy
   pinnedFingerprint: string | null
@@ -58,32 +40,21 @@ interface SshResolvedOptions {
   readyTimeoutMs: number
   keepaliveIntervalMs: number
   home: string
-  username?: string | null
-  auth?: SshAuthOptions
-  sock?: ConnectConfig['sock']
-  acceptUnknownHostKey?: boolean
-  onHostKey?: (info: HostKeyInfo) => boolean | Promise<boolean>
   identityFiles: string[]
 }
 
 /** One auth attempt handed to `connectOnce`: a key blob or a one-time password. */
 export type SshAuthCandidate = { privateKey: Buffer } | { password: string; tryKeyboard: true }
 
-/** Settle a promise at most once; later calls are ignored, so callers need no flag. */
-function oneShot<T>(
-  resolve: (value: T) => void,
-  reject: (error: unknown) => void,
-  cleanup?: () => void,
-): (error: unknown, value?: T) => void {
+/** Settle a promise at most once (later calls are ignored), so callers need no flag. */
+function oneShot<T>(resolve: (value: T) => void, reject: (error: unknown) => void, cleanup?: () => void) {
   let settled = false
-  return (error, value) => {
+  return (error: unknown, value?: T) => {
     if (settled) return
     settled = true
     cleanup?.()
-    if (error) reject(error)
-    // The settled-once contract passes exactly one of error/value, so the success branch
-    // always carries the value this `as` restates (the optional parameter cannot express it).
-    else resolve(value as T)
+    // The settled-once contract passes exactly one of error/value, so the success branch carries it.
+    error ? reject(error) : resolve(value as T)
   }
 }
 
@@ -99,22 +70,16 @@ export function parseSshKeyType(blob: Buffer): string {
   }
 }
 
-/**
- * The ssh2 implementation of `SshPort`.
- *
- * Every failure it produces is a `RemoteGoError` (through `classifySshFailure` / `closedError`),
- * and the SFTP capabilities are declared, so `typeof port.saveRemoteFile === 'function'` is how a
- * caller tells them from a transport that cannot download.
- */
+/** The ssh2 implementation of `SshPort`: every failure is a `RemoteGoError`, and the download members are declared. */
 export class SshConnection extends EventEmitter implements SshPort {
   declare options: SshResolvedOptions
-  declare client: Ssh2Client | null
-  declare fingerprint: string | null
-  declare keyType: string | null
-  declare closed: boolean
-  declare disposed: boolean
-  declare hostKeyDecision: Promise<boolean> | null
-  declare clientFactory: () => Ssh2Client
+  client: Ssh2Client | null = null
+  fingerprint: string | null = null
+  keyType: string | null = null
+  closed = false
+  disposed = false
+  hostKeyDecision: Promise<boolean> | null = null
+  clientFactory: () => Ssh2Client = () => new Client()
 
   constructor(options: Ssh2PortOptions) {
     super()
@@ -129,18 +94,9 @@ export class SshConnection extends EventEmitter implements SshPort {
       ...options,
       identityFiles: options.identityFiles ?? [],
     }
-    this.client = null
-    this.fingerprint = null
-    this.keyType = null
-    this.closed = false
-    this.disposed = false
-    this.hostKeyDecision = null
-    // ssh2 clients emit `error` for every failed auth attempt and again while
-    // tearing down. EventEmitter treats an unhandled `error` as a thrown
-    // exception, which would take down the whole DSH host process; keep a
-    // permanent safety listener so failures stay inside this connection.
+    // ssh2 emits `error` on every failed auth attempt and while tearing down; unhandled, it would kill the Host.
     this.on('error', () => {})
-    this.clientFactory = typeof options.clientFactory === 'function' ? options.clientFactory : () => new Client()
+    if (typeof options.clientFactory === 'function') this.clientFactory = options.clientFactory
   }
 
   get connected(): boolean {
@@ -160,9 +116,7 @@ export class SshConnection extends EventEmitter implements SshPort {
     for (const candidate of candidates) {
       try {
         const info = await this.connectOnce(candidate)
-        this.client?.on('error', (error: Error) => {
-          this.emit('error', error)
-        })
+        this.client?.on('error', (error: Error) => this.emit('error', error))
         return info
       } catch (error) {
         lastError = error
@@ -178,48 +132,33 @@ export class SshConnection extends EventEmitter implements SshPort {
     return new Promise((resolve, reject) => {
       const settle = oneShot(resolve, reject)
       const client = this.clientFactory()
+      const endpoint = { host: this.options.host, port: this.options.port }
       this.client = client
-      // A rejected earlier candidate tears its transport down through
-      // `cleanupClient()`, which marks this object closed. A new attempt owns a
-      // fresh client, so it must clear the flag again; otherwise a successful
-      // fallback (agent -> key on a machine without an SSH agent) would report
-      // `connected === false` and every later `exec`/`forwardOut` would throw
-      // "SSH connection is not open" on a transport that is actually up.
+      // A rejected candidate was torn down by `cleanupClient()`, marking this closed; the new attempt owns a fresh
+      // client, so the flag must clear or a working fallback would report "not open".
       this.closed = false
-      // An attempt that has already failed is torn down by its own error/close pair (a DNS
-      // resolution failure emits both synchronously), and that close is the teardown of a
-      // connection that never existed - not a lost link. Without this flag the wrapper would
-      // emit `close`, the pipeline would read a transport drop and retry a first connection
-      // that never got off the ground (review: close-after-error).
+      // An attempt that already failed tears itself down (error+close in one tick): without this flag that close
+      // would look like a dropped link, and a first connection that never started would be retried as one.
       let attemptFailed = false
-      // Attach the close handling *before* dialling: a transport that dies during the
-      // handshake (for example while a host-key prompt is open) must be observable and must
-      // reject the connect promise instead of hanging until the ready timeout. `this.client
-      // !== client` filters a superseded auth attempt, whose teardown is not a lost link.
+      // Attach the close handling *before* dialling: a transport that dies during the handshake (while a host-key
+      // prompt is open) must reject the connect promise, and `this.client !== client` filters a superseded attempt,
+      // whose teardown is not a lost link.
       client.once('close', () => {
-        if (attemptFailed) return
-        if (this.client !== client) return
+        if (attemptFailed || this.client !== client) return
         this.closed = true
-        // Decision D3: emit before rejecting. `connect-pipeline`'s two watchers rely on the
-        // event arriving for a handshake that died while a host-key prompt was parked.
+        // Emit before rejecting: connect-pipeline's watchers rely on the event for a parked prompt.
         this.emit('close')
-        settle(
-          classifySshFailure(new Error('the connection closed during the SSH handshake'), {
-            host: this.options.host,
-            port: this.options.port,
-          }),
-        )
+        settle(classifySshFailure(new Error('the connection closed during the SSH handshake'), endpoint))
       })
       client.once('ready', () => {
         const info: ConnectInfo = { fingerprint: this.fingerprint ?? '', keyType: this.keyType ?? '' }
         this.emit('ready', info)
         settle(null, info)
       })
-      // Permanent listener: settle the promise on the first error, swallow any
-      // later teardown errors (they are already reflected in the rejection).
+      // Settle on the first error and swallow any later teardown errors.
       client.on('error', (error: Error) => {
         attemptFailed = true
-        settle(classifySshFailure(error, { host: this.options.host, port: this.options.port }))
+        settle(classifySshFailure(error, endpoint))
       })
       const config = {
         host: this.options.host,
@@ -233,7 +172,7 @@ export class SshConnection extends EventEmitter implements SshPort {
         ...authConfig,
         hostVerifier: (keyBlob: Buffer, verify: (accepted: boolean) => void) => {
           this.verifyHostKey(keyBlob)
-            .then((accepted) => verify(accepted))
+            .then(verify)
             .catch(() => verify(false))
         },
       }
@@ -241,16 +180,14 @@ export class SshConnection extends EventEmitter implements SshPort {
         client.connect(config)
       } catch (error) {
         attemptFailed = true
-        settle(classifySshFailure(error, { host: this.options.host, port: this.options.port }))
+        settle(classifySshFailure(error, endpoint))
       }
     })
   }
 
-  /**
-   * The five-level host-key decision: pin → known_hosts → acceptUnknown → a decision already in
-   * flight → policy (ask) → refuse. Emits `hostkey-*` as it goes.
-   * @internal exercised directly by `test/unit/ssh.test.js`; not part of `SshPort`.
-   */
+  /** The five-level host-key decision: pin → known_hosts → acceptUnknown → a decision in flight → policy (strict or
+   * ask) → refuse. Emits `hostkey-*` as it goes.
+   * @internal exercised directly by `test/unit/ssh.test.js`; not part of `SshPort`. */
   async verifyHostKey(keyBlob: Buffer): Promise<boolean> {
     const sha256 = fingerprintFromBlob(keyBlob)
     const keyType = parseSshKeyType(keyBlob)
@@ -274,11 +211,8 @@ export class SshConnection extends EventEmitter implements SshPort {
       return true
     }
     if (this.hostKeyDecision) return this.hostKeyDecision
-    if (this.options.hostKeyPolicy === 'strict') {
-      throw errors.hostKeyUnknown(sha256)
-    }
-    if (typeof this.options.onHostKey !== 'function') {
-      // No UI attached (tests/automation): refuse rather than silently trust.
+    // A strict policy, or no UI attached (tests/automation): refuse rather than silently trust.
+    if (this.options.hostKeyPolicy === 'strict' || typeof this.options.onHostKey !== 'function') {
       throw errors.hostKeyUnknown(sha256)
     }
     this.emit('hostkey-pending', info)
@@ -291,28 +225,21 @@ export class SshConnection extends EventEmitter implements SshPort {
     return true
   }
 
-  /**
-   * The candidate list: a password when one is set, otherwise key files only. There is
-   * deliberately no agent candidate (``~/.ssh/id_{ed25519,rsa,ecdsa}`` is the fallback chain).
-   * @internal exercised directly by `test/unit/ssh.test.js`; not part of `SshPort`.
-   */
+  /** The candidate list: a password when one is set, otherwise key files only — deliberately no agent candidate. The
+   * configured path wins; the conventional names follow, so a host added with the default key path still connects.
+   * @internal exercised directly by `test/unit/ssh.test.js`; not part of `SshPort`. */
   async resolveAuthCandidates(): Promise<SshAuthCandidate[]> {
     const auth = this.options.auth ?? { type: 'key' }
-    const out: SshAuthCandidate[] = []
-    if (auth.type === 'password') {
-      if (auth.password) out.push({ password: auth.password, tryKeyboard: true })
-      return out
-    }
-    // Key-file authentication only: there is deliberately no agent candidate. The
-    // configured path wins; when it is missing or unset the conventional names are
-    // tried, so a host added with the default key path still connects.
+    if (auth.type === 'password') return auth.password ? [{ password: auth.password, tryKeyboard: true }] : []
+    const sshDir = path.join(this.options.home, '.ssh')
     const keyPaths = [
       ...(auth.keyPath ? [expandHome(auth.keyPath, this.options.home)] : []),
       ...(this.options.identityFiles ?? []),
-      path.join(this.options.home, '.ssh', 'id_ed25519'),
-      path.join(this.options.home, '.ssh', 'id_rsa'),
-      path.join(this.options.home, '.ssh', 'id_ecdsa'),
+      path.join(sshDir, 'id_ed25519'),
+      path.join(sshDir, 'id_rsa'),
+      path.join(sshDir, 'id_ecdsa'),
     ]
+    const out: SshAuthCandidate[] = []
     const seen = new Set<string>()
     for (const keyPath of keyPaths) {
       if (!keyPath) continue
@@ -333,17 +260,24 @@ export class SshConnection extends EventEmitter implements SshPort {
         reject(closedError())
         return
       }
-      let timedOut = false
       let timer: ReturnType<typeof setTimeout> | null = null
-      const chunks = { stdout: '', stderr: '' }
+      const result: SshExecResult = { code: null, signal: null, stdout: '', stderr: '', timedOut: false }
       const finish = oneShot(resolve, reject, () => {
         if (timer) clearTimeout(timer)
         options.signal?.removeEventListener?.('abort', onAbort)
       })
-      const onAbort = () => {
-        finish(new Error('aborted'))
-      }
+      const onAbort = () => finish(new Error('aborted'))
       options.signal?.addEventListener?.('abort', onAbort, { once: true })
+      // `maxBytes` truncation is silent by contract: no error, no flag, the excess is dropped.
+      const collect = (target: 'stdout' | 'stderr', text: string, listener?: (text: string) => void) => {
+        if (result[target].length >= maxBytes) return
+        result[target] += text
+        try {
+          listener?.(text)
+        } catch {
+          // swallow-ok: stream listeners must not break the command
+        }
+      }
       this.client.exec(command, { env: options.env }, (error, stream) => {
         if (error) {
           finish(error)
@@ -351,14 +285,13 @@ export class SshConnection extends EventEmitter implements SshPort {
         }
         if (timeoutMs > 0) {
           timer = setTimeout(() => {
-            // A deadline is a result, not a rejection: `timedOut` is the caller's signal, and
-            // the existing `{code,signal,stdout,stderr}` contract must not gain a throw path.
-            timedOut = true
+            // A deadline is a result, not a rejection: `timedOut` is the caller's signal and the result contract
+            // must not gain a throw path.
+            result.timedOut = true
             stream.destroy()
           }, timeoutMs)
         }
-        // Optional stdin (file uploads): the command reads it, so a secret never
-        // appears on the remote command line.
+        // Optional stdin (file uploads): the command reads it, so a secret never reaches the remote command line.
         if (options.stdin !== undefined) {
           try {
             stream.end(String(options.stdin))
@@ -367,38 +300,12 @@ export class SshConnection extends EventEmitter implements SshPort {
             return
           }
         }
-        stream.on('data', (data: Buffer) => {
-          const text = data.toString('utf8')
-          // `maxBytes` truncation is silent by contract: no error, no flag, the excess is dropped.
-          if (chunks.stdout.length < maxBytes) {
-            chunks.stdout += text
-            // The consumer is a progress reporter: its failure must not abort the command.
-            try {
-              options.onStdout?.(text)
-            } catch {
-              // swallow-ok: stdout listeners must not break the command
-            }
-          }
-        })
-        stream.stderr.on('data', (data: Buffer) => {
-          const text = data.toString('utf8')
-          if (chunks.stderr.length < maxBytes) {
-            chunks.stderr += text
-            try {
-              options.onStderr?.(text)
-            } catch {
-              // swallow-ok: stderr listeners must not break the command
-            }
-          }
-        })
+        stream.on('data', (data: Buffer) => collect('stdout', data.toString('utf8'), options.onStdout))
+        stream.stderr.on('data', (data: Buffer) => collect('stderr', data.toString('utf8'), options.onStderr))
         stream.on('close', (code: number | null, signal: string | null) => {
-          finish(null, {
-            code: code ?? null,
-            signal: signal ?? null,
-            stdout: chunks.stdout,
-            stderr: chunks.stderr,
-            timedOut,
-          })
+          result.code = code ?? null
+          result.signal = signal ?? null
+          finish(null, result)
         })
         stream.on('error', (streamError: Error) => finish(streamError))
       })
@@ -411,42 +318,33 @@ export class SshConnection extends EventEmitter implements SshPort {
     return openSftpSession(this.client)
   }
 
-  /** Stream one remote file into a local path; the session is closed in `finally`. */
-  async saveRemoteFile(
-    remotePath: string,
-    localPath: string,
-    options: SftpDownloadOptions = {},
-  ): Promise<{ size: number }> {
+  /** Run one download step on a fresh SFTP session and close it in `finally`: the three downloads share this. */
+  private async withSftp<T>(run: (sftp: SftpSession) => Promise<T>): Promise<T> {
     const sftp = await this.openSftp()
     try {
-      return await saveSftpFile(sftp, remotePath, localPath, options)
+      return await run(sftp)
     } finally {
       endSftp(sftp)
     }
+  }
+
+  /** Stream one remote file into a local path; the session is closed in `finally`. */
+  saveRemoteFile(remotePath: string, localPath: string, options: SftpDownloadOptions = {}): Promise<{ size: number }> {
+    return this.withSftp((sftp) => saveSftpFile(sftp, remotePath, localPath, options))
   }
 
   /** Inspect one remote path without reading it. */
-  async inspectRemotePath(remotePath: string): Promise<SshRemoteFileInfo> {
-    const sftp = await this.openSftp()
-    try {
-      return await inspectSftpPath(sftp, remotePath)
-    } finally {
-      endSftp(sftp)
-    }
+  inspectRemotePath(remotePath: string): Promise<SshRemoteFileInfo> {
+    return this.withSftp((sftp) => inspectSftpPath(sftp, remotePath))
   }
 
   /** Copy a remote directory to a local directory; see `saveSftpTree` for the exact contract. */
-  async saveRemoteTree(
+  saveRemoteTree(
     remotePath: string,
     targetRoot: string,
     options: SftpDownloadOptions = {},
   ): Promise<SshTreeDownloadResult> {
-    const sftp = await this.openSftp()
-    try {
-      return await saveSftpTree(sftp, remotePath, targetRoot, options)
-    } finally {
-      endSftp(sftp)
-    }
+    return this.withSftp((sftp) => saveSftpTree(sftp, remotePath, targetRoot, options))
   }
 
   forwardOut(destHost: string, destPort: number, srcHost = '127.0.0.1', srcPort = 0): Promise<ClientChannel> {
@@ -467,6 +365,7 @@ export class SshConnection extends EventEmitter implements SshPort {
     const client = this.client
     this.cleanupClient()
     if (!client) return
+    // The remote never acknowledges, so bound the wait for our own transport to close.
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 1_500)
       try {
@@ -486,26 +385,19 @@ export class SshConnection extends EventEmitter implements SshPort {
     const client = this.client
     this.client = null
     this.closed = true
-    if (client) {
-      try {
-        // Keep an error sink attached: ssh2 may still emit during teardown.
-        client.on('error', () => {})
-        client.end()
-      } catch {
-        // swallow-ok: an error handler is installed above and end() must not throw
-      }
+    if (!client) return
+    try {
+      // Keep an error sink attached: ssh2 may still emit during teardown.
+      client.on('error', () => {})
+      client.end()
+    } catch {
+      // swallow-ok: an error handler is installed above and end() must not throw
     }
   }
 }
 
-/**
- * The production `SshFactory`: one ssh2 adapter per dial attempt.
- *
- * `ctx.deps.sshFactory` keeps its `(options) => SshPort` signature (decision D4); the default
- * implementation moved from `new SshConnection(...)` to this factory so tests can override the
- * injected client without touching the assembly.
- * @param options - the port's connect options (plus the adapter's `@internal` client seam).
- */
+/** The production `SshFactory`: one ssh2 adapter per dial attempt, keeping the `(options) => SshPort` signature
+ * `ctx.deps.sshFactory` expects, so tests can override the injected client without touching the assembly. */
 export function createSsh2Port(options: Ssh2PortOptions): SshPort {
   return new SshConnection(options)
 }
@@ -516,8 +408,7 @@ const MAX_KEY_BYTES = 1024 * 1024
 async function readKey(keyPath: string): Promise<Buffer | null> {
   let handle: FileHandle | null = null
   try {
-    // Measure and read through the *same* handle: a stat followed by a path-based read is a
-    // race (the file could be swapped in between), and a non-regular file has no place here.
+    // Measure and read through the *same* handle: a stat-then-read is a race, and a non-regular file has no place here.
     handle = await open(keyPath, 'r')
     const stats = await handle.stat()
     if (stats.isFile?.() !== true) return null

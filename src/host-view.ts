@@ -1,6 +1,4 @@
-/**
- * The client-facing view of one host (docs/api.md HostView).
- */
+/** The client-facing view of one host (docs/api.md HostView). */
 import { versionParity } from './version.js'
 import { connectLogTail, connectLogVisible } from './connect-log.js'
 import type { BilingualText } from './util.js'
@@ -10,23 +8,15 @@ import type { ConnectLogTailItem } from './connect-log.js'
 import type { ConnectProgressState } from './connect-progress.js'
 import type { HostRuntime, RemoteRuntime, RuntimeFingerprint } from './host-runtime.js'
 import type { VersionParity } from './version.js'
-
-/** The context fields HostView copies straight out of the service context. */
 export interface HostViewContext {
   passwordStorageAvailable: boolean
   targetVersion: string
   storeCorrupt?: boolean
 }
-
-/**
- * What a projection may leave out. `logs: false` is the SSE state-frame shape: the rows travel on
- * the log channel, so a state frame carries `logs: []` and stays small (docs/api.md v2.12).
- */
+/** `logs: false` is the SSE state-frame shape: rows travel on the log channel, so the frame keeps `logs: []`. */
 export interface HostViewOptions {
   logs?: boolean
 }
-
-/** One host as the Client renders it; every field is contract (docs/api.md HostView). */
 export interface HostView {
   id: string
   name: string
@@ -47,12 +37,7 @@ export interface HostView {
   conflict: unknown
   fingerprint: RuntimeFingerprint | null
   logs: ConnectLogTailItem[]
-  /**
-   * The log cursor this host's tail ends at: the attempt (boundary line number) and the `seq` of
-   * its newest row. The log channel is the only real-time carrier of rows; these two fields let
-   * the Client align what it already merged with a snapshot it reads, and are what a client of a
-   * Host *without* `/events/logs` (older build) falls back to (docs/api.md v2.12).
-   */
+  /** The log cursor this tail ends at (attempt plus newest `seq`), for aligning a merge and for older Hosts. */
   logAttempt: number
   logSeq: number
   remote: RemoteRuntime
@@ -67,8 +52,6 @@ export interface HostView {
   versionParity: VersionParity
   storeCorrupt: boolean
 }
-
-/** The address fields `maskAddress` reads; the editor never parses the display form back. */
 export interface MaskedAddressSource {
   address?: string | null
   username?: string | null
@@ -81,23 +64,13 @@ export function hostView(runtime: HostRuntime, ctx: HostViewContext, options: Ho
     id: runtime.id,
     name: entry.name,
     address: entry.address,
+    // Presentation only: the editor must never parse this form back (a bare IPv6 such as
+    // `fe80::1` used to yield port 1 and silently replace the default port with 22).
     addressMasked: maskAddress(entry),
-    /**
-     * The plain connection fields. The masked address is presentation only: the editor must not
-     * parse it back (a bare IPv6 like `fe80::1` used to yield port 1, and the default port was
-     * silently replaced by 22). Never a secret.
-     */
     username: entry.username ?? null,
     port: entry.port ?? 22,
-    /** Never the secret itself; lets the Client ask for a one-time password. */
     authType: entry.auth?.type ?? 'key',
-    /** The configured key file path (not a secret); lets the edit form prefill it. */
     authKeyPath: entry.auth?.type === 'key' && typeof entry.auth.keyPath === 'string' ? entry.auth.keyPath : null,
-    /**
-     * Whether a remembered password exists in the credential store (never the value). The
-     * runtime mirror is restored from the store on load, so this stays true across a DSH
-     * restart while a one-time password used for this connection alone stays false.
-     */
     passwordSaved: entry.auth?.type === 'password' ? runtime.passwordSaved === true : false,
     passwordStorageAvailable: ctx.passwordStorageAvailable,
     jumpHost: entry.jumpHost ?? null,
@@ -111,10 +84,7 @@ export function hostView(runtime: HostRuntime, ctx: HostViewContext, options: Ho
     logs: options.logs === false ? [] : connectLogVisible(runtime.status) ? connectLogTail(runtime) : [],
     logAttempt: typeof runtime.connectCount === 'number' ? runtime.connectCount : 0,
     logSeq: typeof runtime.logSeq === 'number' ? runtime.logSeq : 0,
-    remote: {
-      ...runtime.remote,
-      version: runtime.remote.version ?? null,
-    },
+    remote: { ...runtime.remote, version: runtime.remote.version ?? null },
     keepAlive: entry.keepAlive,
     idleMinutes: entry.idleMinutes,
     autoReconnect: entry.autoReconnect,
@@ -124,20 +94,11 @@ export function hostView(runtime: HostRuntime, ctx: HostViewContext, options: Ho
     updatedAt: entry.updatedAt,
     targetVersion: ctx.targetVersion,
     versionParity: versionParity(ctx.targetVersion, runtime.remote.version ?? null),
-    /**
-     * True when `hosts.json` was unreadable on load: this list is the recovered fallback, and a
-     * copy of the damaged file is kept next to it (`hosts.json.corrupt-<timestamp>`). Contract
-     * field only — the Client renders it as a warning (docs/api.md HostView).
-     */
     storeCorrupt: ctx.storeCorrupt === true,
   }
 }
-
-/**
- * The display form of the endpoint: `user@host`, `user@host:2222`, and bracketed IPv6
- * (`user@[fe80::1]`, `user@[fe80::1]:2222`). The port is omitted only for SSH's default 22, which
- * is why the Client reads `port`/`username` instead of parsing this string.
- */
+/** The display form of the endpoint (`user@host`, `user@host:2222`, bracketed IPv6); the port is omitted only for SSH's
+ * default 22, which is why the Client reads `port`/`username` instead of parsing this string. */
 export function maskAddress(entry: MaskedAddressSource): string {
   const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   const user = entry.username ? `${entry.username}@` : ''

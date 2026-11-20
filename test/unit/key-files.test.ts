@@ -14,7 +14,6 @@ async function makeHome() {
   await mkdir(path.join(home, '.ssh', 'sub'), { recursive: true })
   return home
 }
-
 async function assertSamePath(actual, expected) {
   assert.equal(await realpath(actual), await realpath(expected))
 }
@@ -29,6 +28,12 @@ test('listKeyFiles defaults to ~/.ssh and lists folders before files', async () 
   assert.deepEqual(names, ['config', 'id_ed25519', 'notes.txt'])
   assert.equal(listing.truncated, false)
   await assertSamePath(listing.parent, home)
+  // Only regular files and directories inside ~/.ssh are reported; nothing else is invented.
+  for (const entry of listing.entries) {
+    assert.equal(typeof entry.name, 'string')
+    await assertSamePath(path.dirname(entry.path), path.join(home, '.ssh'))
+    assert.equal(typeof entry.isDirectory, 'boolean')
+  }
 })
 
 test('listKeyFiles expands a leading tilde and walks into subdirectories', async () => {
@@ -39,26 +44,13 @@ test('listKeyFiles expands a leading tilde and walks into subdirectories', async
   await assertSamePath(listing.parent, path.join(home, '.ssh'))
 })
 
-test('listKeyFiles refuses to escape the home directory', async () => {
+test('listKeyFiles refuses to escape the home directory and reports a missing one', async () => {
   const home = await makeHome()
-  await assert.rejects(() => listKeyFiles({ home, dir: path.join(home, '..') }), /inside the home directory/)
-  await assert.rejects(() => listKeyFiles({ home, dir: path.join(home, '..', '..') }), /inside the home directory/)
-  await assert.rejects(() => listKeyFiles({ home, dir: tmpdir() }), /inside the home directory/)
-})
-
-test('listKeyFiles reports a missing directory instead of inventing an empty one', async () => {
-  const home = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-keyfiles-empty-'))
-  await assert.rejects(() => listKeyFiles({ home }), /ENOENT/)
-})
-
-test('listKeyFiles only reports regular files and directories', async () => {
-  const home = await makeHome()
-  const listing = await listKeyFiles({ home })
-  for (const entry of listing.entries) {
-    assert.equal(typeof entry.name, 'string')
-    await assertSamePath(path.dirname(entry.path), path.join(home, '.ssh'))
-    assert.equal(typeof entry.isDirectory, 'boolean')
+  for (const dir of [path.join(home, '..'), path.join(home, '..', '..'), tmpdir()]) {
+    await assert.rejects(() => listKeyFiles({ home, dir }), /inside the home directory/)
   }
+  const empty = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-keyfiles-empty-'))
+  await assert.rejects(() => listKeyFiles({ home: empty }), /ENOENT/)
 })
 
 test('listKeyFiles stays internally consistent when realpath reports another spelling', async () => {
@@ -81,8 +73,7 @@ test('listKeyFiles stays internally consistent when realpath reports another spe
   const listing = await listKeyFiles({ home: requested, fsImpl })
   assert.equal(listing.path, path.join(canonical, '.ssh'))
   assert.equal(listing.parent, canonical)
-  assert.deepEqual(
-    listing.entries.map((entry) => entry.path),
-    [path.join(canonical, '.ssh', 'sub'), path.join(canonical, '.ssh', 'id_ed25519')],
-  )
+  const entries = listing.entries.map((entry) => entry.path)
+  // The whole list, not two spot checks: a third or reordered entry must fail here.
+  assert.deepEqual(entries, [path.join(canonical, '.ssh', 'sub'), path.join(canonical, '.ssh', 'id_ed25519')])
 })

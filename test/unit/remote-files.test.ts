@@ -6,54 +6,18 @@ import path from 'node:path'
 import { normalizeRemoteFilePath, remoteFileName } from '../../dist/src/remote-path.js'
 import { readHostDownload, toRemoteFileError } from '../../dist/src/remote-files.js'
 
-function runtimeWith(ssh) {
-  return { id: 'h_1', status: 'connected', ssh }
-}
-
-test('normalizeRemoteFilePath accepts absolute POSIX paths and collapses redundant segments', () => {
-  assert.equal(normalizeRemoteFilePath('/home/ubuntu/report.md'), '/home/ubuntu/report.md')
-  assert.equal(normalizeRemoteFilePath('/home//ubuntu/./report.md'), '/home/ubuntu/report.md')
-  assert.equal(normalizeRemoteFilePath('/home/ubuntu/../ubuntu/report.md'), '/home/ubuntu/report.md')
-  assert.equal(remoteFileName('/home/ubuntu/report.md'), 'report.md')
-  assert.equal(remoteFileName('/'), 'download')
-})
-
-test('normalizeRemoteFilePath rejects relative, empty and control-character paths', () => {
-  for (const value of ['', '  ', 'home/ubuntu/a.txt', 'C:\\Users\\a.txt', '/home/\0/a', '/home/a\nb']) {
-    assert.throws(() => normalizeRemoteFilePath(value), /invalid-input/)
-  }
-  assert.throws(() => normalizeRemoteFilePath(null), /invalid-input/)
-})
-
-test('readHostDownload streams a file into a unique local file', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'dsh-file-download-'))
-  await writeFile(path.join(base, 'report.md'), 'already here')
-  const calls = []
-  const runtime = runtimeWith({
-    async inspectRemotePath() {
-      return { isFile: true, isDirectory: false, size: 12, mtime: 0 }
-    },
+const runtimeWith = (ssh) => ({ id: 'h_1', status: 'connected', ssh })
+const download = (runtime, remotePath, destination) =>
+  readHostDownload(runtime, remotePath, { destination, home: tmpdir() })
+/** One fake transport for both shapes; the kind only picks which inspect/save pair runs. */
+function hostSsh({ kind, calls }) {
+  const isFile = kind === 'file'
+  return {
+    inspectRemotePath: async () => ({ isFile, isDirectory: !isFile, size: 0, mtime: 0 }),
     async saveRemoteFile(remotePath, localPath, options) {
       calls.push({ remotePath, localPath, options })
       await writeFile(localPath, 'hello remote')
       return { size: 12 }
-    },
-  })
-  const result = await readHostDownload(runtime, '/home/ubuntu/report.md', { destination: base, home: tmpdir() })
-  assert.equal(result.kind, 'file')
-  assert.equal(result.name, 'report (2).md')
-  assert.equal(result.destination, path.join(base, 'report (2).md'))
-  assert.equal(result.files, 1)
-  assert.equal(await readFile(result.destination, 'utf8'), 'hello remote')
-  assert.equal(calls.length, 1)
-})
-
-test('readHostDownload saves a folder into a unique local directory', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'dsh-folder-download-'))
-  const calls = []
-  const runtime = runtimeWith({
-    async inspectRemotePath() {
-      return { isFile: false, isDirectory: true, size: 0, mtime: 0 }
     },
     async saveRemoteTree(remotePath, targetRoot, options) {
       calls.push({ remotePath, targetRoot, options })
@@ -61,69 +25,64 @@ test('readHostDownload saves a folder into a unique local directory', async () =
       await writeFile(path.join(targetRoot, 'a.txt'), 'abc')
       return { destination: targetRoot, totalBytes: 3, totalFiles: 1 }
     },
-  })
-  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
-  assert.equal(result.kind, 'folder')
-  assert.equal(result.name, 'project')
-  assert.equal(result.destination, path.join(base, 'project'))
-  assert.equal(result.files, 1)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].targetRoot, path.join(base, 'project'))
-  const second = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
-  assert.equal(second.destination, path.join(base, 'project (2)'))
+  }
+}
+
+test('normalizeRemoteFilePath accepts absolute POSIX paths and rejects everything else', () => {
+  assert.equal(normalizeRemoteFilePath('/home/ubuntu/report.md'), '/home/ubuntu/report.md')
+  assert.equal(normalizeRemoteFilePath('/home//ubuntu/./report.md'), '/home/ubuntu/report.md')
+  assert.equal(normalizeRemoteFilePath('/home/ubuntu/../ubuntu/report.md'), '/home/ubuntu/report.md')
+  assert.equal(remoteFileName('/home/ubuntu/report.md'), 'report.md')
+  assert.equal(remoteFileName('/'), 'download')
+  // Relative, empty and control-character paths are rejected.
+  for (const value of ['', '  ', 'home/ubuntu/a.txt', 'C:\\Users\\a.txt', '/home/\0/a', '/home/a\nb', null]) {
+    assert.throws(() => normalizeRemoteFilePath(value), /invalid-input/)
+  }
 })
 
-test('readHostDownload renames the target file/folder when a file has the same name', async () => {
-  const base = await mkdtemp(path.join(tmpdir(), 'dsh-folder-file-'))
-  await writeFile(path.join(base, 'project'), 'existing file')
-  const runtime = runtimeWith({
-    async inspectRemotePath() {
-      return { isFile: false, isDirectory: true, size: 0, mtime: 0 }
-    },
-    async saveRemoteTree(_remotePath, targetRoot) {
-      await mkdir(targetRoot, { recursive: true })
-      return { destination: targetRoot, totalBytes: 0, totalFiles: 0 }
-    },
-  })
-  const result = await readHostDownload(runtime, '/home/ubuntu/project', { destination: base, home: tmpdir() })
-  assert.equal(result.destination, path.join(base, 'project (2)'))
+test('readHostDownload streams a file or folder into a unique local path', async () => {
+  const fileBase = await mkdtemp(path.join(tmpdir(), 'dsh-file-download-'))
+  await writeFile(path.join(fileBase, 'report.md'), 'already here')
+  const fileCalls = []
+  const fileRuntime = runtimeWith(hostSsh({ kind: 'file', calls: fileCalls }))
+  const file = await download(fileRuntime, '/home/ubuntu/report.md', fileBase)
+  assert.deepEqual([file.kind, file.name, file.files, fileCalls.length], ['file', 'report (2).md', 1, 1])
+  assert.equal(file.destination, path.join(fileBase, 'report (2).md'))
+  assert.equal(await readFile(file.destination, 'utf8'), 'hello remote')
+  const folderBase = await mkdtemp(path.join(tmpdir(), 'dsh-folder-download-'))
+  const folderCalls = []
+  const folderRuntime = runtimeWith(hostSsh({ kind: 'folder', calls: folderCalls }))
+  const folder = await download(folderRuntime, '/home/ubuntu/project', folderBase)
+  assert.deepEqual([folder.kind, folder.name, folder.files, folderCalls.length], ['folder', 'project', 1, 1])
+  assert.equal(folder.destination, path.join(folderBase, 'project'))
+  assert.equal(folderCalls[0].targetRoot, path.join(folderBase, 'project'))
+  const second = await download(folderRuntime, '/home/ubuntu/project', folderBase)
+  assert.equal(second.destination, path.join(folderBase, 'project (2)'))
+  // A plain file already holding the folder's name is renamed too, never overwritten.
+  const collided = await mkdtemp(path.join(tmpdir(), 'dsh-folder-file-'))
+  await writeFile(path.join(collided, 'project'), 'existing file')
+  const collidedResult = await download(folderRuntime, '/home/ubuntu/project', collided)
+  assert.equal(collidedResult.destination, path.join(collided, 'project (2)'))
 })
 
-test('readHostDownload requires a destination for every download', async () => {
-  const runtime = runtimeWith({
-    async inspectRemotePath() {
-      return { isFile: true, isDirectory: false, size: 0, mtime: 0 }
-    },
-  })
-  await assert.rejects(readHostDownload(runtime, '/home/ubuntu/report.md'), /invalid-input/)
-})
-
-test('readHostDownload rejects unsupported paths and disconnected hosts', async () => {
-  await assert.rejects(
-    readHostDownload({ status: 'disconnected', ssh: null }, '/home/ubuntu/a.txt', {
-      destination: tmpdir(),
-      home: tmpdir(),
-    }),
-    /remote-file-unavailable/,
-  )
-  const weird = runtimeWith({
-    async inspectRemotePath() {
-      return { isFile: false, isDirectory: false, size: 0 }
-    },
-  })
-  await assert.rejects(
-    readHostDownload(weird, '/home/ubuntu/socket', { destination: tmpdir(), home: tmpdir() }),
-    /remote-file-unavailable/,
-  )
-})
-
-test('toRemoteFileError maps transport codes without leaking internals', () => {
+test('readHostDownload requires a destination and rejects unavailable paths', async () => {
+  const withDestination = runtimeWith(hostSsh({ kind: 'file', calls: [] }))
+  await assert.rejects(readHostDownload(withDestination, '/home/ubuntu/report.md'), /invalid-input/)
+  const options = { destination: tmpdir(), home: tmpdir() }
+  const unavailable = (runtime, remotePath) =>
+    assert.rejects(readHostDownload(runtime, remotePath, options), /remote-file-unavailable/)
+  await unavailable({ status: 'disconnected', ssh: null }, '/home/ubuntu/a.txt')
+  const socket = {
+    id: 'h_1',
+    status: 'connected',
+    ssh: { inspectRemotePath: async () => ({ isFile: false, isDirectory: false, size: 0 }) },
+  }
+  await unavailable(socket, '/home/ubuntu/socket')
   const missing = toRemoteFileError(Object.assign(new Error('No such file'), { code: 2 }))
   assert.equal(missing.code, 'remote-file-unavailable')
   assert.match(missing.detail.en, /no longer exists/)
   const denied = toRemoteFileError(Object.assign(new Error('Permission denied'), { code: 3 }))
   assert.equal(denied.code, 'remote-file-unavailable')
   assert.match(denied.detail.en, /not allowed/)
-  const other = toRemoteFileError(new Error('unexpected disconnect'))
-  assert.equal(other.technical, 'unexpected disconnect')
+  assert.equal(toRemoteFileError(new Error('unexpected disconnect')).technical, 'unexpected disconnect')
 })

@@ -1,58 +1,22 @@
-// Build the published browser half: the modules listed in `SOURCES` -> `dist/client.js`.
-// `package.json` `exports["./client"]` points at that file and `files[]` ships `dist`, so the
-// repository root holds no generated file and the published layout is the build output itself.
-//
-// Three parts, and the contract-bearing one is never rewritten by a tool:
-//
-//   the modules          every file in `SOURCES`, concatenated in that order with exactly one
-//                        blank line between files. They are one *script* scope, not modules: no
-//                        `import`/`export` anywhere (checked below), so a declaration in one file
-//                        is the same binding a later file uses - exactly the single file P3a had.
-//   client/template.js   the loader shell — `window.__ModuleLoader__.load({ id, factory(require) })`,
-//                        `require('react')`, the one `const CSS = ` panel stylesheet (kept out of
-//                        the splices' script scope so it no longer redeclares lib.dom's global
-//                        `CSS` namespace), and the `return __drgExport` hand-off. It is read as
-//                        text and spliced, never parsed or formatted, so the frozen contract text
-//                        in it stays byte-exact.
-//   prettier             formats the composed file with the repository's `.prettierrc.json`, so the
-//                        artifact keeps the same style every other checked-in file has.
-//
-// Why no bundler (deviation from design-client.md §3.1, recorded in the P3a report and confirmed by
-// P3b): with `bundle: true`, esbuild rewrites every module-level `const`/`let` to `var` (a bundle
-// flattens module scopes), which breaks two structural guards that read the artifact text and must
-// not be relaxed: `const CSS = ` at test/unit/guards.test.ts:446-451 and `const TONE_VARS = {` at
-// :590-596. Source-level concatenation sidesteps the rewrite instead of arguing with it: `const`
-// stays `const`, no helper is emitted, nothing is renamed.
-//
-// esbuild still runs, as a *transform* (`bundle: false`, the P3a options): it strips the TypeScript
-// annotations and the comments, which is why the published file is ~60 KB smaller than its sources.
-// A transform neither renames nor re-scopes a binding, so it composes with the manifest: the same
-// bytes in produce the same bytes out, and P3b's acceptance was that the artifact hash does not
-// move at all.
-//
-// `target: 'es2022'` means no syntax lowering, so no `__async`/`__spreadValues` helper can appear
-// in the four guest functions that are injected into a remote page via `Function#toString`.
-//
-// `external: ['react']` is deliberately absent: esbuild refuses it without `bundle` ("Cannot use
-// external without bundle"), and the property it has to guarantee is asserted instead — exactly one
-// `require()` call survives and its specifier is `react`, so React is injected by the loader and
-// never inlined (checkArtifact below).
+// Build the published browser half: SOURCES concatenated in source order into one script scope (no import/export,
+// checked below) -> `dist/client.js`, with `client/template.js` spliced in as text so its frozen contract stays
+// byte-exact, then formatted by prettier. No bundler on purpose: `bundle: true` rewrites module-level const/let to var
+// and breaks the structural guards that read the artifact text (`const CSS = `, `const TONE_VARS = {`), so esbuild runs
+// as a *transform* only (types and comments stripped, nothing renamed); `target: 'es2022'` keeps a bundler helper
+// out of the guest functions injected via `Function#toString`. `external: ['react']` is absent on purpose (esbuild
+// refuses it without `bundle`) and the one surviving `require()` is asserted instead.
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const require_ = createRequire(path.join(root, 'package.json'))
 const esbuild = require_('esbuild')
 const prettier = require_('prettier')
 const ts = require_('typescript')
-
-// The manifest. Order is the artifact's order: this array *is* the file, and it is hand-written so
-// that a rename or a delete is a reviewable one-line diff. Adding a module means adding a line
-// here; the completeness check below fails on both a missing line and a line for a file that no
-// longer exists.
 const SOURCE_DIR = 'client/src'
+// The manifest. Order is the artifact's order: this array *is* the file, and it is hand-written so that a rename or a
+// delete is a reviewable one-line diff. The completeness check below fails on both a missing line and a stale one.
 const SOURCES = [
   'react',
   'constants',
@@ -96,13 +60,10 @@ const TEMPLATE = 'client/template.js'
 // Inside `dist/` like every other emitted file: this is the file `exports["./client"]` names.
 const OUT = 'dist/client.js'
 const BUNDLE_MARKER = '/* @@BUNDLE@@ */'
-// Bindings the artifact legitimately declares with a `__` prefix (`__drgExport` is the plugin face
-// the loader template hands back; `__test` is the test seam on it). Any other `__`-prefixed binding
-// is a bundler helper.
+// Own `__` bindings: `__drgExport` (the loader's plugin face), `__test` (its seam); any other one is a bundler helper.
 const OWN_BINDINGS = new Set(['__drgExport', '__test'])
-
-// The four functions injected into a remote page through `Function#toString()`: a guest cannot see
-// the plugin's scope, so a bundler helper in their body would be a runtime ReferenceError there.
+// The four functions injected via `Function#toString()`: a guest cannot see the plugin's scope,
+// so a bundler helper in their body would be a runtime ReferenceError in the remote page.
 const GUEST_FUNCTIONS = ['mountHostRow', 'mountGuestTools', 'mountCapabilityBridge', 'mountSidebarMirror']
 // Globals the guest copies create and read themselves (they are properties, not plugin bindings).
 const GUEST_GLOBALS = new Set([
@@ -119,47 +80,36 @@ const GUEST_GLOBALS = new Set([
   '__DSH_BOOT__',
   '__DSH_DIRECTORY_PICKER__',
 ])
-
-// A module is a contiguous, reviewable slice. Every one of them fits the budget with no exception:
-// P3c split the overlay host's commands out into `actions.ts`, which was the last module over it.
+// A module is a contiguous, reviewable slice: every one of them fits this budget with no exception.
 const MAX_MODULE_LINES = 600
-
 function fail(message) {
   throw new Error(message)
 }
-
 const specifiersOf = (text) => [...text.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1])
 const literalOf = (text, name) => text.match(new RegExp(`const ${name} = \`([\\s\\S]*?)\``))?.[1] ?? null
 const parse = (text) => ts.createSourceFile('client.js', text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS)
 
-/** Every `__`-prefixed identifier read inside the four stringified guest functions. */
-function guestHelperLeaks(text) {
-  const source = parse(text)
+/** The two `__`-prefix rules in one walk: a `__` identifier read inside the four stringified guest functions (a helper
+ * there would not exist in the remote page), and every `__`-prefixed declaration in the artifact (the shape an esbuild
+ * helper arrives in). */
+function artifactLeaks(text) {
   const leaks = []
+  const names = []
   const visit = (node, guest) => {
     if (ts.isFunctionDeclaration(node) && node.name && GUEST_FUNCTIONS.includes(node.name.text)) guest = node.name.text
     if (guest !== null && ts.isIdentifier(node) && node.text.startsWith('__') && !GUEST_GLOBALS.has(node.text)) {
       leaks.push(`${guest}: ${node.text}`)
     }
-    ts.forEachChild(node, (child) => visit(child, guest))
-  }
-  visit(source, null)
-  return [...new Set(leaks)]
-}
-
-/** Every `__`-prefixed declaration in the artifact: that is the shape an esbuild helper arrives in. */
-function helperDeclarations(text) {
-  const source = parse(text)
-  const names = []
-  const visit = (node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) names.push(node.name.text)
     if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) names.push(node.name.text)
-    ts.forEachChild(node, visit)
+    ts.forEachChild(node, (child) => visit(child, guest))
   }
-  visit(source)
-  return [...new Set(names.filter((name) => name.startsWith('__') && !OWN_BINDINGS.has(name)))]
+  visit(parse(text), null)
+  return {
+    leaks: [...new Set(leaks)],
+    helpers: [...new Set(names.filter((name) => name.startsWith('__') && !OWN_BINDINGS.has(name)))],
+  }
 }
-
 /** Structural contract of the artifact: every rule is a hard build failure, not a warning. */
 function checkArtifact(text, templateText) {
   const rules = [
@@ -200,26 +150,21 @@ function checkArtifact(text, templateText) {
   const failures = rules.filter(([ok]) => !ok).map(([, why]) => why)
   if (failures.length > 0) fail(failures.join('; '))
 }
-
 /** Repository-relative TypeScript files under `dir`, ambient declarations excluded. */
 async function sourceFiles(dir) {
-  const entries = await readdir(path.join(root, dir), { withFileTypes: true })
   const found = []
-  for (const entry of entries) {
+  for (const entry of await readdir(path.join(root, dir), { withFileTypes: true })) {
     const rel = `${dir}/${entry.name}`
     if (entry.isDirectory()) found.push(...(await sourceFiles(rel)))
-    // A `.d.ts` is an ambient declaration: it types the loader template's names, it never reaches
-    // the artifact, so it must not appear in the manifest.
+    // A `.d.ts` types the loader template's names and never reaches the artifact, so it stays out of the manifest.
     else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) found.push(rel)
   }
   return found
 }
 
-/**
- * The manifest's contract: every source file appears exactly once, in a list whose order is the
- * artifact's order. A file nobody lists would be silently dropped from the published plugin, and a
- * listed file that no longer exists would be a build error instead of a mystery - both fail here.
- */
+/** The manifest's contract: every source file appears exactly once, in a list whose order is the artifact's order. A
+ * file nobody lists would be silently dropped from the published plugin, and a listed file that no longer exists must
+ * be a build error instead of a mystery - both fail here. */
 async function checkManifest() {
   const actual = (await sourceFiles(SOURCE_DIR)).sort()
   const listed = [...SOURCES].sort()
@@ -232,15 +177,10 @@ async function checkManifest() {
   if (duplicates.length > 0) problems.push(`listed more than once: ${[...new Set(duplicates)].join(', ')}`)
   if (problems.length > 0) fail(problems.join('; '))
 }
-
-/**
- * A module is a *script* file: top-level `import`/`export` would make it a module, and the
- * concatenated artifact would then be either a syntax error (no bundler resolves the specifier) or
- * a silent half-load. The compiler already answers exactly this question — `externalModuleIndicator`
- * is set by any module syntax, including the `export` *modifier* on a `const`, which a
- * statement-kind check alone would miss — and it reads the AST, so a `// import` in a comment or an
- * `'export'` in a string is never mistaken for code.
- */
+/** A module is a *script* file: top-level `import`/`export` would make it a module and the concatenated artifact would
+ * be a syntax error (no bundler resolves the specifier) or a silent half-load. The compiler answers exactly this:
+ * `externalModuleIndicator` is set by any module syntax, including the `export` *modifier* on a `const` that a
+ * statement-kind check would miss, and it reads the AST, so a `// import` in a comment is never mistaken for code. */
 function checkSourceScript(file, text) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS)
   const problems = []
@@ -258,15 +198,10 @@ function checkSourceScript(file, text) {
   visit(source)
   if (problems.length > 0) fail(problems.join('; '))
 }
-
-/**
- * Read the manifest in order and rebuild the one script the template expects.
- *
- * Each file starts with exactly one header line (`// client/src/<name>.ts - <what it holds>`); the
- * header documents the slice for a reader and is *not* part of the artifact. The bodies are joined
- * with one blank line, which is what the build's byte-for-byte equivalence with the pre-split
- * `client/src/main.ts` was proven against.
- */
+/** Read the manifest in order and rebuild the one script the template expects. Each file starts with exactly one
+ * header line (`// client/src/<name>.ts - <what it holds>`) that documents the slice and is not part of the artifact;
+ * bodies are joined with one blank line, which is what the byte-for-byte equivalence with the pre-split `main.ts` was
+ * proven against. */
 async function composeSource() {
   const bodies = []
   for (const file of SOURCES) {
@@ -279,9 +214,7 @@ async function composeSource() {
     const body = text.slice(newline + 1)
     if (body.trim() === '') fail(`${file} has an empty body`)
     const lines = body.split('\n').length - 1
-    if (lines > MAX_MODULE_LINES) {
-      fail(`${file} is ${lines} lines, over the ${MAX_MODULE_LINES}-line module budget`)
-    }
+    if (lines > MAX_MODULE_LINES) fail(`${file} is ${lines} lines, over the ${MAX_MODULE_LINES}-line module budget`)
     checkSourceScript(file, body)
     bodies.push(body.slice(0, -1))
   }
@@ -289,17 +222,14 @@ async function composeSource() {
   if (source.trim() === '') fail('the composed source is empty')
   return source
 }
-
 /** One build: esbuild transform + template splice + prettier. Returns the finished artifact text. */
 async function compose(sourceText, templateText) {
   if (!templateText.includes(BUNDLE_MARKER)) fail(`${TEMPLATE} must contain the ${BUNDLE_MARKER} marker`)
-  // The annotation below is stripped textually, so a literal one in the source would be mangled by
-  // that regex: catching it here keeps the strip safe instead of making it a hidden landmine.
+  // The annotation below is stripped textually, so a literal one would be mangled by that regex: catching it here keeps
+  // the strip safe instead of making it a hidden landmine.
   if (sourceText.includes('@__PURE__')) fail('the client sources must not contain a literal @__PURE__ annotation')
-
   const bundle = await esbuild.build({
-    // The composed script arrives on stdin: there is one input (the manifest's concatenation), and
-    // an entry point would re-run resolution over a file that deliberately imports nothing.
+    // One input (the concatenation) on stdin: an entry point would re-run resolution over a file that imports nothing.
     stdin: { contents: sourceText, resolveDir: root, sourcefile: 'client/src/client.ts', loader: 'ts' },
     absWorkingDir: root,
     bundle: false,
@@ -320,19 +250,16 @@ async function compose(sourceText, templateText) {
   const config = (await prettier.resolveConfig(path.join(root, OUT))) ?? {}
   return prettier.format(composed, { ...config, parser: 'babel', filepath: path.join(root, OUT) })
 }
-
 await checkManifest()
 const sourceText = await composeSource()
 const templateText = await readFile(path.join(root, TEMPLATE), 'utf8')
-
 const first = await compose(sourceText, templateText)
 const second = await compose(sourceText, templateText)
 if (first !== second) fail('two consecutive builds differ; the artifact is not reproducible')
-
 checkArtifact(first, templateText)
-for (const leak of guestHelperLeaks(first)) fail(`a guest script closes over a bundler helper: ${leak}`)
-for (const helper of helperDeclarations(first)) fail(`a \`__\`-prefixed binding leaked into the artifact: ${helper}`)
-
+const { leaks, helpers } = artifactLeaks(first)
+for (const leak of leaks) fail(`a guest script closes over a bundler helper: ${leak}`)
+for (const helper of helpers) fail(`a \`__\`-prefixed binding leaked into the artifact: ${helper}`)
 await mkdir(path.dirname(path.join(root, OUT)), { recursive: true })
 await writeFile(path.join(root, OUT), first, 'utf8')
 console.log(

@@ -1,6 +1,4 @@
-/**
- * Diagnostics redaction: tokens, passwords and private keys never leave the machine in a diagnostic package.
- */
+/** Diagnostics redaction: tokens, passwords and private keys never leave the machine in a diagnostic package. */
 
 /** Callers that render paths themselves set `keepPaths` so the home-directory rule is opt-out. */
 export interface RedactOptions {
@@ -13,16 +11,9 @@ const SECRET_HEADER_RE = /\b(authorization|cookie|set-cookie|x-api-key|proxy-aut
 const SECRET_CUSTOM_HEADER_RE = /\b(x-[a-z0-9-]*(?:token|key|secret|auth)[a-z0-9-]*)\s*:\s*[^\r\n]+/gi
 const BEARER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g
 const TOKEN_QUERY_RE = new RegExp(`([?&](?:${SECRET_QUERY_KEYS.join('|')})=)[^&#\\s"']+`, 'gi')
-/**
- * A bare `token=…` outside a query string (log lines, `#fragment`, key=value dumps). The
- * value never contains `<`/`>` so an already-redacted `<redacted>` is left alone.
- */
-/**
- * A bare `key=value` pair (log lines, `#fragment`, dumps). The anchor is "not alphanumeric" rather
- * than `\b`, so a prefixed env name such as `MYSQL_PWD=…` is caught too (`_` is a word character,
- * which made `\b` miss it). The value never contains `<`/`>` so an already-redacted `<redacted>` is
- * left alone.
- */
+/** A bare `key=value` pair (log lines, `#fragment`, dumps). The anchor is "not alphanumeric" rather than `\b`, so
+ * `MYSQL_PWD=…` is caught too (`_` is a word character, which made `\b` miss it); and the value never contains `<`/`>`,
+ * so an already-redacted `<redacted>` is left alone. */
 const BARE_TOKEN_KEYS = [
   'token',
   'access_token',
@@ -37,21 +28,15 @@ const BARE_TOKEN_KEYS = [
   'key',
 ]
 const BARE_TOKEN_RE = new RegExp(`(^|[^A-Za-z0-9])((?:${BARE_TOKEN_KEYS.join('|')})\\s*=\\s*)[^\\s&;,'"<>]+`, 'gi')
-/**
- * A secret passed as a command-line flag (`--token abc`, `--api-key x`, `--password y`). No `\b`
- * anchor: `-` is a non-word character, so a boundary never holds right before `--token`. The
- * separate `PASSWORD_FLAG_RE` below covers the historic spellings; this one catches the token-ish
- * flags that a launch command line carries, which `ps` output made worth redacting.
- */
+/** A secret passed as a command-line flag (`--token abc`, `--api-key x`). No `\b` anchor: `-` is a non-word character,
+ * so a boundary never holds right before `--token`. The separate `PASSWORD_FLAG_RE` covers the historic spellings; this
+ * one catches the token-ish flags a launch command line carries in `ps` output. */
 const SECRET_FLAG_RE =
   /(?:--?)(?:token|api-key|apikey|auth-token|access-token|password|passphrase)[=\s]+(?!<redacted>)\S+/gi
 const PRIVATE_KEY_RE = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g
-/**
- * `--password X`, `password=X` and the short `-p X` form. The short form is also ssh's
- * port flag (`ssh -p 2222`), so a bare number is left alone: a port is not a secret and
- * mangling it would make the technical detail unreadable. The value may also be glued to the
- * flag (`mysql -pHunter2`), which is why the whitespace after `-p` is optional.
- */
+/** `--password X`, `password=X` and the short `-p X` form. That short form is also ssh's port flag (`ssh -p 2222`), so
+ * a bare number is left alone — a port is not a secret and mangling it would make the technical detail unreadable. The
+ * whitespace after `-p` is optional because the value may be glued to the flag (`mysql -pHunter2`). */
 const PASSWORD_FLAG_RE = /(--password[=\s]+|password[=:]\s*|-p\s*(?!\d+\b))(\S+)/gi
 const DSH_TOKEN_LINE_RE = /(dsh web:\s*\S*?\?token=)[A-Za-z0-9._~+/=-]+/g
 
@@ -59,9 +44,8 @@ export function redactText(text: string, options: RedactOptions = {}): string {
   if (typeof text !== 'string' || text === '') return text
   let out = text
   out = out.replace(PRIVATE_KEY_RE, '-----BEGIN PRIVATE KEY-----<redacted>-----END PRIVATE KEY-----')
-  // A capture that was cut before the footer (`safeText` bounds every field before it redacts) leaves
-  // a header with no END; the complete-block rule above cannot match it, so the body is dropped
-  // explicitly. The placeholder from the rule above already carries an END and is left alone.
+  // A capture cut before the footer (`safeText` bounds every field before it redacts) leaves a
+  // header with no END, which the complete-block rule above cannot match: drop the body explicitly.
   const strayBegin = out.lastIndexOf('-----BEGIN ')
   if (strayBegin >= 0 && strayBegin > out.lastIndexOf('-----END ')) {
     out = `${out.slice(0, strayBegin)}-----BEGIN PRIVATE KEY-----<redacted>`
@@ -75,8 +59,7 @@ export function redactText(text: string, options: RedactOptions = {}): string {
   out = out.replace(BARE_TOKEN_RE, '$1$2<redacted>')
   out = out.replace(PASSWORD_FLAG_RE, '$1<redacted>')
   if (!options.keepPaths) {
-    // Home directories of the remote account are not secrets, but avoid leaking
-    // arbitrary local user names into exported diagnostics.
+    // Remote home directories are not secrets, but arbitrary local user names should not leak.
     out = out.replace(/(\/home\/)[^/\s]+/g, '$1<user>')
     out = out.replace(/(\/Users\/)[^/\s]+/g, '$1<user>')
     out = out.replace(/\b(C:\\Users\\)[^\\\s]+/gi, '$1<user>')
@@ -96,9 +79,7 @@ function redactValue(key: string, value: unknown): unknown {
   return value
 }
 
-/**
- * Deep-redact a JSON-compatible value.
- */
+/** Deep-redact a JSON-compatible value. */
 export function redactObject<T>(value: T): T {
   if (Array.isArray(value)) return value.map((item) => redactValue('', item)) as T
   if (!value || typeof value !== 'object') return value

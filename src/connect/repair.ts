@@ -1,7 +1,4 @@
-/**
- * The listener rebuild for a host whose remote UI answers the SSH probe but whose proxied
- * requests fail (B8): the tunnel, not the remote, is what broke.
- */
+/** The listener rebuild for a host whose remote UI answers the SSH probe but whose proxied requests fail: the tunnel, not the remote, is what broke. Single-flight per host and owned by a link-work token; the replacement is created before the old listener closes (no window without a listener) and its new random local port bumps `viewRev` so the carrier refetches. It reads five slices and never the persistence layer, so it takes `WatchdogCtx` rather than `ConnectCtx`. */
 import { REMOTE_REPAIR_BACKOFF_MAX_MS, REMOTE_REPAIR_BACKOFF_MS } from '../constants.js'
 import type { WatchdogCtx } from '../context.js'
 import { errors } from '../errors.js'
@@ -12,26 +9,6 @@ import type { Tunnel } from '../tunnel.js'
 import { isPid, messageOf } from '../util.js'
 import { noteRemoteUnreachable } from '../watchdog.js'
 
-/**
- * Rebuild the local listener for a host whose remote UI answers the SSH probe but whose
- * proxied requests fail: the tunnel, not the remote, is what broke. Single-flight per host and
- * owned by a link-work token, like restart/reattach: a disconnect, host removal or shutdown
- * cancels it and the caller waits for `runtime.tunnelRepair` before tearing down.
- *
- * The replacement is created before the old listener closes, so there is no window without a
- * listener. Its local port is a new random one, so `viewRev` is bumped: the carrier refetches
- * `GET /hosts/:id/open` and navigates again (the desktop guest's URL is the loopback origin).
- * Existing WebSockets/downloads are dropped by closing the old listener - documented.
- *
- * It reads five slices and never the persistence layer (`ctx.init`/`ctx.store`/`ctx.secrets`):
- * the rebuild publishes through `ctx.emitState()` and logs through `ctx.progress`, so the type is
- * `WatchdogCtx`, not the six-slice `ConnectCtx` the other five orchestration entries take. The
- * architecture gate measures this, which is why this function is not in its `godCtxParams` list.
- *
- * @param ctx - the watchdog's five slices (state, config, transport, remote deps, reporter).
- * @param runtime - connected host runtime.
- * @returns whether the listener was rebuilt.
- */
 export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Promise<LifecycleVerdict> {
   if (
     ctx.state.disposed === true ||
@@ -44,9 +21,7 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
   }
   if (runtime.ssh?.connected !== true) return { ok: false, reason: 'no-transport' }
   if (runtime.tunnelRepair) return runtime.tunnelRepair
-  if (Date.now() < (Number(runtime.nextTunnelRepairAt) || 0)) {
-    return { ok: false, reason: 'backoff' }
-  }
+  if (Date.now() < (Number(runtime.nextTunnelRepairAt) || 0)) return { ok: false, reason: 'backoff' }
   const port = runtime.remote.port
   const previous = runtime.tunnel
   const token = beginLinkWork(runtime, 'repair')
@@ -57,9 +32,7 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
     runtime.status === 'connected' &&
     runtime.ssh?.connected === true
   let created: Tunnel | null = null
-  let work: Promise<LifecycleVerdict> | null = null
-  let settled: Promise<LifecycleVerdict> | null = null
-  work = (async () => {
+  const settled: Promise<LifecycleVerdict> = (async () => {
     try {
       if (runtime.ssh?.connected !== true) throw errors.internal(new Error('the SSH transport is gone'))
       if (!isPid(port) || port > 65535) throw errors.internal(new Error(`invalid remote port for the tunnel: ${port}`))
@@ -74,7 +47,6 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
         throw errors.internal(new Error(`the rebuilt tunnel has no usable local port (${next?.localPort})`))
       }
       if (!stillCurrent()) return { ok: false, reason: 'cancelled' }
-      // Publish the replacement before closing the old listener: no no-listener window.
       runtime.tunnel = next
       runtime.remote.localPort = nextPort
       try {
@@ -83,7 +55,6 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
         // swallow-ok: the old listener could already be gone; the new one is what matters
       }
       if (!stillCurrent()) return { ok: false, reason: 'cancelled' }
-      // The local port changed, so the carrier's view of the host did too.
       runtime.remote.viewRev = (Number(runtime.remote.viewRev) || 0) + 1
       ctx.progress.log(
         runtime,
@@ -95,8 +66,8 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
       ctx.emitState()
       return { ok: true }
     } catch (error) {
-      // swallow-ok: a failed rebuild is a typed, retryable reason (with backoff) for the caller;
-      // the old listener is still serving, so this is not a connection failure.
+      // swallow-ok: a failed rebuild is a typed, retryable reason (with backoff) for the caller; the
+      // old listener is still serving, so this is not a connection failure.
       runtime.tunnelRepairFailures = (Number(runtime.tunnelRepairFailures) || 0) + 1
       const backoff = Math.min(
         REMOTE_REPAIR_BACKOFF_MAX_MS,
@@ -106,8 +77,8 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
       ctx.progress.log(runtime, 'warn', 'tunnel rebuild failed:', messageOf(error))
       return { ok: false, reason: 'rebuild-failed' }
     } finally {
-      // A listener this rebuild created must never outlive it: on a cancelled token (or if it
-      // was never published) close it here, and clear the view only when it owned the slot.
+      // A listener this rebuild created must never outlive it: close it on a cancelled token (or if it
+      // was never published), and clear the view only when it owned the slot.
       if (created !== null && (!isLinkWorkCurrent(runtime, token) || runtime.tunnel !== created)) {
         if (runtime.tunnel === created) {
           runtime.tunnel = null
@@ -121,8 +92,7 @@ export async function repairTunnel(ctx: WatchdogCtx, runtime: HostRuntime): Prom
       }
       endLinkWork(runtime, token)
     }
-  })()
-  settled = work.finally(() => {
+  })().finally(() => {
     if (runtime.tunnelRepair === settled) runtime.tunnelRepair = null
   })
   runtime.tunnelRepair = settled

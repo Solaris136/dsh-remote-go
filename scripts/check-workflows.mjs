@@ -1,6 +1,5 @@
-// Validate the committed CI workflow YAML files with a real parser: the js-yaml
-// devDependency, then DSH_JS_YAML, then python3 + PyYAML. Exit 1 on a bad workflow and 2
-// when no YAML parser is available.
+// Validate the committed CI workflow YAML files with a real parser: the js-yaml devDependency, then DSH_JS_YAML,
+// then python3 + PyYAML. Exit 1 on a bad workflow and 2 when no YAML parser is available.
 import { existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -9,12 +8,10 @@ import { spawnSync } from 'node:child_process'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
-// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+// fileURLToPath, not URL#pathname: it percent-encodes the space in "C:\Work\my repo" and resolved the wrong root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const workflowDir = path.join(root, '.github', 'workflows')
-// Discover the workflows instead of listing them: a new workflow file must be validated
-// by CI on the day it is added, not after someone remembers to extend this list.
+// Discovered, not listed: a new workflow file must be validated the day it is added, not once someone updates a list.
 const files = (await readdir(workflowDir).catch(() => []))
   .filter((name) => /\.ya?ml$/.test(name))
   .sort()
@@ -23,7 +20,6 @@ if (files.length === 0) {
   console.error(`[check-workflows] no workflow YAML found under ${path.relative(root, workflowDir)}`)
   process.exit(1)
 }
-
 let parse = null
 try {
   // Preferred: the js-yaml devDependency (installed by pnpm in CI and locally).
@@ -46,9 +42,8 @@ if (!parse && override) {
     parse = (text) => yaml.load(text)
     console.log(`[check-workflows] using js-yaml: ${override}`)
   } catch (error) {
-    console.error(
-      `[check-workflows] cannot load DSH_JS_YAML (${override}): ${error instanceof Error ? error.message : String(error)}`,
-    )
+    const message = `[check-workflows] cannot load DSH_JS_YAML (${override}): ${error instanceof Error ? error.message : String(error)}`
+    console.error(message)
   }
 }
 if (!parse && spawnSync('python3', ['-c', 'import yaml; print("ok")'], { windowsHide: true }).status === 0) {
@@ -69,7 +64,6 @@ if (!parse) {
   )
   process.exit(2)
 }
-
 let bad = 0
 for (const file of files) {
   const full = path.join(root, file)

@@ -6,12 +6,10 @@ import { EXEC_TOOL_NAME } from '../../dist/src/tools-exec.js'
 import { errors, toErrorView } from '../../dist/src/errors.js'
 
 // ---- fixtures ----------------------------------------------------------------------------------
-
 const SECRET = 'hunter2-do-not-leak'
 const TOKEN = 'tok_live_abcdefghijklmnop'
 const KEY_PATH = '/home/dev/.ssh/id_ed25519'
 const FINGERPRINT = 'SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG='
-
 /** A HostView with credentials and fingerprints deliberately filled in: none may reach a result. */
 function hostView(overrides = {}) {
   return {
@@ -41,12 +39,9 @@ function hostView(overrides = {}) {
     ...overrides,
   }
 }
-
-/**
- * A fake host composition. `inject` behaves like cordis: it returns a *fiber* (not a disposer),
- * whose `dispose()` unloads the child effect, and it can deliver the injected context immediately
- * or later (`deferInject`), exactly as a parked fiber would.
- */
+// A fake host composition. `inject` behaves like cordis: it returns a *fiber* (not a disposer), whose `dispose()`
+// unloads the child effect, and it can deliver the injected context
+// immediately or later (`deferInject`), as a parked fiber would.
 function makeHarness(options = {}) {
   const registered = new Map()
   const whens = new Map()
@@ -126,12 +121,9 @@ function makeHarness(options = {}) {
     reveal: registered.get(REVEAL_TOOL_NAME),
   }
 }
-
-/**
- * Validate one result against the tool's declared `output.schema` the way the kernel does: required
- * fields present, declared types, no undeclared key and no `undefined` value. A mismatch here is a
- * runtime INVALID_TOOL_OUTPUT, so this catches it before a model ever sees a broken call.
- */
+// Validate one result against the tool's declared `output.schema` the way the kernel does: required fields present,
+// declared types, no undeclared key and no `undefined` value. A mismatch is a runtime INVALID_TOOL_OUTPUT, so this
+// catches it before a model ever sees a broken call.
 function assertMatchesSchema(schema, value, path = 'value') {
   if (schema.type === 'object') {
     assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value), `${path} must be an object`)
@@ -158,13 +150,9 @@ function assertMatchesSchema(schema, value, path = 'value') {
   else if (schema.type === 'number') assert.equal(typeof value, 'number', `${path} must be a number`)
   else if (schema.type === 'boolean') assert.equal(typeof value, 'boolean', `${path} must be a boolean`)
 }
-
-/**
- * The three tools the reveal entry unlocks. Every one of them is registered at mount behind a
- * `when` condition, so a session that never reveals never sees their schemas and cannot call them.
- */
+// The three tools the reveal entry unlocks. Every one is registered at mount behind a `when` condition, so a session
+// that never reveals never sees their schemas and cannot call them.
 const GATED_TOOLS = ['remote_hosts_list', 'remote_host_report', 'remote_exec']
-
 /** The credentials, fingerprints and key material that must never appear in a result. */
 const FORBIDDEN = [
   SECRET,
@@ -177,7 +165,6 @@ const FORBIDDEN = [
   'passwordSaved',
   'authKeyPath',
 ]
-
 function assertNoSecrets(value) {
   const serialized = JSON.stringify(value)
   for (const secret of FORBIDDEN) {
@@ -213,8 +200,8 @@ test('the host list registers with a read-only contract and a working disposer',
     'a startup log must say the tool is registered',
   )
 
-  // `ctx.inject` hands back the fiber, so the returned disposer must dispose it — and it must not
-  // throw, because `apply`'s cleanup runs the rest of the unload after this line.
+  // `ctx.inject` hands back the fiber, so the disposer must
+  // dispose it and not throw: `apply`'s cleanup continues after it.
   assert.equal(typeof harness.dispose, 'function')
   assert.doesNotThrow(() => harness.dispose())
   assert.equal(harness.fibers.length, 1)
@@ -237,8 +224,8 @@ test('a failed fiber disposal is contained and lets the rest of the unload run',
 })
 
 test('the tool is registered through ctx.inject even when the service is already live', () => {
-  // A replaced `tools` service only reaches us through the fiber's re-apply; a one-shot
-  // `ctx.get` fast path would leave the tool registered against the dead service.
+  // A replaced `tools` service only reaches us through the fiber's
+  // re-apply; a one-shot `ctx.get` fast path would go stale.
   const harness = makeHarness()
   assert.deepEqual(harness.injects, [['tools']])
   assert.equal(harness.registered.size, 4, 'three gated tools plus the entry they are reached through')
@@ -564,8 +551,8 @@ test('the result is capped, stops projecting early and says so', async () => {
 })
 
 test('a connect failure never echoes a fingerprint or a private-key path', async () => {
-  // The two failure shapes the pipeline really stores on the runtime: prompts.js builds the
-  // first-use host-key prompt (120s timeout) and ssh.js the changed-key one, both from SHA256
+  // The two failure shapes the pipeline really stores on the runtime: prompts.js builds the first-use host-key prompt
+  // (120s timeout) and ssh.js the changed-key one, both from SHA256
   // fingerprints; an auth failure quotes the configured key file.
   const unknown = toErrorView(errors.hostKeyUnknown(FINGERPRINT))
   const changed = toErrorView(
@@ -627,8 +614,8 @@ test('redaction covers case, short tokens and key files outside .ssh', async () 
 })
 
 test('a 50 KB field cannot stall the host event loop', async () => {
-  // `address` has no upstream length limit and the projection is synchronous, so a separator-free
-  // 50 KB token used to cost seconds of regex backtracking.
+  // `address` has no upstream length limit and the projection
+  // is synchronous: a separator-free 50 KB token cost seconds.
   const long = `${FINGERPRINT} ${KEY_PATH} ${'a'.repeat(50_000)}`
   const harness = makeHarness({
     views: [hostView({ address: long, error: { code: 'network', detail: { zh: long, en: long } } })],
@@ -656,8 +643,8 @@ test('long fields are truncated instead of returned whole', async () => {
 })
 
 test('planted regression: an extra projected field fails the whitelist check', () => {
-  // The guard that protects every result: this is the shape a leaky projection would produce, so the
-  // checker (and the row key assertion above) must reject it rather than pass it through.
+  // The guard that protects every result: this is the shape a
+  // leaky projection would produce, so the checker must reject it.
   const harness = makeHarness()
   const leaky = {
     ok: true,

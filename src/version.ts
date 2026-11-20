@@ -1,6 +1,4 @@
-/**
- * Version parsing/comparison and the exact-version parity rule, covering the shapes DSH and Node publish (`0.2.2-rc.1`, `24.22.2`, optional `v`).
- */
+/** Version parsing/comparison and the exact-version parity rule, covering the shapes DSH and Node publish (`0.2.2-rc.1`, `24.22.2`, optional `v`). */
 
 /** A parsed version: numeric core, semver identifiers for the pre-release, the raw input. */
 export interface ParsedVersion {
@@ -11,7 +9,6 @@ export interface ParsedVersion {
   prerelease: (string | number)[]
   build: string | null
 }
-
 /** The parity verdict the Client renders next to a host. */
 export interface VersionParity {
   status: 'unknown' | 'same' | 'different'
@@ -25,12 +22,12 @@ export interface VersionParity {
 const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/
 
 export function parseVersion(input: unknown): ParsedVersion | null {
-  if (typeof input !== 'string') return null
-  const match = VERSION_RE.exec(input.trim())
+  const text = typeof input === 'string' ? input.trim() : ''
+  const match = text === '' ? null : VERSION_RE.exec(text)
   if (!match) return null
   const [, major, minor, patch, prerelease, build] = match
   return {
-    raw: input.trim(),
+    raw: text,
     major: Number(major),
     minor: Number(minor),
     patch: Number(patch),
@@ -46,11 +43,8 @@ export function normalizeVersion(input: unknown): string {
   return parsed.prerelease.length > 0 ? `${core}-${parsed.prerelease.join('.')}` : core
 }
 
-/**
- * Semver identifier comparison: numeric identifiers sort before alphanumeric ones. The
- * pre-release list is `(string | number)[]` by spec, so the two `as number` assertions only
- * restore the branch `typeof` already proved — nothing is coerced.
- */
+// Semver identifier comparison: numeric identifiers sort first. The two `as number` assertions only
+// restore the branch `typeof` already proved — nothing is coerced.
 function compareIdentifiers(a: string | number, b: string | number): number {
   const aNum = typeof a === 'number'
   const bNum = typeof b === 'number'

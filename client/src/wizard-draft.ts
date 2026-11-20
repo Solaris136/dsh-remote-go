@@ -1,12 +1,7 @@
 // client/src/wizard-draft.ts - HOST_LIMITS, the host-draft parser/validator and initialDraft (driven through __test); after key-picker.ts, before wizard.ts.
 //#region 10. connect wizard
-
-/**
- * The ranges the Host actually enforces (`src/settings.js` clamps to them). The Client now
- * checks the same numbers before it saves, so a value is either accepted unchanged on both
- * sides or rejected with a field error — never silently rewritten by the Host. `__test.limits`
- * keeps this table pinned to the Host's behaviour in `test/unit/client.test.js`.
- */
+/** The ranges the Host clamps to (`src/settings.js`): the Client checks the same numbers, so both sides agree. */
+// A value is accepted unchanged on both sides or rejected, never rewritten, and `__test.limits` pins the table.
 interface HostRange {
   min: number
   max: number
@@ -34,43 +29,28 @@ function inRange(value: unknown, limit: HostRange): boolean {
   const number = toInt(value, NaN)
   return Number.isInteger(number) && number >= limit.min && number <= limit.max
 }
-
 function toInt(value: unknown, fallback: number): number {
-  const number =
-    typeof value === 'number' ? value : Number(String(value === undefined || value === null ? '' : value).trim())
+  const number = typeof value === 'number' ? value : Number(String(value ?? '').trim())
   return Number.isFinite(number) && Number.isInteger(number) ? number : fallback
 }
 
-/**
- * Legacy Hosts only expose `addressMasked`; this reads a port out of it. Bracketed IPv6
- * (`user@[fe80::1]:2222`) carries one; a bare IPv6 (`user@fe80::1`) never does, so its last
- * colon-separated group is not a port. New Hosts expose `port`/`username`, and the editor reads
- * those directly (see `initialDraft`).
- */
+/** Legacy Hosts only expose `addressMasked`: the bracketed IPv6 form carries a port, a bare one never does. */
+// New Hosts expose `port`/`username`, read directly.
 function parseMaskedAddress(masked: unknown): { username: string; port: number | null } {
   const text = String(masked || '')
-  const result: { username: string; port: number | null } = { username: '', port: null }
   const at = text.lastIndexOf('@')
-  if (at >= 0) result.username = text.slice(0, at)
   const tail = at >= 0 ? text.slice(at + 1) : text
+  const result: { username: string; port: number | null } = { username: at < 0 ? '' : text.slice(0, at), port: null }
   const bracketed = tail.match(/^\[([^\]]+)\](?::(\d+))?$/)
-  if (bracketed) {
-    result.port = bracketed[2] ? Number(bracketed[2]) : null
-    return result
-  }
-  // An unbracketed address with more than one colon is IPv6: nothing after the last colon is
-  // a port (`fe80::1` used to yield port 1 here).
-  if ((tail.match(/:/g) || []).length > 1) return result
-  const match = tail.match(/:(\d+)\s*$/)
-  if (match) result.port = Number(match[1])
+  // More than one colon means IPv6: nothing after the last colon is a port (`fe80::1` gave 1).
+  const single = (tail.match(/:/g) || []).length > 1 ? null : tail.match(/:(\d+)\s*$/)
+  if (bracketed) result.port = bracketed[2] ? Number(bracketed[2]) : null
+  else if (single) result.port = Number(single[1])
   return result
 }
 
-/**
- * The body `POST /hosts` takes as this wizard builds it. `jumpHost`, `id` and `auth` are added
- * conditionally (a new host vs. an edit, an untouched credential vs. a new one), which is why they
- * are optional here: the Host treats a missing field as "keep what is stored".
- */
+/** The body `POST /hosts` takes: `jumpHost`, `id` and `auth` are added conditionally. */
+// The Host treats a missing field as "keep what is stored".
 interface HostInputBody {
   name: string
   address: string
@@ -84,7 +64,6 @@ interface HostInputBody {
   id?: string
   auth?: { type: string; keyPath?: string }
 }
-
 /** What a save may or may not demand from the draft (an edit that leaves auth alone demands less). */
 interface HostDraftValidationOptions {
   requireKeyPath?: boolean
@@ -102,25 +81,17 @@ function buildHostInput(draft: HostDraftForm, hostId: string | undefined, includ
     autoReconnect: draft.autoReconnect !== false,
     hostKeyPolicy: draft.hostKeyPolicy === 'strict' ? 'strict' : 'first-use',
   }
-  // Contract: an explicit empty string clears the jump host; an omitted field keeps the existing value on update.
-  // Send it only when the HostView exposed it (edit) or when adding a host.
-  const jumpHost = String(draft.jumpHost || '').trim()
-  if (!hostId || draft.jumpHostKnown !== false) host.jumpHost = jumpHost
+  // An explicit empty string clears the jump host; an omitted field keeps the existing value.
+  if (!hostId || draft.jumpHostKnown !== false) host.jumpHost = String(draft.jumpHost || '').trim()
   if (hostId) host.id = hostId
-  if (includeAuth) {
-    // Key files and passwords are the only accepted methods; anything
-    // else (a stale draft carrying the retired "agent" choice) falls back to a key.
-    if (draft.authType === 'password') {
-      host.auth = { type: 'password' }
-    } else {
-      host.auth = { type: 'key', keyPath: String(draft.keyPath || '').trim() }
-    }
-  }
+  // Key files and passwords are the only methods; a stale draft with the retired "agent" choice falls back to a key.
+  const keyPath = String(draft.keyPath || '').trim()
+  if (includeAuth) host.auth = draft.authType === 'password' ? { type: 'password' } : { type: 'key', keyPath }
   return host
 }
 
 /** One validation failure names the field so the form can mark and focus it, not only toast it. */
-function fieldError(field: string, code: string): { field: string; code: string } {
+function fieldError(field: string, code: string) {
   return { field, code }
 }
 
@@ -133,10 +104,9 @@ function validateHostDraft(draft: HostDraftForm, options: HostDraftValidationOpt
   if (draft.keepAlive === 'idle' && !inRange(draft.idleMinutes, HOST_LIMITS.idleMinutes)) {
     return fieldError('idleMinutes', 'wizard.validationIdleMinutes')
   }
-  // An edit that leaves authentication untouched keeps the stored key, so an
-  // empty field is only an error when this save actually sends auth.
-  const requireKeyPath = options.requireKeyPath !== false
-  if (draft.authType === 'key' && requireKeyPath && !String(draft.keyPath || '').trim()) {
+  // An edit that leaves authentication untouched keeps the stored key, so an empty field errors only when auth is sent.
+  const keyPath = String(draft.keyPath || '').trim()
+  if (draft.authType === 'key' && options.requireKeyPath !== false && !keyPath) {
     return fieldError('keyPath', 'wizard.validationKeyPath')
   }
   if (draft.authType === 'password' && options.requirePassword === true && String(draft.password || '').trim() === '') {
@@ -147,18 +117,13 @@ function validateHostDraft(draft: HostDraftForm, options: HostDraftValidationOpt
 
 /** The settings modal validates against the same table the Host clamps with. */
 function validateSettingsDraft(draft: SettingsDraft) {
-  if (!inRange(draft.defaultPort, HOST_LIMITS.defaultPort)) {
-    return fieldError('defaultPort', 'settings.validationPort')
-  }
-  if (!inRange(draft.connectTimeoutSec, HOST_LIMITS.connectTimeoutSec)) {
-    return fieldError('connectTimeoutSec', 'settings.validationTimeout')
-  }
-  if (!inRange(draft.maxAttempts, HOST_LIMITS.maxAttempts)) {
-    return fieldError('maxAttempts', 'settings.validationAttempts')
-  }
-  if (!inRange(draft.baseDelayMs, HOST_LIMITS.baseDelayMs)) {
-    return fieldError('baseDelayMs', 'settings.validationBaseDelay')
-  }
+  const checks = [
+    ['defaultPort', 'settings.validationPort'],
+    ['connectTimeoutSec', 'settings.validationTimeout'],
+    ['maxAttempts', 'settings.validationAttempts'],
+    ['baseDelayMs', 'settings.validationBaseDelay'],
+  ]
+  for (const [field, code] of checks) if (!inRange(draft[field], HOST_LIMITS[field])) return fieldError(field, code)
   if (!isValidProfileName(draft.profile)) return fieldError('profile', 'settings.validationProfile')
   return null
 }
@@ -167,42 +132,27 @@ function initialDraft(mode: string, host: HostLike | null, settings: SettingsVie
   const defaults: Partial<SettingsView> = settings && typeof settings === 'object' ? settings : {}
   const auto: Partial<SettingsView['autoReconnect']> =
     defaults.autoReconnect && typeof defaults.autoReconnect === 'object' ? defaults.autoReconnect : {}
-  if (mode === 'edit' && host) {
-    // Read the plain fields the Host exposes; the masked address is presentation only and
-    // parsing it back used to invent a port (`user@fe80::1` -> 1) or overwrite the default
-    // port with 22. The parse stays as the fallback for a Host from before v2.10.
-    const parsed = parseMaskedAddress(host.addressMasked)
-    const exposedPort = typeof host.port === 'number' && Number.isInteger(host.port) ? host.port : null
-    const exposedUser = typeof host.username === 'string' ? host.username : null
-    return {
-      name: host.name || '',
-      address: host.address || '',
-      port: exposedPort === null ? (parsed.port === null ? defaults.defaultPort || 22 : parsed.port) : exposedPort,
-      username: exposedUser === null ? parsed.username : exposedUser,
-      jumpHost: typeof host.jumpHost === 'string' ? host.jumpHost : '',
-      jumpHostKnown: typeof host.jumpHost === 'string',
-      authType: typeof host.authType === 'string' ? host.authType : defaults.defaultAuth || 'key',
-      // The Host exposes the configured path (not a secret) so an edit does not
-      // start with an empty field; touching nothing still keeps the stored key.
-      keyPath: typeof host.authKeyPath === 'string' ? host.authKeyPath : '',
-      keepAlive: host.keepAlive || 'keep',
-      idleMinutes: host.idleMinutes || 15,
-      autoReconnect: host.autoReconnect !== false,
-      hostKeyPolicy: host.hostKeyPolicy || defaults.hostKeyPolicy || 'first-use',
-    }
-  }
+  // Adding starts from the settings, an edit from the fields the Host exposes; the masked address is display only.
+  // Parsing it back invented a port (`user@fe80::1` -> 1) and overwrote the default, so it is pre-v2.10 only.
+  const editing = mode === 'edit' && Boolean(host)
+  const source: Partial<HostView> = editing ? host : {}
+  const parsed = parseMaskedAddress(source.addressMasked)
+  const port = typeof source.port === 'number' && Number.isInteger(source.port) ? source.port : null
+  const user = typeof source.username === 'string' ? source.username : null
+  const configuredKey = editing ? '' : defaults.defaultKeyPath || '~/.ssh/id_rsa'
   return {
-    name: '',
-    address: '',
-    port: defaults.defaultPort || 22,
-    username: '',
-    jumpHost: '',
-    jumpHostKnown: true,
-    authType: defaults.defaultAuth || 'key',
-    keyPath: defaults.defaultKeyPath || '~/.ssh/id_rsa',
-    keepAlive: 'keep',
-    idleMinutes: 15,
-    autoReconnect: auto.enabled !== false,
-    hostKeyPolicy: defaults.hostKeyPolicy || 'first-use',
+    name: source.name || '',
+    address: source.address || '',
+    port: port === null ? (parsed.port === null ? defaults.defaultPort || 22 : parsed.port) : port,
+    username: user === null ? parsed.username : user,
+    jumpHost: typeof source.jumpHost === 'string' ? source.jumpHost : '',
+    jumpHostKnown: !editing || typeof source.jumpHost === 'string',
+    authType: typeof source.authType === 'string' ? source.authType : defaults.defaultAuth || 'key',
+    // The Host exposes the configured path (not a secret), so an edit does not start at the default.
+    keyPath: typeof source.authKeyPath === 'string' ? source.authKeyPath : configuredKey,
+    keepAlive: source.keepAlive || 'keep',
+    idleMinutes: source.idleMinutes || 15,
+    autoReconnect: editing ? source.autoReconnect !== false : auto.enabled !== false,
+    hostKeyPolicy: source.hostKeyPolicy || defaults.hostKeyPolicy || 'first-use',
   }
 }

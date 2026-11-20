@@ -12,25 +12,56 @@ import {
 } from '../helpers/fake-remote.ts'
 import { errors } from '../../dist/src/errors.js'
 import { SshConnection } from '../../dist/src/ssh.js'
-
-function webInfo() {
-  return {
-    pid: 4242,
-    port: 38123,
-    token: 'tok_test',
-    url: 'http://127.0.0.1:38123/?token=tok_test',
-    logPath: '/home/ubuntu/.dsh/remote-go/logs/web.log',
-    startedAt: new Date().toISOString(),
-    rawLine: '',
-    profile: 'web',
-    dshHome: '/home/ubuntu/.dsh',
-  }
+const WEB_INFO = {
+  pid: 4242,
+  port: 38123,
+  token: 'tok_test',
+  url: 'http://127.0.0.1:38123/?token=tok_test',
+  logPath: '/home/ubuntu/.dsh/remote-go/logs/web.log',
+  startedAt: new Date().toISOString(),
+  rawLine: '',
+  profile: 'web',
+  dshHome: '/home/ubuntu/.dsh',
 }
-
-function framesOf(service) {
+/** The error every fake transport throws when the link is down. */
+const linkDown = () => errors.network({ zh: '链路已断。', en: 'the link is down' })
+const framesOf = (service) => {
   const frames = []
   service.on('state', (state) => frames.push(state))
   return frames
+}
+/** A fake transport that parks in the host-key prompt until the pipeline answers it. */
+function promptSsh(options) {
+  const ssh = new FakeSsh({ options })
+  ssh.connectImpl = async () => {
+    const accepted = await options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
+    if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
+    ssh.connected = true
+    return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
+  }
+  return ssh
+}
+/** The last `lastOpenedAt` store write: counts every write and holds the first one until released. */
+function spyPatchHost(store, hold = false) {
+  const original = store.patchHost.bind(store)
+  const write = (patch) => patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt')
+  const spy = { writes: 0, patches: [], entered: null, release: null }
+  const entered = new Promise((resolve) => {
+    spy.entered = resolve
+  })
+  store.patchHost = async (id, patch) => {
+    spy.patches.push(patch)
+    if (!write(patch)) return original(id, patch)
+    spy.writes += 1
+    if (hold && spy.release === null) {
+      spy.entered()
+      await new Promise((resolve) => {
+        spy.release = resolve
+      })
+    }
+    return original(id, patch)
+  }
+  return { spy, entered }
 }
 
 test('autoReconnect.maxAttempts is the real retry budget, not one attempt', async () => {
@@ -40,11 +71,7 @@ test('autoReconnect.maxAttempts is the real retry budget, not one attempt', asyn
     sshFactory: (options) => {
       attempts += 1
       const ssh = new FakeSsh({ options })
-      if (failing) {
-        ssh.connect = async () => {
-          throw errors.network({ zh: '链路已断。', en: 'the link is down' })
-        }
-      }
+      if (failing) ssh.connect = async () => Promise.reject(linkDown())
       return ssh
     },
   })
@@ -80,11 +107,7 @@ test('a transport dropped during bootstrap is a network failure and is retried',
     sshFactory: (options) => {
       state.attempts += 1
       const ssh = new FakeSsh({ options })
-      if (state.failRetry) {
-        ssh.connect = async () => {
-          throw errors.network({ zh: '链路已断。', en: 'the link is down' })
-        }
-      }
+      if (state.failRetry) ssh.connect = async () => Promise.reject(linkDown())
       return ssh
     },
     probe: async () => {
@@ -101,8 +124,8 @@ test('a transport dropped during bootstrap is a network failure and is retried',
   const frames = framesOf(service)
   await service.connect(host.id)
   const runtime = service.runtimes.get(host.id)
-  // The first failure must be classified as a dropped link, with a retry already armed -
-  // never as an internal error and never with no timer at all (H3).
+  // The first failure must be classified as a dropped link with
+  // a retry armed - never an internal error, never no timer.
   await waitFor(
     () => runtime.status === 'error' && runtime.error?.code === 'network' && runtime.progress?.code === 'reconnecting',
     { timeoutMs: 5_000, label: 'network + reconnecting' },
@@ -121,21 +144,7 @@ test('a transport dropped during bootstrap is a network failure and is retried',
 })
 
 test('a host-key prompt that times out clears its pending state', async () => {
-  const { service } = await makeTestService({
-    hostKeyConfirmTimeoutMs: 60,
-    sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          const accepted = await options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
-          if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
-          ssh.connected = true
-          return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
-        },
-      })
-      return ssh
-    },
-  })
+  const { service } = await makeTestService({ hostKeyConfirmTimeoutMs: 60, sshFactory: promptSsh })
   const host = await createHost(service)
   await service.connect(host.id)
   const runtime = service.runtimes.get(host.id)
@@ -151,22 +160,8 @@ test('a host-key prompt that times out clears its pending state', async () => {
 })
 
 test('a disconnect during a host-key prompt settles the connect immediately', async () => {
-  const { service } = await makeTestService({
-    // Long enough that only the teardown can end the wait.
-    hostKeyConfirmTimeoutMs: 60_000,
-    sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          const accepted = await options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
-          if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
-          ssh.connected = true
-          return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
-        },
-      })
-      return ssh
-    },
-  })
+  // Long enough that only the teardown can end the wait.
+  const { service } = await makeTestService({ hostKeyConfirmTimeoutMs: 60_000, sshFactory: promptSsh })
   const host = await createHost(service)
   const runtime = service.runtimes.get(host.id)
   await service.connect(host.id)
@@ -184,22 +179,20 @@ test('a transport that closes while a host-key prompt is open is a dropped link 
   const state = { failRetry: false }
   const { service } = await makeTestService({
     sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          if (state.failRetry) throw errors.network({ zh: '链路已断。', en: 'the link is down' })
-          // The user is being asked about the key when the transport dies underneath.
-          const asked = options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
-          setTimeout(() => {
-            state.failRetry = true
-            ssh.simulateClose()
-          }, 20)
-          const accepted = await asked
-          if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
-          ssh.connected = true
-          return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
-        },
-      })
+      const ssh = new FakeSsh({ options })
+      ssh.connect = async () => {
+        if (state.failRetry) throw linkDown()
+        // The user is being asked about the key when the transport dies underneath.
+        const asked = options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
+        setTimeout(() => {
+          state.failRetry = true
+          ssh.simulateClose()
+        }, 20)
+        const accepted = await asked
+        if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
+        ssh.connected = true
+        return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
+      }
       return ssh
     },
   })
@@ -228,31 +221,15 @@ test('a disconnect after the store write but before markConnected publishes noth
   const host = await createHost(service)
   const runtime = service.runtimes.get(host.id)
   // Hold the last store write (`lastOpenedAt`) open: the user disconnects while it is in flight.
-  const originalPatch = store.patchHost.bind(store)
-  const patches = []
-  let releaseStore = null
-  let storeEntered = null
-  const writing = new Promise((resolve) => {
-    storeEntered = resolve
-  })
-  store.patchHost = async (id, patch) => {
-    patches.push(patch)
-    if (patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt')) {
-      storeEntered()
-      await new Promise((resolve) => {
-        releaseStore = resolve
-      })
-    }
-    return originalPatch(id, patch)
-  }
+  const { spy, entered } = spyPatchHost(store, true)
   const frames = framesOf(service)
   await service.connect(host.id)
-  await writing
+  await entered
   const tunnel = runtime.tunnel
   assert.ok(tunnel, 'the listener is published before the last store write')
   await service.disconnect(host.id)
   assert.equal(tunnel.closed, true, 'the teardown keeps its own listener closed')
-  releaseStore()
+  spy.release()
   await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: 'pipeline settled' })
   assert.equal(runtime.status, 'disconnected')
   assert.equal(runtime.remote.uiReady, false)
@@ -268,12 +245,7 @@ test('a disconnect after the store write but before markConnected publishes noth
     false,
     'a cancelled attempt is not a failure',
   )
-  assert.equal(
-    patches.filter((patch) => patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt'))
-      .length,
-    1,
-    'the store write itself did land; only the publication after it was stopped',
-  )
+  assert.equal(spy.writes, 1, 'the store write itself did land; only the publication after it was stopped')
   await service.shutdown()
 })
 
@@ -311,12 +283,7 @@ test('a token exchange that lands after a user cancel never touches the closed t
   })
   const host = await createHost(service)
   const runtime = service.runtimes.get(host.id)
-  const originalPatch = store.patchHost.bind(store)
-  let lastOpenedWrites = 0
-  store.patchHost = async (id, patch) => {
-    if (patch !== null && typeof patch === 'object' && Object.hasOwn(patch, 'lastOpenedAt')) lastOpenedWrites += 1
-    return originalPatch(id, patch)
-  }
+  const { spy } = spyPatchHost(store)
   await service.connect(host.id)
   await exchanging
   assert.ok(tunnel !== null, 'the exchange runs against the published listener')
@@ -329,7 +296,7 @@ test('a token exchange that lands after a user cancel never touches the closed t
   assert.equal(runtime.status, 'disconnected')
   assert.equal(runtime.remote.uiReady, false, 'a cancelled exchange must not mark the remote UI ready')
   assert.equal(service.snapshot().activeHostId, null)
-  assert.equal(lastOpenedWrites, 0, 'a cancelled exchange must not reach the store write')
+  assert.equal(spy.writes, 0, 'a cancelled exchange must not reach the store write')
   assert.equal(tunnel.closed, true, 'the late exchange must not reopen the listener')
   assert.equal(tunnel.closeCalls, closeCallsAfterCancel, 'the late exchange must not touch the closed listener again')
   await service.shutdown()
@@ -339,14 +306,12 @@ test('a successful attach resets the retry budget exactly once', async () => {
   let failing = false
   const { service } = await makeTestService({
     sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          if (failing) throw errors.network({ zh: '链路已断。', en: 'the link is down' })
-          ssh.connected = true
-          return { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
-        },
-      })
+      const ssh = new FakeSsh({ options })
+      ssh.connect = async () => {
+        if (failing) throw linkDown()
+        ssh.connected = true
+        return { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
+      }
       return ssh
     },
   })
@@ -363,8 +328,8 @@ test('a successful attach resets the retry budget exactly once', async () => {
     timeoutMs: 20_000,
     label: 'retry budget spent twice',
   })
-  // Count the writes back to zero. `connect.succeeded` is the only event allowed to make one:
-  // `connect.requested` keeps a retry's budget, so a retry cannot masquerade as a reset.
+  // Count the writes back to zero. `connect.succeeded` is the
+  // only event allowed to make one: `connect.requested` keeps a
   let resets = 0
   let current = runtime.reconnectAttempts
   Object.defineProperty(runtime, 'reconnectAttempts', {
@@ -384,9 +349,7 @@ test('a successful attach resets the retry budget exactly once', async () => {
   assert.equal(service.snapshot().activeHostId, host.id)
   await service.shutdown()
 })
-
 const STAGES = ['probe', 'bootstrap', 'start', 'tunnel', 'verifying']
-
 /** The dependencies a connect runs *after* each stage, in pipeline order. */
 const STAGE_CHAIN = {
   probe: ['ensureNode', 'preflight', 'startWeb', 'tunnel', 'waitUi', 'exchange'],
@@ -395,17 +358,17 @@ const STAGE_CHAIN = {
   tunnel: ['waitUi', 'exchange'],
   verifying: ['exchange'],
 }
-
-/**
- * The dependency overrides of one H4 case. Every *downstream* dependency is counted so a
- * cancelled connect that kept going past the user's action is caught as a side effect, not
- * only as a state frame (the catch's cancellation fallback would hide that).
- */
+// The dependency overrides of one H4 case. Every *downstream* dependency is counted so a cancelled connect that kept
+// going past the user's action is caught as a side effect, not
+// only as a state frame (the cancellation fallback would hide it).
 function stageOverrides(stage, state) {
   const facts = makeFacts()
-  const overrides = {
+  const actAt = (name) => async () => {
+    if (stage === name) await state.act()
+  }
+  return {
     probe: async () => {
-      if (stage === 'probe') await state.act()
+      await actAt('probe')()
       state.calls.probe += 1
       return facts
     },
@@ -414,24 +377,24 @@ function stageOverrides(stage, state) {
       return managedNodeFixture()
     },
     preflight: async () => {
-      if (stage === 'bootstrap') await state.act()
+      await actAt('bootstrap')()
       state.calls.preflight += 1
       return '0.2.2-rc.1'
     },
     startWeb: async () => {
-      if (stage === 'start') await state.act()
+      await actAt('start')()
       state.calls.startWeb += 1
-      return webInfo()
+      return WEB_INFO
     },
     tunnelFactory: async () => {
-      if (stage === 'tunnel') await state.act()
+      await actAt('tunnel')()
       state.calls.tunnel += 1
       const tunnel = new FakeTunnel(45124)
       state.tunnels.push(tunnel)
       return tunnel
     },
     waitUi: async () => {
-      if (stage === 'verifying') await state.act()
+      await actAt('verifying')()
       state.calls.waitUi += 1
       return { ok: true, status: 200 }
     },
@@ -440,9 +403,7 @@ function stageOverrides(stage, state) {
       return { ok: true, firstStatus: 302, location: './', status: 200, title: 'DSH', csp: null, bodyLength: 1 }
     },
   }
-  return overrides
 }
-
 for (const action of ['disconnect', 'removeHost']) {
   test(`${action} during any connect step stops the pipeline there`, async (t) => {
     for (const stage of STAGES) {
@@ -467,8 +428,8 @@ for (const action of ['disconnect', 'removeHost']) {
         await service.connect(host.id)
         await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: `${stage} settled` })
 
-        // The pipeline must stop where the user stopped wanting it: no step after the acted
-        // stage may run (a start after a disconnect would leave a remote process behind).
+        // The pipeline must stop where the user stopped wanting it: no step after the acted stage may run (a start
+        // after a disconnect would leave a remote process behind).
         for (const dependency of STAGE_CHAIN[stage]) {
           assert.equal(state.calls[dependency], 0, `${dependency} ran after the ${action} during ${stage}`)
         }

@@ -8,11 +8,8 @@ const EVENT_PATH = '/dsh-remote-go/api/events'
 /** The connect-log channel (docs/api.md): the same admission as `/events`, rows only. */
 const LOG_EVENT_PATH = '/dsh-remote-go/api/events/logs'
 const POLL_INTERVAL_MS = 3000
-/**
- * A dropped SSE stream is rebuilt with exponential backoff instead of leaving the panel in
- * polling forever (docs/api.md `/events`). The first retry is immediate enough to ride out a
- * page reload, and the cap keeps a permanently refused stream from hammering the Host.
- */
+/** A dropped SSE stream is rebuilt with exponential backoff instead of polling forever. */
+// The first retry rides out a page reload, and the cap stops a permanently refused stream from hammering.
 const STREAM_RETRY_BASE_MS = 500
 const STREAM_RETRY_MAX_MS = 15000
 /** One state fetch in a retry chain must not hold the stream down forever. */
@@ -26,20 +23,12 @@ const OVERLAY_ROOT_ID = 'dsh-remote-go-overlay'
 const CAPTION_FALLBACK_HEIGHT = 40
 const CAPTION_MARKER = 'data-windows-titlebar'
 const CAPTION_LIVE_CLASS = 'drg-caption-live'
-/**
- * Fallback for the caption band's control strip, used only when the guest cannot report DSH's
- * own value: the sidebar toggle sits at 12px, a collapsed rail pins the new-session control at
- * 48px (both are DSH's, see SidebarRoot.module.css), 28px wide, plus 8px of air. The window drag
- * strip starts here.
- */
+/** Fallback for the caption band's control strip, used only when the guest cannot report DSH's own value. */
+// The toggle sits at 12px, a collapsed rail's new-session control at 48px (both DSH's), 28px wide, plus 8px of air.
 const CAPTION_CONTROLS_END = 84
 const CAPTION_GRIP_LEFT = CAPTION_CONTROLS_END
-/**
- * Where DSH mounts the Windows caption menubar (应用 / 编辑): a fixed host that reads
- * `--dsh-windows-menu-start`, which the sidebar's own collapse rule raises to the value above.
- * The guest resolves that variable for this page (its document carries the same rule), so these
- * two numbers are only the fallback for a guest that cannot answer.
- */
+/** Where DSH mounts the Windows caption menubar: a fixed host reads `--dsh-windows-menu-start`. */
+// The sidebar's collapse rule raises it, and the guest resolves it here, so these two numbers are only the fallback.
 const CAPTION_MENU_VAR = '--dsh-windows-menu-start'
 const CAPTION_MENU_START = 48
 const CAPTION_MENU_START_COLLAPSED = CAPTION_CONTROLS_END
@@ -47,15 +36,10 @@ const CAPTION_MENU_START_COLLAPSED = CAPTION_CONTROLS_END
 const CAPTION_MENU_MAX = 200
 /** A guest reports its rail state through the same queue its row clicks use (mountSidebarMirror). */
 const CAPTION_SIDEBAR_INTENT = 'caption-sidebar'
-/**
- * Only loopback URLs may ever be handed to the desktop guest (docs/api.md 安全约束). The
- * prefix is the outer shape check; `isValidLoopbackUrl` still verifies the parsed origin.
- */
+/** Only loopback URLs may ever be handed to the desktop guest. */
+// The prefix is the outer shape check; `isValidLoopbackUrl` still verifies the parsed origin.
 const LOOPBACK_PREFIX = 'http://127.0.0.1:'
-/**
- * Same-origin seat of the remote UI used by the browser carrier. It is a path, not an origin:
- * the local DSH proxies it to the connected host's tunnel (docs/api.md `GET /hosts/:id/open`).
- */
+/** The browser carrier's same-origin seat: a path, not an origin, which the local DSH proxies to the host's tunnel. */
 const REMOTE_VIEW_PREFIX = '/dsh-remote-go/remote/'
 /** Ordered connect phases (contract ConnectPhase). */
 const PHASES = ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready']

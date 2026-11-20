@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { Readable } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -11,12 +11,32 @@ import { errors, RemoteGoError } from '../../dist/src/errors.js'
 import { classifySshFailure, closedError, toSshError } from '../../dist/src/ssh-failures.js'
 import { headTail } from '../../dist/src/util.js'
 
+const tempDir = (label) => mkdtemp(path.join(tmpdir(), `dsh-${label}-`))
 function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'key-material') {
   const type = Buffer.from(keyType, 'ascii')
   const len = Buffer.alloc(4)
   len.writeUInt32BE(type.length, 0)
   return Buffer.concat([len, type, Buffer.from(payload, 'ascii')])
 }
+/** An ssh2 client double whose `connect()` runs `behaviour`; `end()` is always a no-op. */
+function fakeClient(behaviour) {
+  const client = new EventEmitter()
+  client.connect = () => behaviour(client)
+  client.end = () => {}
+  return client
+}
+/** The password-auth adapter every client-double case starts from. */
+const sshWith = (clientFactory, overrides = {}) =>
+  new SshConnection({
+    host: 'example.com',
+    username: 'u',
+    auth: { type: 'password', password: 'x' },
+    clientFactory,
+    ...overrides,
+  })
+/** The standard offline failure: `ssh2` reports it, then the transport closes. */
+const authFailure = () =>
+  Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' })
 
 test('parseSshKeyType reads the SSH wire key type', () => {
   assert.equal(parseSshKeyType(makeKeyBlob('ssh-ed25519')), 'ssh-ed25519')
@@ -103,7 +123,7 @@ test('verifyHostKey can be told to accept unknown keys (automation)', async () =
 })
 
 test('resolveAuthCandidates returns password and key-file candidates only', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-key-'))
+  const dir = await tempDir('key')
   const keyFile = path.join(dir, 'id_test')
   await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
   const password = new SshConnection({ host: 'h', auth: { type: 'password', password: 'pw' } })
@@ -153,177 +173,102 @@ test('a closed transport is a typed network failure, never an internal one', asy
 })
 
 test('a throwing progress listener cannot abort a running command', async () => {
-  const { PassThrough } = await import('node:stream')
-  class FakeClient extends EventEmitter {
-    connect() {
-      queueMicrotask(() => this.emit('ready'))
-    }
-    end() {}
-    exec(_command, _options, callback) {
-      const stream = new PassThrough()
-      stream.stderr = new PassThrough()
-      callback(null, stream)
-      queueMicrotask(() => {
-        stream.write('remote-output')
-        stream.end()
-      })
-    }
+  const client = fakeClient((self) => queueMicrotask(() => self.emit('ready')))
+  client.exec = (_command, _options, callback) => {
+    const stream = new PassThrough()
+    stream.stderr = new PassThrough()
+    callback(null, stream)
+    queueMicrotask(() => {
+      stream.write('remote-output')
+      stream.end()
+    })
   }
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'password', password: 'x' },
-    clientFactory: () => new FakeClient(),
-  })
+  const ssh = sshWith(() => client)
   await ssh.connect()
-  const result = await ssh.exec('true', {
-    onStdout: () => {
-      throw new Error('progress reporter blew up')
-    },
-    onStderr: () => {
-      throw new Error('progress reporter blew up')
-    },
-  })
+  const reporter = () => {
+    throw new Error('progress reporter blew up')
+  }
+  const result = await ssh.exec('true', { onStdout: reporter, onStderr: reporter })
   assert.equal(result.stdout, 'remote-output')
 })
 
 test('late ssh2 errors after a failed auth attempt never crash the host process', async () => {
-  class FakeClient extends EventEmitter {
-    connect() {
-      queueMicrotask(() => {
-        this.emit(
-          'error',
-          Object.assign(new Error('All configured authentication methods failed'), { level: 'client-authentication' }),
-        )
-        this.emit('error', new Error('late teardown error'))
-      })
-    }
-    end() {}
-  }
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'password', password: 'x' },
-    clientFactory: () => new FakeClient(),
-  })
+  const client = fakeClient((self) =>
+    queueMicrotask(() => {
+      self.emit('error', authFailure())
+      self.emit('error', new Error('late teardown error'))
+    }),
+  )
+  const ssh = sshWith(() => client)
   await assert.rejects(ssh.connect(), (error) => error?.code === 'auth')
   await new Promise((resolve) => setTimeout(resolve, 20))
 })
 
 test('a failed auth candidate does not leave the fallback connection marked closed', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-fallback-'))
+  const dir = await tempDir('fallback')
   const keyFile = path.join(dir, 'id_test')
   await writeFile(keyFile, 'PRIVATE-KEY-BYTES', 'utf8')
-  let attempt = 0
-  class FakeClient extends EventEmitter {
-    connect() {
-      attempt += 1
-      if (attempt === 1) {
-        queueMicrotask(() => {
-          this.emit(
-            'error',
-            Object.assign(new Error('All configured authentication methods failed'), {
-              level: 'client-authentication',
-            }),
-          )
-        })
-        return
-      }
-      queueMicrotask(() => this.emit('ready'))
-    }
-    end() {}
-  }
   const secondKey = path.join(dir, 'id_second')
   await writeFile(secondKey, 'SECOND-KEY-BYTES', 'utf8')
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'key', keyPath: keyFile },
-    identityFiles: [secondKey],
-    home: dir,
-    clientFactory: () => new FakeClient(),
-  })
+  let attempt = 0
+  const clientFactory = () =>
+    fakeClient((self) => {
+      attempt += 1
+      if (attempt === 1) {
+        queueMicrotask(() => self.emit('error', authFailure()))
+        return
+      }
+      queueMicrotask(() => self.emit('ready'))
+    })
+  const ssh = sshWith(clientFactory, { auth: { type: 'key', keyPath: keyFile }, identityFiles: [secondKey], home: dir })
   await ssh.connect()
   assert.equal(attempt, 2, 'the second candidate must be tried after the first fails')
   assert.equal(ssh.connected, true, 'the successful fallback must not stay marked closed')
 })
 
 test('post-connect ssh errors are contained and reach optional listeners', async () => {
-  class FakeClient extends EventEmitter {
-    connect() {
-      queueMicrotask(() => this.emit('ready'))
-    }
-    end() {}
-  }
-  const fake = new FakeClient()
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'password', password: 'x' },
-    clientFactory: () => fake,
-  })
+  const client = fakeClient((self) => queueMicrotask(() => self.emit('ready')))
+  const ssh = sshWith(() => client)
   await ssh.connect()
   const seen = []
   ssh.on('error', (error) => seen.push(error.message))
-  assert.doesNotThrow(() => fake.emit('error', new Error('connection lost')))
+  assert.doesNotThrow(() => client.emit('error', new Error('connection lost')))
   assert.deepEqual(seen, ['connection lost'])
 })
-
+/** One SFTP directory-listing row; `attrs` carries exactly the predicates the walker reads. */
+const entry = (filename, attrs) => ({ filename, attrs })
+const fileEntry = (filename, size) => entry(filename, { isFile: () => true, size, mtime: 0 })
+const dirEntry = (filename) => entry(filename, { isDirectory: () => true, mtime: 0 })
+/** The SFTP error ssh2 reports for a path that is not there (a missing file or directory). */
+const missing = (what) => Object.assign(new Error(`No such ${what}`), { code: 2 })
 function fakeSftp(files, directories = {}) {
   const ended = { value: false }
+  const attrsOf = (file) => ({
+    size: file.bytes.length,
+    mtime: 0,
+    isDirectory: () => file.directory === true,
+    isFile: () => file.directory !== true,
+  })
   const wrapper = {
     stat(path, callback) {
       if (directories[path] !== undefined) {
-        callback(null, {
-          size: 0,
-          mtime: 0,
-          isDirectory: () => true,
-          isFile: () => false,
-        })
+        callback(null, { size: 0, mtime: 0, isDirectory: () => true, isFile: () => false })
         return
       }
-      const file = files[path]
-      if (file === undefined) {
-        const error = new Error('No such file')
-        error.code = 2
-        callback(error)
-        return
-      }
-      callback(null, {
-        size: file.bytes.length,
-        mtime: 0,
-        isDirectory: () => file.directory === true,
-        isFile: () => file.directory !== true,
-      })
+      if (files[path] === undefined) return callback(missing('file'))
+      callback(null, attrsOf(files[path]))
     },
     readdir(path, callback) {
-      const listing = directories[path]
-      if (listing === undefined) {
-        const error = new Error('No such directory')
-        error.code = 2
-        callback(error)
-        return
-      }
-      callback(null, listing)
+      if (directories[path] === undefined) return callback(missing('directory'))
+      callback(null, directories[path])
     },
     createReadStream(path) {
-      const file = files[path]
-      if (file === undefined) {
-        const error = new Error('No such file')
-        error.code = 2
-        throw error
-      }
-      return Readable.from([file.bytes])
+      if (files[path] === undefined) throw missing('file')
+      return Readable.from([files[path].bytes])
     },
     readFile(path, callback) {
-      const file = files[path]
-      if (file === undefined) {
-        const error = new Error('No such file')
-        error.code = 2
-        callback(error)
-        return
-      }
-      callback(null, file.bytes)
+      if (files[path] === undefined) return callback(missing('file'))
+      callback(null, files[path].bytes)
     },
     end() {
       ended.value = true
@@ -331,7 +276,6 @@ function fakeSftp(files, directories = {}) {
   }
   return { wrapper, ended }
 }
-
 function sshWithSftp(files, directories) {
   const ssh = new SshConnection({ host: 'example.com' })
   const { wrapper, ended } = fakeSftp(files, directories)
@@ -341,10 +285,8 @@ function sshWithSftp(files, directories) {
 }
 
 test('saveRemoteFile streams a regular file to disk and ends the session', async () => {
-  const { ssh, ended } = sshWithSftp({
-    '/home/ubuntu/report.md': { bytes: Buffer.from('hello remote') },
-  })
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-file-')), 'report.md')
+  const { ssh, ended } = sshWithSftp({ '/home/ubuntu/report.md': { bytes: Buffer.from('hello remote') } })
+  const target = path.join(await tempDir('save-file'), 'report.md')
   const progress = []
   const result = await ssh.saveRemoteFile('/home/ubuntu/report.md', target, {
     onProgress: (info) => progress.push(info),
@@ -358,11 +300,11 @@ test('saveRemoteFile streams a regular file to disk and ends the session', async
 
 test('saveRemoteFile refuses directories and has no size cap', async () => {
   const directory = sshWithSftp({ '/home/ubuntu/folder': { bytes: Buffer.alloc(0), directory: true } })
-  const first = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-dir-')), 'folder')
+  const first = path.join(await tempDir('save-dir'), 'folder')
   await assert.rejects(directory.ssh.saveRemoteFile('/home/ubuntu/folder', first), /remote-file-unavailable/)
   assert.equal(directory.ended.value, true)
   const large = sshWithSftp({ '/home/ubuntu/big.bin': { bytes: Buffer.alloc(32) } })
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-large-')), 'big.bin')
+  const target = path.join(await tempDir('save-large'), 'big.bin')
   const result = await large.ssh.saveRemoteFile('/home/ubuntu/big.bin', target)
   assert.equal(result.size, 32)
   assert.equal((await readFile(target)).length, 32)
@@ -371,7 +313,7 @@ test('saveRemoteFile refuses directories and has no size cap', async () => {
 
 test('saveRemoteFile removes the partial file when cancelled mid-stream', async () => {
   const { ssh } = sshWithSftp({ '/home/ubuntu/report.md': { bytes: Buffer.from('hello remote') } })
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-cancel-file-')), 'report.md')
+  const target = path.join(await tempDir('save-cancel-file'), 'report.md')
   await assert.rejects(
     ssh.saveRemoteFile('/home/ubuntu/report.md', target, { isCancelled: () => true }),
     /download-cancelled/,
@@ -387,16 +329,16 @@ test('saveRemoteTree writes files and empty directories into a local target', as
     },
     {
       '/home/ubuntu/project': [
-        { filename: 'sub', attrs: { isDirectory: () => true, mtime: 0 } },
-        { filename: 'a.txt', attrs: { isFile: () => true, size: 3, mtime: 0 } },
-        { filename: 'empty', attrs: { isDirectory: () => true, mtime: 0 } },
-        { filename: 'link', attrs: { isSymbolicLink: () => true } },
+        dirEntry('sub'),
+        fileEntry('a.txt', 3),
+        dirEntry('empty'),
+        entry('link', { isSymbolicLink: () => true }),
       ],
-      '/home/ubuntu/project/sub': [{ filename: 'b.txt', attrs: { isFile: () => true, size: 3, mtime: 0 } }],
+      '/home/ubuntu/project/sub': [fileEntry('b.txt', 3)],
       '/home/ubuntu/project/empty': [],
     },
   )
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-tree-')), 'project')
+  const target = path.join(await tempDir('save-tree'), 'project')
   const inventory = []
   const progress = []
   const result = await ssh.saveRemoteTree('/home/ubuntu/project', target, {
@@ -414,18 +356,16 @@ test('saveRemoteTree writes files and empty directories into a local target', as
 })
 
 test('saveRemoteTree has no byte or entry cap', async () => {
-  const files = {
-    '/home/ubuntu/big/a.bin': { bytes: Buffer.alloc(32) },
-    '/home/ubuntu/big/b.bin': { bytes: Buffer.alloc(32) },
-  }
-  const directories = {
-    '/home/ubuntu/big': [
-      { filename: 'a.bin', attrs: { isFile: () => true, size: 32 } },
-      { filename: 'b.bin', attrs: { isFile: () => true, size: 32 } },
-    ],
-  }
-  const { ssh } = sshWithSftp(files, directories)
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-big-')), 'big')
+  const { ssh } = sshWithSftp(
+    {
+      '/home/ubuntu/big/a.bin': { bytes: Buffer.alloc(32) },
+      '/home/ubuntu/big/b.bin': { bytes: Buffer.alloc(32) },
+    },
+    {
+      '/home/ubuntu/big': [fileEntry('a.bin', 32), fileEntry('b.bin', 32)],
+    },
+  )
+  const target = path.join(await tempDir('save-big'), 'big')
   const result = await ssh.saveRemoteTree('/home/ubuntu/big', target)
   assert.equal(result.totalBytes, 64)
   assert.equal(result.totalFiles, 2)
@@ -435,11 +375,9 @@ test('saveRemoteTree has no byte or entry cap', async () => {
 test('saveRemoteTree can stop before the next file', async () => {
   const { ssh } = sshWithSftp(
     { '/home/ubuntu/project/a.txt': { bytes: Buffer.from('aaa') } },
-    {
-      '/home/ubuntu/project': [{ filename: 'a.txt', attrs: { isFile: () => true, size: 3 } }],
-    },
+    { '/home/ubuntu/project': [fileEntry('a.txt', 3)] },
   )
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-cancel-')), 'project')
+  const target = path.join(await tempDir('save-cancel'), 'project')
   const result = await ssh.saveRemoteTree('/home/ubuntu/project', target, { isCancelled: () => true })
   assert.equal(result.cancelled, true)
   await assert.rejects(readdir(target), /ENOENT/)
@@ -447,7 +385,7 @@ test('saveRemoteTree can stop before the next file', async () => {
 
 test('saveRemoteTree rejects a non-directory root', async () => {
   const { ssh } = sshWithSftp({ '/home/ubuntu/a.txt': { bytes: Buffer.from('a') } })
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-file-')), 'a.txt')
+  const target = path.join(await tempDir('save-file'), 'a.txt')
   await assert.rejects(ssh.saveRemoteTree('/home/ubuntu/a.txt', target), /remote-file-unavailable/)
 })
 
@@ -458,13 +396,10 @@ test('saveRemoteTree keeps both files when two names differ only by case', async
       '/home/ubuntu/report/report.md': { bytes: Buffer.from('lower') },
     },
     {
-      '/home/ubuntu/report': [
-        { filename: 'Report.md', attrs: { isFile: () => true, size: 5 } },
-        { filename: 'report.md', attrs: { isFile: () => true, size: 5 } },
-      ],
+      '/home/ubuntu/report': [fileEntry('Report.md', 5), fileEntry('report.md', 5)],
     },
   )
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-case-')), 'report')
+  const target = path.join(await tempDir('save-case'), 'report')
   // Force the case-insensitive behavior a Windows/macOS Desktop has, whatever this host is.
   const result = await ssh.saveRemoteTree('/home/ubuntu/report', target, { caseInsensitive: true })
   assert.equal(result.totalFiles, 2)
@@ -480,22 +415,20 @@ test('saveRemoteTree keeps both files when two names differ only by case', async
 
 test('saveRemoteTree leaves Windows metadata and shell shortcut files out', async () => {
   const { ssh } = sshWithSftp(
-    {
-      '/home/ubuntu/mixed/readme.txt': { bytes: Buffer.from('keep') },
-    },
+    { '/home/ubuntu/mixed/readme.txt': { bytes: Buffer.from('keep') } },
     {
       '/home/ubuntu/mixed': [
-        { filename: 'readme.txt', attrs: { isFile: () => true, size: 4 } },
-        { filename: 'desktop.ini', attrs: { isFile: () => true, size: 9 } },
-        { filename: 'Thumbs.db', attrs: { isFile: () => true, size: 9 } },
-        { filename: 'setup.lnk', attrs: { isFile: () => true, size: 9 } },
-        { filename: 'docs.url', attrs: { isFile: () => true, size: 9 } },
-        { filename: 'notes', attrs: { isDirectory: () => true } },
+        fileEntry('readme.txt', 4),
+        fileEntry('desktop.ini', 9),
+        fileEntry('Thumbs.db', 9),
+        fileEntry('setup.lnk', 9),
+        fileEntry('docs.url', 9),
+        dirEntry('notes'),
       ],
       '/home/ubuntu/mixed/notes': [],
     },
   )
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-junk-')), 'mixed')
+  const target = path.join(await tempDir('save-junk'), 'mixed')
   const reported = []
   const result = await ssh.saveRemoteTree('/home/ubuntu/mixed', target, {
     ignoreWindowsNames: true,
@@ -511,15 +444,15 @@ test('saveRemoteTree leaves Windows metadata and shell shortcut files out', asyn
 
 test('saveRemoteFile surfaces a missing SFTP session and a missing file', async () => {
   const closed = new SshConnection({ host: 'example.com' })
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-closed-')), 'a')
+  const target = path.join(await tempDir('save-closed'), 'a')
   await assert.rejects(closed.saveRemoteFile('/home/ubuntu/a', target), /SSH connection is not open/)
-  const missing = sshWithSftp({})
-  const missingTarget = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-missing-')), 'missing')
-  await assert.rejects(missing.ssh.saveRemoteFile('/home/ubuntu/missing', missingTarget), /No such file/)
+  const missingFile = sshWithSftp({})
+  const missingTarget = path.join(await tempDir('save-missing'), 'missing')
+  await assert.rejects(missingFile.ssh.saveRemoteFile('/home/ubuntu/missing', missingTarget), /No such file/)
 })
 
 test('readKey skips a huge file and a non-regular file at the configured key path', async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-hugekey-'))
+  const dir = await tempDir('hugekey')
   const big = path.join(dir, 'huge.key')
   await writeFile(big, Buffer.alloc(1024 * 1024 + 1, 0x41))
   const fromBig = new SshConnection({ host: 'h', auth: { type: 'key', keyPath: big }, home: dir })
@@ -538,14 +471,10 @@ test('the Windows-only name filter can be turned off (other platforms keep those
       '/home/ubuntu/posix/readme.txt': { bytes: Buffer.from('c') },
     },
     {
-      '/home/ubuntu/posix': [
-        { filename: 'desktop.ini', attrs: { isFile: () => true, size: 1 } },
-        { filename: 'readme.txt', attrs: { isFile: () => true, size: 1 } },
-        { filename: 'setup.lnk', attrs: { isFile: () => true, size: 1 } },
-      ],
+      '/home/ubuntu/posix': [fileEntry('desktop.ini', 1), fileEntry('readme.txt', 1), fileEntry('setup.lnk', 1)],
     },
   )
-  const target = path.join(await mkdtemp(path.join(tmpdir(), 'dsh-save-posix-')), 'posix')
+  const target = path.join(await tempDir('save-posix'), 'posix')
   const kept = await ssh.saveRemoteTree('/home/ubuntu/posix', target, {
     ignoreWindowsNames: false,
     caseInsensitive: false,
@@ -556,19 +485,9 @@ test('the Windows-only name filter can be turned off (other platforms keep those
 })
 
 test('a handshake-time close is observable and rejects the connect instead of hanging', async () => {
-  class FakeClient extends EventEmitter {
-    connect() {
-      // The transport dies before `ready`: exactly the window a host-key prompt sits in.
-      queueMicrotask(() => this.emit('close'))
-    }
-    end() {}
-  }
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'password', password: 'x' },
-    clientFactory: () => new FakeClient(),
-  })
+  // The transport dies before `ready`: exactly the window a host-key prompt sits in.
+  const client = fakeClient((self) => queueMicrotask(() => self.emit('close')))
+  const ssh = sshWith(() => client)
   const closes = []
   ssh.on('close', () => closes.push('close'))
   await assert.rejects(
@@ -580,22 +499,14 @@ test('a handshake-time close is observable and rejects the connect instead of ha
 })
 
 test('a synchronous error+close during the handshake is one failure, not a dropped link', async () => {
-  class SyncFailureClient extends EventEmitter {
-    connect() {
-      // ssh2's DNS resolution failure: error then close in the same tick.
-      const error = new Error('getaddrinfo ENOTFOUND example.com')
-      error.code = 'ENOTFOUND'
-      this.emit('error', error)
-      this.emit('close')
-    }
-    end() {}
-  }
-  const ssh = new SshConnection({
-    host: 'example.com',
-    username: 'u',
-    auth: { type: 'password', password: 'x' },
-    clientFactory: () => new SyncFailureClient(),
+  const client = fakeClient((self) => {
+    // ssh2's DNS resolution failure: error then close in the same tick.
+    const error = new Error('getaddrinfo ENOTFOUND example.com')
+    error.code = 'ENOTFOUND'
+    self.emit('error', error)
+    self.emit('close')
   })
+  const ssh = sshWith(() => client)
   const closes = []
   ssh.on('close', () => closes.push('close'))
   await assert.rejects(
@@ -607,13 +518,10 @@ test('a synchronous error+close during the handshake is one failure, not a dropp
 })
 
 /* ── error-classification equivalence (P5 / decision D2) ────────────────────────────────────────
- *
- * `toSshError` was extracted into `classifySshFailure` (and `toSshError` became an alias). The
- * extraction is only allowed if the client-visible code and wording did not move, so these cases
- * compare the new classifier against a verbatim copy of HEAD's `toSshError` / `closedError` — the
- * *old* rules, not the new alias (comparing the alias with its own implementation would prove
- * nothing).
- */
+ * `toSshError` was extracted into `classifySshFailure` (and `toSshError` became an alias). The extraction is only
+ * allowed if the client-visible code and wording didn't move, so these cases compare the new classifier against a
+ * verbatim copy of HEAD's `toSshError` / `closedError` — the *old* rules, not the alias (an alias compared
+ * with itself proves nothing). */
 
 /** HEAD `src/ssh.ts:876-903` (pre-P5 `toSshError`), copied verbatim as the oracle. */
 function headToSshError(error, host, port) {
@@ -642,7 +550,6 @@ function headToSshError(error, host, port) {
     en: `SSH connection failed: ${headTail(message, 300)}`,
   })
 }
-
 /** HEAD `src/ssh.ts:42-51` (pre-P5 `closedError`), copied verbatim as the oracle. */
 function headClosedError() {
   return errors.network(
@@ -653,7 +560,6 @@ function headClosedError() {
     { technical: 'reason=ssh-closed' },
   )
 }
-
 /** Everything the client can observe of one coded error (identity deliberately excluded). */
 const codedShape = (error) => ({
   code: error.code,
@@ -664,9 +570,8 @@ const codedShape = (error) => ({
 })
 
 test('ssh-failures.ts is the single source: the adapter no longer re-exports the classifier', async () => {
-  // The classifier used to be re-exported from `ssh.ts` for old call sites; the barrel gate
-  // (scripts/check-architecture.mjs) forbids `export … from`, so the owner module is the only
-  // exporter. Importing it here proves both the name and the deletion.
+  // The classifier used to be re-exported from `ssh.ts` for old call sites; the barrel gate forbids `export … from`, so
+  // the owner module is the only exporter. Importing it here proves both the name and the deletion.
   const adapter = await import('../../dist/src/ssh.js')
   assert.equal('toSshError' in adapter, false)
   assert.equal(typeof toSshError, 'function')

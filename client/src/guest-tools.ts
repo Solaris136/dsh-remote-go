@@ -1,19 +1,13 @@
-// client/src/guest-tools.ts - mountGuestTools/mountCapabilityBridge and the two guest scripts they become (9b 3/11); after guest-host-row.ts, before guest-storage.ts.
+// client/src/guest-tools.ts - mountGuestTools/mountCapabilityBridge and the two guest scripts they become; after guest-host-row.ts, before guest-storage.ts.
 // i18n-exempt: this function is serialized into the remote page, which cannot reach the host's t() or its dictionary.
-/**
- * The remote DSH page's file menu already offers "Download", but a desktop
- * guest session explicitly cancels Chromium downloads. This injected script
- * keeps the page's own menu and, when its download item is chosen, turns the
- * file row's absolute path into an intent the local half can fetch over SFTP.
- * It only touches `win` and its locals (the script is stringified into the guest).
- */
+/** A desktop guest cancels Chromium downloads; this keeps the menu and turns the row's path into an SFTP intent. */
+// It only touches `win` and its locals, since the script is stringified into the guest.
 function mountGuestTools(win: Window): string {
   try {
     var doc = win.document
     if (!doc || !doc.documentElement) return 'no-document'
     if (win.__drgGuestTools === true) return 'already'
-    // The installed flag is set only once every listener is in place: setting it first made
-    // a partial install permanent, because the retry then answered "already" (audit).
+    // Install flag last: setting it first made a half-installed page permanent, because the retry answered "already".
     var emit: (intent: GuestIntentLike) => IntentReceipt | boolean | undefined | void =
       typeof win.__drgBridgeSink === 'function'
         ? win.__drgBridgeSink
@@ -24,8 +18,7 @@ function mountGuestTools(win: Window): string {
             win.__drgBridgeQueue = queue
           }
     var lastFile: { kind: string; path: string; name: string } | null = null
-    // The icon is the stable hook; the labels are a fallback for a future icon
-    // rename (the eight languages shipped by the file-action plugin).
+    // The icon is the stable hook; the labels fall back for a rename (the file-action plugin ships eight languages).
     var DOWNLOAD_LABELS = [
       '下载',
       'Download',
@@ -52,31 +45,21 @@ function mountGuestTools(win: Window): string {
       }
     }
     var hideMenus = function () {
-      // The page's menu closes from its own select handler, which the capture below
-      // suppressed. Hide the menu surface (and its backing) instead of replaying a
-      // synthetic click: a hidden node cannot eat the next gesture, and the next
-      // context menu restores it before the page opens it again.
+      // The capture ate the menu's own select handler: hide the surface and its backing instead of replaying a click.
+      // A hidden node cannot eat the next gesture, and the next context menu restores it.
       try {
-        var menus = doc.querySelectorAll<HTMLElement>('[role="menu"][data-context-menu]')
-        for (var menuIndex = 0; menuIndex < menus.length; menuIndex += 1) {
-          menus[menuIndex].setAttribute('data-drg-guest-hidden', '1')
-          menus[menuIndex].style.display = 'none'
-        }
-        var backings = doc.querySelectorAll<HTMLElement>('[data-menu-backing]')
-        for (var backingIndex = 0; backingIndex < backings.length; backingIndex += 1) {
-          backings[backingIndex].setAttribute('data-drg-guest-hidden', '1')
-          backings[backingIndex].style.display = 'none'
+        var marked = doc.querySelectorAll<HTMLElement>('[role="menu"][data-context-menu], [data-menu-backing]')
+        for (var menuIndex = 0; menuIndex < marked.length; menuIndex += 1) {
+          marked[menuIndex].setAttribute('data-drg-guest-hidden', '1')
+          marked[menuIndex].style.display = 'none'
         }
       } catch (_error) {
         // swallow-ok: the menu also closes on the next pointer gesture
       }
     }
     var directoryTimer: number | null = null
-    /**
-     * A directory has no native download item, so append one to the context menu.
-     * React owns the menu but the appended wrapper uses the cloned item's classes;
-     * the wrapper is removed again on the next context menu.
-     */
+    /** A directory has no native download item, so append one to the context menu, cloned from the template. */
+    // React owns the menu; the appended wrapper is removed again on the next context menu.
     var addDirectoryItem = function () {
       if (!lastFile || lastFile.kind !== 'directory') return true
       var menu = doc.querySelector('[role="menu"][data-context-menu]')
@@ -223,8 +206,7 @@ function mountGuestTools(win: Window): string {
       },
       true,
     )
-    // Capture phase: the page's React menu would otherwise read the file itself
-    // and hand a Blob to a download Chromium refuses for a guest session.
+    // Capture phase, else the page's menu reads the file itself and hands a Blob to a download Chromium refuses.
     doc.addEventListener(
       'click',
       function (event: GuestMouseEvent) {
@@ -237,8 +219,7 @@ function mountGuestTools(win: Window): string {
     doc.addEventListener(
       'click',
       function () {
-        // Runs after the interception listener above: any click ends the file
-        // gesture (the download branch already cleared it before emitting).
+        // Runs after the interception listener: any click ends the file gesture (the download branch cleared it first).
         clear()
       },
       true,
@@ -251,16 +232,9 @@ function mountGuestTools(win: Window): string {
 }
 
 const GUEST_TOOLS_SCRIPT = '(' + mountGuestTools.toString() + ')(window)'
-/**
- * The guest half of the capability bridge. A same-origin subdocument keeps this origin's DOM
- * access but not the browser capabilities a top-level document owns: clipboard writes are
- * refused (`Document is not focused` / `Write permission denied`) and a popup has no handler,
- * so a copy button and a link silently do nothing. This script turns those three requests into
- * intents on the channel the switcher row already uses — `__drgBridgeSink` when the carrier can
- * call back directly, the `__drgBridgeQueue` the desktop carrier drains otherwise — and answers
- * the clipboard one through `__drgCapabilityReply`, so the page can show ✓ or fail visibly.
- * It only touches `win` and its own locals (the script is stringified into the guest).
- */
+/** The guest half of the capability bridge: a subdocument keeps this origin's DOM but not the top-level powers. */
+// Clipboard writes are refused and a popup has no handler, so this turns them into intents on the row's channel
+// (`__drgBridgeSink`, else `__drgBridgeQueue`) and answers the clipboard one through `__drgCapabilityReply`.
 function mountCapabilityBridge(win: Window): string {
   try {
     var doc = win.document
@@ -278,8 +252,7 @@ function mountCapabilityBridge(win: Window): string {
             return null
           }
     var UrlCtor = typeof win.URL === 'function' ? win.URL : URL
-    // A URL that may leave the frame: absolute http(s), a host, no credentials. Anything else
-    // (javascript:, data:, blob:, a relative path) stays inside the framed page.
+    // Absolute http(s), a host, no credentials: only that leaves the frame; javascript:, data:, blob: stay inside.
     var externalUrl = function (value: unknown): string | null {
       if (typeof value !== 'string' || value === '' || value.length > 8192) return null
       var url = null
@@ -351,8 +324,7 @@ function mountCapabilityBridge(win: Window): string {
         }
       })
     }
-    // The frame is the document the user just clicked in, so the legacy path can still land
-    // the text when the top half reports a refusal.
+    // The frame is the clicked document, so the legacy path still lands the text if the top half refuses.
     var legacyCopy = function (text: string) {
       try {
         if (!doc.body || typeof doc.execCommand !== 'function') return false
@@ -413,10 +385,7 @@ function mountCapabilityBridge(win: Window): string {
     // --- links: capture a real external click before the page's own handler swallows it ------
     var onLinkClick = function (event: GuestMouseEvent) {
       if (!event || event.defaultPrevented === true) return
-      // A modified or non-primary click is the user asking for the browser's own behaviour
-      // (new background tab, new window, middle-click paste): leave it to the page and the
-      // browser, exactly like the chat view's own `openExternalLink` handler does. Otherwise
-      // the bridge would silently take those gestures over.
+      // A modified or non-primary click wants the browser's behaviour: leave it to the page, like `openExternalLink`.
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
       var target = event.target
       if (!target || typeof target.closest !== 'function') return
@@ -436,8 +405,7 @@ function mountCapabilityBridge(win: Window): string {
       }
       var url = externalUrl(resolved.href)
       if (url === null) return
-      // A same-origin link is part of the framed application (the DSH router): leave it alone,
-      // a new tab would open the remote UI without its host row.
+      // A same-origin link belongs to the framed app (the DSH router): a new tab would open it with no row.
       var origin = originOf()
       if (origin !== null && resolved.origin === origin) return
       event.preventDefault()
@@ -449,7 +417,6 @@ function mountCapabilityBridge(win: Window): string {
       }
     }
     doc.addEventListener('click', onLinkClick, true)
-
     // --- window.open: a resolved web URL belongs to the top-level document --------------------
     var nativeOpen: Window['open'] | null = typeof win.open === 'function' ? win.open : null
     try {
@@ -457,8 +424,7 @@ function mountCapabilityBridge(win: Window): string {
         var raw = typeof url === 'string' ? url : url === undefined || url === null ? '' : String(url)
         var target = externalUrl(raw)
         if (target === null) {
-          // `about:blank` is the account login's popup skeleton: it has no URL to hand over,
-          // so it keeps the native call (the frame now declares `allow-popups` for it).
+          // `about:blank` is the login popup with no URL, so it keeps the native call (the frame allows popups).
           if (nativeOpen === null) return null
           try {
             return nativeOpen.call(win, url, name, features)
@@ -476,8 +442,7 @@ function mountCapabilityBridge(win: Window): string {
     } catch (_error) {
       // swallow-ok: a frozen window.open keeps the native one, which still opens the tab
     }
-    // Only claim the bridge once every shim above is in place: a half-installed page must be
-    // retried by the next load stop instead of reporting `already` forever.
+    // Claim the bridge only when every shim is in place, else a half-installed page answers `already` forever.
     win.__drgCapabilityBridge = true
     return 'installed'
   } catch (_error) {

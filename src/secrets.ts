@@ -1,18 +1,9 @@
-/**
- * Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in
- * `hosts.json`; with no credential service nothing is persisted.
- *
- * Both kernel shapes this store touches live in `kernel-adapter.ts`: the record API and the
- * `<scope>/<id>` key grammar, which is replicated there and confirmed against the kernel's own
- * parser when one is exposed. A kernel whose grammar moved (`changed`) does not change the keys
- * this plugin generates — the stored form is the one already on users' machines — but it is
- * reported once, because a save the moved grammar later refuses must not look like a silent no-op.
- *
- * The same applies to a credential service that is present but whose members changed shape: the
- * store answers "not stored" exactly as it does without a service, so that `changed` would make a
- * remembered password look forgotten. It is warned about once per store, at the same level as the
- * grammar warning.
- */
+/** Per-host SSH password storage in DSH's own credential store (`ctx.credentials`), never in `hosts.json`; with no
+ * credential service nothing is persisted. The record API and the `<scope>/<id>` grammar live in `kernel-adapter.ts`.
+ * A moved grammar (`changed`) does not change the keys this plugin generates — the stored form is the one already on
+ * users' machines — but it is reported once, because a later refused save must not look like a silent no-op. A service
+ * whose members changed shape gets the same warning: the store answers "not stored" as without a service, and silence
+ * would look like amnesia. */
 import { credentialRecordKey, createKernelAdapter } from './kernel-adapter.js'
 import type { CredentialRecordApi } from './kernel-adapter.js'
 import { HOST_ID_RE } from './settings.js'
@@ -48,37 +39,24 @@ const RECORD_SCOPE = 'dsh-remote-go'
 const RECORD_ID_PREFIX = 'ssh-password-'
 const PAYLOAD_VERSION = 1
 
-/**
- * DSH addresses a stored record as `<scope>/<id>`, and both segments must match
- * `/^[a-z][a-z0-9-]*$/` (`parseCredentialKey` in `@deepseek-ai/dsh-credentials`). A colon-separated
- * key such as `dsh-remote-go:ssh-password:h_1` is stored as given but rejected the next time the
- * credential document is read — the whole file then fails to load, taking every other credential
- * with it. A host id is `h_<base36>`: its only character outside the grammar is the underscore,
- * which maps onto `-` without collisions because the issued suffix never contains one. Only an id
- * this plugin issued is addressable, so an unexpected value never reaches the document.
- * @param hostId - the host id as it appears in `hosts.json`.
- * @returns the record key, or `null` when the id is not addressable.
- */
+/** DSH addresses a record as `<scope>/<id>` and both segments must match `/^[a-z][a-z0-9-]*$/` (`parseCredentialKey` in
+ * `@deepseek-ai/dsh-credentials`): a colon-separated key would be stored as given and rejected on the next read,
+ * failing every other credential with it. A host id is `h_<base36>`, whose only out-of-grammar character is the
+ * underscore; it maps onto `-` without collisions (the suffix never contains one), so only our ids are addressable. */
 export function passwordRecordKey(hostId: unknown): string | null {
   if (typeof hostId !== 'string' || !HOST_ID_RE.test(hostId)) return null
   return credentialRecordKey(RECORD_SCOPE, RECORD_ID_PREFIX + hostId.replace(/_/g, '-'))
 }
 
-/**
- * Build the store for one plugin activation.
- * @param options - the kernel context (a fake in tests) and the warning sink.
- * @returns the store; every method answers "not stored"/"not saved" instead of throwing.
- */
+/** Build the store for one plugin activation; every method answers "not stored"/"not saved" instead of throwing. */
 export function createSecretStore(options: SecretStoreOptions = {}): SecretStore {
   const logger = options.logger ?? console
   const kernel = createKernelAdapter(options.ctx)
   let grammarChecked = false
   let serviceChangedNoted = false
 
-  /**
-   * Report a moved key grammar once per store. The keys stay in their stored form on purpose: a
-   * changed grammar is a kernel we do not recognize, not a reason to orphan every saved password.
-   */
+  // Report a moved key grammar once per store. The keys keep their stored form on purpose: a changed
+  // grammar is a kernel we do not recognize, not a reason to orphan every saved password.
   function noteGrammar(): void {
     if (grammarChecked) return
     grammarChecked = true
@@ -97,9 +75,8 @@ export function createSecretStore(options: SecretStoreOptions = {}): SecretStore
       noteGrammar()
       return probe.value
     }
-    // A service that exists but no longer has the record members is not "no credential service":
-    // answering null silently would present every remembered password as forgotten. Report it
-    // once per store, like the grammar warning; repeated lookups stay quiet.
+    // A present service whose members changed shape is not "no credential service": answering null
+    // silently would present every remembered password as forgotten. Report it once per store.
     if (probe.state === 'changed') {
       if (!serviceChangedNoted) {
         serviceChangedNoted = true

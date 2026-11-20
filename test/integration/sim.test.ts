@@ -13,13 +13,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
 const SIM_SCRIPT = path.join(ROOT, 'e2e', 'sim', 'simulated-remote.mjs')
 const STATE_FILE = path.join(ROOT, 'e2e', 'sim', '.state.json')
-
 const CREDENTIALS = { username: 'sim', password: 'sim' }
-
 function tail(lines) {
   return lines.slice(-12).join('')
 }
-
 function withTimeout(promise, ms, label) {
   let timer = null
   const timeout = new Promise((_resolve, reject) => {
@@ -30,7 +27,6 @@ function withTimeout(promise, ms, label) {
     if (timer) clearTimeout(timer)
   })
 }
-
 async function waitForState(child, logs, timeoutMs = 30_000) {
   const started = Date.now()
   while (true) {
@@ -47,7 +43,6 @@ async function waitForState(child, logs, timeoutMs = 30_000) {
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
 }
-
 async function startSimulator() {
   rmSync(STATE_FILE, { force: true })
   const logs = []
@@ -67,7 +62,6 @@ async function startSimulator() {
   const state = await waitForState(child, logs)
   return { child, state, logs }
 }
-
 async function stopSimulator(child) {
   if (child.exitCode !== null) return true
   const exited = new Promise((resolve) => child.once('exit', resolve))
@@ -94,7 +88,6 @@ async function stopSimulator(child) {
   } catch {}
   return stopped || child.exitCode !== null
 }
-
 function httpOver(stream, request) {
   const call = new Promise((resolve, reject) => {
     let response = ''

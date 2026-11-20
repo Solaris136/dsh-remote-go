@@ -13,10 +13,8 @@ import {
 import { filterResponseHead, responseHeaders, safeLocation, upstreamHeaders } from '../../dist/src/proxy/headers.js'
 import { parseViewPath, upgradePath } from '../../dist/src/proxy/routes.js'
 import { trustedRequest } from '../../dist/src/request-trust.js'
-
 const LOCAL_ORIGIN = 'http://127.0.0.1:57442'
 const LOCAL_AUTHORITY = '127.0.0.1:57442'
-
 function listen(server) {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -26,11 +24,18 @@ function listen(server) {
     })
   })
 }
-
 function close(server) {
   return new Promise((resolve) => server.close(() => resolve(undefined)))
 }
-
+/** Bind and release a port, so the proxy forwards to a loopback listener that is really gone. */
+async function deadPort() {
+  const probe = net.createServer()
+  const port = await listen(probe)
+  await close(probe)
+  return port
+}
+/** Flatten header name/value pairs into the raw array the header parser walks. */
+const rawHeaders = (pairs) => Object.entries(pairs).flatMap(([name, value]) => [name, value])
 /** One HTTP request against the local proxy listener, with browser-shaped headers. */
 function request(port, path, options = {}) {
   return new Promise((resolve, reject) => {
@@ -59,7 +64,6 @@ function request(port, path, options = {}) {
     else req.end()
   })
 }
-
 /** A local DSH web server stand-in: prefix routes plus exact upgrade routes. */
 function fakeWebServer() {
   const routes = new Map()
@@ -79,7 +83,6 @@ function fakeWebServer() {
     },
   }
 }
-
 async function startProxy(resolveHost, webServer = fakeWebServer(), options = {}) {
   const proxy = createRemoteProxy({
     webServer,
@@ -113,6 +116,69 @@ async function startProxy(resolveHost, webServer = fakeWebServer(), options = {}
   })
   const port = await listen(server)
   return { proxy, server, port, webServer }
+}
+// One proxied scenario: a fake upstream (http, or `server` for a raw net listener) plus the proxy in front of it.
+// `body` gets both; everything is disposed and closed afterwards, including `cleanup` — raw sockets must go first or
+// `server.close()` waits forever.
+async function withUpstream(spec, body) {
+  const upstream =
+    spec.server ??
+    http.createServer(
+      spec.onRequest ??
+        ((_req, res) => {
+          res.writeHead(200)
+          res.end('upstream')
+        }),
+    )
+  if (spec.onUpgrade) upstream.on('upgrade', spec.onUpgrade)
+  const upstreamPort = await listen(upstream)
+  const resolve = spec.resolve ?? (() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
+  const local = await startProxy(resolve, spec.webServer, spec.options)
+  try {
+    return await body({ local, upstreamPort, request: (path, options) => request(local.port, path, options) })
+  } finally {
+    spec.cleanup?.()
+    local.proxy.dispose()
+    await close(local.server)
+    if (spec.keepUpstream !== true) await close(upstream)
+  }
+}
+// Open one HTTP/1.1 upgrade against the proxy and resolve with everything the peer sent back. `until` resolves as soon
+// as that marker arrives (a streaming handshake); otherwise the socket's close does. Errors are swallowed only where a
+// destroyed peer is the expected answer.
+function upgradeExchange(port, hostId, options = {}) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(
+        `GET ${upgradePath(hostId)} HTTP/1.1\r\nHost: ${LOCAL_AUTHORITY}\r\n` +
+          'Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n' +
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+          (options.headers ?? '') +
+          '\r\n',
+      )
+    })
+    const chunks = []
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(options.timeoutMessage ?? 'the upgrade never answered'))
+    }, options.timeoutMs ?? 10_000)
+    timer.unref?.()
+    socket.on('data', (chunk) => {
+      chunks.push(Buffer.from(chunk))
+      const text = Buffer.concat(chunks).toString('utf8')
+      if (options.until !== undefined && text.includes(options.until)) {
+        clearTimeout(timer)
+        socket.destroy()
+        resolve(text)
+      }
+    })
+    socket.on('close', () => {
+      clearTimeout(timer)
+      resolve(Buffer.concat(chunks).toString('utf8'))
+    })
+    socket.on('error', options.ignoreErrors === true ? () => {} : reject)
+    socket.resume()
+  })
 }
 
 test('parseViewPath accepts exactly one host segment below the view prefix', () => {
@@ -191,9 +257,8 @@ test('the proxy fence mirrors the local API: same host authority, same Origin, n
   // Host is case-insensitive, and a loopback spelling may differ from the listener's own.
   assert.equal(trustedRequest({ headers: { host: 'LOCALHOST:57442' } }, origin), true)
   assert.equal(trustedRequest({ headers: { host: LOCAL_AUTHORITY, origin: 'http://LOCALHOST:57442' } }, origin), true)
-  // The Origin authority is compared verbatim: a value the URL parser rewrote (userinfo, a
-  // trailing dot, a zero-padded port) cannot have come from a browser, and the rewritten form
-  // must not be accepted as loopback.
+  // The Origin authority is compared verbatim: a value the URL parser rewrote (userinfo, a trailing dot, a zero-padded
+  // port) cannot have come from a browser, and the rewritten form must not be accepted as loopback.
   for (const originHeader of [
     'http://evil.example@127.0.0.1:57442',
     'http://127.0.0.1.:57442',
@@ -206,8 +271,7 @@ test('the proxy fence mirrors the local API: same host authority, same Origin, n
       `Origin ${originHeader} must be rejected`,
     )
   }
-  // A parser has to rewrite each of these into a loopback authority; a browser fills Host from the
-  // serialized URL, so such a value never arrives from one — and the fence must not trust it.
+  // A parser rewrites these into a loopback authority; a browser fills Host from the URL, so don't trust it.
   for (const host of [
     'attacker.example@127.0.0.1:57442',
     '127.0.0.1:57442\\@attacker.example',
@@ -221,20 +285,14 @@ test('the proxy fence mirrors the local API: same host authority, same Origin, n
 
 test('response headers drop the remote cookie, framing denial and remote redirects', () => {
   const headers = responseHeaders(
-    [
-      'content-type',
-      'text/html',
-      'set-cookie',
-      'dsh-auth-a=one; Path=/',
-      'x-frame-options',
-      'DENY',
-      'content-security-policy',
-      "default-src 'self'; frame-ancestors 'none'; script-src 'self'",
-      'location',
-      'http://127.0.0.1:43210/next?x=1',
-      'content-length',
-      '10',
-    ],
+    rawHeaders({
+      'content-type': 'text/html',
+      'set-cookie': 'dsh-auth-a=one; Path=/',
+      'x-frame-options': 'DENY',
+      'content-security-policy': "default-src 'self'; frame-ancestors 'none'; script-src 'self'",
+      location: 'http://127.0.0.1:43210/next?x=1',
+      'content-length': '10',
+    }),
     { hostId: 'h_a', remoteOrigin: 'http://127.0.0.1:43210' },
   )
   assert.deepEqual(headers, [
@@ -257,58 +315,33 @@ test('upstreamHeaders forwards only the allowlisted content headers', () => {
     path: '/',
     jar,
   }
-  const raw = [
-    'accept',
-    'text/html',
-    'accept-encoding',
-    'gzip, deflate, br',
-    'accept-language',
-    'zh-CN',
-    'content-type',
-    'application/json',
-    'content-length',
-    '12',
-    'range',
-    'bytes=0-9',
-    'if-none-match',
-    '"abc"',
-    'if-modified-since',
-    'Tue, 01 Jan 2030 00:00:00 GMT',
-    'cache-control',
-    'no-cache',
-    'user-agent',
-    'Mozilla/5.0',
-    'x-requested-with',
-    'dsh',
-    'authorization',
-    'Bearer local-session-token',
-    'x-dsh-remote-go',
-    '1',
-    'x-dsh-session',
-    'local-session',
-    'forwarded',
-    'for=203.0.113.9',
-    'x-forwarded-for',
-    '203.0.113.9',
-    'x-forwarded-host',
-    'evil.example',
-    'sec-fetch-site',
-    'same-origin',
-    'sec-fetch-mode',
-    'cors',
-    'cookie',
-    'dsh-auth-local=local-cookie',
-    'host',
-    '127.0.0.1:57442',
-    'origin',
-    'http://127.0.0.1:57442',
-    'referer',
-    'http://127.0.0.1:57442/page',
-    'te',
-    'trailers',
-    'connection',
-    'keep-alive',
-  ]
+  const raw = rawHeaders({
+    accept: 'text/html',
+    'accept-encoding': 'gzip, deflate, br',
+    'accept-language': 'zh-CN',
+    'content-type': 'application/json',
+    'content-length': '12',
+    range: 'bytes=0-9',
+    'if-none-match': '"abc"',
+    'if-modified-since': 'Tue, 01 Jan 2030 00:00:00 GMT',
+    'cache-control': 'no-cache',
+    'user-agent': 'Mozilla/5.0',
+    'x-requested-with': 'dsh',
+    authorization: 'Bearer local-session-token',
+    'x-dsh-remote-go': '1',
+    'x-dsh-session': 'local-session',
+    forwarded: 'for=203.0.113.9',
+    'x-forwarded-for': '203.0.113.9',
+    'x-forwarded-host': 'evil.example',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'cors',
+    cookie: 'dsh-auth-local=local-cookie',
+    host: '127.0.0.1:57442',
+    origin: 'http://127.0.0.1:57442',
+    referer: 'http://127.0.0.1:57442/page',
+    te: 'trailers',
+    connection: 'keep-alive',
+  })
   const out = upstreamHeaders(raw, input)
   assert.deepEqual(Object.keys(out).sort(), [
     'accept',
@@ -356,26 +389,17 @@ test('only a WebSocket handshake carries the upgrade headers, credentials still 
     path: '/api/remote.mux',
     jar: new Map(),
   }
-  const raw = [
-    'connection',
-    'Upgrade',
-    'upgrade',
-    'websocket',
-    'sec-websocket-key',
-    'dGhlIHNhbXBsZSBub25jZQ==',
-    'sec-websocket-version',
-    '13',
-    'sec-websocket-protocol',
-    'dsh',
-    'sec-websocket-extensions',
-    'permessage-deflate',
-    'authorization',
-    'Bearer local-session-token',
-    'sec-fetch-mode',
-    'websocket',
-    'x-dsh-remote-go',
-    '1',
-  ]
+  const raw = rawHeaders({
+    connection: 'Upgrade',
+    upgrade: 'websocket',
+    'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+    'sec-websocket-version': '13',
+    'sec-websocket-protocol': 'dsh',
+    'sec-websocket-extensions': 'permessage-deflate',
+    authorization: 'Bearer local-session-token',
+    'sec-fetch-mode': 'websocket',
+    'x-dsh-remote-go': '1',
+  })
   const upgrade = upstreamHeaders(raw, { ...input, preserveUpgrade: true })
   assert.equal(upgrade.connection, 'Upgrade')
   assert.equal(upgrade.upgrade, 'websocket')
@@ -395,30 +419,19 @@ test('only a WebSocket handshake carries the upgrade headers, credentials still 
 
 test('responseHeaders blocks the browser-policy headers a remote must not set locally', () => {
   const out = responseHeaders(
-    [
-      'content-type',
-      'text/html',
-      'clear-site-data',
-      '"cookies", "storage"',
-      'access-control-allow-origin',
-      '*',
-      'access-control-allow-credentials',
-      'true',
-      'refresh',
-      '0; url=https://evil.example/',
-      'content-location',
-      'https://evil.example/',
-      'report-to',
-      '{"group":"default"}',
-      'nel',
-      '{"report_to":"default"}',
-      'permissions-policy',
-      'geolocation=()',
-      'alt-svc',
-      'h3=":443"; ma=60',
-      'cache-control',
-      'no-store',
-    ],
+    rawHeaders({
+      'content-type': 'text/html',
+      'clear-site-data': '"cookies", "storage"',
+      'access-control-allow-origin': '*',
+      'access-control-allow-credentials': 'true',
+      refresh: '0; url=https://evil.example/',
+      'content-location': 'https://evil.example/',
+      'report-to': '{"group":"default"}',
+      nel: '{"report_to":"default"}',
+      'permissions-policy': 'geolocation=()',
+      'alt-svc': 'h3=":443"; ma=60',
+      'cache-control': 'no-store',
+    }),
     { hostId: 'h_a', remoteOrigin: 'http://127.0.0.1:43210' },
   )
   assert.deepEqual(out, ['content-type', 'text/html', 'cache-control', 'no-store'])
@@ -439,8 +452,8 @@ test('a redirect may only stay on the remote listener', () => {
     'https://evil.example/',
     '//evil.example/x',
     '\\\\evil.example\\x',
-    // A backslash is a slash to the URL parser for http(s): these two resolve to
-    // `http://evil.example/…`, so a "relative" reference carrying one is off-origin.
+    // A backslash is a slash to the URL parser for http(s): these
+    // resolve to `http://evil.example/…`, so they are off-origin.
     '/\\evil.example/x',
     '\\/evil.example',
     '/assets\\..\\evil',
@@ -485,257 +498,189 @@ test('filterResponseHead applies the response policy to a 101 handshake', () => 
 
 test('the upgrade forwards a filtered 101 and streams the frames after it', async () => {
   const upgraded = []
-  const upstream = http.createServer((_req, res) => {
-    res.writeHead(200)
-    res.end('not used')
-  })
-  upstream.on('upgrade', (_req, socket) => {
-    upgraded.push(socket)
-    // Keep the server side readable so a peer FIN is processed instead of staying buffered.
-    socket.resume()
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\n' +
-        'upgrade: websocket\r\nconnection: Upgrade\r\n' +
-        'sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n' +
-        'set-cookie: dsh-auth=stolen; Path=/\r\n' +
-        'clear-site-data: "cookies"\r\n' +
-        'access-control-allow-origin: *\r\n\r\n' +
-        'FRAME-AFTER-HEADERS',
-    )
-  })
-  const upstreamPort = await listen(upstream)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
-  try {
-    local.proxy.sync(['h_a'])
-    const received = await new Promise((resolve, reject) => {
-      const socket = net.connect(local.port, '127.0.0.1', () => {
+  await withUpstream(
+    {
+      onUpgrade: (_req, socket) => {
+        upgraded.push(socket)
+        // Keep the server side readable so a peer FIN is processed instead of staying buffered.
+        socket.resume()
         socket.write(
-          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
-            `Host: ${LOCAL_AUTHORITY}\r\n` +
-            'Connection: Upgrade\r\nUpgrade: websocket\r\n' +
-            'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+          'HTTP/1.1 101 Switching Protocols\r\n' +
+            'upgrade: websocket\r\nconnection: Upgrade\r\n' +
+            'sec-websocket-accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n' +
+            'set-cookie: dsh-auth=stolen; Path=/\r\n' +
+            'clear-site-data: "cookies"\r\n' +
+            'access-control-allow-origin: *\r\n\r\n' +
+            'FRAME-AFTER-HEADERS',
         )
+      },
+      cleanup: () => {
+        for (const socket of upgraded) socket.destroy()
+      },
+    },
+    async ({ local }) => {
+      local.proxy.sync(['h_a'])
+      const received = await upgradeExchange(local.port, 'h_a', {
+        until: 'FRAME-AFTER-HEADERS',
+        timeoutMs: 5000,
       })
-      const chunks = []
-      const timer = setTimeout(() => {
-        socket.destroy()
-        reject(new Error('the upgrade never answered'))
-      }, 5000)
-      timer.unref?.()
-      socket.on('data', (chunk) => {
-        chunks.push(Buffer.from(chunk))
-        const text = Buffer.concat(chunks).toString('utf8')
-        if (text.includes('FRAME-AFTER-HEADERS')) {
-          clearTimeout(timer)
-          socket.destroy()
-          resolve(text)
-        }
-      })
-      socket.on('error', reject)
-    })
-    assert.match(received, /^HTTP\/1\.1 101/)
-    assert.match(received, /upgrade: websocket/i)
-    assert.match(received, /connection: Upgrade/i)
-    assert.match(received, /sec-websocket-accept:/i)
-    assert.equal(received.includes('set-cookie'), false, 'a 101 must not install a cookie')
-    assert.equal(received.includes('clear-site-data'), false, 'a 101 must not clear local state')
-    assert.equal(received.includes('access-control-allow-origin'), false)
-    assert.match(received, /FRAME-AFTER-HEADERS/, 'the frames after the head still stream')
-  } finally {
-    for (const socket of upgraded) socket.destroy()
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+      assert.match(received, /^HTTP\/1\.1 101/)
+      assert.match(received, /upgrade: websocket/i)
+      assert.match(received, /connection: Upgrade/i)
+      assert.match(received, /sec-websocket-accept:/i)
+      assert.equal(received.includes('set-cookie'), false, 'a 101 must not install a cookie')
+      assert.equal(received.includes('clear-site-data'), false, 'a 101 must not clear local state')
+      assert.equal(received.includes('access-control-allow-origin'), false)
+      assert.match(received, /FRAME-AFTER-HEADERS/, 'the frames after the head still stream')
+    },
+  )
 })
 
 test('the HTTP proxy strips the prefix, keeps cookies server-side and rewrites authority', async () => {
   const seen = []
-  const upstream = http.createServer((req, res) => {
-    seen.push({ url: req.url, headers: req.headers })
-    if (req.url.startsWith('/?token=')) {
-      res.writeHead(303, {
-        location: './',
-        'set-cookie': ['dsh-auth-fake=session-value; Path=/; HttpOnly; SameSite=Strict'],
-        'content-type': 'text/html',
-      })
-      res.end('token-consumed')
-      return
-    }
-    if (req.url === '/') {
-      res.writeHead(200, { 'content-type': 'text/html' })
-      res.end(`cookie=${req.headers.cookie ?? ''}`)
-      return
-    }
-    res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end('asset')
-  })
-  const upstreamPort = await listen(upstream)
-  const hosts = { h_a: { localPort: upstreamPort, remotePort: upstreamPort } }
-  const local = await startProxy((id) => hosts[id] ?? null)
-  try {
-    const first = await request(local.port, '/dsh-remote-go/remote/h_a/?token=launch-token')
-    assert.equal(first.status, 303)
-    assert.equal(first.headers.location, './')
-    assert.equal(first.headers['set-cookie'], undefined, 'the remote cookie must never reach the browser')
-    const second = await request(local.port, '/dsh-remote-go/remote/h_a/')
-    assert.equal(second.status, 200)
-    assert.equal(second.body, 'cookie=dsh-auth-fake=session-value')
-    const tokenRequest = seen[0]
-    assert.equal(tokenRequest.url, '/?token=launch-token')
-    assert.equal(tokenRequest.headers.host, `127.0.0.1:${upstreamPort}`)
-    // The local GUI's own cookie is never forwarded to the remote.
-    assert.equal(seen[1].headers.cookie, 'dsh-auth-fake=session-value')
-    // Remote cookies stay inside the proxy: the browser sees none.
-    assert.equal(local.proxy.cookies('h_a'), 'dsh-auth-fake=session-value')
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+  await withUpstream(
+    {
+      onRequest: (req, res) => {
+        seen.push({ url: req.url, headers: req.headers })
+        if (req.url.startsWith('/?token=')) {
+          res.writeHead(303, {
+            location: './',
+            'set-cookie': ['dsh-auth-fake=session-value; Path=/; HttpOnly; SameSite=Strict'],
+            'content-type': 'text/html',
+          })
+          res.end('token-consumed')
+          return
+        }
+        if (req.url === '/') {
+          res.writeHead(200, { 'content-type': 'text/html' })
+          res.end(`cookie=${req.headers.cookie ?? ''}`)
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('asset')
+      },
+    },
+    async ({ local, upstreamPort, request: send }) => {
+      const first = await send('/dsh-remote-go/remote/h_a/?token=launch-token')
+      assert.equal(first.status, 303)
+      assert.equal(first.headers.location, './')
+      assert.equal(first.headers['set-cookie'], undefined, 'the remote cookie must never reach the browser')
+      const second = await send('/dsh-remote-go/remote/h_a/')
+      assert.equal(second.status, 200)
+      assert.equal(second.body, 'cookie=dsh-auth-fake=session-value')
+      const tokenRequest = seen[0]
+      assert.equal(tokenRequest.url, '/?token=launch-token')
+      assert.equal(tokenRequest.headers.host, `127.0.0.1:${upstreamPort}`)
+      // The local GUI's own cookie is never forwarded to the remote.
+      assert.equal(seen[1].headers.cookie, 'dsh-auth-fake=session-value')
+      // Remote cookies stay inside the proxy: the browser sees none.
+      assert.equal(local.proxy.cookies('h_a'), 'dsh-auth-fake=session-value')
+    },
+  )
 })
 
 test('the proxy refuses cross-site requests, unknown hosts and disconnected hosts', async () => {
-  const upstream = http.createServer((_req, res) => {
-    res.writeHead(200)
-    res.end('should not be reached')
-  })
-  const upstreamPort = await listen(upstream)
   const hosts = { h_a: null }
-  const local = await startProxy((id) => hosts[id] ?? null)
-  try {
-    const crossSite = await request(local.port, '/dsh-remote-go/remote/h_a/', {
-      headers: { 'sec-fetch-site': 'cross-site' },
-    })
-    assert.equal(crossSite.status, 403)
-    const unknown = await request(local.port, '/dsh-remote-go/remote/h_missing/')
-    assert.equal(unknown.status, 404)
-    const badHost = await request(local.port, '/dsh-remote-go/remote/h_a/', {
-      headers: { host: 'evil.example:57442' },
-    })
-    assert.equal(badHost.status, 403)
-    hosts.h_a = { localPort: upstreamPort, remotePort: upstreamPort }
-    const connected = await request(local.port, '/dsh-remote-go/remote/h_a/')
-    assert.equal(connected.status, 200)
-    assert.equal(connected.body, 'should not be reached')
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+  await withUpstream(
+    {
+      resolve: (id) => hosts[id] ?? null,
+      onRequest: (_req, res) => {
+        res.writeHead(200)
+        res.end('should not be reached')
+      },
+    },
+    async ({ upstreamPort, request: send }) => {
+      const crossSite = await send('/dsh-remote-go/remote/h_a/', { headers: { 'sec-fetch-site': 'cross-site' } })
+      assert.equal(crossSite.status, 403)
+      const unknown = await send('/dsh-remote-go/remote/h_missing/')
+      assert.equal(unknown.status, 404)
+      const badHost = await send('/dsh-remote-go/remote/h_a/', { headers: { host: 'evil.example:57442' } })
+      assert.equal(badHost.status, 403)
+      hosts.h_a = { localPort: upstreamPort, remotePort: upstreamPort }
+      const connected = await send('/dsh-remote-go/remote/h_a/')
+      assert.equal(connected.status, 200)
+      assert.equal(connected.body, 'should not be reached')
+    },
+  )
 })
 
 test('the proxy refuses callers DSH does not admit, over HTTP and the stream upgrade', async () => {
   const reached = []
-  const upstream = http.createServer((_req, res) => {
-    reached.push('http')
-    res.writeHead(200)
-    res.end('upstream')
-  })
-  upstream.on('upgrade', (_req, socket) => {
-    reached.push('upgrade')
-    socket.destroy()
-  })
-  const upstreamPort = await listen(upstream)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), undefined, {
-    admit: (req) => (req.headers['x-test-session'] === 'ok' ? undefined : 401),
-  })
-  try {
-    local.proxy.sync(['h_a'])
-    const denied = await request(local.port, '/dsh-remote-go/remote/h_a/')
-    assert.equal(denied.status, 401)
-    assert.doesNotMatch(denied.body, /upstream/)
+  await withUpstream(
+    {
+      onRequest: (_req, res) => {
+        reached.push('http')
+        res.writeHead(200)
+        res.end('upstream')
+      },
+      onUpgrade: (_req, socket) => {
+        reached.push('upgrade')
+        socket.destroy()
+      },
+      options: { admit: (req) => (req.headers['x-test-session'] === 'ok' ? undefined : 401) },
+    },
+    async ({ local, request: send }) => {
+      local.proxy.sync(['h_a'])
+      const denied = await send('/dsh-remote-go/remote/h_a/')
+      assert.equal(denied.status, 401)
+      assert.doesNotMatch(denied.body, /upstream/)
 
-    const deniedUpgrade = await new Promise((resolve, reject) => {
-      const socket = net.connect(local.port, '127.0.0.1', () => {
-        socket.write(
-          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
-            `Host: ${LOCAL_AUTHORITY}\r\n` +
-            'Connection: Upgrade\r\nUpgrade: websocket\r\n' +
-            'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
-        )
-      })
-      const chunks = []
-      socket.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-      socket.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')))
-      socket.on('error', reject)
-    })
-    assert.match(deniedUpgrade, /HTTP\/1\.1 401/)
-    assert.deepEqual(reached, [], 'a rejected request must never open an upstream connection')
+      const deniedUpgrade = await upgradeExchange(local.port, 'h_a')
+      assert.match(deniedUpgrade, /HTTP\/1\.1 401/)
+      assert.deepEqual(reached, [], 'a rejected request must never open an upstream connection')
 
-    const allowed = await request(local.port, '/dsh-remote-go/remote/h_a/', {
-      headers: { 'x-test-session': 'ok' },
-    })
-    assert.equal(allowed.status, 200)
-    assert.equal(allowed.body, 'upstream')
-    assert.deepEqual(reached, ['http'])
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+      const allowed = await send('/dsh-remote-go/remote/h_a/', { headers: { 'x-test-session': 'ok' } })
+      assert.equal(allowed.status, 200)
+      assert.equal(allowed.body, 'upstream')
+      assert.deepEqual(reached, ['http'])
+    },
+  )
 })
 
 test('the upgrade route forwards only the host stream path and injects the jar cookie', async () => {
   const seen = []
-  const upstream = http.createServer((req, res) => {
-    // The token exchange is the only HTTP request this test needs: it fills the jar.
-    if (req.url.startsWith('/?token=')) {
-      res.writeHead(303, {
-        location: './',
-        'set-cookie': ['dsh-auth-fake=session-value; Path=/; HttpOnly; SameSite=Strict'],
-      })
-      res.end()
-      return
-    }
-    res.writeHead(200)
-    res.end('page')
-  })
-  upstream.on('upgrade', (req, socket) => {
-    seen.push(req)
-    socket.write(
-      'HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n' +
-        `cookie=${req.headers.cookie ?? ''};host=${req.headers.host}`,
-    )
-    socket.end()
-  })
-  const upstreamPort = await listen(upstream)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
-  try {
-    local.proxy.sync(['h_a'])
-    assert.equal(local.webServer.upgrades.has(upgradePath('h_a')), true)
-    // Warm the jar the same way the first page load does.
-    const tokenRequest = await request(local.port, '/dsh-remote-go/remote/h_a/?token=t')
-    assert.equal(tokenRequest.status, 303)
-    assert.equal(local.proxy.cookies('h_a'), 'dsh-auth-fake=session-value')
-
-    const received = await new Promise((resolve, reject) => {
-      const socket = net.connect(local.port, '127.0.0.1', () => {
+  await withUpstream(
+    {
+      onRequest: (req, res) => {
+        // The token exchange is the only HTTP request this test needs: it fills the jar.
+        if (req.url.startsWith('/?token=')) {
+          res.writeHead(303, {
+            location: './',
+            'set-cookie': ['dsh-auth-fake=session-value; Path=/; HttpOnly; SameSite=Strict'],
+          })
+          res.end()
+          return
+        }
+        res.writeHead(200)
+        res.end('page')
+      },
+      onUpgrade: (req, socket) => {
+        seen.push(req)
         socket.write(
-          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
-            `Host: ${LOCAL_AUTHORITY}\r\n` +
-            'Origin: http://127.0.0.1:57442\r\n' +
-            'Connection: Upgrade\r\n' +
-            'Upgrade: websocket\r\n' +
-            'Sec-WebSocket-Version: 13\r\n' +
-            'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n',
+          'HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n' +
+            `cookie=${req.headers.cookie ?? ''};host=${req.headers.host}`,
         )
+        socket.end()
+      },
+    },
+    async ({ local, upstreamPort, request: send }) => {
+      local.proxy.sync(['h_a'])
+      assert.equal(local.webServer.upgrades.has(upgradePath('h_a')), true)
+      // Warm the jar the same way the first page load does.
+      const tokenRequest = await send('/dsh-remote-go/remote/h_a/?token=t')
+      assert.equal(tokenRequest.status, 303)
+      assert.equal(local.proxy.cookies('h_a'), 'dsh-auth-fake=session-value')
+
+      const received = await upgradeExchange(local.port, 'h_a', {
+        headers: 'Origin: http://127.0.0.1:57442\r\n',
       })
-      const chunks = []
-      socket.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-      socket.on('close', () => resolve(Buffer.concat(chunks).toString('utf8')))
-      socket.on('error', reject)
-    })
-    assert.match(received, /HTTP\/1\.1 101/)
-    assert.match(received, new RegExp(`host=127\\.0\\.0\\.1:${upstreamPort}`))
-    assert.match(received, /cookie=dsh-auth-fake=session-value/)
-    assert.equal(seen.length, 1)
-    assert.equal(seen[0].url, '/api/remote.mux')
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+      assert.match(received, /HTTP\/1\.1 101/)
+      assert.match(received, new RegExp(`host=127\\.0\\.0\\.1:${upstreamPort}`))
+      assert.match(received, /cookie=dsh-auth-fake=session-value/)
+      assert.equal(seen.length, 1)
+      assert.equal(seen[0].url, '/api/remote.mux')
+    },
+  )
 })
 
 test('the cookie jar is bound to the remote authority and resets when the remote moves', async () => {
@@ -760,8 +705,7 @@ test('the cookie jar is bound to the remote authority and resets when the remote
     await request(local.port, '/dsh-remote-go/remote/h_a/?token=one')
     const sameAuthority = await request(local.port, '/dsh-remote-go/remote/h_a/')
     assert.equal(sameAuthority.body, 'cookie=dsh-auth=first-instance')
-    // The remote restarted on a new random port: its authority changed, so the old instance's
-    // cookie must not be sent to (or kept for) the new one.
+    // The remote restarted on a new random port: its authority changed, so the old cookie must not be sent or kept.
     target.current = { localPort: secondPort, remotePort: secondPort }
     const afterRestart = await request(local.port, '/dsh-remote-go/remote/h_a/')
     assert.equal(afterRestart.body, 'cookie=')
@@ -778,12 +722,9 @@ test('the cookie jar is bound to the remote authority and resets when the remote
 })
 
 test('a failed upstream reports the fault once per request and still answers 502', async () => {
-  // Bind then release a port so the proxy forwards to a loopback listener that is really gone.
-  const probe = net.createServer()
-  const deadPort = await listen(probe)
-  await close(probe)
   const failures = []
-  const local = await startProxy(() => ({ localPort: deadPort, remotePort: deadPort }), fakeWebServer(), {
+  const port = await deadPort()
+  const local = await startProxy(() => ({ localPort: port, remotePort: port }), fakeWebServer(), {
     onUpstreamError: (hostId) => failures.push(hostId),
   })
   try {
@@ -795,19 +736,7 @@ test('a failed upstream reports the fault once per request and still answers 502
     assert.deepEqual(failures, ['h_a', 'h_a'])
 
     local.proxy.sync(['h_a'])
-    await new Promise((resolve, reject) => {
-      const socket = net.connect(local.port, '127.0.0.1', () => {
-        socket.write(
-          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
-            `Host: ${LOCAL_AUTHORITY}\r\n` +
-            'Connection: Upgrade\r\n' +
-            'Upgrade: websocket\r\n\r\n',
-        )
-      })
-      socket.on('close', resolve)
-      socket.on('error', reject)
-      socket.resume()
-    })
+    await upgradeExchange(local.port, 'h_a')
     assert.deepEqual(failures, ['h_a', 'h_a', 'h_a'], 'the upgrade failure is reported too')
   } finally {
     local.proxy.dispose()
@@ -816,10 +745,8 @@ test('a failed upstream reports the fault once per request and still answers 502
 })
 
 test('a throwing upstream reporter cannot fail the proxied request', async () => {
-  const probe = net.createServer()
-  const deadPort = await listen(probe)
-  await close(probe)
-  const local = await startProxy(() => ({ localPort: deadPort, remotePort: deadPort }), fakeWebServer(), {
+  const port = await deadPort()
+  const local = await startProxy(() => ({ localPort: port, remotePort: port }), fakeWebServer(), {
     onUpstreamError: () => {
       throw new Error('reporter exploded')
     },
@@ -835,93 +762,88 @@ test('a throwing upstream reporter cannot fail the proxied request', async () =>
 
 test('the proxy never forwards the local session credential to the remote host', async () => {
   const seen = []
-  const upstream = http.createServer((req, res) => {
-    seen.push(req.headers)
-    res.writeHead(200, { 'content-type': 'text/plain' })
-    res.end('ok')
-  })
-  const upstreamPort = await listen(upstream)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
-  try {
-    const response = await request(local.port, '/dsh-remote-go/remote/h_a/page', {
-      headers: {
-        accept: 'text/html',
-        origin: LOCAL_ORIGIN,
-        authorization: 'Bearer local-session-token',
-        'x-dsh-remote-go': '1',
-        'x-dsh-session': 'local-session',
-        'x-forwarded-for': '203.0.113.9',
-        forwarded: 'for=203.0.113.9',
-        'sec-fetch-site': 'same-origin',
-        'x-custom-trace': 'trace-1',
+  await withUpstream(
+    {
+      onRequest: (req, res) => {
+        seen.push(req.headers)
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('ok')
       },
-    })
-    assert.equal(response.status, 200)
-    assert.equal(seen.length, 1)
-    const headers = seen[0]
-    // The upstream received the request, but not the browser's local credentials or the
-    // one-hop routing fields.
-    for (const name of [
-      'authorization',
-      'x-dsh-remote-go',
-      'x-dsh-session',
-      'x-forwarded-for',
-      'forwarded',
-      'sec-fetch-site',
-      'x-custom-trace',
-    ]) {
-      assert.equal(headers[name], undefined, `${name} reached the remote host`)
-    }
-    assert.equal(headers.accept, 'text/html', 'ordinary content headers still work')
-    assert.equal(headers.host, `127.0.0.1:${upstreamPort}`)
-    assert.equal(headers.origin, `http://127.0.0.1:${upstreamPort}`)
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+    },
+    async ({ upstreamPort, request: send }) => {
+      const response = await send('/dsh-remote-go/remote/h_a/page', {
+        headers: {
+          accept: 'text/html',
+          origin: LOCAL_ORIGIN,
+          authorization: 'Bearer local-session-token',
+          'x-dsh-remote-go': '1',
+          'x-dsh-session': 'local-session',
+          'x-forwarded-for': '203.0.113.9',
+          forwarded: 'for=203.0.113.9',
+          'sec-fetch-site': 'same-origin',
+          'x-custom-trace': 'trace-1',
+        },
+      })
+      assert.equal(response.status, 200)
+      assert.equal(seen.length, 1)
+      const headers = seen[0]
+      // The upstream received the request, but not the browser's local credentials or the one-hop routing fields.
+      for (const name of [
+        'authorization',
+        'x-dsh-remote-go',
+        'x-dsh-session',
+        'x-forwarded-for',
+        'forwarded',
+        'sec-fetch-site',
+        'x-custom-trace',
+      ]) {
+        assert.equal(headers[name], undefined, `${name} reached the remote host`)
+      }
+      assert.equal(headers.accept, 'text/html', 'ordinary content headers still work')
+      assert.equal(headers.host, `127.0.0.1:${upstreamPort}`)
+      assert.equal(headers.origin, `http://127.0.0.1:${upstreamPort}`)
+    },
+  )
 })
 
 test('a hostile remote response cannot clear local cookies or navigate the frame away', async () => {
-  const upstream = http.createServer((_req, res) => {
-    if (_req.url.startsWith('/?token=')) {
-      res.writeHead(303, { location: './', 'set-cookie': ['dsh-auth=ok; Path=/'] })
-      res.end('token-consumed')
-      return
-    }
-    res.writeHead(302, {
-      location: 'https://evil.example/login',
-      'clear-site-data': '"cookies", "storage"',
-      'access-control-allow-origin': '*',
-      'content-location': 'https://evil.example/',
-      refresh: '0; url=https://evil.example/',
-      'permissions-policy': 'geolocation=()',
-      'content-type': 'text/html',
-    })
-    res.end('redirecting')
-  })
-  const upstreamPort = await listen(upstream)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }))
-  try {
-    await request(local.port, '/dsh-remote-go/remote/h_a/?token=t')
-    const redirected = await request(local.port, '/dsh-remote-go/remote/h_a/')
-    assert.equal(redirected.status, 302)
-    for (const name of [
-      'location',
-      'clear-site-data',
-      'access-control-allow-origin',
-      'content-location',
-      'refresh',
-      'permissions-policy',
-    ]) {
-      assert.equal(redirected.headers[name], undefined, `the remote set ${name} on the local origin`)
-    }
-    assert.equal(redirected.headers['content-type'], 'text/html')
-  } finally {
-    local.proxy.dispose()
-    await close(local.server)
-    await close(upstream)
-  }
+  await withUpstream(
+    {
+      onRequest: (req, res) => {
+        if (req.url.startsWith('/?token=')) {
+          res.writeHead(303, { location: './', 'set-cookie': ['dsh-auth=ok; Path=/'] })
+          res.end('token-consumed')
+          return
+        }
+        res.writeHead(302, {
+          location: 'https://evil.example/login',
+          'clear-site-data': '"cookies", "storage"',
+          'access-control-allow-origin': '*',
+          'content-location': 'https://evil.example/',
+          refresh: '0; url=https://evil.example/',
+          'permissions-policy': 'geolocation=()',
+          'content-type': 'text/html',
+        })
+        res.end('redirecting')
+      },
+    },
+    async ({ request: send }) => {
+      await send('/dsh-remote-go/remote/h_a/?token=t')
+      const redirected = await send('/dsh-remote-go/remote/h_a/')
+      assert.equal(redirected.status, 302)
+      for (const name of [
+        'location',
+        'clear-site-data',
+        'access-control-allow-origin',
+        'content-location',
+        'refresh',
+        'permissions-policy',
+      ]) {
+        assert.equal(redirected.headers[name], undefined, `the remote set ${name} on the local origin`)
+      }
+      assert.equal(redirected.headers['content-type'], 'text/html')
+    },
+  )
 })
 
 test('an upstream that accepts and never answers fails with 502 instead of hanging', async () => {
@@ -931,21 +853,21 @@ test('an upstream that accepts and never answers fails with 502 instead of hangi
     socket.on('close', () => hungSockets.delete(socket))
     // Accept and never answer: the old proxy waited forever.
   })
-  const upstreamPort = await listen(hung)
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), fakeWebServer(), {
-    upstreamTimeoutMs: 150,
-  })
-  try {
-    const started = Date.now()
-    const response = await request(local.port, '/dsh-remote-go/remote/h_a/')
-    assert.equal(response.status, 502)
-    assert.ok(Date.now() - started < 10_000, 'the request must not hang on a silent upstream')
-  } finally {
-    for (const socket of hungSockets) socket.destroy()
-    local.proxy.dispose()
-    await close(local.server)
-    await close(hung)
-  }
+  await withUpstream(
+    {
+      server: hung,
+      options: { upstreamTimeoutMs: 150 },
+      cleanup: () => {
+        for (const socket of hungSockets) socket.destroy()
+      },
+    },
+    async ({ local }) => {
+      const started = Date.now()
+      const response = await request(local.port, '/dsh-remote-go/remote/h_a/')
+      assert.equal(response.status, 502)
+      assert.ok(Date.now() - started < 10_000, 'the request must not hang on a silent upstream')
+    },
+  )
 })
 
 test('an upgrade upstream that accepts and never answers the handshake is dropped and reported', async () => {
@@ -954,41 +876,24 @@ test('an upgrade upstream that accepts and never answers the handshake is droppe
     hungSockets.add(socket)
     socket.on('close', () => hungSockets.delete(socket))
   })
-  const upstreamPort = await listen(hung)
   const failures = []
-  const local = await startProxy(() => ({ localPort: upstreamPort, remotePort: upstreamPort }), fakeWebServer(), {
-    upstreamTimeoutMs: 150,
-    onUpstreamError: (hostId) => failures.push(hostId),
-  })
-  try {
-    local.proxy.sync(['h_a'])
-    await new Promise((resolve, reject) => {
-      const socket = net.connect(local.port, '127.0.0.1', () => {
-        socket.write(
-          `GET ${upgradePath('h_a')} HTTP/1.1\r\n` +
-            `Host: ${LOCAL_AUTHORITY}\r\n` +
-            'Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
-        )
+  await withUpstream(
+    {
+      server: hung,
+      options: { upstreamTimeoutMs: 150, onUpstreamError: (hostId) => failures.push(hostId) },
+      cleanup: () => {
+        for (const socket of hungSockets) socket.destroy()
+      },
+    },
+    async ({ local }) => {
+      local.proxy.sync(['h_a'])
+      await upgradeExchange(local.port, 'h_a', {
+        ignoreErrors: true,
+        timeoutMessage: 'the upgrade socket was never dropped',
       })
-      const timer = setTimeout(() => {
-        socket.destroy()
-        reject(new Error('the upgrade socket was never dropped'))
-      }, 10_000)
-      timer.unref?.()
-      socket.on('close', () => {
-        clearTimeout(timer)
-        resolve(undefined)
-      })
-      socket.on('error', () => {})
-      socket.resume()
-    })
-    assert.deepEqual(failures, ['h_a'])
-  } finally {
-    for (const socket of hungSockets) socket.destroy()
-    local.proxy.dispose()
-    await close(local.server)
-    await close(hung)
-  }
+      assert.deepEqual(failures, ['h_a'])
+    },
+  )
 })
 
 test('sync keeps one upgrade route per host and drops removed hosts', async () => {
@@ -1017,8 +922,7 @@ test('an upgrade whose target no URL can parse is dropped instead of throwing', 
         destroyed = true
       },
     }
-    // Absolute-form garbage: `new URL` throws on it, and a throw here would escape into the web
-    // server's upgrade dispatch (which only logs it).
+    // Absolute-form garbage: `new URL` throws on it, and that would escape into the web server's upgrade dispatch.
     local.proxy.handleUpgrade(
       'h_a',
       { url: 'http://[', headers: { host: LOCAL_AUTHORITY }, rawHeaders: [] },

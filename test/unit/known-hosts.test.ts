@@ -1,14 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import {
-  findKnownHostEntries,
-  fingerprintFromBase64,
-  fingerprintFromBlob,
-  knownHostFieldMatches,
-  parseKnownHosts,
-  summarizeKnownHosts,
-} from '../../dist/src/known-hosts.js'
+import { findKnownHostEntries, fingerprintFromBase64, fingerprintFromBlob } from '../../dist/src/known-hosts.js'
+import { knownHostFieldMatches, parseKnownHosts, summarizeKnownHosts } from '../../dist/src/known-hosts.js'
 
 function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'abcdef') {
   const type = Buffer.from(keyType, 'ascii')
@@ -16,20 +10,13 @@ function makeKeyBlob(keyType = 'ssh-ed25519', payload = 'abcdef') {
   len.writeUInt32BE(type.length, 0)
   return Buffer.concat([len, type, Buffer.from(payload, 'ascii')])
 }
+const base64 = (blob) => blob.toString('base64')
 
-function base64(blob) {
-  return blob.toString('base64')
-}
-
-test('fingerprintFromBlob matches the OpenSSH SHA256 format', () => {
+test('fingerprintFromBlob matches the OpenSSH SHA256 format and fingerprintFromBase64 agrees', () => {
   const blob = makeKeyBlob()
   const expected = `SHA256:${createHash('sha256').update(blob).digest('base64').replace(/=+$/g, '')}`
   assert.equal(fingerprintFromBlob(blob), expected)
   assert.match(expected, /^SHA256:[A-Za-z0-9+/]+$/)
-})
-
-test('fingerprintFromBase64 equals fingerprintFromBlob', () => {
-  const blob = makeKeyBlob()
   assert.equal(fingerprintFromBase64(base64(blob)), fingerprintFromBlob(blob))
 })
 
@@ -38,7 +25,7 @@ test('parseKnownHosts handles plain, port-qualified, hashed and marker lines', (
   const key2 = makeKeyBlob('ssh-rsa', 'two')
   const text = [
     '# comment',
-    `example.com,192.0.2.1 ${'ssh-ed25519'} ${base64(key1)}`,
+    `example.com,192.0.2.1 ssh-ed25519 ${base64(key1)}`,
     `[example.com]:2222 ssh-rsa ${base64(key2)}`,
     '|1|somesalt|somehash ssh-ed25519 AAAA',
     `@revoked revoked.example ssh-ed25519 ${base64(key1)}`,
@@ -55,40 +42,30 @@ test('parseKnownHosts handles plain, port-qualified, hashed and marker lines', (
   assert.equal(parsed.malformed.length, 1)
 })
 
-test('findKnownHostEntries matches hosts and non-default ports', () => {
+test('known hosts match hosts, wildcards and non-default ports only in the bracketed form', () => {
   const key = makeKeyBlob()
   const text = [`[example.com]:2222 ssh-ed25519 ${base64(key)}`, `plain.example ssh-ed25519 ${base64(key)}`].join('\n')
   const parsed = parseKnownHosts(text)
   assert.equal(findKnownHostEntries(parsed, 'example.com', 2222).length, 1)
   assert.equal(findKnownHostEntries(parsed, 'example.com', 22).length, 0)
   assert.equal(findKnownHostEntries(parsed, 'plain.example', 22).length, 1)
-})
-
-test('knownHostFieldMatches supports wildcards', () => {
   assert.equal(knownHostFieldMatches('*.example.com', 'a.example.com', 22), true)
   assert.equal(knownHostFieldMatches('10.0.0.?', '10.0.0.5', 22), true)
   assert.equal(knownHostFieldMatches('*.example.com', 'example.org', 22), false)
-})
-
-test('a plain host entry never vouches for a non-default port', () => {
-  const key = makeKeyBlob()
   // OpenSSH only accepts the bracketed form for a port other than 22.
   assert.equal(knownHostFieldMatches('example.com', 'example.com', 2222), false)
   assert.equal(knownHostFieldMatches('[example.com]:2222', 'example.com', 2222), true)
   assert.equal(knownHostFieldMatches('example.com', 'example.com', 22), true)
   assert.equal(knownHostFieldMatches('[example.com]:22', 'example.com', 22), false)
-  const parsed = parseKnownHosts(`example.com ssh-ed25519 ${base64(key)}`)
-  assert.equal(findKnownHostEntries(parsed, 'example.com', 2222).length, 0)
-  assert.equal(findKnownHostEntries(parsed, 'example.com', 22).length, 1)
+  const plain = parseKnownHosts(`example.com ssh-ed25519 ${base64(key)}`)
+  assert.equal(findKnownHostEntries(plain, 'example.com', 2222).length, 0)
+  assert.equal(findKnownHostEntries(plain, 'example.com', 22).length, 1)
   // A wildcard on a non-default port only matches the bracketed host field too.
   assert.equal(knownHostFieldMatches('*.example.com', 'a.example.com', 2222), false)
   assert.equal(knownHostFieldMatches('[*.example.com]:2222', 'a.example.com', 2222), true)
-})
-
-test('summarizeKnownHosts counts and lists hosts without exposing hashes', () => {
-  const key = makeKeyBlob()
-  const parsed = parseKnownHosts(`a.example,b.example ssh-ed25519 ${base64(key)}\n|1|x|y ssh-rsa AAAA\n`)
-  const summary = summarizeKnownHosts(parsed)
+  const summary = summarizeKnownHosts(
+    parseKnownHosts(`a.example,b.example ssh-ed25519 ${base64(makeKeyBlob())}\n|1|x|y ssh-rsa AAAA\n`),
+  )
   assert.equal(summary.entries, 1)
   assert.equal(summary.hashed, 1)
   assert.deepEqual(summary.hosts, ['a.example', 'b.example'])

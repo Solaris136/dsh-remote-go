@@ -17,12 +17,14 @@ import {
 } from '../../dist/src/node-runtime.js'
 import { remoteLayout } from '../../dist/src/layout.js'
 import { makeFacts } from '../helpers/fake-remote.ts'
-
 const LAYOUT = remoteLayout('/home/ubuntu')
 const SHA = 'a'.repeat(64)
 const VERSION = MANAGED_NODE_VERSION_FALLBACK
 const FILE = `node-v${VERSION}-linux-x64.tar.gz`
 const NODE_DIR = '/home/ubuntu/.dsh/remote-go/node'
+const BIN = `${NODE_DIR}/v24.9.0/bin`
+const parseChecksum = (line) => parseNodeChecksumOutput(line, { version: VERSION, arch: 'x64' })
+const ensure = (ssh) => ensureRemoteNode(ssh, { facts: makeFacts(), layout: LAYOUT })
 
 test('nodeDistArch maps uname values to the official Linux build names', () => {
   assert.equal(nodeDistArch('x86_64'), 'x64')
@@ -56,17 +58,15 @@ test('buildNodeScanScript lists managed builds without any network access', () =
 })
 
 test('parseNodeScanOutput keeps versions, drops duplicates and junk', () => {
-  const versions = parseNodeScanOutput(
-    [
-      `NODE\t24.9.0\t${NODE_DIR}/v24.9.0`,
-      `NODE\tv24.9.0\t${NODE_DIR}/v24.9.0`,
-      `NODE\tnot-a-version\t${NODE_DIR}/junk`,
-      `NODE\t24.22.3\t${NODE_DIR}/v24.22.3`,
-      'garbage',
-    ].join('\n'),
-  )
+  const output = [
+    `NODE\t24.9.0\t${NODE_DIR}/v24.9.0`,
+    `NODE\tv24.9.0\t${NODE_DIR}/v24.9.0`,
+    `NODE\tnot-a-version\t${NODE_DIR}/junk`,
+    `NODE\t24.22.3\t${NODE_DIR}/v24.22.3`,
+    'garbage',
+  ].join('\n')
   assert.deepEqual(
-    versions.map((entry) => entry.version),
+    parseNodeScanOutput(output).map((entry) => entry.version),
     ['24.9.0', '24.22.3'],
   )
 })
@@ -81,21 +81,10 @@ test('buildNodeChecksumScript pins the version and asks for the exact asset', ()
 
 test('parseNodeChecksumOutput accepts only a known host and a hex checksum', () => {
   const line = `CHECKSUM\thttps://nodejs.org/dist\t${SHA}`
-  assert.deepEqual(parseNodeChecksumOutput(line, { version: VERSION, arch: 'x64' }), {
-    base: 'https://nodejs.org/dist',
-    version: VERSION,
-    sha256: SHA,
-    file: FILE,
-  })
-  assert.equal(
-    parseNodeChecksumOutput(`CHECKSUM\thttps://evil.example\t${SHA}`, { version: VERSION, arch: 'x64' }),
-    null,
-  )
-  assert.equal(
-    parseNodeChecksumOutput(`CHECKSUM\thttps://nodejs.org/dist\tzzz`, { version: VERSION, arch: 'x64' }),
-    null,
-  )
-  assert.equal(parseNodeChecksumOutput('', { version: VERSION, arch: 'x64' }), null)
+  assert.deepEqual(parseChecksum(line), { base: 'https://nodejs.org/dist', version: VERSION, sha256: SHA, file: FILE })
+  assert.equal(parseChecksum(`CHECKSUM\thttps://evil.example\t${SHA}`), null)
+  assert.equal(parseChecksum(`CHECKSUM\thttps://nodejs.org/dist\tzzz`), null)
+  assert.equal(parseChecksum(''), null)
 })
 
 test('buildNodeInstallScript verifies the checksum before unpacking', () => {
@@ -112,7 +101,7 @@ test('buildNodeInstallScript verifies the checksum before unpacking', () => {
   assert.ok(script.indexOf('GOT=') < script.indexOf('mv "$TMPX" "$BINDIR"'))
   for (const base of NODE_DIST_BASES) assert.ok(script.includes(base), base)
 })
-
+/** An ssh double answering the scan, the checksum and the install script from `input`. */
 function fakeNodeSsh(input = {}) {
   const calls = []
   return {
@@ -137,7 +126,7 @@ function fakeNodeSsh(input = {}) {
 
 test('ensureRemoteNode reuses the pinned build without touching the network', async () => {
   const ssh = fakeNodeSsh({ scan: `NODE\t${VERSION}\t${NODE_DIR}/v${VERSION}\n` })
-  const result = await ensureRemoteNode(ssh, { facts: makeFacts(), layout: LAYOUT })
+  const result = await ensure(ssh)
   assert.equal(result.version, VERSION)
   assert.equal(result.npxPath, `${NODE_DIR}/v${VERSION}/bin/npx`)
   assert.equal(result.nodeBinDir, `${NODE_DIR}/v${VERSION}/bin`)
@@ -168,7 +157,7 @@ test('ensureRemoteNode installs the pinned build when only another version is pr
 test('ensureRemoteNode reports a typed failure and keeps its reason attached', async () => {
   const noChecksum = fakeNodeSsh({ checksum: { code: 5, stderr: 'curl: (6) Could not resolve host' } })
   await assert.rejects(
-    () => ensureRemoteNode(noChecksum, { facts: makeFacts(), layout: LAYOUT }),
+    () => ensure(noChecksum),
     (error) =>
       error.code === 'remote-node-install-failed' &&
       error.detail.zh.includes('无法从') &&
@@ -182,7 +171,7 @@ test('ensureRemoteNode reports a typed failure and keeps its reason attached', a
     },
   })
   await assert.rejects(
-    () => ensureRemoteNode(failedInstall, { facts: makeFacts(), layout: LAYOUT }),
+    () => ensure(failedInstall),
     (error) => error.code === 'remote-node-install-failed' && /checksum/.test(error.detail.en),
   )
 })
@@ -212,13 +201,13 @@ test('applyManagedNodeFacts swaps in the managed binaries and keeps the other fa
   const facts = makeFacts({ curlPath: null, wgetPath: '/usr/bin/wget' })
   const patched = applyManagedNodeFacts(facts, {
     version: 'v24.9.0',
-    nodePath: `${NODE_DIR}/v24.9.0/bin/node`,
-    npmPath: `${NODE_DIR}/v24.9.0/bin/npm`,
-    npxPath: `${NODE_DIR}/v24.9.0/bin/npx`,
+    nodePath: `${BIN}/node`,
+    npmPath: `${BIN}/npm`,
+    npxPath: `${BIN}/npx`,
   })
   assert.equal(patched.nodeVersion, '24.9.0')
-  assert.equal(patched.nodePath, `${NODE_DIR}/v24.9.0/bin/node`)
-  assert.equal(patched.npxPath, `${NODE_DIR}/v24.9.0/bin/npx`)
+  assert.equal(patched.nodePath, `${BIN}/node`)
+  assert.equal(patched.npxPath, `${BIN}/npx`)
   assert.equal(patched.curlPath, null)
   assert.equal(patched.wgetPath, '/usr/bin/wget')
   assert.equal(patched.arch, 'x86_64')

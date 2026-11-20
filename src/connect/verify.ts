@@ -1,7 +1,4 @@
-/**
- * The `[verifying]` step: the remote UI answers through the new listener and the launch token
- * exchanges for the cookie the carrier needs. Both halves are guarded across their awaits (H3/H4).
- */
+/** The `[verifying]` step: the remote UI answers through the new listener and the launch token exchanges for the cookie the carrier needs; both halves are guarded across their awaits. */
 import { TUNNEL_PROBE_TIMEOUT_MS } from '../constants.js'
 import type { HostState, RemoteDeps, Reporter } from '../context.js'
 import { errors } from '../errors.js'
@@ -10,7 +7,6 @@ import type { ExchangeResult } from '../remote-proc.js'
 import { isPid } from '../util.js'
 import { assertStillWanted, assertTransportOpen } from './guards.js'
 
-/** Prove the remote UI answers through the new tunnel and exchange this launch's token. */
 export async function verifyRemoteUi(
   ctx: HostState & RemoteDeps & Reporter,
   runtime: HostRuntime,
@@ -19,13 +15,10 @@ export async function verifyRemoteUi(
   localPort: number,
 ): Promise<ExchangeResult> {
   const tunnelPort = Number(localPort)
-  if (!Number.isInteger(tunnelPort) || !isPid(tunnelPort) || tunnelPort > 65535) {
+  if (!Number.isInteger(tunnelPort) || !isPid(tunnelPort) || tunnelPort > 65535)
     throw errors.internal(new Error(`the tunnel has no local port to verify (${localPort ?? 'none'})`))
-  }
   ctx.progress.log(runtime, 'debug', `verifying the remote UI on 127.0.0.1:${tunnelPort}`)
   const ui = await ctx.deps.waitUi(runtime.ssh, port, { attempts: 20, intervalMs: 500 })
-  // The probe retries for up to ten seconds: the user may have cancelled in that window, and
-  // the token exchange must not touch the (possibly closed) tunnel after it (H4).
   assertStillWanted(ctx, runtime)
   assertTransportOpen(runtime)
   if (!ui.ok) {
@@ -35,9 +28,7 @@ export async function verifyRemoteUi(
     })
   }
   ctx.progress.log(runtime, 'debug', `remote UI answered HTTP ${ui.status}; exchanging the launch token`)
-  const exchange = await ctx.deps.exchange(tunnelPort, token, {
-    timeoutMs: TUNNEL_PROBE_TIMEOUT_MS,
-  })
+  const exchange = await ctx.deps.exchange(tunnelPort, token, { timeoutMs: TUNNEL_PROBE_TIMEOUT_MS })
   runtime.exchange = exchange
   if (!exchange.ok) {
     throw errors.remoteUiUnreachable({

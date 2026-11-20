@@ -1,6 +1,4 @@
-/**
- * Detect the DSH version of the local installation; the remote runtime is pinned to this exact version, never to npm `latest`.
- */
+/** Detect the DSH version of the local installation; the remote runtime is pinned to this exact version, never to npm `latest`. */
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -20,27 +18,36 @@ export interface LocalVersionInput {
   cwd?: string
 }
 
-/** The detected version (or none) and which source proved it. */
 export interface LocalVersionResult {
   version: string | null
   source: string
 }
 
-/** The detected `engines.node` range (or none) and which source proved it. */
 export interface LocalEnginesResult {
   range: string | null
   source: string
 }
 
+/** The parsed `package.json` at `candidate`, or null when it is absent or not a JSON object. */
+async function readPackageJson(candidate: string): Promise<Record<string, unknown> | null> {
+  try {
+    if (!existsSync(candidate)) return null
+    // A package.json on disk is untrusted input: narrow it before reading fields.
+    const parsed: unknown = JSON.parse(await readFile(candidate, 'utf8'))
+    return isPlainObject(parsed) ? parsed : null
+  } catch {
+    // swallow-ok: a candidate that is absent or unparsable is skipped by design
+    return null
+  }
+}
+
 export async function detectLocalVersion(input: LocalVersionInput = {}): Promise<LocalVersionResult> {
   const env = input.env ?? process.env
   const explicit = env.DSH_VERSION || env.DSH_RUNTIME_VERSION
-  if (explicit && parseVersion(normalizeVersion(explicit))) {
+  if (explicit && parseVersion(normalizeVersion(explicit)))
     return { version: normalizeVersion(explicit), source: 'env' }
-  }
-
-  // The web client-module registry publishes the Host release identity, which
-  // releases share with the CLI package version.
+  // The web client-module registry publishes the Host release identity, which releases share with
+  // the CLI package version.
   const release = createKernelAdapter(input.ctx).clientModuleRelease()
   if (release.state === 'ok' && release.value !== null) {
     const version = release.value.version
@@ -55,49 +62,24 @@ export async function detectLocalVersion(input: LocalVersionInput = {}): Promise
       release.detail,
     )
   }
-
   for (const candidate of candidatePackageJsons(input)) {
-    try {
-      if (!existsSync(candidate)) continue
-      const text = await readFile(candidate, 'utf8')
-      // A package.json on disk is untrusted input: narrow it before reading fields.
-      const parsed: unknown = JSON.parse(text)
-      if (
-        isPlainObject(parsed) &&
-        parsed.name === '@deepseek-ai/dsh' &&
-        typeof parsed.version === 'string' &&
-        parseVersion(normalizeVersion(parsed.version))
-      ) {
-        return { version: normalizeVersion(parsed.version), source: `package.json:${candidate}` }
-      }
-    } catch {
-      // swallow-ok: a candidate that is absent or unparsable is skipped by design
-    }
+    const manifest = await readPackageJson(candidate)
+    if (manifest?.name !== '@deepseek-ai/dsh' || typeof manifest.version !== 'string') continue
+    if (!parseVersion(normalizeVersion(manifest.version))) continue
+    return { version: normalizeVersion(manifest.version), source: `package.json:${candidate}` }
   }
   return { version: null, source: 'unknown' }
 }
 
-/**
- * The local DSH build's Node engine range (`engines.node`). It is the source of
- * truth for the managed Node version the plugin installs on the remote: the
- * remote runs this exact DSH version, so it must satisfy this declaration.
- *
- * Best-effort like the version probe: an unreadable or missing package yields
- * `range: null` and the caller falls back to the plugin's own floor.
- */
+/** The local DSH build's Node engine range (`engines.node`), the source of truth for the managed Node on the remote: it
+ * must satisfy this declaration. Best-effort: a missing package yields `range: null` and the plugin's own floor. */
 export async function detectLocalEnginesNode(input: LocalVersionInput = {}): Promise<LocalEnginesResult> {
   for (const candidate of candidatePackageJsons(input)) {
-    try {
-      if (!existsSync(candidate)) continue
-      const parsed: unknown = JSON.parse(await readFile(candidate, 'utf8'))
-      const engines = isPlainObject(parsed) && isPlainObject(parsed.engines) ? parsed.engines : null
-      const range = engines?.node
-      if (typeof range === 'string' && range.trim() !== '') {
-        return { range: range.trim(), source: `package.json:${candidate}` }
-      }
-    } catch {
-      // swallow-ok: the same candidate scan as the version probe above
-    }
+    const manifest = await readPackageJson(candidate)
+    const engines = manifest !== null && isPlainObject(manifest.engines) ? manifest.engines : null
+    const range = engines?.node
+    if (typeof range === 'string' && range.trim() !== '')
+      return { range: range.trim(), source: `package.json:${candidate}` }
   }
   return { range: null, source: 'unknown' }
 }
@@ -107,17 +89,13 @@ export function candidatePackageJsons(input: LocalVersionInput = {}): string[] {
   const argv1 = input.argv1 ?? process.argv[1] ?? ''
   const marker = `${path.sep}@deepseek-ai${path.sep}dsh${path.sep}`
   const markerIndex = argv1.indexOf(marker)
-  if (markerIndex >= 0) {
-    out.push(path.join(argv1.slice(0, markerIndex + marker.length), 'package.json'))
-  }
+  if (markerIndex >= 0) out.push(path.join(argv1.slice(0, markerIndex + marker.length), 'package.json'))
   // Electron's `resourcesPath` is not on the standard Process type; it is read duck-typed.
   const resourcesPath = input.resourcesPath ?? (process as { resourcesPath?: unknown }).resourcesPath
   if (typeof resourcesPath === 'string' && resourcesPath !== '') {
-    out.push(path.join(resourcesPath, 'app.asar', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
-    out.push(
-      path.join(resourcesPath, 'app.asar.unpacked', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'),
-    )
-    out.push(path.join(resourcesPath, 'app', 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+    for (const dir of ['app.asar', 'app.asar.unpacked', 'app']) {
+      out.push(path.join(resourcesPath, dir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
+    }
   }
   // Walk up from the CLI entry looking for a nested package.
   let dir = argv1 ? path.dirname(argv1) : (input.cwd ?? process.cwd())

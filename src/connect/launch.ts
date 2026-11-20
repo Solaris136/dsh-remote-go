@@ -1,8 +1,4 @@
-/**
- * The `[start]` step's one decision: a remote DSH this plugin did not start is put in front of the
- * user (stop it, keep it alongside, or cancel) instead of being silently raced by a second
- * instance that shares the same `~/.dsh` profile (docs/design.md §5.5).
- */
+/** The `[start]` step: the one notice a browser-carrier-patched launch logs, and the one decision about a remote DSH this plugin did not start — put it in front of the user (stop it, keep it alongside, or cancel) instead of silently racing it with a second instance that shares the same `~/.dsh` profile. */
 import type { PromptCtx, RemoteDeps } from '../context.js'
 import { errors } from '../errors.js'
 import type { HostRuntime } from '../host-runtime.js'
@@ -10,23 +6,15 @@ import type { RemoteLayout } from '../layout.js'
 import { askConflict } from '../prompts.js'
 import { isPid, messageOf } from '../util.js'
 
-/** One foreign DSH the conflict prompt describes. */
-export interface KnownProcess {
-  pid: number
-  command: string
-}
+/** The note a launch logs after it had to re-enable the remote profile's browser Remote-Event carrier. */
+export const PATCHED_CARRIER_NOTE =
+  'the remote profile disables api-remotes (browser Remote-Event carrier); re-enabled it for this launch'
 
-/** What `resolveForeignConflict` may be told about pids the user already answered for. */
-interface ForeignConflictOptions {
-  ignoredPids?: number[]
-  knownProcess?: KnownProcess | null
-}
+export type KnownProcess = { pid: number; command: string }
 
-/**
- * Warn when the remote already runs a DSH this plugin did not start, and let the
- * user decide: stop it, keep it alongside, or cancel.
- * @returns the decision, or null when no prompt was needed.
- */
+type ForeignConflictOptions = { ignoredPids?: number[]; knownProcess?: KnownProcess | null }
+
+/** Warn when the remote already runs a DSH this plugin did not start, and let the user decide: stop it, keep it alongside, or cancel. */
 export async function resolveForeignConflict(
   ctx: PromptCtx & RemoteDeps,
   runtime: HostRuntime,
@@ -34,9 +22,10 @@ export async function resolveForeignConflict(
   profile: string,
   options: ForeignConflictOptions = {},
 ): Promise<'stop' | 'alongside' | null> {
-  // Processes the user already chose to keep alongside this connection are not asked
-  // about again (a local restart must not turn that choice into a prompt every time).
-  const ignorePids = (Array.isArray(options.ignoredPids) ? options.ignoredPids : []).filter((pid) => isPid(pid))
+  // Processes the user already chose to keep alongside this connection are not asked about again.
+  const answered = Array.isArray(options.ignoredPids) ? options.ignoredPids : []
+  const keptAlongside = answered.map(Number)
+  const ignorePids = answered.filter((pid) => isPid(pid))
   try {
     const registry = await ctx.deps.readRegistry(runtime.ssh, layout)
     const pid = Number(registry?.pid)
@@ -47,15 +36,10 @@ export async function resolveForeignConflict(
   }
   const found = await ctx.deps.findForeign(runtime.ssh, { ignorePids })
   const processes = found.ok === true && Array.isArray(found.processes) ? [...found.processes] : []
-  // The registry-named instance is normally ignored by the scan (it is this connection's own
-  // process). When the caller cannot stop it - a pid a re-attach discovered - it still must be
-  // put in front of the user: a second instance must never start silently next to it. Merge it
-  // before failing open on a scan error: its identity came from /proc, not from the scan.
+  // The registry-named instance is normally ignored by the scan, but when the caller cannot stop it it must still be
+  // shown: a second instance must never start silently next to it. Merged before failing open, since /proc proved it.
   const known = options.knownProcess
   const knownPid = Number(known?.pid)
-  // A pid the user already chose to keep alongside is never asked about again; the
-  // registry-named pid, however, must be shown when it could not be stopped.
-  const keptAlongside = (Array.isArray(options.ignoredPids) ? options.ignoredPids : []).map(Number)
   if (
     isPid(knownPid) &&
     !keptAlongside.includes(knownPid) &&
@@ -68,8 +52,6 @@ export async function resolveForeignConflict(
   }
   if (found.ok !== true) {
     ctx.progress.log(runtime, 'debug', 'foreign DSH: scan failed:', found.reason ?? found.technical ?? 'unknown')
-    // A broken scan must never allow a silent second instance: with a known live process we
-    // still ask; with nothing known there is nothing to conflict with (the old behavior).
     if (processes.length === 0) return null
   }
   if (processes.length === 0) return null
@@ -79,13 +61,9 @@ export async function resolveForeignConflict(
     'warn',
     `foreign DSH on the remote: ${processes.length} process(es) sharing this ~/.dsh (${pidList})`,
   )
-
   const decision = await askConflict(ctx, runtime, processes)
-  if (decision.action === 'cancel') {
-    // The user said no: retrying would ask the same question again. The `conflict.answered`
-    // transition already recorded that (its rule owns `connectCancelled`); this is only the throw.
-    throw errors.remoteDshRunning()
-  }
+  // The user said no: retrying would ask the same question again (`conflict.answered` already owns the flag).
+  if (decision.action === 'cancel') throw errors.remoteDshRunning()
   if (decision.action === 'alongside') {
     runtime.alongsidePids = processes.map((entry) => entry.pid).filter((pid) => isPid(pid))
     runtime.warning = {

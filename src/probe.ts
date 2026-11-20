@@ -1,6 +1,5 @@
-/**
- * One read-only remote probe: a single POSIX `sh` script prints `key<TAB>value` lines that become the facts used by the planner, the Node installer and diagnostics.
- */
+/** One read-only remote probe: a single POSIX `sh` script prints `key<TAB>value` lines that become the facts used by
+ * the planner, the Node installer and diagnostics. */
 import { headTail } from './util.js'
 import { errors } from './errors.js'
 import { normalizeVersion } from './version.js'
@@ -8,11 +7,8 @@ import type { SshPort } from './ssh-port.js'
 
 /** The libc family the remote runs; `unknown` never upgrades to a guess. */
 export type RemoteLibc = 'musl' | 'glibc' | 'unknown'
-
-/**
- * What one probe learned about the remote. Every field is either a measured value or an
- * explicit `null`; the planner, the Node installer and diagnostics all read this shape.
- */
+/** What one probe learned about the remote. Every field is either a measured value or an explicit `null`; the planner,
+ * the Node installer and diagnostics all read this shape. */
 export interface RemoteFacts {
   os: string
   arch: string
@@ -79,6 +75,7 @@ export function parseProbeOutput(stdout: unknown): Record<string, string> {
 }
 
 export function toProbeFacts(values: Record<string, string>): RemoteFacts {
+  /** A measured number, or `null` when the remote reported nothing usable. */
   const num = (value: string): number | null => {
     const n = Number(value)
     return Number.isFinite(n) ? n : null
@@ -107,11 +104,10 @@ export function toProbeFacts(values: Record<string, string>): RemoteFacts {
 }
 
 export async function probeRemote(ssh: SshPort, options: { timeoutMs?: number } = {}): Promise<RemoteFacts> {
-  const script = buildProbeScript()
   const timeoutMs = options.timeoutMs ?? 60_000
-  const result = await ssh.exec(script, { timeoutMs })
-  // A probe that ran out of time says nothing about the remote's DSH: report a timeout
-  // (retryable network), not a missing remote runtime (L).
+  const result = await ssh.exec(buildProbeScript(), { timeoutMs })
+  // A probe that ran out of time says nothing about the remote's DSH: report a retryable timeout, not a
+  // missing remote runtime.
   if (result.timedOut === true) {
     throw errors.network(
       {

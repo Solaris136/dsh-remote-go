@@ -1,6 +1,5 @@
 // client/src/diagnostics.ts - DiagnoseDrawer plus the check ordering/labels/text (region 11); after wizard.ts, before settings.ts.
 //#region 11. diagnostics drawer
-
 /** Sort diagnostic checks into the contract's fixed order, unknown ids last. */
 function sortDiagnoseChecks(checks: unknown): DiagnoseCheck[] {
   const list: DiagnoseCheck[] = Array.isArray(checks) ? checks.slice() : []
@@ -17,11 +16,7 @@ function checkStatusLabel(t: Translate, status: unknown): string {
   return t('diag.checkUnknown')
 }
 
-/**
- * Plain-text diagnostic report for the clipboard. Redacted by contract;
- * never includes a token or remote URL. `report` is required: the only caller
- * branches on it and calls this with a real report.
- */
+/** Plain-text diagnostic report for the clipboard: redacted by contract, never a token or remote URL. */
 function formatDiagnoseText(
   report: DiagnoseReport,
   host: Partial<HostView> | null | undefined,
@@ -56,6 +51,29 @@ interface DiagnoseDrawerProps extends LocaleProps {
   onRun?: () => void
 }
 
+/** The summary badge's tone and label, one `diag.summary*` key per contract summary. */
+const SUMMARY_KEYS: Record<string, DictKey> = {
+  ok: 'diag.summaryOk',
+  warning: 'diag.summaryWarning',
+  error: 'diag.summaryError',
+}
+const SUMMARY_TONES: Record<string, Tone> = { ok: 'success', warning: 'warn', error: 'error' }
+/** One check row: the status pill plus the title/detail body the drawer renders for it. */
+function diagnoseCheckRow(t: Translate, locale: DictLocale, check: DiagnoseCheck, index: number) {
+  const detail = resolveText(check.detail, locale)
+  return h(
+    'li',
+    { key: String(check.id || index), className: 'drg-diag-check', 'data-status': check.status },
+    h('span', { className: 'drg-diag-status', 'data-status': check.status }, checkStatusLabel(t, check.status)),
+    box(
+      'div',
+      'drg-diag-check-body',
+      box('div', 'drg-diag-check-title', resolveText(check.title, locale) || String(check.id || '')),
+      detail ? box('div', 'drg-diag-check-detail', detail) : null,
+    ),
+  )
+}
+
 function DiagnoseDrawer(props: DiagnoseDrawerProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
@@ -66,8 +84,7 @@ function DiagnoseDrawer(props: DiagnoseDrawerProps) {
   const layerRef = useRef(null)
   const dialogRef = useRef(null)
   const titleIdRef = useRef('drg-drawer-title')
-  // The drawer is a dialog like the modals: one Escape handler for the whole stack, so a
-  // drawer under a wizard cannot close first (audit S1-1).
+  // The drawer is a dialog like the modals: one Escape handler for the stack, so a drawer under a wizard cannot close.
   useDialogLayer({ layerRef, dialogRef, onClose: props.onClose, dismissible: true })
 
   const handleCopy = async () => {
@@ -78,25 +95,14 @@ function DiagnoseDrawer(props: DiagnoseDrawerProps) {
     setCopied(ok === true)
   }
 
-  const summaryTone =
-    report && report.summary === 'error' ? 'error' : report && report.summary === 'warning' ? 'warn' : 'success'
-  const summaryText =
-    report && report.summary === 'error'
-      ? t('diag.summaryError')
-      : report && report.summary === 'warning'
-        ? t('diag.summaryWarning')
-        : t('diag.summaryOk')
-
+  const summary = report && typeof report.summary === 'string' ? report.summary : 'ok'
+  const summaryTone: Tone = SUMMARY_TONES[summary] || 'success'
+  const summaryText = t(SUMMARY_KEYS[summary] || 'diag.summaryOk')
   let content
   if (status === 'loading') {
     content = box('div', 'drg-loading', h(Spinner, { size: 20 }), h('span', null, t('diag.running')))
   } else if (status === 'error') {
-    content = h(ErrorCard, {
-      t,
-      locale,
-      error: props.error,
-      onRetry: props.onRun,
-    })
+    content = h(ErrorCard, { t, locale, error: props.error, onRetry: props.onRun })
   } else if (!report || !Array.isArray(report.checks) || report.checks.length === 0) {
     content = box('p', 'drg-paragraph', t('diag.empty'))
   } else {
@@ -114,27 +120,44 @@ function DiagnoseDrawer(props: DiagnoseDrawerProps) {
       box(
         'ul',
         'drg-diag-list',
-        sortDiagnoseChecks(report.checks).map((check, index) =>
-          h(
-            'li',
-            { key: String(check.id || index), className: 'drg-diag-check', 'data-status': check.status },
-            h('span', { className: 'drg-diag-status', 'data-status': check.status }, checkStatusLabel(t, check.status)),
-            box(
-              'div',
-              'drg-diag-check-body',
-              box('div', 'drg-diag-check-title', resolveText(check.title, locale) || String(check.id || '')),
-              resolveText(check.detail, locale)
-                ? box('div', 'drg-diag-check-detail', resolveText(check.detail, locale))
-                : null,
-            ),
-          ),
-        ),
+        sortDiagnoseChecks(report.checks).map((check, index) => diagnoseCheckRow(t, locale, check, index)),
       ),
       box('p', 'drg-field-hint', t('diag.redacted')),
       copied ? h(Notice, { tone: 'success' }, t('diag.copyDone')) : null,
     )
   }
 
+  const head = box(
+    'div',
+    'drg-drawer-head',
+    h(
+      'div',
+      null,
+      box('h2', { className: 'drg-drawer-title', id: titleIdRef.current }, t('diag.title')),
+      host
+        ? box(
+            'p',
+            'drg-drawer-subtitle',
+            (host.name || host.id) + (displayAddress(host) ? ' · ' + displayAddress(host) : ''),
+          )
+        : null,
+    ),
+    h(IconButton, { icon: h(IconClose), label: t('diag.close'), onClick: props.onClose }),
+  )
+  const foot = box(
+    'div',
+    'drg-drawer-foot',
+    h(
+      Button,
+      { variant: 'secondary', testId: 'diagnose-rerun', busy: status === 'loading', onClick: props.onRun },
+      t('diag.rerun'),
+    ),
+    h(
+      Button,
+      { variant: 'primary', testId: 'diagnose-copy', onClick: handleCopy },
+      copied ? t('copied') : t('diag.copy'),
+    ),
+  )
   return h(
     'div',
     { className: 'drg-drawer-layer', ref: layerRef },
@@ -149,38 +172,9 @@ function DiagnoseDrawer(props: DiagnoseDrawerProps) {
         ref: dialogRef,
         'data-testid': 'diagnostics',
       },
-      box(
-        'div',
-        'drg-drawer-head',
-        h(
-          'div',
-          null,
-          box('h2', { className: 'drg-drawer-title', id: titleIdRef.current }, t('diag.title')),
-          host
-            ? box(
-                'p',
-                'drg-drawer-subtitle',
-                (host.name || host.id) + (displayAddress(host) ? ' · ' + displayAddress(host) : ''),
-              )
-            : null,
-        ),
-        h(IconButton, { icon: h(IconClose), label: t('diag.close'), onClick: props.onClose }),
-      ),
+      head,
       box('div', 'drg-drawer-body', content),
-      box(
-        'div',
-        'drg-drawer-foot',
-        h(
-          Button,
-          { variant: 'secondary', testId: 'diagnose-rerun', busy: status === 'loading', onClick: props.onRun },
-          t('diag.rerun'),
-        ),
-        h(
-          Button,
-          { variant: 'primary', testId: 'diagnose-copy', onClick: handleCopy },
-          copied ? t('copied') : t('diag.copy'),
-        ),
-      ),
+      foot,
     ),
   )
 }

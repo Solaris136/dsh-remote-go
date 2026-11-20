@@ -1,11 +1,9 @@
 import { waitFor } from './harness-support.ts'
 
 const SELECTOR_TIMEOUT_MS = 60_000
-
 export async function waitForSelector(page, selector, timeout = SELECTOR_TIMEOUT_MS) {
   await page.waitForSelector(selector, { visible: true, timeout })
 }
-
 export function clickInDialogInPage(target) {
   const dialog = document.querySelector('[role="dialog"]')
   if (!dialog) return { clicked: false, reason: 'no-dialog' }
@@ -25,11 +23,9 @@ export function clickInDialogInPage(target) {
   node.click()
   return { clicked: true, reason: null, text: (node.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 40) }
 }
-
 export async function clickInDialog(page, target) {
   return await page.evaluate(clickInDialogInPage, target)
 }
-
 export async function dismissOpenDialog(page, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10_000
   const dialogGone = async () =>
@@ -48,7 +44,6 @@ export async function dismissOpenDialog(page, options = {}) {
   await page.keyboard.press('Escape').catch(() => {})
   return await dialogGone()
 }
-
 export async function openManageWindow(page) {
   await waitForSelector(page, '#drg-host-row', 120_000)
   const opened = await page.evaluate(() => {
@@ -64,7 +59,6 @@ export async function openManageWindow(page) {
   await waitForSelector(page, '[data-testid="manage-window"] [role="dialog"]')
   await waitForSelector(page, '[data-testid="host-list-empty"], [data-testid="host-list"]')
 }
-
 export async function closeManageWindow(page) {
   await page.evaluate(() => {
     const win = document.querySelector('[data-testid="manage-window"]')
@@ -73,15 +67,12 @@ export async function closeManageWindow(page) {
   })
   await waitFor(page, () => !document.querySelector('[data-testid="manage-window"]'), { timeout: 20_000 })
 }
-
 const reducedMotionPages = new WeakSet()
-
 /** Opt one page into reduced motion (desktop windows can be occluded and pause animations). */
 export async function emulateReducedMotion(page) {
   reducedMotionPages.add(page)
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }])
 }
-
 export async function applyColorScheme(page, scheme, previousBodyBackground) {
   const features = [{ name: 'prefers-color-scheme', value: scheme }]
   if (reducedMotionPages.has(page)) features.push({ name: 'prefers-reduced-motion', value: 'reduce' })

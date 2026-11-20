@@ -1,19 +1,13 @@
 // client/src/guest-host-row.ts - mountHostRow + HOST_ROW_SCRIPT, stringified into the remote page and self-contained (9b 2/11); after switcher.ts, before guest-tools.ts.
-/**
- * The switcher row, stringified into the remote guest (`HOST_ROW_SCRIPT`): it may only touch
- * `win` and its own locals — any closure over this module breaks the guest copy. Intents leave
- * through `win.__drgBridgeSink` (local page) or `win.__drgBridgeQueue` (guest, drained by the
- * carrier); both copies therefore need identical intents and identical tokens.
- */
+/** The row stringified into the guest: it may only touch `win` and its own locals — any closure breaks the copy. */
+// Intents leave through `win.__drgBridgeSink` or `win.__drgBridgeQueue`, so both copies must emit identical intents.
 function mountHostRow(win: Window): string | unknown {
   try {
     var doc = win.document
     if (!doc || !doc.head) return 'no-document'
     var existing = win.__drgHostRow
     if (existing && typeof existing.update === 'function') return existing.update(null)
-
-    // A guest has no callback channel, so it leaves intents in a queue the carrier
-    // drains: a single slot would drop the first of two quick clicks.
+    // A guest has no callback channel, so intents go in a queue the carrier drains (a single slot would drop a click).
     var emit =
       typeof win.__drgBridgeSink === 'function'
         ? win.__drgBridgeSink
@@ -36,9 +30,8 @@ function mountHostRow(win: Window): string | unknown {
       win.__drgHostRowStyle = style
     }
     style.textContent = [
-      // The row is drawn inside the host page, so it reads that page's --dsw-* aliases and
-      // follows light/dark, a registered theme, or a token override layer unchanged. The
-      // menu surface uses the same pair as the host's own menus (specific-menu + blur).
+      // The row lives in the host page: it reads that page's --dsw-* aliases, so light/dark and themes follow.
+      // The menu surface uses the host's own pair (specific-menu + blur).
       '#drg-host-row{position:relative;z-index:2147483000;display:flex;align-items:center;gap:8px;margin:4px 8px 6px;padding:5px 8px;border-radius:var(--dsw-radius-md);color:var(--dsw-alias-label-secondary);font:500 12.5px/1.35 var(--dsw-font-family);cursor:pointer;user-select:none;transition:background-color 140ms ease,color 140ms ease}',
       '#drg-host-row:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
       '#drg-host-row.drg-open{background:var(--dsw-alias-interactive-bg-active);color:var(--dsw-alias-label-primary)}',
@@ -52,9 +45,7 @@ function mountHostRow(win: Window): string | unknown {
       '#drg-host-row .drg-hr-name{flex:1 1 auto;min-width:0;color:var(--dsw-alias-label-primary);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
       '#drg-host-row .drg-hr-chev{display:flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary);transition:transform 160ms ease}',
       '#drg-host-row.drg-open .drg-hr-chev{transform:rotate(180deg)}',
-      // The row is a button, so the menu is a child of a pointer surface: the surface
-      // itself (padding, separators, the slack around a short row) must not inherit the
-      // hand, or the blank parts of the menu promise a click they do not have.
+      // The row is a button, so the menu is its child: no inherited hand, or blank parts promise a click they lack.
       '#drg-host-row .drg-hr-menu{display:none;position:fixed;z-index:2147483000;min-width:220px;max-height:min(60vh,420px);overflow:auto;padding:5px;border:0;border-radius:var(--dsw-radius-lg);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);color:var(--dsw-alias-label-primary);box-shadow:var(--dsw-elevation-panel);font-size:13px;cursor:default}',
       '#drg-host-row.drg-open .drg-hr-menu{display:block;animation:drg-hr-in 120ms ease-out}',
       '@keyframes drg-hr-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}',
@@ -65,8 +56,7 @@ function mountHostRow(win: Window): string | unknown {
       // The name takes the slack, so the address and the exit control stay flush right.
       '#drg-host-row .drg-hr-item-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}',
       '#drg-host-row .drg-hr-addr{flex:0 0 auto;max-width:120px;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-tertiary);font-size:11.5px}',
-      // Text, not an icon, and only while the row is hovered: an accidental exit is a
-      // worse outcome than a hidden control.
+      // Text, not an icon, and only while hovered: an accidental exit is worse than a hidden control.
       '#drg-host-row .drg-hr-act{flex:0 0 auto;margin-left:2px;padding:2px 6px;border:0;border-radius:var(--dsw-radius-xs);background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11.5px;cursor:pointer;opacity:0;pointer-events:none;transition:opacity 120ms ease,background-color 120ms ease,color 120ms ease}',
       '#drg-host-row .drg-hr-item:hover .drg-hr-act,#drg-host-row .drg-hr-act:focus-visible{opacity:1;pointer-events:auto}',
       '#drg-host-row .drg-hr-act:hover,#drg-host-row .drg-hr-act:focus-visible{background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent);color:var(--dsw-alias-state-error-primary)}',
@@ -155,8 +145,7 @@ function mountHostRow(win: Window): string | unknown {
         trailingNode.textContent = opts.trailing
         node.appendChild(trailingNode)
       }
-      // A live host carries its own exit control, on the same line, right-aligned and revealed on hover: switching
-      // to a host and leaving it are different actions, and the menu had no way to leave one.
+      // A live host carries its own exit control: switching to a host and leaving it are different actions.
       if (opts.exit) {
         var exitLabel = state.labels.exit || 'Disconnect'
         var exitNode = make('button', 'drg-hr-act')
@@ -209,26 +198,21 @@ function mountHostRow(win: Window): string | unknown {
       menuNode.appendChild(itemFor(state.labels.addHost, { action: 'add', glyph: '+' }))
       menuNode.appendChild(itemFor(state.labels.manage, { action: 'manage', glyph: '\u2261' }))
     }
-    /**
-     * Find the sidebar column and the row the switcher belongs under: the drag-handle
-     * brand row when the shell exposes one, otherwise the tall left column itself.
-     */
+    /** Find the sidebar column and the row under it: the drag-handle brand row, else the tall column. */
     var findSlot = function () {
       var handles = doc.querySelectorAll('[data-window-drag]')
       var best = null
       for (var index = 0; index < handles.length; index += 1) {
         var box = handles[index].getBoundingClientRect()
         if (box.width <= 0 && box.height <= 0) continue
-        // The sidebar brand is inset by its padding and near the top; the conversation
-        // header and the tab strip are wide, so the width bound leaves only the brand.
+        // The brand is inset, near the top and narrow; the header and tab strip are wide.
         if (box.width > 520) continue
         if (box.top > win.innerHeight * 0.4) continue
         if (!handles[index].parentNode) continue
         var columnBox = (handles[index].parentNode as Element).getBoundingClientRect()
         if (columnBox.left > 24) continue
         if (columnBox.width < 180) continue
-        // macOS puts a drag strip *above* the brand row, and both qualify: the lower one
-        // is the row the switcher belongs under.
+        // macOS puts a drag strip above the brand row and both qualify: the lower one wins.
         if (best === null || box.top > best.top) {
           best = { column: handles[index].parentNode as Element, anchor: handles[index], top: box.top }
         }
@@ -242,24 +226,15 @@ function mountHostRow(win: Window): string | unknown {
         if (rect.width < 180 || rect.width > 480) continue
         if (rect.height < win.innerHeight * 0.6) continue
         found = columns[probe]
-        // The first matching column is the sidebar; a later full-height section is not a
-        // better answer, and the old loop took the last one it saw.
+        // The first matching column is the sidebar; a later full-height section is not better.
         break
       }
       if (found === null) return null
       return { column: found, anchor: found.children.length > 0 ? found.children[0] : null }
     }
-    /**
-     * Put the row under `parent`, directly before `ref` (`null` appends).
-     *
-     * `insertBefore` on an already-connected node runs the DOM's remove-then-insert steps, and the
-     * remove step is what costs the node its focus and resets its state: the row is a `tabindex=0`
-     * button whose open menu is one of its children, so a shell that re-orders the sidebar (or
-     * inserts a sibling above the brand) used to drop both - the menu stayed open but Esc stopped
-     * reaching it. `moveBefore` is the specification's state-preserving move and lands the node in
-     * the same place; it is not in every engine yet, so its absence - or an implementation that
-     * refuses the move - falls through to exactly the insertion this code made before.
-     */
+    /** Insert the row under `parent` before `ref` (`null` appends). */
+    // `insertBefore` on a connected node removes and re-inserts it, costing the row its focus and its open menu.
+    // `moveBefore` preserves that state; without it (or if it refuses) the fallback is the old insertion.
     var moveRow = function (parent: Element, ref: Node | null) {
       if (typeof parent.moveBefore === 'function') {
         try {
@@ -276,9 +251,7 @@ function mountHostRow(win: Window): string | unknown {
     var place = function () {
       var slot = findSlot()
       if (slot === null) {
-        // The collapsed rail is ~56px wide and no longer a candidate column: hide the
-        // row instead of leaving it squeezed into it.
-        // Node.parentNode is typed as ParentNode; the row only ever lives under an Element.
+        // The collapsed rail (~56px) is no candidate: hide the row; parentNode is typed as ParentNode, not Element.
         var parent = row.parentNode as Element | null
         var parentBox = parent && parent.getBoundingClientRect ? parent.getBoundingClientRect() : null
         if (parentBox !== null && parentBox.width < 180) {
@@ -315,8 +288,7 @@ function mountHostRow(win: Window): string | unknown {
       if (node && typeof node.focus === 'function') node.focus()
     }
     var openMenu = function (focusFirst: boolean) {
-      // The sidebar clips its children: anchor the fixed menu to the row so it can
-      // escape that overflow and sit over the page like a native menu.
+      // The sidebar clips its children: anchor the fixed menu to the row so it escapes that overflow.
       var rect = row.getBoundingClientRect()
       menuNode.style.top = rect.bottom + 4 + 'px'
       menuNode.style.left = rect.left + 'px'
@@ -352,8 +324,7 @@ function mountHostRow(win: Window): string | unknown {
       }
       openMenu(false)
     })
-    // Keyboard parity (audit "host row unreachable by keyboard"): the row is a real button,
-    // Enter/Space opens it, arrows walk the menu, Escape closes and returns focus to the row.
+    // Keyboard parity: the row is a real button; Enter/Space opens it, arrows walk the menu, Escape closes it.
     row.addEventListener('keydown', function (event: GuestKeyboardEvent) {
       var key = event.key
       var focusTarget = event.target
@@ -439,8 +410,7 @@ function mountHostRow(win: Window): string | unknown {
         win.__drgHostRowStyle = null
       },
     }
-    // A sidebar that is not mounted yet (or is collapsed) still gets its handle: the
-    // caller's next push places the row the moment the column exists.
+    // A sidebar that is not mounted yet (or is collapsed) still gets its handle: the next push places it.
     return update(null)
   } catch (_error) {
     return 'error'

@@ -5,24 +5,17 @@ import path from 'node:path'
 import process from 'node:process'
 
 export const isWindows = process.platform === 'win32'
-
 export const STRICT = process.env.DSH_E2E_STRICT === '1'
-
 export function skipOrFail(t, reason) {
   if (STRICT) throw new Error(`E2E prerequisite missing (DSH_E2E_STRICT=1): ${reason}`)
   t.skip(reason)
 }
-
-// Puppeteer's waitForFunction polls with requestAnimationFrame by default, and Chromium
-// pauses rAF for background pages: a guest that had already booted could sit out the whole
-// timeout. Timer polling is throttled in the background but never stopped, so every E2E
+// Puppeteer's waitForFunction polls with requestAnimationFrame, and Chromium pauses rAF for background pages: a guest
+// that had already booted could sit out the timeout. Timer polling is throttled but never stopped, so every E2E
 // readiness check goes through this helper instead of rAF.
 export const POLLING_MS = 250
-
-/**
- * Give a fresh DSH home one configured host. The contrast gate measures the 11–12px metadata on
- * a host card; a clean profile has no cards, which made those assertions vacuous (review nit 4).
- */
+/* Give a fresh DSH home one configured host. The contrast gate measures the 11-12px metadata on a host card; a clean
+ * profile has no cards, which made those assertions vacuous (review nit 4). */
 export function seedFixtureHost(dshHome) {
   const stateDir = path.join(dshHome, 'remote-go')
   mkdirSync(stateDir, { recursive: true })
@@ -54,15 +47,12 @@ export function seedFixtureHost(dshHome) {
     'utf8',
   )
 }
-
 export function waitFor(page, predicate, options = {}, ...args) {
   return page.waitForFunction(predicate, { polling: POLLING_MS, ...options }, ...args)
 }
-
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
-
 export async function pollUntil(check, options) {
   const timeoutMs = options.timeoutMs ?? 60_000
   const intervalMs = options.intervalMs ?? 250
@@ -91,12 +81,10 @@ export async function pollUntil(check, options) {
       detail,
   )
 }
-
 export function tail(stdout, stderr = '', lines = 20) {
   const text = Array.isArray(stdout) ? stdout.join('') : stdout
   return `${text}\n${stderr}`.trim().split(/\r?\n/).slice(-lines).join('\n')
 }
-
 function signalTree(child, signal) {
   if (!child || !child.pid) return
   try {
@@ -111,7 +99,6 @@ function signalTree(child, signal) {
     } catch {}
   }
 }
-
 export async function stopChild(child) {
   if (!child || child.exitCode !== null) return
   const exited = new Promise((resolve) => child.once('exit', resolve))
@@ -121,7 +108,6 @@ export async function stopChild(child) {
   signalTree(child, 'SIGKILL')
   await Promise.race([exited, sleep(5_000)])
 }
-
 export function runCommand(command, args, options) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -152,7 +138,6 @@ export function runCommand(command, args, options) {
     })
   })
 }
-
 export function resolvePnpm(shimDir) {
   const cjs = process.env.DSH_PNPM_CJS
   if (cjs && existsSync(cjs)) {
@@ -188,7 +173,6 @@ export function resolvePnpm(shimDir) {
     shell: false,
   }
 }
-
 export async function packPlugin(input) {
   mkdirSync(input.outDir, { recursive: true })
   const result = await runCommand(
@@ -205,7 +189,6 @@ export async function packPlugin(input) {
   if (tarballs.length !== 1) throw new Error(`expected exactly one packed tarball, found ${tarballs.length}`)
   return tarballs[0]
 }
-
 const REQUIRED_PACKAGE_FILES = [
   'package.json',
   'index.js',
@@ -220,7 +203,6 @@ const REQUIRED_PACKAGE_FILES = [
   'locale/zh.json',
   'dist/vendor/ssh2.bundle.cjs',
 ]
-
 export function assertPackedDependency(profileDir) {
   const manifestPath = path.join(profileDir, 'package.json')
   if (!existsSync(manifestPath)) throw new Error(`the profile has no package.json at ${manifestPath}`)
@@ -237,7 +219,6 @@ export function assertPackedDependency(profileDir) {
   }
   return spec
 }
-
 export function resolveDshCli() {
   const envBin = process.env.DSH_BIN
   const envExe = process.env.DSH_EXE
@@ -247,8 +228,7 @@ export function resolveDshCli() {
     return { command: envBin, args: [], kind: 'env' }
   }
   if (isWindows) {
-    // DSH_INSTALL_DIR is set to the package directory inside a running DSH, so probe
-    // the standard install roots as well and use whichever one holds the app exe.
+    // DSH_INSTALL_DIR is set inside a running DSH, so probe the standard install roots for the one holding the app exe.
     const installs = [
       process.env.DSH_INSTALL_DIR,
       path.join(process.env.LOCALAPPDATA ?? '', 'Programs', 'DeepSeek Harness'),
@@ -270,8 +250,7 @@ export function resolveDshCli() {
       if (probeVersion(exe, [bin], { ELECTRON_RUN_AS_NODE: '1' })) {
         return { command: exe, args: [bin], kind: 'windows-install' }
       }
-      // Node cannot read inside `app.asar`; the installer's runtime CLI shim can
-      // (it sets ELECTRON_RUN_AS_NODE itself) and needs no PATH entry.
+      // Node cannot read inside `app.asar`; the installer's runtime CLI shim can (it sets ELECTRON_RUN_AS_NODE itself).
       const shim = path.join(install, 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd')
       if (existsSync(shim) && probeVersion('cmd.exe', ['/d', '/c', shim])) {
         return { command: 'cmd.exe', args: ['/d', '/c', shim], kind: 'windows-runtime-cli' }
@@ -291,7 +270,6 @@ export function resolveDshCli() {
   if (onPath.status === 0) return { command: 'dsh', args: [], kind: 'path' }
   return null
 }
-
 function resolveDshCliJs() {
   const suffix = path.join('node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   const candidates = []
@@ -304,7 +282,6 @@ function resolveDshCliJs() {
   }
   return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
-
 export function probeVersion(command, args, env = {}) {
   try {
     const probe = spawnSync(command, [...args, '--version'], {
@@ -318,7 +295,6 @@ export function probeVersion(command, args, env = {}) {
     return false
   }
 }
-
 export function resolveBrowser() {
   for (const key of ['CHROME_PATH', 'PUPPETEER_EXECUTABLE_PATH', 'E2E_CHROME', 'DSH_E2E_BROWSER']) {
     const value = process.env[key]
@@ -359,14 +335,12 @@ export function resolveBrowser() {
         ]
   return candidates.find((candidate) => existsSync(candidate)) ?? null
 }
-
 export function resolveDesktopApp() {
   if (!isWindows) return null
   const explicit = process.env.DSH_DESKTOP_EXE
   if (explicit && existsSync(explicit)) return explicit
   return findDesktopApp() ?? null
 }
-
 export function findDesktopApp(options = {}) {
   if (!isWindows) return null
   const roots = []
@@ -399,7 +373,6 @@ export function findDesktopApp(options = {}) {
   }
   return null
 }
-
 export function desktopAppVersion(exe) {
   if (!isWindows) return null
   try {
@@ -419,7 +392,6 @@ export function desktopAppVersion(exe) {
     return null
   }
 }
-
 export async function describePage(page) {
   return await page
     .evaluate(() => {
@@ -441,7 +413,6 @@ export async function describePage(page) {
     })
     .catch((error) => ({ error: String(error?.message ?? error).slice(0, 200) }))
 }
-
 export async function writeFailureArtifacts(input) {
   if (!input.dir) return
   try {
@@ -461,7 +432,6 @@ export async function writeFailureArtifacts(input) {
     if (input.page) await input.page.screenshot({ path: path.join(input.dir, `${input.name}-failure.png`) })
   } catch {}
 }
-
 export function makeTempRoot(prefix) {
   return mkdtempSync(path.join(tmpdir(), `${prefix}-`))
 }

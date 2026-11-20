@@ -2,63 +2,54 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { redactObject, redactText } from '../../dist/src/redact.js'
 
-test('redactText removes tokens from query strings and dsh web lines', () => {
-  assert.match(redactText('http://127.0.0.1:5000/?token=abc123def456'), /token=<redacted>/)
-  assert.doesNotMatch(redactText('http://127.0.0.1:5000/?token=abc123def456'), /abc123def456/)
-  assert.match(redactText('dsh web: http://127.0.0.1:38123/?token=SUPERSECRET'), /token=<redacted>/)
-  assert.doesNotMatch(redactText('dsh web: http://127.0.0.1:38123/?token=SUPERSECRET'), /SUPERSECRET/)
-})
-
-test('redactText removes headers, bearer tokens, passwords and private keys', () => {
+test('redactText removes tokens from query strings, fragments and header lines', () => {
+  const secrets = ['abc123def456', 'SUPERSECRET', 'abcdefghijkl', 'supersecretkey']
   const sample = [
-    'Authorization: Bearer abcdefghijklmnop',
-    'Cookie: dsh-auth-xyz=secretvalue',
-    'curl --password hunter2 https://example.com',
-    '-----BEGIN OPENSSH PRIVATE KEY-----',
-    'AAAAB3NzaC1yc2EAAAADAQABAAABgQ==',
-    '-----END OPENSSH PRIVATE KEY-----',
-  ].join('\n')
-  const redacted = redactText(sample)
-  assert.doesNotMatch(redacted, /abcdefghijklmnop/)
-  assert.doesNotMatch(redacted, /secretvalue/)
-  assert.doesNotMatch(redacted, /hunter2/)
-  assert.doesNotMatch(redacted, /AAAAB3NzaC1yc2E/)
-  assert.match(redacted, /<redacted>/)
-})
-
-test('redactText anonymizes home directories by default but keeps them on request', () => {
-  assert.equal(redactText('/home/alice/.dsh/profile'), '/home/<user>/.dsh/profile')
-  assert.equal(redactText('/home/alice/.dsh/profile', { keepPaths: true }), '/home/alice/.dsh/profile')
-  assert.equal(redactText('C:\\Users\\alice\\file'), 'C:\\Users\\<user>\\file')
-  assert.equal(redactText('/Users/alice/.ssh/id_rsa'), '/Users/<user>/.ssh/id_rsa')
-})
-
-test('a real ssh port is not mistaken for a password flag', () => {
-  // `-p` is ssh's port flag; the password redaction used to eat the port number.
-  assert.equal(redactText('ssh -p 2222 ubuntu@host'), 'ssh -p 2222 ubuntu@host')
-  assert.match(redactText('sshpass -p hunter2 ssh ubuntu@host'), /<redacted>/)
-  assert.doesNotMatch(redactText('sshpass -p hunter2 ssh ubuntu@host'), /hunter2/)
-  assert.doesNotMatch(redactText('curl --password hunter2 https://example.com'), /hunter2/)
-  assert.doesNotMatch(redactText('password=hunter2'), /hunter2/)
-})
-
-test('redactText covers bare token assignments, fragments and custom auth headers', () => {
-  const sample = [
+    'http://127.0.0.1:5000/?token=abc123def456',
+    'dsh web: http://127.0.0.1:38123/?token=SUPERSECRET',
     'launch token=abc123def456 done',
     'see #token=abc123def456',
     'x-auth-token: abcdefghijkl',
     'x-dsh-session-key: supersecretkey',
   ].join('\n')
-
-  const out = redactText(sample)
-  for (const secret of ['abc123def456', 'abcdefghijkl', 'supersecretkey']) {
-    assert.equal(out.includes(secret), false, `${secret} survived redaction`)
-  }
-  assert.match(out, /token=<redacted>/)
-  assert.match(out, /x-auth-token: <redacted>/i)
+  const redacted = redactText(sample)
+  for (const secret of secrets) assert.equal(redacted.includes(secret), false, `${secret} survived redaction`)
+  assert.match(redacted, /token=<redacted>/)
+  assert.match(redacted, /x-auth-token: <redacted>/i)
+  // Each URL shape is checked on its own: a union match would still pass if one shape stopped rewriting its token to
+  // the same replacement.
+  assert.match(redactText('http://127.0.0.1:5000/?token=abc123def456'), /token=<redacted>/)
+  assert.match(redactText('dsh web: http://127.0.0.1:38123/?token=SUPERSECRET'), /token=<redacted>/)
 })
 
-test('redactObject deep-redacts secret-keyed fields', () => {
+test('redactText removes secrets and home paths, and redactObject redacts secret-keyed fields', () => {
+  const redacted = redactText(
+    'Authorization: Bearer abcdefghijklmnop\nCookie: dsh-auth-xyz=secretvalue\n' +
+      'curl --password hunter2 https://example.com\n-----BEGIN OPENSSH PRIVATE KEY-----\n' +
+      'AAAAB3NzaC1yc2EAAAADAQABAAABgQ==\n-----END OPENSSH PRIVATE KEY-----',
+  )
+  for (const secret of ['abcdefghijklmnop', 'secretvalue', 'hunter2', 'AAAAB3NzaC1yc2E']) {
+    assert.doesNotMatch(redacted, new RegExp(secret), secret)
+  }
+  assert.match(redacted, /<redacted>/)
+  // `-p` is ssh's port flag; the password redaction used to eat the port number.
+  assert.equal(redactText('ssh -p 2222 ubuntu@host'), 'ssh -p 2222 ubuntu@host')
+  assert.match(redactText('sshpass -p hunter2 ssh ubuntu@host'), /<redacted>/)
+  for (const line of [
+    'sshpass -p hunter2 ssh ubuntu@host',
+    'curl --password hunter2 https://example.com',
+    'password=hunter2',
+  ]) {
+    assert.doesNotMatch(redactText(line), /hunter2/, line)
+  }
+  // Home paths are anonymized by default; `keepPaths` opts out.
+  const cases = [
+    ['/home/alice/.dsh/profile', '/home/<user>/.dsh/profile'],
+    ['C:\\Users\\alice\\file', 'C:\\Users\\<user>\\file'],
+    ['/Users/alice/.ssh/id_rsa', '/Users/<user>/.ssh/id_rsa'],
+  ]
+  for (const [input, expected] of cases) assert.equal(redactText(input), expected, input)
+  assert.equal(redactText('/home/alice/.dsh/profile', { keepPaths: true }), '/home/alice/.dsh/profile')
   const input = {
     host: 'test-host',
     password: 'p@ss',

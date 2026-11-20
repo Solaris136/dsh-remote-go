@@ -1,8 +1,5 @@
-/**
- * Remote download entry: validate an absolute Linux path, inspect it, then hand it
- * to the local writer. Both files and folders stream directly to disk; no bytes are
- * buffered in the Host and no ZIP is created.
- */
+// Remote download entry: validate an absolute Linux path, inspect it, then hand it to the local
+// writer; files and folders stream straight to disk, so nothing is buffered and no ZIP is created.
 import { errors, isRemoteGoError } from './errors.js'
 import type { RemoteGoError } from './errors.js'
 import { requireDestination, saveHostFile, saveHostFolder } from './local-download.js'
@@ -20,11 +17,7 @@ export interface ReadHostDownloadOptions extends SaveHostFileOptions, SaveHostFo
   destination?: unknown
 }
 
-/**
- * Save one file or one folder for a download job.
- * @param runtime - the connected host runtime.
- * @param rawPath - the requested absolute remote path.
- */
+/** Save one file or one folder for a download job. */
 export async function readHostDownload(
   runtime: HostDownloadRuntime | null | undefined,
   rawPath: unknown,
@@ -41,10 +34,9 @@ export async function readHostDownload(
   if (typeof ssh.inspectRemotePath !== 'function') {
     throw errors.internal('the SSH transport does not support path inspection')
   }
-  let destination: string
   try {
     const info = await ssh.inspectRemotePath(remotePath)
-    destination = await requireDestination(options.destination, { home: options.home })
+    const destination = await requireDestination(options.destination, { home: options.home })
     if (info.isFile) return await saveHostFile(runtime, remotePath, destination, options)
     if (info.isDirectory) return await saveHostFolder(runtime, remotePath, destination, options)
     throw errors.remoteFileUnavailable({
@@ -57,17 +49,13 @@ export async function readHostDownload(
   }
 }
 
-/**
- * Classify an SFTP failure without leaking transport internals to the client.
- * @param error - the transport error.
- * @returns a client-safe error.
- */
+/** Classify an SFTP failure without leaking transport internals to the client. */
 export function toRemoteFileError(error: unknown): RemoteGoError {
-  // `isRemoteGoError` only declares a boolean (it lives in the P1a set); the `as` restates
-  // the narrowing its `instanceof` proves at runtime.
+  // `isRemoteGoError` only declares a boolean; the `as` restates the narrowing its `instanceof`
+  // proves at runtime.
   if (isRemoteGoError(error)) return error as RemoteGoError
-  // A transport error is `unknown`: the `as` restates the two fields an SFTP error carries
-  // (`code` 2/3 for ENOENT/EACCES) and the `??` fallbacks keep a thrown string working.
+  // A transport error is `unknown`: the `as` restates the two fields an SFTP error carries (`code`
+  // 2/3 for ENOENT/EACCES) and the `??` fallbacks keep a thrown string working.
   const code = Number((error as { code?: unknown } | null)?.code)
   const message = String((error as { message?: unknown } | null)?.message ?? error ?? '')
   if (code === 2 || /no such file|not found/i.test(message)) {

@@ -16,23 +16,19 @@ interface EmptyHostsProps extends LocaleProps {
 
 function EmptyHosts(props: EmptyHostsProps) {
   const t = translatorOf(props)
+  const icon = h('div', { className: 'drg-empty-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 40 }))
+  const add = h(Button, { variant: 'primary', testId: 'host-add-empty', onClick: props.onAdd }, t('addFirstHost'))
   return h(
     'div',
     { className: 'drg-empty', 'data-testid': 'host-list-empty' },
-    h('div', { className: 'drg-empty-icon', 'aria-hidden': 'true' }, h(RemoteIcon, { size: 40 })),
+    icon,
     box('h3', 'drg-empty-title', t('emptyTitle')),
     box('p', 'drg-empty-body', t('emptyBody')),
-    h(
-      Button,
-      {
-        variant: 'primary',
-        testId: 'host-add-empty',
-        onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
-      },
-      t('addFirstHost'),
-    ),
+    add,
   )
 }
+
+type HostCallback = ((target: Partial<HostView>) => void) | undefined
 
 interface HostCardProps extends LocaleProps {
   host?: Partial<HostView> | null
@@ -61,209 +57,130 @@ function HostCard(props: HostCardProps) {
       : t('versionPending')
   const lastOpened = host.lastOpenedAt ? formatTime(host.lastOpenedAt, locale) : t('neverOpened')
   const reason = host.error ? resolveText(host.error.detail, locale) || resolveText(host.error.title, locale) : ''
-  const primaryDisabled = busy || meta.wait === true
-  // A restart of the managed remote web is visible on the card itself: the host is
-  // `connecting` (not `disconnected`) while it runs, so no "connection lost" shows up.
-  const restarting =
-    host.status === 'connecting' && host.progress !== null && host.progress.code === 'restarting-remote'
-  // The explicit stop is the same kind of one-shot link action, under its own progress code.
-  const stopping = host.status === 'connecting' && host.progress !== null && host.progress.code === 'stopping-remote'
-  // A connecting host's primary action is not "connect" (it is already doing that): it is the way
-  // back to the window that prints the progress and the log, after the user closed it.
+  // A host stays `connecting` while the web restarts or stops: no "connection lost", and the code names the action.
+  const code = host.status === 'connecting' && host.progress ? host.progress.code : ''
+  const restarting = code === 'restarting-remote'
+  const stopping = code === 'stopping-remote'
   const connecting = host.status === 'connecting'
-  /**
-   * Clicking the card is the same gesture as the switcher's host item: it opens the connecting
-   * host's window. The card's own controls (restart, stop, diagnose, edit, delete) keep their own
-   * action - a click that starts inside a button belongs to that button only.
-   */
+  const linkBusy = busy || restarting || stopping
+  // `remote-unreachable` keeps the SSH session, so restart joins reconnect: both one-shot actions stay available.
+  const recoverable = host.status === 'error' && host.error !== null && host.error.code === 'remote-unreachable'
+  const restartAvailable = host.status === 'connected' || restarting || recoverable
+  const stopAvailable = host.status === 'connected' || restarting || stopping || recoverable
+  const parity = host.versionParity || null
+  const parityText = parity
+    ? resolveText(parity.message, locale) ||
+      t('versionDifferent', { remote: parity.remote || '?', local: parity.local || host.targetVersion || '?' })
+    : ''
+  const fire = (callback?: (target: Partial<HostView>) => void) => () => {
+    if (typeof callback === 'function') callback(host)
+  }
+  /** Clicking the card body is the switcher's gesture: it opens the connecting host's window. */
+  // A click that starts inside a button belongs to that button only.
   const openProgress = (event: ReactMouseEvent<HTMLElement>) => {
     const target = event.target as Element | null
     if (target && typeof target.closest === 'function' && target.closest('button')) return
     if (typeof props.onViewProgress === 'function') props.onViewProgress(host)
   }
-  // `remote-unreachable` keeps the SSH session on purpose, so a restart is the other way
-  // back besides reconnecting (docs/design.md §5.6).
-  const recoverable = host.status === 'error' && host.error !== null && host.error.code === 'remote-unreachable'
-  const restartAvailable = host.status === 'connected' || restarting || recoverable
-  const stopAvailable = host.status === 'connected' || restarting || stopping || recoverable
-
-  return h(
-    'li',
-    {
-      className: 'drg-host-card',
-      'data-status': host.status,
-      'data-testid': 'host-card',
-      'data-host-id': host.id,
-      // The card body is a click target while the link is being built, so a click anywhere on the
-      // host opens its progress window (the visible button stays the keyboard/AT path).
-      'data-interactive': connecting ? 'true' : undefined,
-      onClick: connecting ? openProgress : undefined,
-    },
-    meta.strip
-      ? h(
-          'div',
-          { className: 'drg-card-strip', role: meta.strip },
-          h(IconAlert, { size: 14 }),
-          box(
-            'span',
-            'drg-card-strip-text',
-            meta.strip === 'alert' ? t('errorReason', { detail: reason || t(meta.hint) }) : t(meta.hint),
-          ),
-          meta.strip === 'alert'
-            ? h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'drg-linkbtn',
-                  onClick: typeof props.onDiagnose === 'function' ? () => props.onDiagnose(host) : undefined,
-                },
-                t('cardDiagnose'),
-              )
-            : null,
-        )
-      : null,
-    box(
-      'div',
-      'drg-card-head',
-      h(StatusDot, { status: host.status, title: statusLabel }),
-      h('h3', { className: 'drg-card-name', title: host.name }, host.name || host.id),
-      h(Badge, { tone: meta.tone, title: t(meta.hint) }, statusLabel),
-    ),
-    h('div', { className: 'drg-card-address', title: displayAddress(host) }, displayAddress(host) || '—'),
+  const iconButton = (testId: string, icon: ReactNode, label: ReactNode, callback: HostCallback, disabled: boolean) =>
+    h(IconButton, { icon, label, testId, onClick: fire(callback), disabled })
+  const ghost = (testId: string, label: ReactNode, callback: HostCallback, disabled: boolean, ariaLabel?: string) =>
+    h(Button, { variant: 'ghost', testId, ariaLabel, onClick: fire(callback), disabled }, label)
+  const stripText = meta.strip === 'alert' ? t('errorReason', { detail: reason || t(meta.hint) }) : t(meta.hint)
+  const stripDiagnose = h(
+    'button',
+    { type: 'button', className: 'drg-linkbtn', onClick: fire(props.onDiagnose) },
+    t('cardDiagnose'),
+  )
+  const stripRow = meta.strip
+    ? h(
+        'div',
+        { className: 'drg-card-strip', role: meta.strip },
+        h(IconAlert, { size: 14 }),
+        box('span', 'drg-card-strip-text', stripText),
+        meta.strip === 'alert' ? stripDiagnose : null,
+      )
+    : null
+  const head = box(
+    'div',
+    'drg-card-head',
+    h(StatusDot, { status: host.status, title: statusLabel }),
+    h('h3', { className: 'drg-card-name', title: host.name }, host.name || host.id),
+    h(Badge, { tone: meta.tone, title: t(meta.hint) }, statusLabel),
+  )
+  const address = h('div', { className: 'drg-card-address', title: displayAddress(host) }, displayAddress(host) || '—')
+  const progressLine =
     host.status === 'connecting' && host.progress
       ? h('p', { className: 'drg-card-progress', 'data-progress': host.progress.code }, progressText(t, host.progress))
-      : null,
-    box(
-      'dl',
-      'drg-card-meta',
-      h('div', null, h('dt', null, t('remoteVersion')), h('dd', null, remoteVersion)),
-      h('div', null, h('dt', null, t('lastOpened')), h('dd', null, lastOpened)),
-    ),
-    // Both fields were already in the contract but never painted: a Host that warns about a
-    // shared ~/.dsh or reports a version difference now says so on its card (audit S3).
-    host.warning
-      ? h(
-          'div',
-          { 'data-testid': 'host-warning' },
-          h(Notice, { tone: 'warn', title: t('hostWarnings') }, resolveText(host.warning, locale)),
-        )
-      : null,
-    host.versionParity && host.versionParity.status === 'different'
-      ? h(
-          'div',
-          { 'data-testid': 'host-version-parity' },
-          h(
-            Notice,
-            { tone: 'warn' },
-            resolveText(host.versionParity.message, locale) ||
-              t('versionDifferent', {
-                remote: host.versionParity.remote || '?',
-                local: host.versionParity.local || host.targetVersion || '?',
-              }),
-          ),
-        )
-      : null,
-    host.versionParity && host.versionParity.status === 'unknown'
-      ? h('p', { className: 'drg-field-hint', 'data-testid': 'host-version-unknown' }, t('versionUnknown'))
-      : null,
-    box(
-      'div',
-      'drg-card-actions',
-      h(
-        Button,
-        {
-          variant: host.status === 'connected' ? 'primary' : 'secondary',
-          testId: connecting ? 'host-view-progress' : 'host-open',
-          onClick: () => {
-            if (connecting) {
-              if (typeof props.onViewProgress === 'function') props.onViewProgress(host)
-              return
-            }
-            if (typeof props.onOpen === 'function') props.onOpen(host)
-          },
-          disabled: connecting ? busy : primaryDisabled,
-          busy: busy && host.status !== 'connected' && host.status !== 'connecting',
-        },
-        connecting ? t('cardViewProgress') : t(meta.action),
-      ),
-      host.status === 'connected'
-        ? h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'host-disconnect',
-              onClick: () => props.onDisconnect && props.onDisconnect(host),
-              disabled: busy,
-            },
-            t('cardDisconnect'),
-          )
-        : null,
-      restartAvailable
-        ? h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'host-restart',
-              ariaLabel: t('cardRestartName'),
-              onClick: () => props.onRestart && props.onRestart(host),
-              disabled: busy || restarting || stopping,
-            },
-            restarting ? t('cardRestarting') : t('cardRestart'),
-          )
-        : null,
-      stopAvailable
-        ? h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'host-stop-remote',
-              ariaLabel: t('cardStopRemoteName'),
-              onClick: () => props.onStopRemote && props.onStopRemote(host),
-              disabled: busy || restarting || stopping,
-            },
-            stopping ? t('cardStopping') : t('cardStopRemote'),
-          )
-        : null,
-      meta.retry === true
-        ? h(
-            Button,
-            {
-              variant: 'ghost',
-              testId: 'host-reconnect',
-              onClick: () => props.onReconnect && props.onReconnect(host),
-              disabled: busy,
-            },
-            t('cardReconnect'),
-          )
-        : null,
-      box(
-        'div',
-        'drg-card-actions-end',
-        h(IconButton, {
-          icon: h(IconPulse),
-          label: t('cardDiagnose'),
-          testId: 'host-diagnose',
-          onClick: () => props.onDiagnose && props.onDiagnose(host),
-          disabled: busy,
-        }),
-        h(IconButton, {
-          icon: h(IconEdit),
-          label: t('cardEdit'),
-          testId: 'host-edit',
-          onClick: () => props.onEdit && props.onEdit(host),
-          // Editing while a link is being built would race the connection's own settings.
-          disabled: busy || host.status === 'connecting',
-        }),
-        h(IconButton, {
-          icon: h(IconTrash),
-          label: t('cardDelete'),
-          testId: 'host-delete',
-          onClick: () => props.onDelete && props.onDelete(host),
-          disabled: busy || host.status === 'connecting',
-        }),
-      ),
-    ),
+      : null
+  const metaRow = (label: ReactNode, value: ReactNode) => h('div', null, h('dt', null, label), h('dd', null, value))
+  const metaList = box(
+    'dl',
+    'drg-card-meta',
+    metaRow(t('remoteVersion'), remoteVersion),
+    metaRow(t('lastOpened'), lastOpened),
   )
+  // Both contract fields are now painted: a shared ~/.dsh warning or a version difference shows on the card.
+  const warningNotice = h(Notice, { tone: 'warn', title: t('hostWarnings') }, resolveText(host.warning, locale))
+  const warningEl = h('div', { 'data-testid': 'host-warning' }, warningNotice)
+  const warning = host.warning ? warningEl : null
+  const parityEl = h('div', { 'data-testid': 'host-version-parity' }, h(Notice, { tone: 'warn' }, parityText))
+  const parityNotice = parity && parity.status === 'different' ? parityEl : null
+  const unknownEl = h('p', { className: 'drg-field-hint', 'data-testid': 'host-version-unknown' }, t('versionUnknown'))
+  const unknown = parity && parity.status === 'unknown' ? unknownEl : null
+  const primaryLabel = connecting ? t('cardViewProgress') : t(meta.action)
+  const openClick = () => (connecting ? fire(props.onViewProgress)() : fire(props.onOpen)())
+  const primaryProps = {
+    variant: host.status === 'connected' ? 'primary' : 'secondary',
+    testId: connecting ? 'host-view-progress' : 'host-open',
+    onClick: openClick,
+    disabled: connecting ? busy : busy || meta.wait === true,
+    busy: busy && host.status !== 'connected' && host.status !== 'connecting',
+  }
+  const endActions = box(
+    'div',
+    'drg-card-actions-end',
+    iconButton('host-diagnose', h(IconPulse), t('cardDiagnose'), props.onDiagnose, busy),
+    // Editing while a link is being built would race the connection's own settings.
+    iconButton('host-edit', h(IconEdit), t('cardEdit'), props.onEdit, busy || connecting),
+    iconButton('host-delete', h(IconTrash), t('cardDelete'), props.onDelete, busy || connecting),
+  )
+  const actions = box(
+    'div',
+    'drg-card-actions',
+    h(Button, primaryProps, primaryLabel),
+    host.status === 'connected' ? ghost('host-disconnect', t('cardDisconnect'), props.onDisconnect, busy) : null,
+    restartAvailable
+      ? ghost(
+          'host-restart',
+          restarting ? t('cardRestarting') : t('cardRestart'),
+          props.onRestart,
+          linkBusy,
+          t('cardRestartName'),
+        )
+      : null,
+    stopAvailable
+      ? ghost(
+          'host-stop-remote',
+          stopping ? t('cardStopping') : t('cardStopRemote'),
+          props.onStopRemote,
+          linkBusy,
+          t('cardStopRemoteName'),
+        )
+      : null,
+    meta.retry === true ? ghost('host-reconnect', t('cardReconnect'), props.onReconnect, busy) : null,
+    endActions,
+  )
+  const cardProps = {
+    className: 'drg-host-card',
+    'data-status': host.status,
+    'data-testid': 'host-card',
+    'data-host-id': host.id,
+    // The body is a click target while the link is being built (the visible button stays the AT path).
+    'data-interactive': connecting ? 'true' : undefined,
+    onClick: connecting ? openProgress : undefined,
+  }
+  return h('li', cardProps, stripRow, head, address, progressLine, metaList, warning, parityNotice, unknown, actions)
 }
 
 interface HostListViewProps extends LocaleProps {
@@ -294,18 +211,13 @@ function HostListView(props: HostListViewProps) {
   const loading = props.loading === true
   const error = props.error || null
   const hosts = state && Array.isArray(state.hosts) ? state.hosts : []
-  // Every host keeps its card, a connecting one included: the card carries the phase, the
-  // progress line and the way back to the connect window the user may have closed
-  // (docs/design.md §4.1). A stale Host with no status is the only thing this list never draws.
+  // Every host keeps its card: it carries the phase and the way back to the connect window; a stale one is never drawn.
   const visibleHosts = hosts.filter((host) => Boolean(host))
   const connected = hosts.filter((host) => host && host.status === 'connected').length
-  const total = hosts.length
   const busyHostId = props.busyHostId || null
-  // Stopping a remote DSH is destructive, so the card action only opens a confirmation;
-  // the dialog owns the busy state until the Host answers.
+  // Stopping a remote DSH is destructive, so the card only confirms; the dialog owns busy until the Host answers.
   const [pendingStop, setPendingStop] = useState<Partial<HostView> | null>(null)
   const [stopBusy, setStopBusy] = useState(false)
-
   const requestStop = (host: Partial<HostView> | null | undefined) => {
     if (host) setPendingStop(host)
   }
@@ -313,19 +225,66 @@ function HostListView(props: HostListViewProps) {
     if (pendingStop === null || stopBusy) return
     const host = pendingStop
     setStopBusy(true)
-    const work = typeof props.onStopRemote === 'function' ? props.onStopRemote(host) : null
-    Promise.resolve(work).then(
-      () => {
-        setStopBusy(false)
-        setPendingStop(null)
-      },
-      () => {
-        setStopBusy(false)
-        setPendingStop(null)
-      },
-    )
+    const settle = () => {
+      setStopBusy(false)
+      setPendingStop(null)
+    }
+    Promise.resolve(typeof props.onStopRemote === 'function' ? props.onStopRemote(host) : null).then(settle, settle)
   }
-
+  const card = (host: Partial<HostView>) =>
+    h(HostCard, {
+      key: host.id,
+      t,
+      locale,
+      host,
+      busy: busyHostId === host.id,
+      onOpen: props.onOpenHost,
+      onViewProgress: props.onViewProgress,
+      onDisconnect: props.onDisconnectHost,
+      onReconnect: props.onReconnectHost,
+      onRestart: props.onRestartHost,
+      onStopRemote: requestStop,
+      onEdit: props.onEditHost,
+      onDelete: props.onDeleteHost,
+      onDiagnose: props.onDiagnoseHost,
+    })
+  const list = h('ul', { className: 'drg-host-list', 'data-testid': 'host-list' }, visibleHosts.map(card))
+  const summary = box(
+    'div',
+    'drg-summary',
+    h(StatusDot, { status: connected > 0 ? 'connected' : 'idle' }),
+    h('span', null, t('summary', { connected, total: hosts.length })),
+  )
+  const stopDialog = h(StopRemoteDialog, {
+    key: 'stop-remote:' + (pendingStop ? pendingStop.id : ''),
+    t,
+    busy: stopBusy,
+    onConfirm: confirmStop,
+    onCancel: () => !stopBusy && setPendingStop(null),
+  })
+  const stopDialogNode = pendingStop !== null ? stopDialog : null
+  const body = box('div', 'drg-host-body', summary, visibleHosts.length > 0 ? list : null, stopDialogNode)
+  const retryProps = {
+    variant: 'secondary',
+    testId: 'live-reconnect',
+    onClick: props.onRetryLive,
+    disabled: typeof props.onRetryLive !== 'function',
+  }
+  const lostText =
+    props.mode === 'reconnecting'
+      ? t('liveReconnecting')
+      : t('liveStreamLostBody', { seconds: Math.round(POLL_INTERVAL_MS / 1000) })
+  // The stream died and the panel is polling: say so instead of stale numbers, and offer to restore live updates.
+  // It stays up while a reconnect is in flight: only an actual `open` or first frame clears it.
+  const liveBanner =
+    props.mode === 'polling' || props.mode === 'reconnecting'
+      ? box(
+          'div',
+          'drg-live-banner',
+          h(Notice, { tone: 'warn', title: t('liveStreamLostTitle') }, lostText),
+          h(Button, retryProps, t('liveReconnect')),
+        )
+      : null
   let content
   if (state === null && error !== null) {
     content = h(ErrorCard, {
@@ -339,128 +298,33 @@ function HostListView(props: HostListViewProps) {
   } else if (hosts.length === 0) {
     content = h(EmptyHosts, { t, onAdd: props.onAdd })
   } else {
-    content = box(
-      'div',
-      'drg-host-body',
-      box(
-        'div',
-        'drg-summary',
-        h(StatusDot, { status: connected > 0 ? 'connected' : 'idle' }),
-        h('span', null, t('summary', { connected, total })),
-      ),
-      visibleHosts.length > 0
-        ? h(
-            'ul',
-            { className: 'drg-host-list', 'data-testid': 'host-list' },
-            visibleHosts.map((host) =>
-              h(HostCard, {
-                key: host.id,
-                t,
-                locale,
-                host,
-                busy: busyHostId === host.id,
-                onOpen: props.onOpenHost,
-                onViewProgress: props.onViewProgress,
-                onDisconnect: props.onDisconnectHost,
-                onReconnect: props.onReconnectHost,
-                onRestart: props.onRestartHost,
-                onStopRemote: requestStop,
-                onEdit: props.onEditHost,
-                onDelete: props.onDeleteHost,
-                onDiagnose: props.onDiagnoseHost,
-              }),
-            ),
-          )
-        : null,
-      pendingStop !== null
-        ? h(StopRemoteDialog, {
-            key: 'stop-remote:' + pendingStop.id,
-            t,
-            busy: stopBusy,
-            onConfirm: confirmStop,
-            onCancel: () => {
-              if (stopBusy) return
-              setPendingStop(null)
-            },
-          })
-        : null,
-    )
+    content = body
   }
-
-  // The stream died and the panel is polling: say so instead of silently showing stale
-  // numbers, and offer the one action that can restore live updates (audit S2-1). The banner
-  // also stays up while a reconnect attempt is in flight (`reconnecting`): only an actual
-  // `open`/first frame clears it.
-  const liveDegraded = props.mode === 'polling' || props.mode === 'reconnecting'
-  const liveBanner = liveDegraded
-    ? box(
-        'div',
-        'drg-live-banner',
-        h(
-          Notice,
-          { tone: 'warn', title: t('liveStreamLostTitle') },
-          props.mode === 'reconnecting'
-            ? t('liveReconnecting')
-            : t('liveStreamLostBody', { seconds: Math.round(POLL_INTERVAL_MS / 1000) }),
-        ),
-        h(
-          Button,
-          {
-            variant: 'secondary',
-            testId: 'live-reconnect',
-            onClick: props.onRetryLive,
-            disabled: typeof props.onRetryLive !== 'function',
-          },
-          t('liveReconnect'),
-        ),
-      )
-    : null
-
-  return box(
-    'div',
-    'drg-page drg-host-page',
-    box(
-      'header',
-      'drg-page-head',
-      box(
-        'div',
-        'drg-page-heading',
-        box('h1', 'drg-page-title', t('hostsTitle')),
-        box('p', 'drg-page-subtitle', t('panelSubtitle')),
-      ),
-      box(
-        'div',
-        'drg-page-actions',
-        h(
-          Button,
-          {
-            variant: 'primary',
-            testId: 'host-add',
-            onClick: props.onAdd === undefined ? undefined : () => props.onAdd(),
-          },
-          h(IconPlus, { size: 14 }),
-          h('span', null, t('addHost')),
-        ),
-        h(
-          Button,
-          {
-            variant: 'ghost',
-            testId: 'host-refresh',
-            onClick: props.onRefresh,
-            busy: loading,
-          },
-          h(IconRefresh, { size: 14 }),
-          h('span', null, t('refresh')),
-        ),
-        h(IconButton, {
-          icon: h(IconGear),
-          label: t('settings'),
-          testId: 'host-settings',
-          onClick: props.onOpenSettings,
-        }),
-      ),
-    ),
-    content,
-    liveBanner,
+  const title = box('h1', 'drg-page-title', t('hostsTitle'))
+  const subtitle = box('p', 'drg-page-subtitle', t('panelSubtitle'))
+  const heading = box('div', 'drg-page-heading', title, subtitle)
+  const plus = h(IconPlus, { size: 14 })
+  const refreshIcon = h(IconRefresh, { size: 14 })
+  const addLabel = h('span', null, t('addHost'))
+  const refreshLabel = h('span', null, t('refresh'))
+  const addButton = h(Button, { variant: 'primary', testId: 'host-add', onClick: props.onAdd }, plus, addLabel)
+  const refreshButton = h(
+    Button,
+    { variant: 'ghost', testId: 'host-refresh', onClick: props.onRefresh, busy: loading },
+    refreshIcon,
+    refreshLabel,
   )
+  const settingsButton = h(IconButton, {
+    icon: h(IconGear),
+    label: t('settings'),
+    testId: 'host-settings',
+    onClick: props.onOpenSettings,
+  })
+  const header = box(
+    'header',
+    'drg-page-head',
+    heading,
+    box('div', 'drg-page-actions', addButton, refreshButton, settingsButton),
+  )
+  return box('div', 'drg-page drg-host-page', header, content, liveBanner)
 }

@@ -1,15 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import http from 'node:http'
-import path from 'node:path'
-import process from 'node:process'
-import { fileURLToPath } from 'node:url'
+import { assertNoPageErrors, collectPageErrors, openBrowserPage, serveHarness } from '../helpers/browser.ts'
 import { resolveBrowser, skipOrFail, waitFor } from './harness-support.ts'
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-// The page serves the built artifact: `dist/client.js` (scripts/build-client.mjs).
-const CLIENT_PATH = path.join(ROOT, 'dist', 'client.js')
 
 /** The host the stubbed Host API reports: one connected remote DSH. */
 const HOST = {
@@ -62,9 +54,8 @@ const HOST = {
 }
 
 /**
- * A page that mounts the real card list over a stubbed Host API, so a real browser can click
- * the destructive action end to end: card -> confirmation -> POST -> progress -> disconnected.
- */
+ * A page that mounts the real card list over a stubbed Host API, so a real browser can click the destructive action end
+ * to end: card -> confirmation -> POST -> progress -> disconnected. */
 function stopHarness() {
   return `<!doctype html>
 <html lang="zh">
@@ -158,75 +149,17 @@ function stopHarness() {
 </html>`
 }
 
-function listen(server) {
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)))
-}
-
 test('the browser card stops the remote DSH only after a confirmed click', { timeout: 240_000 }, async (t) => {
   const browserPath = resolveBrowser()
   if (!browserPath) {
     skipOrFail(t, 'no Chrome/Edge found: set CHROME_PATH or PUPPETEER_EXECUTABLE_PATH')
     return
   }
-  const esbuild = await import('esbuild')
-  const reactBundle = (
-    await esbuild.build({
-      stdin: {
-        contents: `import React from 'react'
-import { createRoot } from 'react-dom/client'
-window.React = React
-window.ReactDOM = { createRoot }`,
-        resolveDir: ROOT,
-        loader: 'js',
-      },
-      bundle: true,
-      write: false,
-      format: 'iife',
-      platform: 'browser',
-      logLevel: 'silent',
-    })
-  ).outputFiles[0].text
-  const server = http.createServer((req, res) => {
-    const pathname = new URL(req.url ?? '/', 'http://x').pathname
-    if (pathname === '/') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(stopHarness())
-      return
-    }
-    if (pathname === '/react.js') {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-      res.end(reactBundle)
-      return
-    }
-    if (pathname === '/client.js') {
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-      res.end(readFileSync(CLIENT_PATH))
-      return
-    }
-    res.writeHead(404)
-    res.end()
-  })
-  const port = await listen(server)
-  const puppeteer = (await import('puppeteer-core')).default
-  const browser = await puppeteer.launch({
-    executablePath: browserPath,
-    headless: 'new',
-    args: [
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-gpu',
-      // Hosted Ubuntu runners restrict unprivileged user namespaces (see web.e2e.js).
-      ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
-    ],
-  })
-  const page = await browser.newPage()
-  const errors = []
-  page.on('console', (message) => {
-    if (message.type() === 'error') errors.push(message.text())
-  })
-  page.on('pageerror', (error) => errors.push(String(error?.message ?? error)))
+  const server = await serveHarness({ '/': stopHarness() })
+  const { page, close } = await openBrowserPage(browserPath)
+  const errors = collectPageErrors(page)
   try {
-    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    await page.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
     await waitFor(page, () => document.querySelector('[data-testid="host-stop-remote"]') !== null, {
       timeout: 15_000,
     })
@@ -313,10 +246,9 @@ window.ReactDOM = { createRoot }`,
       assert.doesNotMatch(card, /关闭/)
     })
 
-    const silent = errors.filter((text) => !/Failed to load resource/.test(text))
-    assert.deepEqual(silent, [], `page errors: ${silent.join(' | ')}`)
+    assertNoPageErrors(errors)
   } finally {
-    await browser.close().catch(() => {})
-    await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await close().catch(() => {})
+    await server.close()
   }
 })

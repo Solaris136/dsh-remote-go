@@ -1,17 +1,10 @@
-/**
- * One classification for a failed connect step (design-arch §3.3, single implementation): a step
- * that raced the transport going away must read as a dropped connection (network, retryable),
- * never as a bare internal error or as a key decision the user never made (H3).
- */
+/** One classification for a failed connect step: a step that raced the transport going away must read as a dropped connection (network, retryable), never as a bare internal error or as a key decision the user never made. */
 import { errors, RemoteGoError, toErrorView } from '../errors.js'
 import type { ErrorView } from '../errors.js'
 import type { HostRuntime } from '../host-runtime.js'
 import type { BilingualText } from '../util.js'
 
-/** A thrown value: the pipeline reads its message to classify a dropped transport. */
-interface ThrownError {
-  message?: unknown
-}
+type ThrownError = { message?: unknown }
 
 /** The bilingual detail of "the transport this step needed is gone". */
 export const SSH_CLOSED_DETAIL: BilingualText = {
@@ -19,25 +12,12 @@ export const SSH_CLOSED_DETAIL: BilingualText = {
   en: 'SSH connection is not open; the transport closed before this step finished. Reconnect to continue.',
 }
 
-/**
- * Classify a pipeline failure. A step that raced the transport going away must read as a
- * dropped connection (`network`, retryable), never as a bare `internal` error or as a key
- * decision the user never made (H3).
- * @param runtime - host runtime.
- * @param error - the thrown value.
- * @returns the Client-facing error view.
- */
+/** Classify a pipeline failure, so a step that raced the transport away reads as a dropped connection rather than a key decision the user never made. */
 export function normalizeConnectFailure(runtime: HostRuntime, error: ThrownError | null): ErrorView {
   const view = toErrorView(error)
   if (runtime.transportLost === true && runtime.ssh?.connected !== true) {
-    // A prompt parked on the transport was resolved by the close itself: the user made no
-    // decision, so this must not read as "confirm the host key" / "a manual DSH is running".
     if (view.code === 'host-key-unknown' || view.code === 'remote-dsh-running') {
-      return toErrorView(
-        errors.network(SSH_CLOSED_DETAIL, {
-          technical: `reason=ssh-closed phase-code=${view.code}`,
-        }),
-      )
+      return toErrorView(errors.network(SSH_CLOSED_DETAIL, { technical: `reason=ssh-closed phase-code=${view.code}` }))
     }
   }
   if (runtime.ssh?.connected === true) {

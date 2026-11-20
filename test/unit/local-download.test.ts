@@ -5,28 +5,40 @@ import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { destinationPolicy, requireDestination, saveHostFile, saveHostFolder } from '../../dist/src/local-download.js'
-import { isRemoteGoError } from '../../dist/src/errors.js'
+import { errors, isRemoteGoError } from '../../dist/src/errors.js'
 import { readHostDownload } from '../../dist/src/remote-files.js'
 
+const HOME = process.platform === 'win32' ? 'C:\\Users\\me' : '/home/me'
+const WINDOWS = process.platform === 'win32'
+const under = (...parts) => path.join(HOME, ...parts)
 const connected = (ssh) => ({ status: 'connected', ssh })
-
-async function tempRoot(t, prefix) {
-  const dir = await mkdtemp(path.join(tmpdir(), prefix))
-  t.after(() => rm(dir, { recursive: true, force: true }))
-  return dir
-}
-
 /** assert.rejects matcher: a RemoteGoError carrying exactly `code`. */
 const coded = (code) => (error) => {
   assert.ok(isRemoteGoError(error), `expected a RemoteGoError, got ${error?.name}: ${error?.message}`)
   assert.equal(error.code, code)
   return true
 }
-
-const HOME = process.platform === 'win32' ? 'C:\\Users\\me' : '/home/me'
-const under = (...parts) => path.join(HOME, ...parts)
-const WINDOWS = process.platform === 'win32'
-
+const invalidInput = coded('invalid-input')
+async function tempRoot(t, prefix) {
+  const dir = await mkdtemp(path.join(tmpdir(), prefix))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  return dir
+}
+// The writer entry points bound to one temp root. `raw*` skips the connected-host wrapper, for cases whose subject is
+// the missing or unusable transport.
+function writer(root) {
+  const save =
+    (fn) =>
+    (ssh, remote, extra = {}) =>
+      fn(connected(ssh), remote, root, { home: root, ...extra })
+  return {
+    file: save(saveHostFile),
+    folder: save(saveHostFolder),
+    fileRaw: (host, remote) => saveHostFile(host, remote, root, { home: root }),
+    folderRaw: (host, remote) => saveHostFolder(host, remote, root, { home: root }),
+    read: (runtime, remote, options) => readHostDownload(runtime, remote, { home: root, ...options }),
+  }
+}
 /** A connected host whose transport records every write, so a refusal can prove zero writes. */
 function recordingRuntime(kind = 'file') {
   const writes = []
@@ -56,35 +68,27 @@ describe('download writer: files and folders', () => {
   test('requireDestination accepts an existing directory and rejects everything else', async (t) => {
     const root = await tempRoot(t, 'dsh-remote-go-destination-')
     assert.equal(await requireDestination(root, { home: root }), path.resolve(root))
-
     for (const value of [undefined, null, '', '   ', `${root}\0suffix`]) {
       await assert.rejects(
         () => requireDestination(value, { home: root }),
-        coded('invalid-input'),
+        invalidInput,
         `value ${JSON.stringify(value)}`,
       )
     }
-
     const file = path.join(root, 'not-a-directory.txt')
     await writeFile(file, 'x')
-    await assert.rejects(() => requireDestination(file, { home: root }), coded('invalid-input'))
-    await assert.rejects(() => requireDestination(path.join(root, 'missing'), { home: root }), coded('invalid-input'))
+    await assert.rejects(() => requireDestination(file, { home: root }), invalidInput)
+    await assert.rejects(() => requireDestination(path.join(root, 'missing'), { home: root }), invalidInput)
   })
 
   test('saveHostFile requires a connected host with a file-capable transport', async (t) => {
-    const root = await tempRoot(t, 'dsh-remote-go-save-file-')
+    const { fileRaw } = writer(await tempRoot(t, 'dsh-remote-go-save-file-'))
+    await assert.rejects(() => fileRaw(null, '/home/ubuntu/a.txt'), coded('remote-file-unavailable'))
     await assert.rejects(
-      () => saveHostFile(null, '/home/ubuntu/a.txt', root, { home: root }),
+      () => fileRaw({ status: 'disconnected', ssh: {} }, '/home/ubuntu/a.txt'),
       coded('remote-file-unavailable'),
     )
-    await assert.rejects(
-      () => saveHostFile({ status: 'disconnected', ssh: {} }, '/home/ubuntu/a.txt', root, { home: root }),
-      coded('remote-file-unavailable'),
-    )
-    await assert.rejects(
-      () => saveHostFile(connected({}), '/home/ubuntu/a.txt', root, { home: root }),
-      coded('internal'),
-    )
+    await assert.rejects(() => fileRaw(connected({}), '/home/ubuntu/a.txt'), coded('internal'))
   })
 
   test('saveHostFile streams one file and auto-renames an existing target', async (t) => {
@@ -97,23 +101,16 @@ describe('download writer: files and folders', () => {
         return { size: 10 }
       },
     }
-
-    const first = await saveHostFile(connected(ssh), '/home/ubuntu/notes.txt', root, { home: root, onProgress() {} })
+    const { file } = writer(root)
+    const first = await file(ssh, '/home/ubuntu/notes.txt', { onProgress() {} })
     assert.deepEqual(
       { kind: first.kind, name: first.name, path: first.path, files: first.files, totalBytes: first.totalBytes },
-      {
-        kind: 'file',
-        name: 'notes.txt',
-        path: '/home/ubuntu/notes.txt',
-        files: 1,
-        totalBytes: 10,
-      },
+      { kind: 'file', name: 'notes.txt', path: '/home/ubuntu/notes.txt', files: 1, totalBytes: 10 },
     )
     assert.equal(first.destination, path.join(root, 'notes.txt'))
     assert.equal(await readFile(first.destination, 'utf8'), 'downloaded')
     assert.equal(written.length, 1)
-
-    const second = await saveHostFile(connected(ssh), '/home/ubuntu/notes.txt', root, { home: root })
+    const second = await file(ssh, '/home/ubuntu/notes.txt')
     assert.equal(second.name, 'notes (2).txt')
     assert.equal(second.destination, path.join(root, 'notes (2).txt'))
     assert.equal(await readFile(path.join(root, 'notes.txt'), 'utf8'), 'downloaded')
@@ -128,7 +125,7 @@ describe('download writer: files and folders', () => {
       },
     }
     await assert.rejects(
-      () => saveHostFile(connected(ssh), '/home/ubuntu/big.bin', root, { home: root }),
+      () => writer(root).file(ssh, '/home/ubuntu/big.bin'),
       (error) => coded('remote-file-unavailable')(error) && /connection reset/.test(error.technical),
     )
     await assert.rejects(() => stat(path.join(root, 'big.bin')), /ENOENT/)
@@ -136,30 +133,20 @@ describe('download writer: files and folders', () => {
 
   test('saveHostFile preserves a coded error and still cleans the partial file', async (t) => {
     const root = await tempRoot(t, 'dsh-remote-go-save-file-')
-    const { errors } = await import('../../dist/src/errors.js')
     const ssh = {
       async saveRemoteFile(_remotePath, localPath) {
         await writeFile(localPath, 'partial')
         throw errors.remoteFileUnavailable({ zh: '远端文件不存在。', en: 'The remote file does not exist.' })
       },
     }
-    await assert.rejects(
-      () => saveHostFile(connected(ssh), '/home/ubuntu/gone.bin', root, { home: root }),
-      coded('remote-file-unavailable'),
-    )
+    await assert.rejects(() => writer(root).file(ssh, '/home/ubuntu/gone.bin'), coded('remote-file-unavailable'))
     await assert.rejects(() => stat(path.join(root, 'gone.bin')), /ENOENT/)
   })
 
   test('saveHostFolder requires a connected host with a tree-capable transport', async (t) => {
-    const root = await tempRoot(t, 'dsh-remote-go-save-folder-')
-    await assert.rejects(
-      () => saveHostFolder(null, '/home/ubuntu/reports', root, { home: root }),
-      coded('remote-file-unavailable'),
-    )
-    await assert.rejects(
-      () => saveHostFolder(connected({}), '/home/ubuntu/reports', root, { home: root }),
-      coded('internal'),
-    )
+    const { folderRaw } = writer(await tempRoot(t, 'dsh-remote-go-save-folder-'))
+    await assert.rejects(() => folderRaw(null, '/home/ubuntu/reports'), coded('remote-file-unavailable'))
+    await assert.rejects(() => folderRaw(connected({}), '/home/ubuntu/reports'), coded('internal'))
   })
 
   test('saveHostFolder copies one folder and auto-renames an existing target', async (t) => {
@@ -173,8 +160,8 @@ describe('download writer: files and folders', () => {
         return { destination: targetRoot, totalBytes: 1, totalFiles: 1 }
       },
     }
-
-    const first = await saveHostFolder(connected(ssh), '/home/ubuntu/reports', root, { home: root, onInventory() {} })
+    const { folder } = writer(root)
+    const first = await folder(ssh, '/home/ubuntu/reports', { onInventory() {} })
     assert.deepEqual(
       { kind: first.kind, name: first.name, path: first.path, files: first.files, totalBytes: first.totalBytes },
       { kind: 'folder', name: 'reports', path: '/home/ubuntu/reports', files: 1, totalBytes: 1 },
@@ -182,8 +169,7 @@ describe('download writer: files and folders', () => {
     assert.equal(first.destination, path.join(root, 'reports'))
     assert.equal(await readFile(path.join(first.destination, 'nested', 'a.txt'), 'utf8'), 'a')
     assert.equal(trees.length, 1)
-
-    const second = await saveHostFolder(connected(ssh), '/home/ubuntu/reports', root, { home: root })
+    const second = await folder(ssh, '/home/ubuntu/reports')
     // A folder download keeps the remote name in `name`; only the local directory is renamed.
     assert.equal(second.name, 'reports')
     assert.equal(second.destination, path.join(root, 'reports (2)'))
@@ -191,22 +177,22 @@ describe('download writer: files and folders', () => {
 
   test('saveHostFolder reports cancellation and removes a failed copy', async (t) => {
     const root = await tempRoot(t, 'dsh-remote-go-save-folder-')
+    const { folder } = writer(root)
     const cancelling = {
       async saveRemoteTree(_remotePath, targetRoot) {
         return { destination: targetRoot, totalBytes: 3, totalFiles: 2, cancelled: true }
       },
     }
-    const cancelled = await saveHostFolder(connected(cancelling), '/home/ubuntu/partial', root, { home: root })
+    const cancelled = await folder(cancelling, '/home/ubuntu/partial')
     assert.equal(cancelled.cancelled, true)
     assert.equal(cancelled.files, 2)
-
     const failing = {
       async saveRemoteTree() {
         throw Object.assign(new Error('SFTP closed'), { code: 'ECONNRESET' })
       },
     }
     await assert.rejects(
-      () => saveHostFolder(connected(failing), '/home/ubuntu/broken', root, { home: root }),
+      () => folder(failing, '/home/ubuntu/broken'),
       (error) => coded('remote-file-unavailable')(error) && /SFTP closed/.test(error.technical),
     )
     await assert.rejects(() => stat(path.join(root, 'broken')), /ENOENT/)
@@ -263,9 +249,8 @@ describe('download destination policy', () => {
       [`${under('Downloads')}\0x`, 'invalid'],
       [null, 'invalid'],
     ]
-    for (const [value, expected] of cases) {
+    for (const [value, expected] of cases)
       assert.equal(destinationPolicy(value, { home: HOME }), expected, JSON.stringify(value))
-    }
   })
 
   test('a system directory is refused even when the home directory covers it', () => {
@@ -279,16 +264,11 @@ describe('download destination policy', () => {
     const startup = path.join(base, 'Startup')
     await mkdir(startup)
     const { runtime, writes } = recordingRuntime()
-    await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/payload.exe', { destination: startup, home: base }),
-      (error) => error.code === 'invalid-input',
-    )
+    const read = (options) => readHostDownload(runtime, '/home/ubuntu/payload.exe', options)
+    await assert.rejects(() => read({ destination: startup, home: base }), invalidInput)
     assert.deepEqual(writes, [], 'a refused destination must never reach the transport')
     await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/payload.exe', {
-        destination: base,
-        home: path.join(base, 'sub', 'home'),
-      }),
+      () => read({ destination: base, home: path.join(base, 'sub', 'home') }),
       (error) => error.code === 'invalid-input',
     )
     assert.deepEqual(writes, [])
@@ -299,24 +279,17 @@ describe('download destination policy', () => {
     const config = path.join(base, '.config')
     await mkdir(config)
     const { runtime, writes } = recordingRuntime('folder')
-
-    // The reported bypass: a legal destination (`~/.config` used to pass before the login rule) is
-    // no longer reachable either, and a remote folder named `autostart` is refused on its own.
+    const read = (remotePath, destination) => readHostDownload(runtime, remotePath, { destination, home: base })
+    // The reported bypass: a legal destination (`~/.config` used to pass) is unreachable, and `autostart` is refused.
     for (const destination of [config, base]) {
       await assert.rejects(
-        readHostDownload(runtime, '/home/ubuntu/autostart', { destination, home: base }),
-        (error) => error.code === 'invalid-input',
+        () => read('/home/ubuntu/autostart', destination),
+        invalidInput,
         `destination ${destination}`,
       )
     }
-    await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/.ssh', { destination: base, home: base }),
-      (error) => error.code === 'invalid-input',
-    )
-    await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/Startup', { destination: base, home: base }),
-      (error) => error.code === 'invalid-input',
-    )
+    await assert.rejects(() => read('/home/ubuntu/.ssh', base), invalidInput)
+    await assert.rejects(() => read('/home/ubuntu/Startup', base), invalidInput)
     // Nothing was created under the home root, and the transport never ran.
     assert.deepEqual(writes, [], 'a refused candidate must never reach the transport')
     assert.deepEqual((await readdir(base)).sort(), ['.config'], 'a refused candidate must create nothing')
@@ -328,8 +301,8 @@ describe('download destination policy', () => {
     const { runtime, writes } = recordingRuntime('file')
     for (const name of ['.bash_login', '.profile', '.zshrc']) {
       await assert.rejects(
-        readHostDownload(runtime, `/home/ubuntu/${name}`, { destination: base, home: base }),
-        (error) => error.code === 'invalid-input',
+        () => readHostDownload(runtime, `/home/ubuntu/${name}`, { destination: base, home: base }),
+        invalidInput,
         name,
       )
       assert.equal(existsSync(path.join(base, name)), false, `${name} must not be created`)
@@ -343,11 +316,10 @@ describe('download destination policy', () => {
     const roaming = path.join(base, 'AppData', 'Roaming')
     await mkdir(roaming, { recursive: true })
     const { runtime, writes } = recordingRuntime('folder')
-    // `…/AppData/Roaming/Microsoft` looks unremarkable, but a folder downloaded there could then
-    // contain `Windows/Start Menu/Programs/Startup` — the tree writer creates nested paths.
+    // `…/AppData/Roaming/Microsoft` looks unremarkable, but the tree writer creates nested paths, so Startup fits.
     await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/Microsoft', { destination: roaming, home: base }),
-      (error) => error.code === 'invalid-input',
+      () => readHostDownload(runtime, '/home/ubuntu/Microsoft', { destination: roaming, home: base }),
+      invalidInput,
     )
     assert.deepEqual(writes, [])
     assert.equal(existsSync(path.join(roaming, 'Microsoft')), false)
@@ -358,17 +330,11 @@ describe('download destination policy', () => {
     const library = path.join(base, 'Library')
     await mkdir(library)
     const { runtime, writes } = recordingRuntime('folder')
+    const read = (remotePath, destination) => readHostDownload(runtime, remotePath, { destination, home: base })
     // `~/Library` is an ordinary destination, but the remote chooses the name below it…
-    await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/LaunchAgents', { destination: library, home: base }),
-      (error) => error.code === 'invalid-input',
-    )
-    // …and must not be able to create `~/Library` itself either: a tree written below it could
-    // contain `LaunchAgents/…`, which macOS runs at login.
-    await assert.rejects(
-      readHostDownload(runtime, '/home/ubuntu/Library', { destination: base, home: base }),
-      (error) => error.code === 'invalid-input',
-    )
+    await assert.rejects(() => read('/home/ubuntu/LaunchAgents', library), invalidInput)
+    // …and it mustn't create `~/Library` itself either: a tree below could hold `LaunchAgents/…`, which macOS runs.
+    await assert.rejects(() => read('/home/ubuntu/Library', base), invalidInput)
     assert.deepEqual(writes, [], 'a refused candidate must never reach the transport')
     assert.deepEqual(await readdir(library), [])
     assert.equal(existsSync(path.join(library, 'LaunchAgents')), false)
@@ -380,10 +346,7 @@ describe('download destination policy', () => {
     const nested = path.join(base, 'nested')
     await mkdir(nested)
     assert.equal(await requireDestination(nested, { home: base }), path.resolve(nested))
-    await assert.rejects(
-      requireDestination(path.join(base, 'nested', 'missing'), { home: base }),
-      (error) => error.code === 'invalid-input',
-    )
+    await assert.rejects(() => requireDestination(path.join(base, 'nested', 'missing'), { home: base }), invalidInput)
   })
 
   test('the policy is pure: it never creates or inspects the destination', async () => {

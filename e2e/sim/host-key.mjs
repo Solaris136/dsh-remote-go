@@ -12,17 +12,11 @@ const ARMOR_PREFIX = '-----BEGIN '
 const CARRIAGE_RETURN = 0x0d
 
 /**
- * Generation attempts. `ssh2`'s ed25519 keygen is flaky under CPU load (see `createHostKey`);
- * five attempts take the observed ~3% failure rate to a negligible one without masking a
- * genuinely broken generator.
+ * Generation attempts. `ssh2`'s ed25519 keygen is flaky under CPU load (see `createHostKey`); five attempts take the observed ~3% failure rate to a negligible one without masking a genuinely broken generator.
  */
 export const HOST_KEY_GENERATION_ATTEMPTS = 5
 
-/**
- * Normalize private-key material: always a Buffer, with carriage returns removed from armored
- * text. Bytes are filtered in place (no string round-trip), and binary material is left
- * untouched because a lone `0x0d` can be real key data there.
- */
+/** Normalize private-key material: always a Buffer, with carriage returns removed from armored text. Bytes are filtered in place (no string round-trip), and binary material is left untouched because a lone `0x0d` can be real key data there. */
 export function normalizePrivateKey(material) {
   let buffer
   if (typeof material === 'string') buffer = Buffer.from(material, 'utf8')
@@ -41,10 +35,7 @@ export function normalizePrivateKey(material) {
   return buffer.subarray(0, write)
 }
 
-/**
- * Parse normalized key material into the facts the simulator needs. Throws (never returns a
- * half-valid key) so a broken key is a startup error that names the reason.
- */
+/** Parse normalized key material into the facts the simulator needs. Throws (never returns a half-valid key) so a broken key is a startup error that names the reason. */
 export function describeHostKey(material) {
   const normalized = normalizePrivateKey(material)
   const parsed = utils.parseKey(normalized)
@@ -63,13 +54,7 @@ export function describeHostKey(material) {
 }
 
 /**
- * Generate a fresh ed25519 host key and validate it before it is used.
- *
- * `ssh2`'s synchronous keygen occasionally produces armored material its own parser rejects
- * (`Malformed OpenSSH private key`) when the machine is under CPU load — observed on the
- * Windows CI runner and reproduced locally with concurrent test workers (~1 in 30 runs).
- * Handing that key to the SSH server kills the simulator at construction, so generation is
- * retried a bounded number of times; the validation itself stays strict.
+ * Generate a fresh ed25519 host key and validate it before it is used. `ssh2`'s synchronous keygen occasionally produces armored material its own parser rejects (`Malformed OpenSSH private key`) when the machine is under CPU load — observed on the Windows CI runner and reproduced locally with concurrent test workers (~1 in 30 runs). Handing that key to the SSH server kills the simulator at construction, so generation is retried a bounded number of times; the validation itself stays strict.
  */
 export function createHostKey(options = {}) {
   const generate =

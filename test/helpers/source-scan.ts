@@ -3,9 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
-
 export const REPO_ROOT = path.resolve(HERE, '..', '..')
-
 export function stripComments(source) {
   let out = ''
   let index = 0
@@ -56,7 +54,6 @@ export function stripComments(source) {
   }
   return out
 }
-
 export function matchingBracket(text, open) {
   const close = { '{': '}', '(': ')', '[': ']' }[text[open]]
   if (!close) return -1
@@ -71,7 +68,6 @@ export function matchingBracket(text, open) {
   }
   return -1
 }
-
 export async function walkFiles(dir, options = {}) {
   const extensions = options.extensions ?? /\.js$/
   const skipDirs = options.skipDirs ?? new Set()

@@ -1,10 +1,7 @@
 /**
- * The watchdog bus itself (design-arch §1.7): synchronous publish, registration order, a throwing
- * listener that cannot break the event that follows it, and an idempotent unsubscribe.
- *
- * The wiring (who subscribes, and what a confirmed/recovered episode does) is covered end-to-end by
- * `remote-restart.test.js`; this file only pins the channel's contract.
- */
+ * The watchdog bus itself: synchronous publish, registration order, a throwing listener that cannot break the event
+ * that follows it, and an idempotent unsubscribe (`remote-restart.test.ts` covers the wiring; this file only pins the
+ * channel's contract). */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createWatchdogBus } from '../../dist/src/watchdog-bus.js'
@@ -12,8 +9,7 @@ import { createWatchdogBus } from '../../dist/src/watchdog-bus.js'
 test('the bus publishes synchronously, in subscription order', () => {
   const bus = createWatchdogBus()
   const seen = []
-  bus.subscribe((event) => seen.push(`a:${event.kind}`))
-  bus.subscribe((event) => seen.push(`b:${event.kind}`))
+  for (const tag of ['a', 'b']) bus.subscribe((event) => seen.push(`${tag}:${event.kind}`))
   bus.publish({ kind: 'confirmed', hostId: 'h1', reason: 'probe-failed-2', source: 'proxy' })
   assert.deepEqual(seen, ['a:confirmed', 'b:confirmed'])
 })

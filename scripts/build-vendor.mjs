@@ -1,15 +1,11 @@
-// Bundle the dev-only runtime library into vendor/, so the published plugin has no
-// runtime dependencies and triggers no install scripts:
-//   - ssh2 (CommonJS) -> vendor/ssh2.bundle.cjs, used by the SSH transport
-// Re-run after upgrading the dependency: node scripts/build-vendor.mjs
-// Pass --no-minify for a readable bundle when debugging the vendored code.
+// Bundle the dev-only runtime library into vendor/ so the published plugin has no runtime dependencies and runs no
+// install scripts: ssh2 (CommonJS) -> vendor/ssh2.bundle.cjs; re-run after upgrades. `--no-minify` is for debugging.
 import { build } from 'esbuild'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-// fileURLToPath, not URL#pathname: pathname percent-encodes characters such as the
-// space in "C:\Work\my repo", which made every gate resolve the wrong repository root.
+// fileURLToPath, not URL#pathname: it percent-encodes the space in "C:\Work\my repo" and resolved the wrong root.
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const minify = !process.argv.includes('--no-minify')
 const minifyNote = minify ? ' (minified; --no-minify for a readable bundle)' : ''
@@ -20,7 +16,6 @@ const ssh2Banner = `/*!
  * ssh2 falls back to its pure-JavaScript implementation.
  */
 `
-
 const bundles = [
   {
     entry: path.join(root, 'vendor', 'ssh2-entry.mjs'),
@@ -30,7 +25,6 @@ const bundles = [
     banner: ssh2Banner,
   },
 ]
-
 const sizes = {}
 for (const item of bundles) {
   await build({
@@ -49,17 +43,13 @@ for (const item of bundles) {
   const text = await readFile(item.outfile, 'utf8')
   sizes[path.basename(item.outfile)] = (text.length / 1024).toFixed(0)
 }
-
-// ssh2 is MIT; its license text is read verbatim from the installed package, because the
-// published tarball must carry the real upstream notice (hard-coding a copyright line
-// drifts from the package the bundle was built from).
+// ssh2 is MIT; the license is read verbatim from the installed package, because a hard-coded notice drifts from it.
 let ssh2License
 try {
   ssh2License = (await readFile(path.join(root, 'node_modules', 'ssh2', 'LICENSE'), 'utf8')).trimEnd()
 } catch (error) {
   throw new Error(`cannot read node_modules/ssh2/LICENSE; run pnpm install first (${error.message})`)
 }
-
 await writeFile(
   path.join(root, 'vendor', 'THIRD_PARTY_NOTICES.md'),
   `# Third-party notices
@@ -83,8 +73,5 @@ The bundle excludes the optional native accelerator \`cpu-features\`; ssh2 uses 
 `,
   'utf8',
 )
-console.log(
-  `[build-vendor] wrote ${Object.entries(sizes)
-    .map(([name, kib]) => `${name} (${kib} KiB)`)
-    .join(', ')} and THIRD_PARTY_NOTICES.md`,
-)
+const parts = Object.entries(sizes).map(([name, kib]) => `${name} (${kib} KiB)`)
+console.log(`[build-vendor] wrote ${parts.join(', ')} and THIRD_PARTY_NOTICES.md`)

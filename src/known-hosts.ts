@@ -1,6 +1,5 @@
-/**
- * Read-only `~/.ssh/known_hosts` parsing and OpenSSH SHA256 fingerprints; hashed entries are counted, never guessed at.
- */
+/** Read-only `~/.ssh/known_hosts` parsing and OpenSSH SHA256 fingerprints; hashed entries are counted, never guessed
+ * at. */
 import { createHash } from 'node:crypto'
 
 /** One usable `known_hosts` line. */
@@ -12,7 +11,6 @@ export interface KnownHostEntry {
   marker: string | null
   line: number
 }
-
 /** One line the parser could not use, kept with its number so diagnostics can point at it. */
 export interface MalformedLine {
   line: number
@@ -28,20 +26,15 @@ export interface KnownHostsParseResult {
 }
 
 /** The summary `diagnostics` shows for one `known_hosts` file. */
-export interface KnownHostsSummary {
-  entries: number
-  hashed: number
-  hosts: string[]
-}
+export type KnownHostsSummary = { entries: number; hashed: number; hosts: string[] }
 
 export function fingerprintFromBase64(keyBase64: string): string {
-  const digest = createHash('sha256').update(Buffer.from(keyBase64, 'base64')).digest('base64')
-  return `SHA256:${digest.replace(/=+$/g, '')}`
+  return fingerprintFromBlob(Buffer.from(keyBase64, 'base64'))
 }
 
+/** OpenSSH's `SHA256:<base64, no padding>` form for one already-decoded key blob. */
 export function fingerprintFromBlob(keyBlob: Buffer): string {
-  const digest = createHash('sha256').update(keyBlob).digest('base64')
-  return `SHA256:${digest.replace(/=+$/g, '')}`
+  return `SHA256:${createHash('sha256').update(keyBlob).digest('base64').replace(/=+$/g, '')}`
 }
 
 export function parseKnownHosts(text: unknown): KnownHostsParseResult {
@@ -50,7 +43,6 @@ export function parseKnownHosts(text: unknown): KnownHostsParseResult {
   let hashedCount = 0
   let revoked = 0
   let certAuthority = 0
-
   const lines = String(text ?? '').split(/\r?\n/)
   for (let index = 0; index < lines.length; index += 1) {
     const lineNo = index + 1
@@ -92,13 +84,9 @@ export function parseKnownHosts(text: unknown): KnownHostsParseResult {
   return { entries, hashedCount, malformed, revoked, certAuthority }
 }
 
-/**
- * OpenSSH `known_hosts` host-field matching: `*` matches any run of characters, `?` exactly
- * one, everything else is literal and the comparison ignores case.
- *
- * Implemented without a regular expression on purpose: a host field is data, and building a
- * `RegExp` from it invites injection and backtracking on remote-controlled text.
- */
+/** OpenSSH `known_hosts` host-field matching: `*` matches any run of characters, `?` exactly one, everything else is
+ * literal and case is ignored. No regular expression on purpose: a host field is data, and building a `RegExp` from it
+ * invites injection and backtracking on remote-controlled text. */
 function wildcardMatch(pattern: string, value: string): boolean {
   const wanted = String(pattern).toLowerCase()
   const text = String(value).toLowerCase()
@@ -126,20 +114,15 @@ function wildcardMatch(pattern: string, value: string): boolean {
   return patternAt === wanted.length
 }
 
-/**
- * Whether one `known_hosts` host field covers `host` on `port`.
- *
- * OpenSSH writes a plain `host` field only for port 22 and `[host]:port` for every other
- * port, and it matches the same way: a plain entry never vouches for a service on 2222.
- */
+/** Whether one `known_hosts` host field covers `host` on `port`: OpenSSH writes a plain field only for port 22 and
+ * `[host]:port` for every other port, so a plain entry never vouches for a service on 2222. */
 export function knownHostFieldMatches(
   pattern: string,
   host: string,
   port: number | string | null | undefined,
 ): boolean {
   const targetPort = Number(port) || 22
-  const target = targetPort === 22 ? String(host) : `[${host}]:${targetPort}`
-  return wildcardMatch(pattern, target)
+  return wildcardMatch(pattern, targetPort === 22 ? String(host) : `[${host}]:${targetPort}`)
 }
 
 export function findKnownHostEntries(
@@ -151,15 +134,6 @@ export function findKnownHostEntries(
 }
 
 export function summarizeKnownHosts(parsed: KnownHostsParseResult): KnownHostsSummary {
-  const hosts = new Set<string>()
-  for (const entry of parsed.entries) {
-    for (const host of entry.hosts) {
-      if (!host.startsWith('|1|')) hosts.add(host)
-    }
-  }
-  return {
-    entries: parsed.entries.length,
-    hashed: parsed.hashedCount,
-    hosts: [...hosts].sort().slice(0, 200),
-  }
+  const hosts = parsed.entries.flatMap((entry) => entry.hosts).filter((host) => !host.startsWith('|1|'))
+  return { entries: parsed.entries.length, hashed: parsed.hashedCount, hosts: [...new Set(hosts)].sort().slice(0, 200) }
 }

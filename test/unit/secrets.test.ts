@@ -2,59 +2,46 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createSecretStore, passwordRecordKey } from '../../dist/src/secrets.js'
 
+const silentLogger = { warn() {} }
 function fakeCredentials() {
   const records = new Map()
   return {
     records,
-    calls: [],
-    async readRecord(key) {
-      this.calls.push(['readRecord', key])
-      return records.get(key)
-    },
+    readRecord: async (key) => records.get(key),
     async modifyRecord(key, mutate) {
-      this.calls.push(['modifyRecord', key])
       const next = await mutate(records.get(key))
       if (next !== undefined) records.set(key, next)
       return records.get(key)
     },
-    async deleteRecord(key) {
-      this.calls.push(['deleteRecord', key])
-      records.delete(key)
-    },
+    deleteRecord: async (key) => records.delete(key),
   }
 }
+const ctxWith = (service) => ({ get: (name) => (name === 'credentials' ? service : undefined) })
+const storeOn = (credentials) => createSecretStore({ ctx: ctxWith(credentials), logger: silentLogger })
 
-function ctxWith(service) {
-  return { get: (name) => (name === 'credentials' ? service : undefined) }
-}
-
-test('the secret store round-trips one password per host', async () => {
+test('the secret store round-trips one password per host as a versioned grant record', async () => {
   const credentials = fakeCredentials()
-  const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
+  const secrets = storeOn(credentials)
   assert.equal(secrets.available(), true)
   assert.equal(await secrets.get('h_1'), null)
   assert.equal(await secrets.set('h_1', 's3cret'), true)
   assert.equal(await secrets.get('h_1'), 's3cret')
   assert.equal(await secrets.get('h_2'), null, 'hosts must not share a record')
-  assert.equal(await secrets.remove('h_1'), true)
-  assert.equal(await secrets.get('h_1'), null)
-})
-
-test('records are tagged as grants with a versioned payload, never a plain string', async () => {
-  const credentials = fakeCredentials()
-  const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
-  await secrets.set('h_1', 's3cret')
   const [key, record] = [...credentials.records.entries()][0]
-  // DSH admits a record only at `<scope>/<id>` (both lowercase identifiers). The old
-  // colon-separated key was accepted on write and then made the whole credential document
-  // unreadable at the next boot, so the save silently stopped working across restarts.
+  // DSH admits a record only at `<scope>/<id>` (both lowercase identifiers); the old colon-separated key was accepted
+  // on write and then made the whole credential document unreadable at the next boot.
   assert.equal(key, 'dsh-remote-go/ssh-password-h-1')
   assert.match(key, /^[a-z][a-z0-9-]*\/[a-z][a-z0-9-]*$/)
-  assert.equal(record.kind, 'grant')
+  assert.equal(record.kind, 'grant', 'a record is a grant, never a plain string')
   assert.deepEqual(record.payload, { version: 1, password: 's3cret' })
+  assert.equal(await secrets.remove('h_1'), true)
+  assert.equal(await secrets.get('h_1'), null)
+  const empty = fakeCredentials()
+  assert.equal(await storeOn(empty).set('h_1', ''), false, 'an empty password is never stored')
+  assert.equal(empty.records.size, 0)
 })
 
-test('the record key is the only DSH-addressable form and never collides across hosts', () => {
+test('the record key is the only DSH-addressable form and only a well-formed payload reads back', async () => {
   assert.equal(passwordRecordKey('h_1'), 'dsh-remote-go/ssh-password-h-1')
   assert.equal(passwordRecordKey('h_abc123'), 'dsh-remote-go/ssh-password-h-abc123')
   assert.notEqual(passwordRecordKey('h_1'), passwordRecordKey('h_2'))
@@ -63,65 +50,40 @@ test('the record key is the only DSH-addressable form and never collides across 
   for (const bad of ['', 'h_', 'H_1', 'x_1', 'h_1/2', 'h_1 ', null, undefined, 42]) {
     assert.equal(passwordRecordKey(bad), null, `unexpected key for ${JSON.stringify(bad)}`)
   }
-})
-
-test('a payload of the wrong shape is ignored instead of returned', async () => {
   const credentials = fakeCredentials()
-  const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
+  const secrets = storeOn(credentials)
   for (const payload of [undefined, null, 'plain', { version: 99, password: 'x' }, { version: 1, password: '' }]) {
     credentials.records.set('dsh-remote-go/ssh-password-h-1', { kind: 'grant', payload })
     assert.equal(await secrets.get('h_1'), null, 'unexpected value for payload ' + JSON.stringify(payload))
   }
 })
 
-test('without a credential service nothing is persisted and available() says so', async () => {
-  const secrets = createSecretStore({ ctx: { get: () => undefined }, logger: { warn() {} } })
-  assert.equal(secrets.available(), false)
-  assert.equal(await secrets.set('h_1', 's3cret'), false, 'a save must report failure, not silently drop it')
-  assert.equal(await secrets.get('h_1'), null)
-  assert.equal(await secrets.remove('h_1'), false)
-})
-
-test('a credential service that changed shape is reported once instead of looking like "nothing stored"', async () => {
-  // `changed` is not `absent`: the service exists, but its record members moved. Answering null
-  // silently would present every remembered password as forgotten (security review L-1).
+test('an absent or reshaped credential service persists nothing and says so once', async () => {
   const warnings = []
+  // `changed` is not `absent`: the service exists but its record members moved, and answering null silently would
+  // present every remembered password as forgotten (security review L-1).
   const moved = { readRecord: 'not-a-function', modifyRecord: 42 }
-  const secrets = createSecretStore({
-    ctx: { get: (name) => (name === 'credentials' ? moved : undefined) },
-    logger: { warn: (...args) => warnings.push(args) },
-  })
-  assert.equal(secrets.available(), false)
-  assert.equal(await secrets.get('h_1'), null)
-  assert.equal(await secrets.set('h_1', 's3cret'), false)
-  assert.equal(await secrets.remove('h_1'), false)
+  for (const [shape, credentials] of [
+    ['absent', undefined],
+    ['reshaped', moved],
+  ]) {
+    const logger = { warn: (...args) => warnings.push(args) }
+    const secrets = createSecretStore({ ctx: { get: () => credentials }, logger })
+    assert.equal(secrets.available(), false, shape)
+    assert.equal(await secrets.get('h_1'), null, shape)
+    assert.equal(await secrets.set('h_1', 's3cret'), false, `${shape}: a save must report failure`)
+    assert.equal(await secrets.remove('h_1'), false, shape)
+  }
   assert.equal(warnings.length, 1, 'a changed credential service must warn exactly once per store')
   assert.match(String(warnings[0][0]), /credential service changed shape/)
 })
 
 test('a throwing credential service never breaks the caller', async () => {
-  const secrets = createSecretStore({
-    ctx: ctxWith({
-      async readRecord() {
-        throw new Error('boom')
-      },
-      async modifyRecord() {
-        throw new Error('boom')
-      },
-      async deleteRecord() {
-        throw new Error('boom')
-      },
-    }),
-    logger: { warn() {} },
-  })
+  const boom = async () => {
+    throw new Error('boom')
+  }
+  const secrets = storeOn({ readRecord: boom, modifyRecord: boom, deleteRecord: boom })
   assert.equal(await secrets.get('h_1'), null)
   assert.equal(await secrets.set('h_1', 's3cret'), false)
   assert.equal(await secrets.remove('h_1'), false)
-})
-
-test('an empty password is never stored', async () => {
-  const credentials = fakeCredentials()
-  const secrets = createSecretStore({ ctx: ctxWith(credentials), logger: { warn() {} } })
-  assert.equal(await secrets.set('h_1', ''), false)
-  assert.equal(credentials.records.size, 0)
 })

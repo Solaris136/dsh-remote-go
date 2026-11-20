@@ -1,23 +1,24 @@
 // client/src/plugin-overlay.ts - PluginOverlay: the overlay host's state, effects and render (its commands live in actions.ts); after actions.ts, before styles.ts.
-/** One job frame as the `/state` feed delivers it; the handler is swapped per render. */
-interface DownloadHandler {
-  (job: DownloadJobView): void
+/** The one member the overlay host needs from every panel store it drains. */
+type StoreSource = { subscribe: (listener: () => void) => () => void }
+/** Run `drain` once at mount and again on every store change: every store the shell hands down is consumed this way. */
+function subscribeStore(store: StoreSource | null | undefined, drain: () => void) {
+  if (!store || typeof store.subscribe !== 'function') return undefined
+  drain()
+  return store.subscribe(drain)
 }
-
-/**
- * The overlay host: everything that is not the sidebar row. It sits above the remote window,
- * so opening or closing a dialog never changes what is behind it.
- */
+/** Polling or reconnecting: the live stream is degraded, which the shell's toast has to say where no banner is visible. */
+const streamDegraded = (mode: StreamMode) => mode === 'polling' || mode === 'reconnecting'
+/** Everything but the sidebar row: it sits above the remote window, so a dialog never changes what is behind it. */
+// One `/state` feed (docs/api.md) serves the row and the windows, and download jobs ride the same SSE stream.
 function PluginOverlay(props: PluginOverlayProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
-  // One `/state` feed for the whole plugin (docs/api.md): the row, the windows and the
-  // remote window all read from it. Download jobs arrive on the same SSE stream.
   const [downloadJobs, setDownloadJobs] = useState<Record<string, DownloadCardView>>({})
   const downloadJobsRef = useRef<Record<string, DownloadCardView>>({})
   const downloadPolls = useRef<Map<string, TimerHandle>>(new Map())
   const downloadRemoval = useRef<Map<string, TimerHandle>>(new Map())
-  const downloadHandlerRef = useRef<DownloadHandler>(() => {})
+  const downloadHandlerRef = useRef<(job: DownloadJobView) => void>(() => {})
   const remote = useRemoteState(props.initialState, (job: DownloadJobView) => downloadHandlerRef.current(job))
   const state = remote.state
   const [target, setTarget] = useState<string | null>(() => {
@@ -25,16 +26,11 @@ function PluginOverlay(props: PluginOverlayProps) {
     return initial && typeof initial.activeHostId === 'string' ? initial.activeHostId : null
   })
   const [manageOpen, setManageOpen] = useState(false)
-  /** Which body the floating window shows. Separate from the host status: 管理界面 always brings the list back. */
+  /** Which body the floating window shows; separate from the host status, so the management seat brings the list back. */
   const [manageView, setManageView] = useState<string>('list')
-  /**
-   * Which host the connect window (progress + log) belongs to. Opening a host sets it, and so
-   * do reconnect and restart: those are the same kind of link work, and the window is where
-   * their progress and log are visible.
-   */
+  /** Which host the connect window belongs to: opening, reconnecting and restarting all name it explicitly. */
   const [connectHostId, setConnectHostId] = useState<string | null>(null)
-  // The loopback URL the guest loads (GET /hosts/:id/open); it carries the
-  // one-shot launch token, so it is fetched on demand and never persisted.
+  // The loopback launch URL (`GET /hosts/:id/open`) carries a one-shot token: fetched on demand, never persisted.
   const [remoteUrl, setRemoteUrl] = useState<RemoteUrlState | null>(null)
   const [busyHostId, setBusyHostId] = useState<string | null>(null)
   const [diagnose, setDiagnose] = useState<DiagnoseState | null>(null)
@@ -44,13 +40,11 @@ function PluginOverlay(props: PluginOverlayProps) {
   // Deleting a host whose link is being built needs a second, explicit confirmation.
   const [deleteArmed, setDeleteArmed] = useState(false)
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null)
-  // Synchronous guard: two Enter events in the same tick both see `pending.busy === false`
-  // because React has not re-rendered yet, so the ref is what makes the submit idempotent.
+  // Synchronous guard: two Enters in one tick both see `pending.busy === false`, so the ref makes it idempotent.
   const passwordBusy = useRef(false)
   const [conflictBusy, setConflictBusy] = useState(false)
   const [fingerprintBusy, setFingerprintBusy] = useState(false)
-  // A queue, not one slot: a second message used to replace the first before it could be
-  // read (audit S3). Newest last, at most three, each with its own dismissal timer.
+  // A queue, not one slot (a second message used to replace the first): newest last, at most three, each timed.
   const [toasts, setToasts] = useState<ToastEntry[]>([])
   const toastSeq = useRef(0)
   const toastTimers = useRef<Map<number, TimerHandle>>(new Map())
@@ -75,12 +69,21 @@ function PluginOverlay(props: PluginOverlayProps) {
       toastTimers.current.set(id, timer)
     }
   }
+  // One unmount cleanup for every timer this page owns: the toast dismissals, the download polls and the removals.
   useEffect(
     () => () => {
-      for (const timer of toastTimers.current.values()) {
+      toastTimers.current.forEach((timer) => {
         if (typeof clearTimeout === 'function') clearTimeout(timer)
-      }
+      })
+      downloadPolls.current.forEach((timer) => {
+        if (typeof clearInterval === 'function') clearInterval(timer)
+      })
+      downloadRemoval.current.forEach((timer) => {
+        if (typeof clearTimeout === 'function') clearTimeout(timer)
+      })
       toastTimers.current.clear()
+      downloadPolls.current.clear()
+      downloadRemoval.current.clear()
     },
     [],
   )
@@ -91,33 +94,14 @@ function PluginOverlay(props: PluginOverlayProps) {
     return detail ? title + ' ' + detail : title
   }
 
-  useEffect(
-    () => () => {
-      for (const timer of downloadPolls.current.values()) {
-        if (typeof clearInterval === 'function') clearInterval(timer)
-      }
-      for (const timer of downloadRemoval.current.values()) {
-        if (typeof clearTimeout === 'function') clearTimeout(timer)
-      }
-      downloadPolls.current.clear()
-      downloadRemoval.current.clear()
-    },
-    [],
-  )
-
   const hosts: HostView[] = state && Array.isArray(state.hosts) ? state.hosts : []
   const conflictHost = hosts.find((host) => host && host.status === 'conflict-pending' && host.conflict) || null
   const activeHost = target ? hosts.find((host) => host && host.id === target) || null : null
-  // The connect body names one host explicitly: a restart / reconnect of a host that is not
-  // the one filling the window must still show that host's progress and log.
+  // The connect body names one host, so a restart of any other host still shows that host's progress and log.
   const connectHost =
     connectHostId !== null ? hosts.find((host) => host && host.id === connectHostId) || null : activeHost
   const activeStatus = activeHost ? activeHost.status : null
-  /**
-   * Which attach the remote window belongs to. `remote.viewRev` changes on every successful
-   * connect / restart / re-attach, so a warm carrier built for an older tunnel is stale even
-   * though its host is connected again.
-   */
+  // The attach the window belongs to: `viewRev` moves per connect/restart, so a warm carrier for an old one is stale.
   const activeViewRev =
     activeHost && activeHost.remote && Number.isInteger(activeHost.remote.viewRev) ? activeHost.remote.viewRev : null
   /** True when the warm carrier was navigated for the given attach. */
@@ -127,11 +111,7 @@ function PluginOverlay(props: PluginOverlayProps) {
     const entryRev = Number.isInteger(entry.viewRev) ? entry.viewRev : null
     return entryRev === viewRev
   }
-  /**
-   * The connect-log channel (docs/api.md `GET /events/logs`): one multiplexed stream for every
-   * host with a connect window, opened only while one exists. Rows arrive here; the state channel
-   * keeps the revision gate, the polling fallback and the degraded banner.
-   */
+  // The connect-log channel: one multiplexed stream for the hosts with a connect window, opened only while one exists.
   const reconnectConnectLog = useConnectLogStream(remote)
   /** The banner's retry reconnects both channels; the log one only when it is in use. */
   const retryLive = () => {
@@ -145,79 +125,28 @@ function PluginOverlay(props: PluginOverlayProps) {
   const pendingIntent = useRef<PanelRequest | null>(null)
   // Host we already told the user cannot be shown here (no desktop window seat).
   const noWindowNotified = useRef<string | null>(null)
-
-  // The commands live in `actions.ts`; they are built from this render's state so every closure
-  // sees the same values the inline declarations did.
-  const {
-    applyIntent,
-    downloadFromHost,
-    startDownloadPoll,
-    showConnectWindow,
-    openHost,
-    disconnectHost,
-    reconnectHost,
-    restartHost,
-    stopRemoteHost,
-    resolveConflict,
-    runDiagnose,
-    rerunDiagnose,
-    confirmDeleteHost,
-    saveSettings,
-    answerFingerprint,
-    openWizard,
-    cancelDownloadJob,
-    removeDownloadView,
-  } = createOverlayActions({
-    props,
-    t,
-    locale,
-    notify,
-    errorMessage,
-    remote,
-    downloadJobsRef,
-    setDownloadJobs,
-    downloadPolls,
-    downloadRemoval,
-    downloadHandlerRef,
-    target,
-    setTarget,
-    setManageOpen,
-    setManageView,
-    setConnectHostId,
-    setRemoteUrl,
-    setBusyHostId,
-    diagnose,
-    setDiagnose,
-    pendingDelete,
-    setPendingDelete,
-    deleting,
-    setDeleting,
-    deleteArmed,
-    setDeleteArmed,
-    setPasswordPrompt,
-    setConflictBusy,
-    setFingerprintBusy,
-    hostsRef,
-    pendingSwitch,
-    pendingIntent,
-  })
-
+  // The commands live in `actions.ts`, rebuilt each render so every closure sees its state; deps are grouped by kind.
+  const actions = createOverlayActions(
+    Object.assign(
+      { props, t, locale, notify, errorMessage, remote },
+      { downloadJobsRef, setDownloadJobs, downloadPolls, downloadRemoval, downloadHandlerRef },
+      { target, setTarget, setManageOpen, setManageView, setConnectHostId, setRemoteUrl, setBusyHostId },
+      { diagnose, setDiagnose, pendingDelete, setPendingDelete, deleting, setDeleting, deleteArmed, setDeleteArmed },
+      { setPasswordPrompt, setConflictBusy, setFingerprintBusy, hostsRef, pendingSwitch, pendingIntent },
+    ),
+  )
   // A host removed elsewhere closes its window instead of leaving a blank frame.
   useEffect(() => {
     if (target === null || state === null) return
     if (!hosts.some((host) => host && host.id === target)) setTarget(null)
   }, [state, target])
 
-  // The launch URL is bound to the host it was issued for: a URL for another host is
-  // worth nothing (it is one-shot and host-specific), so it can never reach a window.
+  // The launch URL is bound to the host it was issued for: a URL for another host is worth nothing (it is one-shot).
   useEffect(() => {
     if (activeStatus === 'connecting') setRemoteUrl(null)
   }, [activeStatus])
 
-  // Fetch `GET /hosts/:id/open` only for a host that is up and not already warm for this
-  // attach: the carrier needs the launch-token URL once, and a warm window is shown without it.
-  // A cached URL from an older `viewRev` is stale even for the same host (its token and
-  // tunnel are gone), so it is refetched rather than replayed.
+  // Fetch the launch URL only for a host that is up and not warm for this attach: one from an older `viewRev` is stale.
   useEffect(() => {
     if (target === null || carrierHoldsView(target, activeViewRev)) return undefined
     if (remoteUrl !== null && remoteUrl.hostId === target && remoteUrl.viewRev === activeViewRev) return undefined
@@ -228,8 +157,7 @@ function PluginOverlay(props: PluginOverlayProps) {
         if (!cancelled) setRemoteUrl({ hostId: target, url: opened.url, webUrl: opened.webUrl, viewRev: activeViewRev })
       },
       (error) => {
-        if (cancelled) return
-        notify(errorMessage(error), 'error')
+        if (!cancelled) notify(errorMessage(error), 'error')
       },
     )
     return () => {
@@ -237,14 +165,9 @@ function PluginOverlay(props: PluginOverlayProps) {
     }
   }, [target, activeStatus, remoteUrl, activeViewRev])
 
-  // Where the window is. Guests stay warm: a warm one is shown again without any load,
-  // which is what makes switching between remotes (and coming back from local) instant.
+  // Where the window is. A warm guest is shown again without any load, which is what makes switching instant.
   useEffect(() => {
-    if (target === null) {
-      hideOverlays()
-      return
-    }
-    if (activeStatus !== 'connected') {
+    if (target === null || activeStatus !== 'connected') {
       hideOverlays()
       return
     }
@@ -257,8 +180,7 @@ function PluginOverlay(props: PluginOverlayProps) {
       })
       return
     }
-    // The launch URL for *this* host is still being fetched: keep the current carrier up
-    // so switching does not flash the local UI behind it.
+    // That launch URL is still being fetched: keep the carrier up so switching does not flash the local UI.
     if (remoteUrl === null || remoteUrl.hostId !== target) return
     // Never replay a launch URL issued for an older attach (its token and tunnel are gone).
     if (activeViewRev !== null && remoteUrl.viewRev !== activeViewRev) return
@@ -271,8 +193,7 @@ function PluginOverlay(props: PluginOverlayProps) {
       }
       return
     }
-    // `showOverlay` is async, so the acquire outcome only arrives through its promise; a
-    // failed acquire still has to reach the toast even though nothing awaits it here.
+    // `showOverlay` is async: a failed acquire only arrives through its promise, which still has to reach the toast.
     showOverlay({
       hostId: target,
       url: carrierUrl,
@@ -290,8 +211,7 @@ function PluginOverlay(props: PluginOverlayProps) {
     )
   }, [target, activeStatus, remoteUrl, activeViewRev])
 
-  // When the host we asked for comes up, the window switches and the connect window gets
-  // out of the way; a failure left it up (with its error and the log) until it is closed.
+  // When the asked-for host comes up the window switches; a failure leaves the connect window up, error and log shown.
   useEffect(() => {
     if (target === null || activeStatus !== 'connected' || pendingSwitch.current !== target) return
     pendingSwitch.current = null
@@ -328,24 +248,21 @@ function PluginOverlay(props: PluginOverlayProps) {
     }
   }, [])
 
-  // While the state stream is down, download cards must keep moving from a status poll:
-  // SSE `download` frames are exactly what stops arriving in fallback mode (audit S2-1).
+  // While the stream is down, cards keep moving from a status poll: SSE `download` frames are what stops arriving.
   useEffect(() => {
-    if (remote.mode !== 'polling' && remote.mode !== 'reconnecting') return
+    if (!streamDegraded(remote.mode)) return
     for (const id of Object.keys(downloadJobsRef.current)) {
       const job = downloadJobsRef.current[id]
       if (!job || job.phase === 'saving' || job.phase === 'done' || job.phase === 'error') continue
-      startDownloadPoll(id)
+      actions.startDownloadPoll(id)
     }
   }, [remote.mode])
 
-  // The management window's footer banner is not visible while a remote carrier fills the
-  // window. Surface the same degradation through the shell's toast so it is visible on the
-  // local page and over a guest, and announce the recovery (review feedback).
+  // That banner is invisible under a remote carrier, so the same degradation reaches the shell's toast on any page.
   const lastStreamMode = useRef<StreamMode>('idle')
   useEffect(() => {
-    const degraded = remote.mode === 'polling' || remote.mode === 'reconnecting'
-    const wasDegraded = lastStreamMode.current === 'polling' || lastStreamMode.current === 'reconnecting'
+    const degraded = streamDegraded(remote.mode)
+    const wasDegraded = streamDegraded(lastStreamMode.current)
     if (degraded && !wasDegraded) notify(t('liveStreamLostTitle'), 'warn')
     else if (remote.mode === 'live' && wasDegraded) notify(t('liveStreamRestored'), 'success')
     lastStreamMode.current = remote.mode
@@ -353,41 +270,30 @@ function PluginOverlay(props: PluginOverlayProps) {
 
   useEffect(() => {
     const store = props.panelStore
-    if (!store || typeof store.take !== 'function' || typeof store.subscribe !== 'function') return undefined
-    const consume = () => applyIntent(store.take())
-    consume()
-    return store.subscribe(consume)
+    if (!store || typeof store.take !== 'function') return undefined
+    return subscribeStore(store, () => actions.applyIntent(store.take()))
   }, [props.panelStore])
   useEffect(() => {
-    if (pendingIntent.current === null) return
-    applyIntent(pendingIntent.current)
+    if (pendingIntent.current !== null) actions.applyIntent(pendingIntent.current)
   }, [state])
 
   // The wizard is driven by its own store so it can be opened from anywhere.
   useEffect(() => {
     const store = props.wizardStore
-    if (!store || typeof store.subscribe !== 'function') return undefined
-    const sync = () => setWizard(typeof store.current === 'function' ? store.current() : null)
-    sync()
-    return store.subscribe(sync)
+    return subscribeStore(store, () => setWizard(typeof store.current === 'function' ? store.current() : null))
   }, [props.wizardStore])
-  // Guest file intents arrive through the same command channel as the wizard's
-  // requests; drain in order, with a small cap so a malformed producer cannot spin.
+  // Guest file intents share the wizard's channel: drain in order, with a small cap so a bad producer cannot spin.
   useEffect(() => {
     const store = props.toolStore
-    if (!store || typeof store.subscribe !== 'function') return undefined
-    const consume = () => {
+    return subscribeStore(store, () => {
       for (let index = 0; index < 8; index += 1) {
         const request = typeof store.take === 'function' ? store.take() : null
         if (!request) return
-        if (request.kind === 'download') downloadFromHost(request)
-        // The capability bridge has no toast of its own: a refused copy is reported here,
-        // where the shell already owns one.
+        if (request.kind === 'download') actions.downloadFromHost(request)
+        // The capability bridge has no toast of its own: a refused copy is reported here, where the shell owns one.
         else if (request.kind === 'notice') notify(request.text, request.tone)
       }
-    }
-    consume()
-    return store.subscribe(consume)
+    })
   }, [props.toolStore])
   const closeWizard = () => {
     const store = props.wizardStore
@@ -396,8 +302,7 @@ function PluginOverlay(props: PluginOverlayProps) {
 
   const submitPassword = (submitted: PasswordSubmission) => {
     const pending = passwordPrompt
-    // The prompt's own handler guards Enter, but the doubling in the audit came from two
-    // events in the same tick; the store-level guard is the last line (S2-2).
+    // The prompt guards Enter itself, but two events in one tick doubled it; this store-level guard is the last line.
     if (!pending || !pending.host || pending.busy === true || passwordBusy.current === true) return
     const value = submitted && typeof submitted.password === 'string' ? submitted.password : ''
     const remember = submitted && submitted.remember === true
@@ -407,20 +312,19 @@ function PluginOverlay(props: PluginOverlayProps) {
     }
     passwordBusy.current = true
     const host = pending.host
-    const intent = pending.intent
-    if (intent === 'open') {
-      showConnectWindow(host)
+    if (pending.intent === 'open') {
+      actions.showConnectWindow(host)
       setTarget(host.id)
     }
-    if (intent === 'reconnect') {
+    if (pending.intent === 'reconnect') {
       setRemoteUrl(null)
       // The reconnect itself is the same link work the connect window explains.
-      showConnectWindow(host)
+      actions.showConnectWindow(host)
     }
     setPasswordPrompt({ ...pending, busy: true, error: null })
     setBusyHostId(host.id)
     const connect =
-      intent === 'reconnect'
+      pending.intent === 'reconnect'
         ? api
             .disconnect(host.id, false)
             .catch(() => {})
@@ -444,12 +348,24 @@ function PluginOverlay(props: PluginOverlayProps) {
       })
   }
   const cancelPassword = () => {
-    // The row moved to that host when it was picked; the switch was cancelled, so put
-    // it back where the window actually is.
+    // The row moved to that host when it was picked; the switch was cancelled, so put it back where the window is.
     passwordBusy.current = false
     pendingSwitch.current = null
     updateSwitcher({ current: target === null ? 'local' : target })
     setPasswordPrompt(null)
+  }
+  /** Closing the connect body is per-visit: the link work itself keeps running. */
+  const hideConnect = () => {
+    setManageOpen(false)
+    setConnectHostId(null)
+  }
+  const askDelete = (host: HostView) => {
+    setDeleteArmed(false)
+    setPendingDelete(host)
+  }
+  const forgetHost = () => {
+    setDeleteArmed(false)
+    setPendingDelete(null)
   }
 
   return h(
@@ -461,8 +377,8 @@ function PluginOverlay(props: PluginOverlayProps) {
           jobs: Object.values(downloadJobs),
           t,
           locale,
-          onCancel: cancelDownloadJob,
-          onDismiss: (job) => removeDownloadView(job.id),
+          onCancel: actions.cancelDownloadJob,
+          onDismiss: (job) => actions.removeDownloadView(job.id),
         })
       : null,
     h(ManageWindow, {
@@ -470,8 +386,7 @@ function PluginOverlay(props: PluginOverlayProps) {
       view: manageView,
       t,
       locale,
-      // The connect body names its own host, so restarting or reconnecting a host that is
-      // not the one filling the window still shows that host's progress and log.
+      // The connect body names its own host, so restarting another host still shows that host's progress and log.
       host: connectHost,
       state,
       loading: remote.loading,
@@ -480,34 +395,26 @@ function PluginOverlay(props: PluginOverlayProps) {
       mode: remote.mode,
       onRetryLive: retryLive,
       fingerprintBusy,
-      onClose: () => {
-        // The connect body is per-visit: closing the window must not leave a stale host
-        // behind for the next one (the link work itself keeps running).
-        setManageOpen(false)
-        setConnectHostId(null)
-      },
+      onClose: hideConnect,
       onShowList: () => setManageView('list'),
-      onAdd: () => openWizard({ mode: 'add', host: null }),
+      onAdd: () => actions.openWizard({ mode: 'add', host: null }),
       onRefresh: remote.refresh,
       onOpenSettings: () => setSettingsOpen(true),
-      onOpenHost: openHost,
-      // A connecting host is not reconnected here: its card reopens the connect window that shows
-      // the progress and the log, so closing that window never strands the connection.
-      onViewProgress: (host) => openHost(host),
-      onDisconnectHost: disconnectHost,
-      onReconnectHost: reconnectHost,
-      onRestartHost: restartHost,
-      onStopRemoteHost: stopRemoteHost,
-      onEditHost: (host) => openWizard({ mode: 'edit', host }),
-      onDeleteHost: (host) => {
-        setDeleteArmed(false)
-        setPendingDelete(host)
-      },
-      onDiagnoseHost: runDiagnose,
-      onAcceptFingerprint: (host, remember) => answerFingerprint(host, true, remember === true),
-      onRejectFingerprint: (host) => answerFingerprint(host, false, false),
-      onRetry: (host) => reconnectHost(host),
-      onDiagnose: (host) => runDiagnose(host),
+      onOpenHost: actions.openHost,
+      // A connecting host is not reconnected here: its card reopens the connect window, so closing it never strands it.
+      onViewProgress: (host: HostView) => actions.openHost(host),
+      onDisconnectHost: actions.disconnectHost,
+      onReconnectHost: actions.reconnectHost,
+      onRestartHost: actions.restartHost,
+      onStopRemoteHost: actions.stopRemoteHost,
+      onEditHost: (host: HostView) => actions.openWizard({ mode: 'edit', host }),
+      onDeleteHost: askDelete,
+      onDiagnoseHost: actions.runDiagnose,
+      onAcceptFingerprint: (host: HostView, remember: boolean) =>
+        actions.answerFingerprint(host, true, remember === true),
+      onRejectFingerprint: (host: HostView) => actions.answerFingerprint(host, false, false),
+      onRetry: (host: HostView) => actions.reconnectHost(host),
+      onDiagnose: (host: HostView) => actions.runDiagnose(host),
     }),
     wizard
       ? h(WizardDialog, {
@@ -520,12 +427,10 @@ function PluginOverlay(props: PluginOverlayProps) {
           onClose: closeWizard,
           onRefresh: remote.refresh,
           onSaved: (_saved, warning) => notify(warning || t('wizard.saved'), warning ? 'warn' : 'success'),
-          // Connect from the dialog: it saved the entry, so hand the connection over here.
-          // The window is the connect window from the first frame on — progress, host key
-          // and log — and the remote takes over as soon as it is up.
+          // Connect from the dialog: the entry is saved, so the connect body shows at once and the remote takes over.
           onConnect: (host, password, rememberPassword) => {
             closeWizard()
-            openHost(host, password === null ? {} : { password, rememberPassword: rememberPassword === true })
+            actions.openHost(host, password === null ? {} : { password, rememberPassword: rememberPassword === true })
           },
         })
       : null,
@@ -538,7 +443,7 @@ function PluginOverlay(props: PluginOverlayProps) {
           report: diagnose.report,
           error: diagnose.error,
           onClose: () => setDiagnose(null),
-          onRun: rerunDiagnose,
+          onRun: actions.rerunDiagnose,
         })
       : null,
     settingsOpen && state
@@ -547,7 +452,7 @@ function PluginOverlay(props: PluginOverlayProps) {
           locale,
           settings: state.settings,
           onClose: () => setSettingsOpen(false),
-          onSave: saveSettings,
+          onSave: actions.saveSettings,
         })
       : null,
     pendingDelete
@@ -564,11 +469,10 @@ function PluginOverlay(props: PluginOverlayProps) {
               : t('deleteConfirm'),
           cancelLabel: t('cancel'),
           busy: deleting,
-          onConfirm: confirmDeleteHost,
+          onConfirm: actions.confirmDeleteHost,
           onCancel: () => {
             if (deleting) return
-            setDeleteArmed(false)
-            setPendingDelete(null)
+            forgetHost()
           },
         })
       : null,
@@ -578,7 +482,7 @@ function PluginOverlay(props: PluginOverlayProps) {
           t,
           host: conflictHost,
           busy: conflictBusy,
-          onResolve: resolveConflict,
+          onResolve: actions.resolveConflict,
         })
       : null,
     passwordPrompt
@@ -589,6 +493,7 @@ function PluginOverlay(props: PluginOverlayProps) {
           host: passwordPrompt.host,
           busy: passwordPrompt.busy === true,
           error: passwordPrompt.error,
+          // No storage of a password is offered where the shell cannot write one.
           storageAvailable: passwordPrompt.host ? passwordPrompt.host.passwordStorageAvailable === true : false,
           onSubmit: submitPassword,
           onCancel: cancelPassword,

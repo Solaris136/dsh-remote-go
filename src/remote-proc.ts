@@ -1,12 +1,9 @@
-/**
- * Remote process and reachability primitives: find, stop and probe DSH processes on the remote, plus the one HTTP round-trip that proves the remote UI answers.
- */
+/** Remote process and reachability primitives: find, stop and probe DSH processes on the remote, plus the one HTTP round-trip that proves the remote UI answers. */
 import http from 'node:http'
 import { TUNNEL_PROBE_TIMEOUT_MS } from './constants.js'
 import { isPid, messageOf } from './util.js'
 import type { SshPort } from './ssh-port.js'
 
-/** One DSH process the remote's `ps` scan named. */
 export interface RemoteProcessRef {
   pid: number
   command: string
@@ -17,7 +14,6 @@ export type ForeignDshScan =
   | { ok: true; processes: RemoteProcessRef[] }
   | { ok: false; processes: RemoteProcessRef[]; reason: 'exec-failed'; technical: string }
 
-/** The `/proc` identity of one process, or the typed reason it could not be proven. */
 export type ProcessIdentity =
   | { ok: true; startTime: string; command: string; dshHome: string }
   | { ok: false; reason: 'invalid-pid' | 'missing' | 'unreadable' }
@@ -38,20 +34,13 @@ PS_OUT=$(ps -eww -o pid=,comm=,args= 2>/dev/null || ps -eo pid=,comm=,args= 2>/d
 printf '%s\\n' "$PS_OUT" | while IFS= read -r LINE; do
   [ -z "$LINE" ] && continue
   set -- $LINE
-  PID=$1
-  COMM=$2
-  shift 2
-  ARGS="$*"
+  PID=$1 COMM=$2
+  shift 2; ARGS="$*"
   [ -z "$PID" ] && continue
   case "$IGNORE" in *" $PID "*) continue ;; esac
   case "$COMM" in node|dsh|npm|npx) ;; *) continue ;; esac
-  case "$ARGS" in
-    *"@deepseek-ai/dsh"*|*"/bin/dsh "*|*" dsh "*) ;;
-    *) continue ;;
-  esac
-  case "$ARGS" in
-    *"ps -eww"*|*"PS_OUT"*|*"IGNORE"*) continue ;;
-  esac
+  case "$ARGS" in *"@deepseek-ai/dsh"*|*"/bin/dsh "*|*" dsh "*) ;; *) continue ;; esac
+  case "$ARGS" in *"ps -eww"*|*"PS_OUT"*|*"IGNORE"*) continue ;; esac
   ENV_HOME=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
   if [ -n "\${ENV_HOME:-}" ] && [ "$ENV_HOME" != "$HOME/.dsh" ]; then continue; fi
   printf '%s\\t%s\\n' "$PID" "$ARGS"
@@ -71,33 +60,27 @@ export function parseForeignDshOutput(stdout: unknown): RemoteProcessRef[] {
   return processes
 }
 
-/**
- * Find DSH processes on the remote that this plugin did not start.
- *
- * Never throws: a failed scan is reported as `{ ok: false }`, and the caller
- * proceeds without a conflict prompt (a broken scan must not block connecting).
- */
+/** Find DSH processes on the remote that this plugin did not start; never throws, because a broken scan must not block connecting. */
 export async function findForeignDshProcesses(
   ssh: SshPort,
   options: { ignorePids?: unknown[]; timeoutMs?: number } = {},
 ): Promise<ForeignDshScan> {
+  const failed = (technical: string): ForeignDshScan => ({
+    ok: false,
+    processes: [],
+    reason: 'exec-failed',
+    technical,
+  })
   try {
     const result = await ssh.exec(buildForeignDshCommand(options.ignorePids ?? []), {
       timeoutMs: options.timeoutMs ?? 20_000,
       maxBytes: 200_000,
     })
-    if (result.code !== 0) {
-      return { ok: false, processes: [], reason: 'exec-failed', technical: String(result.stderr ?? '').slice(0, 500) }
-    }
+    if (result.code !== 0) return failed(String(result.stderr ?? '').slice(0, 500))
     return { ok: true, processes: parseForeignDshOutput(result.stdout) }
   } catch (error) {
     // swallow-ok: a scan failure is surfaced as ok:false and the caller proceeds without a prompt
-    return {
-      ok: false,
-      processes: [],
-      reason: 'exec-failed',
-      technical: messageOf(error),
-    }
+    return failed(messageOf(error))
   }
 }
 
@@ -117,21 +100,13 @@ PIDS="${pids.join(' ')}"
 for PID in $PIDS; do kill -TERM "$PID" 2>/dev/null || true; done
 i=0
 while [ "$i" -lt 20 ]; do
-  ALIVE=0
-  for PID in $PIDS; do
-    if kill -0 "$PID" 2>/dev/null; then ALIVE=1; fi
-  done
+  ALIVE=0; for PID in $PIDS; do if kill -0 "$PID" 2>/dev/null; then ALIVE=1; fi; done
   if [ "$ALIVE" -eq 0 ]; then break; fi
-  i=$((i+1))
-  sleep 0.5
+  i=$((i+1)); sleep 0.5
 done
-for PID in $PIDS; do
-  if kill -0 "$PID" 2>/dev/null; then kill -KILL "$PID" 2>/dev/null || true; fi
-done
+for PID in $PIDS; do if kill -0 "$PID" 2>/dev/null; then kill -KILL "$PID" 2>/dev/null || true; fi; done
 sleep 0.2
-for PID in $PIDS; do
-  if kill -0 "$PID" 2>/dev/null; then echo "ALIVE:$PID"; fi
-done
+for PID in $PIDS; do if kill -0 "$PID" 2>/dev/null; then echo "ALIVE:$PID"; fi; done
 echo "STOPPED"
 `
   try {
@@ -145,24 +120,14 @@ echo "STOPPED"
   }
 }
 
-/**
- * TCP ports a pid is listening on, read from its own `/proc` network tables and
- * matched against the socket inodes it holds. Used after a remote restart: the
- * process may be the same pid with a new random port, or a new pid entirely.
- * @param ssh - SSH transport.
- * @param pid - remote process id.
- * @returns listening ports, ascending and unique.
- */
+/** TCP ports a pid is listening on, read from its own `/proc` network tables and matched against the socket inodes it holds. */
 export async function remoteListenPorts(ssh: SshPort, pid: number): Promise<number[]> {
   if (!isPid(pid)) return []
   const script = `set -u
 PID=${pid}
 [ -d "/proc/$PID" ] || exit 0
 ls -l "/proc/$PID/fd" 2>/dev/null | sed -n 's/.*socket:\\[\\([0-9][0-9]*\\)\\].*/INODE:\\1/p' | sort -u
-for NET in "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6"; do
-  [ -r "$NET" ] || continue
-  awk 'NR > 1 && $4 == "0A" { print "LISTEN:" $2 ":" $10 }' "$NET" 2>/dev/null
-done
+for NET in "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6"; do [ -r "$NET" ] && awk 'NR > 1 && $4 == "0A" { print "LISTEN:" $2 ":" $10 }' "$NET" 2>/dev/null; done
 `
   try {
     const result = await ssh.exec(script, { timeoutMs: 15_000 })
@@ -173,7 +138,6 @@ done
   }
 }
 
-/** Decode the `INODE:` / `LISTEN:<addr-hex>:<port-hex>:<inode>` lines of {@link remoteListenPorts}. */
 export function parseListenPorts(stdout: unknown): number[] {
   const inodes = new Set<string>()
   const ports: Array<{ port: number; inode: string }> = []
@@ -193,14 +157,7 @@ export function parseListenPorts(stdout: unknown): number[] {
   )
 }
 
-/**
- * The pid behind one listening loopback port, found by matching the port's socket
- * inode against every `/proc/<pid>/fd`. Needed when the remote restarted into a new
- * pid that the run registry does not know yet.
- * @param ssh - SSH transport.
- * @param port - TCP port on the remote's loopback.
- * @returns the owning pid, or null when it cannot be read.
- */
+/** The pid behind one listening loopback port, found by matching the port's socket inode against every `/proc/<pid>/fd`; needed when the remote restarted into a pid the run registry does not know yet. */
 export async function remotePortOwnerPid(ssh: SshPort, port: number): Promise<number | null> {
   if (!isPid(port) || port > 65535) return null
   const script = `set -u
@@ -208,10 +165,7 @@ PORT_HEX=$(printf '%04X' ${port})
 INODE=$(awk -v p=":$PORT_HEX" '$2 ~ p"$" && $4 == "0A" { print $10; exit }' /proc/net/tcp 2>/dev/null)
 [ -n "\${INODE:-}" ] || exit 0
 for D in /proc/[0-9]*; do
-  if ls -l "$D/fd" 2>/dev/null | grep -q "socket:\\[\${INODE}\\]"; then
-    echo "PID:\${D#/proc/}"
-    exit 0
-  fi
+  if ls -l "$D/fd" 2>/dev/null | grep -q "socket:\\[\${INODE}\\]"; then echo "PID:\${D#/proc/}"; exit 0; fi
 done
 `
   try {
@@ -225,28 +179,16 @@ done
   }
 }
 
-/**
- * The identity of one remote process, read from `/proc` before the plugin ever signals it.
- * The kernel start time is stable across `exec` (so an in-place DSH restart keeps it) and
- * changes when a pid is reused by another process - which is exactly what a kill decision
- * must rule out. The command line and `DSH_HOME` prove the process is the DSH the plugin
- * thinks it is.
- *
- * @param ssh - SSH transport.
- * @param pid - remote process id.
- */
+/** The identity of one remote process, read from `/proc` before the plugin ever signals it: the kernel start time is stable across `exec` (so an in-place DSH restart keeps it) and changes when a pid is reused, which is exactly what a kill decision must rule out. */
 export async function remoteProcessIdentity(ssh: SshPort, pid: number): Promise<ProcessIdentity> {
   if (!isPid(pid)) return { ok: false, reason: 'invalid-pid' }
   const script = `set -u
 PID=${pid}
 [ -d "/proc/$PID" ] || { echo "MISSING"; exit 0; }
-RAW=$(cat "/proc/$PID/stat" 2>/dev/null || true)
-[ -n "$RAW" ] || { echo "NO-STAT"; exit 0; }
-REST=$(printf '%s' "$RAW" | sed 's/^.*) //')
-set -- $REST
+RAW=$(cat "/proc/$PID/stat" 2>/dev/null || true); [ -n "$RAW" ] || { echo "NO-STAT"; exit 0; }
+REST=$(printf '%s' "$RAW" | sed 's/^.*) //'); set -- $REST
 printf 'START:%s\\n' "\${20}"
-CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null || true)
-printf 'CMD:%s\\n' "$CMD"
+CMD=$(tr '\\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null || true); printf 'CMD:%s\\n' "$CMD"
 HOME_LINE=$(tr '\\0' '\\n' < "/proc/$PID/environ" 2>/dev/null | sed -n 's/^DSH_HOME=//p' | tail -n 1)
 printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
 `
@@ -259,33 +201,23 @@ printf 'DSH_HOME:%s\\n' "\${HOME_LINE:-}"
   }
 }
 
-/** Decode the `START:` / `CMD:` / `DSH_HOME:` lines of {@link remoteProcessIdentity}. */
 export function parseProcessIdentity(stdout: unknown): ProcessIdentity {
   const text = String(stdout ?? '')
-  // The markers below are matched anywhere in the output, deliberately: a command line that
-  // happens to contain MISSING/NO-STAT must not be mistaken for a readable identity (fail closed).
+  // Matched anywhere in the output deliberately: a command line containing MISSING/NO-STAT must not read as an identity.
   if (text.includes('MISSING')) return { ok: false, reason: 'missing' }
   if (text.includes('NO-STAT')) return { ok: false, reason: 'unreadable' }
   const start = /^START:(\d+)$/m.exec(text)
   const command = /^CMD:(.*)$/m.exec(text)
   if (!start || !command) return { ok: false, reason: 'unreadable' }
   const home = /^DSH_HOME:(.*)$/m.exec(text)
-  return {
-    ok: true,
-    startTime: start[1],
-    command: command[1].trim(),
-    dshHome: home === null ? '' : home[1].trim(),
-  }
+  return { ok: true, startTime: start[1], command: command[1].trim(), dshHome: home === null ? '' : home[1].trim() }
 }
 
 export async function remoteHttpStatus(ssh: SshPort, port: number): Promise<number | null> {
   if (!isPid(port)) return null
   const script = `URL="http://127.0.0.1:${port}/"
-if command -v curl >/dev/null 2>&1; then
-  curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true
-elif command -v wget >/dev/null 2>&1; then
-  wget -S -O /dev/null --max-time 5 "$URL" 2>&1 | sed -n 's/.*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' | head -n 1
-fi
+if command -v curl >/dev/null 2>&1; then curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" 2>/dev/null || true
+elif command -v wget >/dev/null 2>&1; then wget -S -O /dev/null --max-time 5 "$URL" 2>&1 | sed -n 's/.*HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p' | head -n 1; fi
 `
   try {
     const result = await ssh.exec(script, { timeoutMs: 15_000 })
@@ -312,13 +244,11 @@ export async function waitForRemoteUi(
   return { ok: false, status: last }
 }
 
-/** Options for the one token → cookie → index handshake over the local tunnel. */
 export interface ExchangeOptions {
   timeoutMs?: number
   path?: string
 }
 
-/** What the handshake proved: the status of both hops and the rendered page title. */
 export interface ExchangeResult {
   ok: boolean
   firstStatus: number
@@ -334,17 +264,14 @@ export async function exchangeTokenOverTunnel(
   const timeoutMs = options.timeoutMs ?? TUNNEL_PROBE_TIMEOUT_MS
   const basePath = options.path ?? '/'
   const tokenPath = `/?token=${encodeURIComponent(token)}`
-  const first = await httpRequest({
-    port: localPort,
-    path: basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`,
-    timeoutMs,
-  })
+  const path = basePath === '/' ? tokenPath : `${basePath}?token=${encodeURIComponent(token)}`
+  const first = await httpRequest({ port: localPort, path, timeoutMs })
   const setCookies = first.headers['set-cookie'] ?? []
   const cookieHeader = setCookies.map((cookie) => String(cookie).split(';')[0]).join('; ')
-  const location = first.headers.location ?? null
+  const back = first.headers.location?.startsWith('/') ? first.headers.location : '/'
   const second = await httpRequest({
     port: localPort,
-    path: location && location.startsWith('/') ? location : '/',
+    path: back,
     timeoutMs,
     headers: cookieHeader ? { cookie: cookieHeader } : {},
   })
@@ -357,19 +284,9 @@ export async function exchangeTokenOverTunnel(
   }
 }
 
-/** One loopback GET against the local tunnel listener. */
-interface HttpRequestOptions {
-  port: number
-  path: string
-  timeoutMs: number
-  headers?: Record<string, string>
-}
+type HttpRequestOptions = { port: number; path: string; timeoutMs: number; headers?: Record<string, string> }
 
-interface HttpResponse {
-  status: number
-  headers: http.IncomingHttpHeaders
-  body: string
-}
+type HttpResponse = { status: number; headers: http.IncomingHttpHeaders; body: string }
 
 function httpRequest(options: HttpRequestOptions): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {

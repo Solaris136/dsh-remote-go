@@ -1,18 +1,14 @@
-/**
- * The WebSocket half of the same-origin proxy.
- *
- * The only WebSocket route a remote DSH owns (`/api/remote.mux`) gets one exact upgrade route per
- * connected host, because the local web server matches upgrades by exact pathname. The handshake
- * is admitted and fenced like an HTTP request, the upstream's response head is filtered before
- * the browser sees it (a 101 used to be forwarded byte-for-byte, also handing the remote's
- * `Set-Cookie` to the local origin), and both directions stream untouched afterwards.
- */
+/** The WebSocket half of the same-origin proxy: the one WebSocket route a remote DSH owns (`/api/remote.mux`) gets an
+ * exact upgrade route per connected host, because the local web server matches upgrades by exact pathname. The
+ * handshake is admitted and fenced like an HTTP request, the upstream head is filtered before the browser sees it (a
+ * 101 used to be forwarded byte-for-byte, handing the remote's `Set-Cookie` to the local origin), and both directions
+ * then stream untouched. */
 import http from 'node:http'
 import net from 'node:net'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { trustedRequest } from '../request-trust.js'
 import { filterResponseHead, remoteOrigin, upstreamHeaders } from './headers.js'
+import { admitSeat } from './http.js'
 import type { ProxyRuntime } from './http.js'
 import { MAX_UPSTREAM_HEAD_BYTES } from './limits.js'
 import { parseViewPath } from './routes.js'
@@ -24,35 +20,27 @@ export interface UpgradeSocketTracking {
   delete: (socket: Duplex) => void
 }
 
-/**
- * Create the upgrade handler of one proxy activation.
- *
- * An upgrade owns its socket, so every refusal here either answers the handshake with a status and
- * closes it (an admission rejection) or destroys it; nothing falls back to an HTTP response.
- */
+/** Create the upgrade handler of one proxy activation. An upgrade owns its socket, so every refusal here either answers
+ * the handshake with a status and closes it (an admission rejection) or destroys it; nothing falls back to an HTTP
+ * response. */
 export function createUpgradeHandler(
   rt: ProxyRuntime,
   track: UpgradeSocketTracking,
 ): (hostId: string, req: IncomingMessage, socket: Duplex, head: Buffer) => void {
   /** One exact upgrade route per host: the only WebSocket a DSH web serves is its stream mux. */
   return function handleUpgrade(hostId: string, req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    if (rt.disposed()) {
-      socket.destroy()
-      return
-    }
-    const rejection = rt.admit(req)
-    if (rejection !== undefined) {
+    const seat = admitSeat(rt, req)
+    if (seat.ok === false) {
+      if (seat.admission === false) {
+        socket.destroy()
+        return
+      }
       // An upgrade owns its socket: answer the handshake with the status, then close it.
       socket.on('error', () => {})
       socket.end(
-        `HTTP/1.1 ${rejection} ${http.STATUS_CODES[rejection] ?? 'Rejected'}\r\n` +
+        `HTTP/1.1 ${seat.status} ${http.STATUS_CODES[seat.status] ?? 'Rejected'}\r\n` +
           'connection: close\r\ncontent-length: 0\r\n\r\n',
       )
-      return
-    }
-    const origin = rt.localOrigin()
-    if (origin === null || !trustedRequest(req, origin)) {
-      socket.destroy()
       return
     }
     const target = rt.targetOf(hostId)
@@ -60,8 +48,8 @@ export function createUpgradeHandler(
       socket.destroy()
       return
     }
-    // A malformed request target (absolute-form, broken escape) must not throw out of the upgrade
-    // handler: the HTTP path already degrades to a 400, this one just drops the socket.
+    // A malformed request target (absolute-form, broken escape) must not throw out of the upgrade handler: the HTTP
+    // path already degrades to a 400, this one just drops the socket.
     let parsed: ViewPath | null = null
     try {
       parsed = parseViewPath(new URL(req.url ?? '/', 'http://127.0.0.1').pathname)
@@ -72,12 +60,11 @@ export function createUpgradeHandler(
       socket.destroy()
       return
     }
-    const jar = rt.jarFor(hostId, target)
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
-      localOrigin: origin.origin,
+      localOrigin: seat.origin.origin,
       path: parsed.path,
-      jar,
+      jar: rt.jarFor(hostId, target),
       preserveUpgrade: true,
     })
     let raw = `${req.method} ${parsed.path} HTTP/1.1\r\n`
@@ -86,9 +73,9 @@ export function createUpgradeHandler(
     }
     raw += '\r\n'
     const upstream = net.connect({ port: target.localPort, host: '127.0.0.1', timeout: rt.upstreamTimeoutMs })
-    // An upgrade owns its socket, so the deadline covers the handshake only: an upstream that
-    // accepts and never answers would otherwise leave both sockets dangling forever.
     let settled = false
+    // An upgrade owns its socket, so the deadline covers the handshake only: an upstream that accepts and never
+    // answers would otherwise leave both sockets dangling forever.
     const handshakeTimer = setTimeout(() => failUpgrade(), rt.upstreamTimeoutMs)
     handshakeTimer.unref?.()
     function failUpgrade(): void {
@@ -100,9 +87,9 @@ export function createUpgradeHandler(
       rt.reportUpstreamFailure(hostId)
     }
     track.add(socket)
-    // The upstream's response head is filtered before the browser sees it: a 101 used to be
-    // forwarded byte-for-byte, which also handed the remote's `Set-Cookie` and policy headers to
-    // the local origin. Only the head is parsed; everything after it streams untouched.
+    // The upstream's response head is filtered before the browser sees it: a 101 used to be forwarded byte-for-byte,
+    // which also handed the remote's `Set-Cookie` and policy headers to the local origin. Only the head is parsed;
+    // everything after it streams untouched.
     let upstreamHead = Buffer.alloc(0)
     let headForwarded = false
     const writeToClient = (chunk: Buffer | string): void => {
@@ -142,10 +129,8 @@ export function createUpgradeHandler(
     socket.on('drain', () => upstream.resume())
     upstream.on('timeout', () => failUpgrade())
     upstream.on('error', () => failUpgrade())
-    /**
-     * The remote ended the stream. `upstream.pipe(socket)` used to forward that EOF implicitly;
-     * the head is parsed here, so the end of the upstream must still close the browser side or
-     * the page would hold a dead socket forever.
+    /** The remote ended the stream. `upstream.pipe(socket)` used to forward that EOF implicitly; the head is parsed
+     * here, so the end of the upstream must still close the browser side or the page would hold a dead socket forever.
      */
     const endClient = (): void => {
       if (settled) return

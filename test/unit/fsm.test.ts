@@ -1,12 +1,7 @@
-/**
- * The `HostRuntime` session state machine (design-arch §2.4): the 31 events, the 8 statuses, and
- * the promise that every (state, event) pair has an explicit outcome.
- *
- * Nothing here imports the pipeline: the FSM is a pure table, so the test drives it with plain
- * state objects. The interesting assertions are the two matrices — every state has a decision for
- * every event, and the 48 (status × activity) cells an entry point can actually see are allowed
- * exactly where §2.4.2 says they are.
- */
+/* The `HostRuntime` session state machine (design-arch §2.4): the 31 events, the 8 statuses, and the promise that every
+ * (state, event) pair has an explicit outcome. Nothing here imports the pipeline: the FSM is a pure table, so the test
+ * drives it with plain state objects. The interesting assertions are the two matrices — every state has a decision for
+ * every event, and the 48 (status × activity) cells an entry point can see are allowed exactly where §2.4.2 says. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -20,7 +15,6 @@ import {
 } from '../../dist/src/runtime/fsm.js'
 import { RESTART_STOP_WARNING, STOP_FAILED_LABEL } from '../../dist/src/runtime/rules.js'
 import { EVENT_TYPE_PARITY, EVENT_TYPES } from '../../dist/src/runtime/events.js'
-
 const STATUSES = [
   'unconfigured',
   'connecting',
@@ -32,7 +26,6 @@ const STATUSES = [
   'limited',
 ]
 const ACTIVITIES = [null, 'connect', 'restart', 'reattach', 'stop', 'repair']
-
 const ERROR_VIEW = {
   code: 'host-key-unknown',
   title: { zh: '确认服务器指纹', en: 'Confirm the host key' },
@@ -40,7 +33,6 @@ const ERROR_VIEW = {
   nextSteps: [],
   retryable: true,
 }
-
 const STOP_SNAPSHOT = {
   status: 'connected',
   phase: 'ready',
@@ -49,7 +41,6 @@ const STOP_SNAPSHOT = {
   uiReady: true,
   localPort: 53001,
 }
-
 /** One minimal valid payload per event type (the completeness matrix uses these). */
 const EVENT_SAMPLES = {
   'connect.requested': { token: 1 },
@@ -57,12 +48,7 @@ const EVENT_SAMPLES = {
   'step.done': { step: 'probe' },
   'transport.ready': {},
   'transport.closed': { transport: null },
-  'hostkey.pending': {
-    info: { sha256: 'SHA256:abc', keyType: 'ssh-ed25519' },
-    role: 'target',
-    host: null,
-    port: 22,
-  },
+  'hostkey.pending': { info: { sha256: 'SHA256:abc', keyType: 'ssh-ed25519' }, role: 'target', host: null, port: 22 },
   'hostkey.answered': { accept: true },
   'hostkey.timeout': { view: ERROR_VIEW },
   'conflict.pending': { count: 2 },
@@ -89,11 +75,7 @@ const EVENT_SAMPLES = {
   shutdown: {},
   'host.removed': { keepAlive: 'keep' },
 }
-
-function eventOf(type) {
-  return { type, ...EVENT_SAMPLES[type] }
-}
-
+const eventOf = (type) => ({ type, ...EVENT_SAMPLES[type] })
 function stateOf(overrides = {}) {
   return {
     status: 'disconnected',
@@ -112,7 +94,6 @@ function stateOf(overrides = {}) {
     ...overrides,
   }
 }
-
 function scopeOf(overrides = {}) {
   return {
     disposed: false,
@@ -129,34 +110,32 @@ function scopeOf(overrides = {}) {
     ...overrides,
   }
 }
-
 /** The desired flag a status implies in practice: an idle host is not "wanted connected". */
 const desiredFor = (status) => (status === 'unconfigured' || status === 'disconnected' ? 'idle' : 'connected')
-
+/** A connected runtime, and a connecting one with the connect activity: the two golden starts. */
+const connectedState = (overrides) => stateOf({ status: 'connected', desired: 'connected', ...overrides })
+const connectingState = (overrides) =>
+  stateOf({ status: 'connecting', desired: 'connected', activity: 'connect', ...overrides })
 /** The read-only facts a runtime in `status` would present to the machine. */
-function scopeFor(status) {
-  const connected = status === 'connected'
-  return scopeOf({
-    linkAlive: connected,
-    tunnelAlive: connected,
+const scopeFor = (status) =>
+  scopeOf({
+    linkAlive: status === 'connected',
+    tunnelAlive: status === 'connected',
     promptsPending: status === 'fingerprint-pending' || status === 'conflict-pending',
-    remoteStarted: connected,
+    remoteStarted: status === 'connected',
     recoverable: status === 'error',
   })
-}
-
+/** Step the machine once from `state` with a sample payload of `type` (one line per golden edge). */
+const next = (state, type, scope) => transition(state, eventOf(type), scopeOf(scope))
 const effectsOf = (result) => result.effects.map((effect) => effect.type)
 const hasEffect = (result, type) => result.effects.some((effect) => effect.type === type)
 const effectOf = (result, type) => result.effects.find((effect) => effect.type === type)
 const patches = (result) =>
   result.effects.filter((effect) => effect.type === 'apply').map((effect) => effect.patch.kind)
-
 /**
- * The hand-reviewed allow-matrix over the 48 (status × activity) cells an entry point can see.
- * `statuses` and `activities` are the two axes; a cell is allowed exactly when both match. Every
- * one of the 31 events must appear here — that is what makes "no unhandled branch" checkable by a
- * human instead of by reading the table again.
- */
+ * The hand-reviewed allow-matrix over the 48 (status × activity) cells an entry point can see. `statuses` and
+ * `activities` are the two axes; a cell is allowed exactly when both match. Every one of 31 events must appear here —
+ * that's what makes "no unhandled branch" checkable by a human instead of by reading the table again. */
 const ALL = { statuses: [...STATUSES], activities: [...ACTIVITIES] }
 const ALL_BUT = (excluded) => ({
   statuses: STATUSES.filter((status) => !excluded.includes(status)),
@@ -303,8 +282,8 @@ describe('fsm: completeness matrices', () => {
   })
 
   test('an event name the table does not declare is refused instead of thrown (untyped callers)', () => {
-    // The table type forbids this; a JavaScript caller can still dispatch it, and the Host process
-    // must survive one bad dispatch (service.js:207-210).
+    // The table type forbids this, but a JavaScript caller can
+    // still dispatch it, and the Host must survive one bad dispatch.
     const state = stateOf({ status: 'disconnected', desired: 'idle' })
     const result = transition(state, { type: 'not.an.event' }, scopeOf())
     assert.equal(result.ok, false)
@@ -314,13 +293,15 @@ describe('fsm: completeness matrices', () => {
 })
 
 describe('fsm: refusal reasons', () => {
+  /** The reason `type` is refused from `state`; every call also proves the refusal itself. */
+  const refusalOf = (state, type, scope) => {
+    const result = transition(state, eventOf(type), scopeOf(scope))
+    assert.equal(result.ok, false, `${type} must be refused`)
+    return result.reason
+  }
+
   test('connect.requested reports the three strings api.ts forwards verbatim', () => {
-    const refused = (activity) =>
-      transition(
-        stateOf({ status: 'disconnected', activity }),
-        eventOf('connect.requested'),
-        scopeOf({ linkAlive: false }),
-      ).reason
+    const refused = (activity) => refusalOf(stateOf({ status: 'disconnected', activity }), 'connect.requested')
     assert.equal(refused('connect'), 'already-connecting')
     assert.equal(refused('restart'), 'already-restarting')
     // Today's `connect/links.ts#startConnect` returns `already-restarting` for *any* linkBusy kind.
@@ -337,84 +318,58 @@ describe('fsm: refusal reasons', () => {
 
   test('restart/stop/repair/reattach entry guards name the real reason', () => {
     const busy = stateOf({ status: 'connected', desired: 'connected', activity: 'repair' })
-    assert.equal(transition(busy, eventOf('restart.requested'), scopeOf()).reason, 'busy')
-    assert.equal(transition(busy, eventOf('stop.requested'), scopeOf()).reason, 'busy')
-    assert.equal(transition(busy, eventOf('repair.requested'), scopeOf()).reason, 'busy')
-    assert.equal(transition(busy, eventOf('reattach.requested'), scopeOf()).reason, 'busy')
-
+    for (const type of ['restart.requested', 'stop.requested', 'repair.requested', 'reattach.requested']) {
+      assert.equal(refusalOf(busy, type), 'busy')
+    }
     const idle = stateOf({ status: 'disconnected', desired: 'idle' })
-    assert.equal(transition(idle, eventOf('restart.requested'), scopeOf()).reason, 'not-connected')
-    assert.equal(transition(idle, eventOf('stop.requested'), scopeOf()).reason, 'not-connected')
-    assert.equal(transition(idle, eventOf('reattach.requested'), scopeOf()).reason, 'not-connected')
-    assert.equal(transition(idle, eventOf('repair.requested'), scopeOf()).reason, 'not-connected')
-
+    for (const type of ['restart.requested', 'stop.requested', 'reattach.requested', 'repair.requested']) {
+      assert.equal(refusalOf(idle, type), 'not-connected')
+    }
     const unreachable = stateOf({ status: 'error', desired: 'connected', error: ERROR_VIEW })
-    assert.equal(
-      transition(unreachable, eventOf('restart.requested'), scopeOf({ recoverable: false })).reason,
-      'not-recoverable',
-    )
-    assert.equal(
-      transition(unreachable, eventOf('stop.requested'), scopeOf({ recoverable: false })).reason,
-      'not-recoverable',
-    )
+    for (const type of ['restart.requested', 'stop.requested']) {
+      assert.equal(refusalOf(unreachable, type, { recoverable: false }), 'not-recoverable')
+    }
   })
 
   test('prompt answers are refused when no prompt is pending or the status moved on', () => {
     const pending = stateOf({ status: 'fingerprint-pending', desired: 'connected' })
-    assert.equal(
-      transition(pending, eventOf('hostkey.answered'), scopeOf({ promptsPending: false })).reason,
-      'stale-prompt',
-    )
-    assert.equal(
-      transition(pending, eventOf('hostkey.timeout'), scopeOf({ promptsPending: false })).reason,
-      'stale-prompt',
-    )
+    for (const type of ['hostkey.answered', 'hostkey.timeout']) {
+      assert.equal(refusalOf(pending, type, { promptsPending: false }), 'stale-prompt')
+    }
     const stale = stateOf({ status: 'connecting', desired: 'connected' })
-    assert.equal(
-      transition(stale, eventOf('hostkey.answered'), scopeOf({ promptsPending: true })).reason,
-      'prompt-not-pending',
-    )
-    assert.equal(
-      transition(
-        stateOf({ status: 'connected', desired: 'connected' }),
-        eventOf('conflict.answered'),
-        scopeOf({ promptsPending: true }),
-      ).reason,
-      'prompt-not-pending',
-    )
-    assert.equal(
-      transition(
-        stateOf({ status: 'conflict-pending', desired: 'connected' }),
-        eventOf('conflict.answered'),
-        scopeOf({ promptsPending: false }),
-      ).reason,
-      'stale-prompt',
-    )
+    assert.equal(refusalOf(stale, 'hostkey.answered', { promptsPending: true }), 'prompt-not-pending')
+    const connected = stateOf({ status: 'connected', desired: 'connected' })
+    assert.equal(refusalOf(connected, 'conflict.answered', { promptsPending: true }), 'prompt-not-pending')
+    const conflict = stateOf({ status: 'conflict-pending', desired: 'connected' })
+    assert.equal(refusalOf(conflict, 'conflict.answered', { promptsPending: false }), 'stale-prompt')
   })
 
   test('script-only events are refused when no activity owns the link', () => {
+    const idle = stateOf({ status: 'disconnected', desired: 'idle' })
     for (const type of ['step.entered', 'step.done', 'transport.ready', 'connect.cancelled', 'connect.failed']) {
-      const result = transition(stateOf({ status: 'disconnected', desired: 'idle' }), eventOf(type), scopeOf())
-      assert.equal(result.ok, false, `${type} must require an activity`)
-      assert.equal(result.reason, 'illegal-transition')
+      assert.equal(refusalOf(idle, type), 'illegal-transition', `${type} must require an activity`)
     }
-    for (const [type, activity] of [
+    const mismatched = [
       ['restart.resumed', 'connect'],
       ['restart.failed', 'stop'],
       ['stop.succeeded', 'restart'],
       ['stop.refused', 'connect'],
       ['reattach.failed', 'stop'],
       ['repair.finished', 'reattach'],
-    ]) {
-      const result = transition(stateOf({ status: 'connecting', activity }), eventOf(type), scopeOf())
-      assert.equal(result.reason, 'illegal-transition', `${type} must require its own activity`)
+    ]
+    for (const [type, activity] of mismatched) {
+      assert.equal(
+        refusalOf(stateOf({ status: 'connecting', activity }), type),
+        'illegal-transition',
+        `${type} must require its own activity`,
+      )
     }
   })
 })
 
 describe('fsm: golden event sequences (§6.2 risk 1)', () => {
   test('connect success: unconfigured → connecting → connected', () => {
-    const first = transition(stateOf({ status: 'unconfigured' }), eventOf('connect.requested'), scopeOf())
+    const first = next(stateOf({ status: 'unconfigured' }), 'connect.requested')
     assert.equal(first.ok, true)
     assert.equal(first.state.status, 'connecting')
     assert.equal(first.state.desired, 'connected')
@@ -423,14 +378,14 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.deepEqual(effectsOf(first), ['disarm', 'disarm', 'disarm', 'emit', 'run'])
     assert.deepEqual(effectOf(first, 'run'), { type: 'run', activity: 'connect', token: 1 })
 
-    const step = transition(first.state, eventOf('step.entered'), scopeOf())
+    const step = next(first.state, 'step.entered')
     assert.equal(step.ok, true)
     assert.equal(step.state.status, 'connecting')
     assert.equal(step.state.phase, 'ssh')
     assert.deepEqual(step.state.progress, { code: 'ssh-connecting' })
     assert.deepEqual(effectsOf(step), ['emit'])
 
-    const done = transition(step.state, eventOf('connect.succeeded'), scopeOf())
+    const done = next(step.state, 'connect.succeeded')
     assert.equal(done.ok, true)
     assert.equal(done.state.status, 'connected')
     assert.equal(done.state.phase, 'ready')
@@ -443,8 +398,8 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
   })
 
   test('a host-key prompt parks the attempt, and its timeout fails it', () => {
-    const connecting = transition(stateOf({ status: 'unconfigured' }), eventOf('connect.requested'), scopeOf())
-    const asked = transition(connecting.state, eventOf('hostkey.pending'), scopeOf({ promptsPending: false }))
+    const connecting = next(stateOf({ status: 'unconfigured' }), 'connect.requested')
+    const asked = next(connecting.state, 'hostkey.pending', { promptsPending: false })
     assert.equal(asked.ok, true)
     assert.equal(asked.state.status, 'fingerprint-pending')
     assert.equal(asked.state.phase, 'ssh')
@@ -453,7 +408,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
       params: { sha256: 'SHA256:abc', keyType: 'ssh-ed25519' },
     })
 
-    const timedOut = transition(asked.state, eventOf('hostkey.timeout'), scopeOf({ promptsPending: true }))
+    const timedOut = next(asked.state, 'hostkey.timeout', { promptsPending: true })
     assert.equal(timedOut.ok, true)
     assert.equal(timedOut.state.status, 'error')
     assert.equal(timedOut.state.error, ERROR_VIEW)
@@ -486,15 +441,8 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
   })
 
   test('a live link that drops becomes disconnected and asks for a retry', () => {
-    const connected = stateOf({
-      status: 'connected',
-      desired: 'connected',
-      phase: 'ready',
-      progress: { code: 'ready' },
-      reconnectAttempts: 0,
-      epoch: 4,
-    })
-    const dropped = transition(connected, eventOf('transport.closed'), scopeOf({ linkAlive: true, tunnelAlive: true }))
+    const connected = connectedState({ phase: 'ready', progress: { code: 'ready' }, epoch: 4 })
+    const dropped = next(connected, 'transport.closed', { linkAlive: true, tunnelAlive: true })
     assert.equal(dropped.ok, true)
     assert.equal(dropped.state.status, 'disconnected')
     assert.equal(dropped.state.transportLost, true)
@@ -508,7 +456,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('a transport that drops during a one-shot action is a dropped link too', () => {
     const repairing = stateOf({ status: 'connected', desired: 'connected', activity: 'repair', epoch: 9 })
-    const dropped = transition(repairing, eventOf('transport.closed'), scopeOf({ linkAlive: true, tunnelAlive: true }))
+    const dropped = next(repairing, 'transport.closed', { linkAlive: true, tunnelAlive: true })
     assert.equal(dropped.state.status, 'disconnected')
     assert.equal(dropped.state.activity, null)
     assert.equal(dropped.state.epoch, 10)
@@ -516,7 +464,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('a transport that drops while the handshake runs only records the loss', () => {
     const dialling = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect' })
-    const dropped = transition(dialling, eventOf('transport.closed'), scopeOf())
+    const dropped = next(dialling, 'transport.closed')
     assert.equal(dropped.ok, true)
     assert.equal(dropped.state.status, 'connecting')
     assert.equal(dropped.state.transportLost, true)
@@ -531,39 +479,31 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('a stale or wanted-off close is a no-op instead of a lost link', () => {
     const live = stateOf({ status: 'connected', desired: 'connected' })
-    const stale = transition(live, eventOf('transport.closed'), scopeOf({ linkAlive: true, transportIsCurrent: false }))
+    const stale = next(live, 'transport.closed', { linkAlive: true, transportIsCurrent: false })
     assert.equal(stale.ok, true)
     assert.equal(stale.state, live)
     assert.deepEqual(stale.effects, [])
 
     const lettingGo = stateOf({ status: 'connected', desired: 'idle' })
-    const ignored = transition(lettingGo, eventOf('transport.closed'), scopeOf({ linkAlive: true }))
+    const ignored = next(lettingGo, 'transport.closed', { linkAlive: true })
     assert.equal(ignored.state, lettingGo)
     assert.deepEqual(ignored.effects, [])
 
     const disconnected = stateOf({ status: 'disconnected', desired: 'connected' })
-    const idle = transition(disconnected, eventOf('transport.closed'), scopeOf())
+    const idle = next(disconnected, 'transport.closed')
     assert.equal(idle.state, disconnected)
     assert.deepEqual(idle.effects, [])
   })
 
   test('restart: requested → resumed keeps the "stop not confirmed" warning, connect clears it', () => {
     const connected = stateOf({ status: 'connected', desired: 'connected', phase: 'ready', epoch: 2 })
-    const requested = transition(
-      connected,
-      { type: 'restart.requested', token: 3, pid: 100, port: 8080 },
-      scopeOf({ linkAlive: true, tunnelAlive: true }),
-    )
+    const requested = next(connected, 'restart.requested', { linkAlive: true, tunnelAlive: true })
     assert.equal(requested.state.status, 'connecting')
     assert.equal(requested.state.activity, 'restart')
     assert.equal(requested.state.epoch, 3)
     assert.equal(requested.state.phase, 'start')
-    assert.deepEqual(requested.state.progress, {
-      code: 'restarting-remote',
-      params: { pid: 100, port: 8080 },
-    })
-    // The request rule publishes the new `connecting` card (today's `progress.set` did), then
-    // hands the action to the executor.
+    assert.deepEqual(requested.state.progress, { code: 'restarting-remote', params: { pid: 100, port: 8080 } })
+    // The request rule publishes the new `connecting` card (like progress.set), then hands the action to the executor.
     assert.deepEqual(effectsOf(requested), ['disarm', 'disarm', 'disarm', 'emit', 'run'])
 
     const resumed = transition(requested.state, { type: 'restart.resumed', keptInstance: true }, scopeOf())
@@ -575,48 +515,31 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.deepEqual(effectsOf(resumed), ['apply', 'arm', 'emit'])
 
     // A restart that was cancelled before it touched anything resumes without inventing a warning.
-    const cancelledRestart = transition(requested.state, eventOf('restart.resumed'), scopeOf())
+    const cancelledRestart = next(requested.state, 'restart.resumed')
     assert.equal(cancelledRestart.state.status, 'connected')
     assert.equal(cancelledRestart.state.warning, null)
     assert.equal(cancelledRestart.state.warningSource, null)
 
-    const nextConnect = transition(resumed.state, eventOf('connect.requested'), scopeOf())
+    const nextConnect = next(resumed.state, 'connect.requested')
     assert.equal(nextConnect.state.warning, null)
     assert.equal(nextConnect.state.warningSource, null)
 
-    // The attach also clears a stale "stop not confirmed" warning, even though
-    // `connect.requested` already cleared it on the way in: the row is belt-and-braces for a
-    // state that entered the attach without passing that entry point.
-    const restartStopped = stateOf({
-      status: 'connecting',
-      desired: 'connected',
-      activity: 'connect',
-      warning: RESTART_STOP_WARNING,
-      warningSource: 'restart-stop',
-    })
-    const attached = transition(restartStopped, eventOf('connect.succeeded'), scopeOf())
+    // The attach also clears a stale "stop not confirmed" warning, though `connect.requested` already cleared it: the
+    // row is belt-and-braces for a state that entered the attach without passing that entry point.
+    const restartStopped = connectingState({ warning: RESTART_STOP_WARNING, warningSource: 'restart-stop' })
+    const attached = next(restartStopped, 'connect.succeeded')
     assert.equal(attached.state.warning, null)
     assert.equal(attached.state.warningSource, null)
 
-    const alongside = stateOf({
-      status: 'connecting',
-      desired: 'connected',
-      activity: 'connect',
-      warning: { zh: '并存', en: 'alongside' },
-      warningSource: 'alongside',
-    })
-    const succeeded = transition(alongside, eventOf('connect.succeeded'), scopeOf())
+    const alongside = connectingState({ warning: { zh: '并存', en: 'alongside' }, warningSource: 'alongside' })
+    const succeeded = next(alongside, 'connect.succeeded')
     assert.deepEqual(succeeded.state.warning, { zh: '并存', en: 'alongside' })
     assert.equal(succeeded.state.warningSource, 'alongside')
   })
 
   test('restart failure lands in error and may stop the remote', () => {
     const restarting = stateOf({ status: 'connecting', desired: 'connected', activity: 'restart', phase: 'start' })
-    const failed = transition(
-      restarting,
-      eventOf('restart.failed'),
-      scopeOf({ keepAlive: 'stop', remoteStarted: true }),
-    )
+    const failed = next(restarting, 'restart.failed', { keepAlive: 'stop', remoteStarted: true })
     assert.equal(failed.state.status, 'error')
     assert.equal(failed.state.error, ERROR_VIEW)
     assert.equal(failed.state.activity, null)
@@ -626,12 +549,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
   })
 
   test('a refused stop puts the previous state back instead of publishing a fake error', () => {
-    const connected = stateOf({
-      status: 'connected',
-      desired: 'connected',
-      phase: 'ready',
-      progress: { code: 'ready' },
-    })
+    const connected = connectedState({ phase: 'ready', progress: { code: 'ready' } })
     const stopping = transition(connected, { type: 'stop.requested', token: 7, pid: 42, port: 8080 }, scopeOf())
     assert.equal(stopping.state.activity, 'stop')
     assert.deepEqual(stopping.state.progress, { code: 'stopping-remote', params: { pid: 42, port: 8080 } })
@@ -646,17 +564,12 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.equal(refused.state.phase, 'ready')
     assert.deepEqual(refused.state.progress, { code: 'ready' })
     assert.equal(refused.state.activity, null)
-    assert.deepEqual(effectOf(refused, 'apply').patch, {
-      kind: 'restore-stop',
-      uiReady: true,
-      localPort: 53001,
-    })
+    assert.deepEqual(effectOf(refused, 'apply').patch, { kind: 'restore-stop', uiReady: true, localPort: 53001 })
     assert.deepEqual(effectOf(refused, 'logFailure'), {
       type: 'logFailure',
       phase: 'start',
       label: STOP_FAILED_LABEL,
-      // The restored state carries the *previous* error; the failure line must still explain the
-      // stop that just failed, so the rule names that view.
+      // The restored state carries the *previous* error, so the failure line must still explain the stop that failed.
       view: ERROR_VIEW,
     })
   })
@@ -674,14 +587,8 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
   })
 
   test('a confirmed stop ends idle', () => {
-    const stopping = stateOf({
-      status: 'connecting',
-      desired: 'connected',
-      activity: 'stop',
-      phase: 'start',
-      epoch: 4,
-    })
-    const done = transition(stopping, eventOf('stop.succeeded'), scopeOf())
+    const stopping = stateOf({ status: 'connecting', desired: 'connected', activity: 'stop', phase: 'start', epoch: 4 })
+    const done = next(stopping, 'stop.succeeded')
     assert.equal(done.state.status, 'disconnected')
     assert.equal(done.state.desired, 'idle')
     assert.equal(done.state.activity, null)
@@ -692,7 +599,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('disconnect during a connect step is allowed and stops the attempt (M1/H4)', () => {
     const dialling = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect', epoch: 1 })
-    const disconnected = transition(dialling, eventOf('disconnect.requested'), scopeOf())
+    const disconnected = next(dialling, 'disconnect.requested')
     assert.equal(disconnected.ok, true)
     assert.equal(disconnected.state.status, 'disconnected')
     assert.equal(disconnected.state.desired, 'idle')
@@ -712,7 +619,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('disconnecting an idle-policy host keeps the transport and arms the idle stop', () => {
     const connected = stateOf({ status: 'connected', desired: 'connected' })
-    const disconnected = transition(connected, eventOf('disconnect.requested'), scopeOf({ keepAlive: 'idle' }))
+    const disconnected = next(connected, 'disconnect.requested', { keepAlive: 'idle' })
     assert.deepEqual(effectOf(disconnected, 'teardown').options, { stopRemote: false, keepSshForIdle: true })
     assert.deepEqual(effectOf(disconnected, 'arm'), { type: 'arm', timer: 'idle', ms: 600000 })
   })
@@ -724,21 +631,18 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
       { type: 'disconnect.requested', stopped: true },
       scopeOf({ keepAlive: 'idle' }),
     )
-    assert.deepEqual(effectOf(disconnected, 'teardown').options, {
-      stopRemote: false,
-      keepSshForIdle: false,
-    })
+    assert.deepEqual(effectOf(disconnected, 'teardown').options, { stopRemote: false, keepSshForIdle: false })
     assert.equal(hasEffect(disconnected, 'arm'), false)
   })
 
   test('the idle timer is a no-op while the host is wanted again', () => {
     const wanted = stateOf({ status: 'disconnected', desired: 'connected' })
-    const refused = transition(wanted, eventOf('idle.elapsed'), scopeOf())
+    const refused = next(wanted, 'idle.elapsed')
     assert.equal(refused.ok, false)
     assert.equal(refused.reason, 'illegal-transition')
 
     const idle = stateOf({ status: 'disconnected', desired: 'idle' })
-    const allowed = transition(idle, eventOf('idle.elapsed'), scopeOf())
+    const allowed = next(idle, 'idle.elapsed')
     assert.equal(allowed.ok, true)
     assert.equal(allowed.state, idle)
     assert.deepEqual(allowed.effects, [])
@@ -746,14 +650,14 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('shutdown closes every timer and disarms prompts without publishing', () => {
     const connected = stateOf({ status: 'connected', desired: 'connected', epoch: 3 })
-    const down = transition(connected, eventOf('shutdown'), scopeOf({ keepAlive: 'keep' }))
+    const down = next(connected, 'shutdown', { keepAlive: 'keep' })
     assert.equal(down.state.closing, true)
     assert.equal(down.state.desired, 'idle')
     assert.equal(down.state.epoch, 4)
     assert.deepEqual(effectsOf(down), ['disarm', 'disarm', 'disarm', 'disarm', 'settlePrompts', 'teardown'])
     assert.deepEqual(effectOf(down, 'teardown').options, { stopRemote: false, shutdown: true })
 
-    const stopPolicy = transition(connected, eventOf('shutdown'), scopeOf({ keepAlive: 'stop' }))
+    const stopPolicy = next(connected, 'shutdown', { keepAlive: 'stop' })
     assert.deepEqual(effectOf(stopPolicy, 'teardown').options, { stopRemote: true, shutdown: true })
   })
 
@@ -769,7 +673,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('link.cancelled invalidates the token even when no activity is running', () => {
     const running = stateOf({ status: 'connecting', desired: 'connected', activity: 'restart', epoch: 6 })
-    const cancelled = transition(running, eventOf('link.cancelled'), scopeOf())
+    const cancelled = next(running, 'link.cancelled')
     assert.equal(cancelled.state.epoch, 7)
     assert.equal(cancelled.state.activity, null)
     assert.equal(isActivityCurrent(cancelled.state, 6), false)
@@ -800,7 +704,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
       code: 'restarting-remote',
       params: { reason: 'remote-unreachable' },
     })
-    const lost = transition(reattaching.state, eventOf('reattach.failed'), scopeOf())
+    const lost = next(reattaching.state, 'reattach.failed')
     assert.equal(lost.state.status, 'error')
     assert.equal(lost.state.error, ERROR_VIEW)
     assert.equal(hasEffect(lost, 'closeLink'), true)
@@ -818,29 +722,28 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.deepEqual(scheduled.state.progress, { code: 'reconnecting', params: { attempt: 3, max: 5 } })
     assert.deepEqual(effectOf(scheduled, 'arm'), { type: 'arm', timer: 'reconnect', ms: 4000 })
 
-    const gaveUp = transition(retrying, eventOf('reconnect.gaveup'), scopeOf())
+    const gaveUp = next(retrying, 'reconnect.gaveup')
     assert.equal(gaveUp.state.status, 'error')
     assert.equal(gaveUp.state.error, ERROR_VIEW)
     assert.deepEqual(effectsOf(gaveUp), ['emit'])
 
-    const skipped = transition(retrying, eventOf('reconnect.skipped'), scopeOf())
+    const skipped = next(retrying, 'reconnect.skipped')
     assert.equal(skipped.state.status, 'disconnected')
     assert.equal(skipped.state.progress, null)
 
-    const succeeded = transition(
+    const succeeded = next(
       stateOf({ status: 'connecting', desired: 'connected', activity: 'connect', reconnectAttempts: 3 }),
-      eventOf('connect.succeeded'),
-      scopeOf(),
+      'connect.succeeded',
     )
     assert.equal(succeeded.state.reconnectAttempts, 0)
   })
 
   test('the conflict prompt publishes and clears its card', () => {
     const connecting = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect' })
-    const pending = transition(connecting, eventOf('conflict.pending'), scopeOf({ promptsPending: false }))
+    const pending = next(connecting, 'conflict.pending', { promptsPending: false })
     assert.equal(pending.state.status, 'conflict-pending')
     assert.deepEqual(pending.state.progress, { code: 'remote-dsh-running', params: { count: 2 } })
-    const answered = transition(pending.state, eventOf('conflict.answered'), scopeOf({ promptsPending: true }))
+    const answered = next(pending.state, 'conflict.answered', { promptsPending: true })
     assert.equal(answered.state.status, 'connecting')
     assert.deepEqual(answered.state.progress, { code: 'probing' })
     assert.deepEqual(patches(answered), ['clear-conflict'])
@@ -848,7 +751,7 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('a cancelled connect ends disconnected without keeping the remote', () => {
     const connecting = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect', error: ERROR_VIEW })
-    const cancelled = transition(connecting, eventOf('connect.cancelled'), scopeOf())
+    const cancelled = next(connecting, 'connect.cancelled')
     assert.equal(cancelled.state.status, 'disconnected')
     assert.equal(cancelled.state.error, null)
     assert.equal(cancelled.state.activity, null)
@@ -857,37 +760,24 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
 
   test('connect.failed only arms a retry while the user still wants the link (H2)', () => {
     const connecting = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect' })
-    const failed = transition(connecting, eventOf('connect.failed'), scopeOf())
+    const failed = next(connecting, 'connect.failed')
     assert.equal(failed.state.status, 'error')
     assert.equal(hasEffect(failed, 'arm'), true)
 
-    const cancelledByUser = stateOf({
-      status: 'connecting',
-      desired: 'connected',
-      activity: 'connect',
-      connectCancelled: true,
-    })
-    const noRetry = transition(cancelledByUser, eventOf('connect.failed'), scopeOf())
+    const cancelledByUser = connectingState({ connectCancelled: true })
+    const noRetry = next(cancelledByUser, 'connect.failed')
     assert.equal(hasEffect(noRetry, 'arm'), false)
 
     // The explicit idempotent self-transition: error → error (§2.4.2).
     const alreadyFailed = stateOf({ status: 'error', desired: 'connected', activity: 'connect', error: ERROR_VIEW })
-    assert.equal(transition(alreadyFailed, eventOf('connect.failed'), scopeOf()).ok, true)
+    assert.equal(next(alreadyFailed, 'connect.failed').ok, true)
   })
 
   test('connect.failed keeps a remote the keep-alive policy must not stop', () => {
     const connecting = stateOf({ status: 'connecting', desired: 'connected', activity: 'connect' })
-    const failed = transition(
-      connecting,
-      eventOf('connect.failed'),
-      scopeOf({ keepAlive: 'idle', remoteStarted: true }),
-    )
+    const failed = next(connecting, 'connect.failed', { keepAlive: 'idle', remoteStarted: true })
     assert.deepEqual(effectOf(failed, 'teardown').options, { stopRemote: false, keepRemote: true })
-    const neverStarted = transition(
-      connecting,
-      eventOf('connect.failed'),
-      scopeOf({ keepAlive: 'stop', remoteStarted: false }),
-    )
+    const neverStarted = next(connecting, 'connect.failed', { keepAlive: 'stop', remoteStarted: false })
     assert.deepEqual(effectOf(neverStarted, 'teardown').options, { stopRemote: false, keepRemote: false })
   })
 
@@ -919,22 +809,9 @@ describe('fsm: shared predicates', () => {
 
 describe('fsm: storage form', () => {
   test('writeBack maps activity/epoch back into the flat runtime and leaves liveness alone', () => {
-    // The four liveness fields start at values the watchdog would have written; writeBack must not
-    // touch them (B9 in docs/invariants.md: the watchdog is their only writer).
-    const runtime = {
-      remoteFailures: 2,
-      remoteEpisode: true,
-      episodeSource: 'proxy',
-      episodeCooldownUntil: 1234,
-    }
-    const state = stateOf({
-      status: 'connected',
-      desired: 'connected',
-      activity: 'restart',
-      epoch: 7,
-      phase: 'ready',
-      progress: { code: 'ready' },
-    })
+    // The four liveness fields start at values the watchdog would have written; writeBack must not touch them (B9).
+    const runtime = { remoteFailures: 2, remoteEpisode: true, episodeSource: 'proxy', episodeCooldownUntil: 1234 }
+    const state = connectedState({ activity: 'restart', epoch: 7, phase: 'ready', progress: { code: 'ready' } })
     writeBack(runtime, state)
     assert.equal(runtime.status, 'connected')
     assert.equal(runtime.desired, 'connected')
@@ -968,8 +845,8 @@ describe('fsm: storage form', () => {
 describe('fsm: purity', () => {
   test('the same inputs produce deeply equal results and never share state objects', () => {
     const state = stateOf({ status: 'connected', desired: 'connected' })
-    const first = transition(state, eventOf('disconnect.requested'), scopeOf())
-    const second = transition(state, eventOf('disconnect.requested'), scopeOf())
+    const first = next(state, 'disconnect.requested')
+    const second = next(state, 'disconnect.requested')
     assert.deepEqual(first, second)
     assert.notEqual(first.state, state, 'an accepted move returns a fresh state object')
     assert.deepEqual(state, stateOf({ status: 'connected', desired: 'connected' }), 'the input is untouched')

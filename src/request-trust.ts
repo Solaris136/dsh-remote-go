@@ -1,14 +1,7 @@
-/**
- * The browser-trust fence shared by the local HTTP API and the same-origin remote proxy.
- *
- * Both surfaces answer on the local DSH origin, so both must give the same answer to one question:
- * did this request arrive from the origin it names? Two confused-deputy paths reach a loopback web
- * server — DNS rebinding and a cross-site page — and a browser labels neither reliably: a rebound
- * page sends its own hostname as `Host` while the socket lands on this server, and a plain
- * navigation or image read carries no `Origin` and no Fetch-Metadata. `Host` is the one header
- * rebinding cannot forge, so it is checked for every request; when a browser does attach `Origin`
- * or `sec-fetch-site`, they must agree too.
- */
+/** The browser-trust fence shared by the local HTTP API and the same-origin remote proxy: did this request arrive from
+ * the origin it names? Two confused-deputy paths reach a loopback web server — DNS rebinding and a cross-site page —
+ * and a browser labels neither reliably, so `Host` (the one header rebinding cannot forge) is checked on every request,
+ * and `Origin`/`sec-fetch-site` must agree when attached. */
 
 /** The part of an `IncomingMessage` the fence reads. */
 export interface TrustedRequestInput {
@@ -23,10 +16,8 @@ function effectivePort(url: URL): string {
   return url.protocol === 'https:' ? '443' : '80'
 }
 
-/**
- * Hostname/port match for a `Host` header (which carries no scheme). The suffix is the local
- * listener's origin; loopback spellings are interchangeable because a browser may dial either one.
- */
+// Hostname/port match for a `Host` header (no scheme); loopback spellings are interchangeable
+// because a browser may dial either one.
 export function sameServerHost(value: unknown, origin: URL): boolean {
   if (typeof value !== 'string' || value === '') return false
   let candidate: URL
@@ -35,25 +26,19 @@ export function sameServerHost(value: unknown, origin: URL): boolean {
   } catch {
     return false
   }
-  // WHATWG parsing rewrites anything that is not a bare authority: `user@host` drops its userinfo,
-  // a backslash becomes a path separator, `#`/`?` start the fragment/query, and a trailing dot or a
-  // zero-padded port is normalized away. A browser fills `Host` from the serialized URL, so a value
-  // the parser had to rewrite is not an authority this server answers to; comparing the rewritten
-  // hostname would let `attacker.example@127.0.0.1:port` pass as loopback.
+  // WHATWG parsing rewrites anything that is not a bare authority: `user@host` drops its userinfo, a backslash becomes
+  // a path separator, `#`/`?` start the fragment/query, a trailing dot and a zero-padded port are normalized away. A
+  // browser fills `Host` from the serialized URL, so a rewritten value is not an authority this server answers to —
+  // comparing the rewritten hostname would let `attacker.example@127.0.0.1:port` pass as loopback.
   if (candidate.host !== value.toLowerCase()) return false
   if (effectivePort(candidate) !== effectivePort(origin)) return false
   if (candidate.hostname === origin.hostname) return true
   return LOOPBACK_HOSTNAMES.has(origin.hostname) && LOOPBACK_HOSTNAMES.has(candidate.hostname)
 }
 
-/**
- * Full same-origin match for an `Origin` header (scheme included).
- *
- * The authority is compared verbatim (case-insensitively) as well as through `sameServerHost`.
- * A browser fills `Origin` from the serialized URL, so anything the URL parser had to rewrite —
- * `user@host`, a trailing dot, a zero-padded port — cannot have come from one, and letting the
- * rewritten form through would accept `http://attacker.example@127.0.0.1:port` as loopback.
- */
+// Full same-origin match for an `Origin` header (scheme included). The authority is compared verbatim
+// as well as through `sameServerHost`, for the rewrite reason above: otherwise
+// `http://attacker.example@127.0.0.1:port` would pass as loopback.
 export function sameServerOrigin(value: unknown, origin: URL): boolean {
   if (typeof value !== 'string' || value === '') return false
   // One trailing slash is tolerated (`Origin: http://host/` is not what a browser sends, but a
@@ -72,10 +57,8 @@ export function sameServerOrigin(value: unknown, origin: URL): boolean {
   return candidate.protocol === origin.protocol && sameServerHost(candidate.host, origin)
 }
 
-/**
- * The fence applied to a browser navigation and its subresources: the request must name this
- * server, and any browser-announced relationship must be same-origin.
- */
+// The fence applied to a browser navigation and its subresources: the request must name this server,
+// and any browser-announced relationship must be same-origin.
 export function trustedRequest(req: TrustedRequestInput, origin: URL): boolean {
   if (!sameServerHost(req.headers.host, origin)) return false
   const originHeader = req.headers.origin

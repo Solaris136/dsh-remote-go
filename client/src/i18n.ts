@@ -1,10 +1,6 @@
 // client/src/i18n.ts - locale/text helpers: interpolate, makeFallbackT, localeOf, translatorOf, resolveText, resolveTextList; after i18n-dict.ts, before util.ts.
 //#region 3. i18n helpers
-
-/**
- * The props a surface mounts a component with. Only the fields the lookup reads are declared: a
- * host passes `t` (its own translator) and/or one of the locale ids, everything else is its own.
- */
+/** The props a surface mounts with: only the fields the language lookup reads are declared here. */
 interface LocaleProps {
   t?: Translate
   getLocaleId?: () => unknown
@@ -12,14 +8,9 @@ interface LocaleProps {
   locale?: string
 }
 
-/**
- * Keys already reported missing. A missing entry is a packaging defect, not a per-render event:
- * the first occurrence says so and every later render of the same key stays quiet, so a condition
- * that renders on each state tick cannot turn into a console flood.
- */
+/** Keys already reported: a missing entry is a packaging defect, not a per-render event, so only the first warns. */
 const REPORTED_MISSING_KEYS = new Set<string>()
-
-/** Report one missing dictionary entry, once per key (DECISIONS §G1: warn, never throw). */
+/** Report one missing dictionary entry, once per key: warn, never throw. */
 function reportMissingKey(key: string, message: string): void {
   if (REPORTED_MISSING_KEYS.has(key)) return
   REPORTED_MISSING_KEYS.add(key)
@@ -35,23 +26,14 @@ function interpolate(template: string, params?: DictParams): string {
   )
 }
 
-/**
- * A key the plugin only knows at runtime: a contract phase id (`phase.<id>`) or a code the Host
- * named in an ErrorView. Literal call sites pass `DictKey` directly and stay compiler-checked; this
- * is the one documented boundary where a plain string becomes a key, and an unknown key still
- * fails soft (the key itself is rendered, `makeFallbackT` warns once).
- */
+/** A key only known at runtime (a `phase.<id>`, an ErrorView code): the one documented string-to-key boundary. */
+// An unknown key still fails soft: it renders as itself and `makeFallbackT` warns once.
 function dictionaryKey(key: string): DictKey {
   return key as DictKey
 }
 
-/**
- * The `t()` a surface renders with: the requested language first, the other language next, the key
- * itself last. Fail-soft on purpose - these calls sit on the render path and a plugin has no error
- * boundary, so throwing over one missing string would blank the whole panel instead of one cell.
- * The default `dictionaries` argument is the shipped pair; tests pass a partial pack to prove both
- * fallbacks without touching the real dictionary.
- */
+/** The `t()` a surface renders with: requested language, then the other, then the key, failing soft, never throwing. */
+// The default `dictionaries` is the shipped pair; tests pass a partial pack to prove both fallbacks.
 function makeFallbackT(locale: DictLocale, dictionaries: PartialDictionaries = STRINGS_BY_LOCALE): Translate {
   const primary = dictionaries[locale] ?? {}
   const fallbackLocale: DictLocale = locale === 'en' ? 'zh' : 'en'
@@ -68,8 +50,7 @@ function makeFallbackT(locale: DictLocale, dictionaries: PartialDictionaries = S
       return interpolate(backup, params)
     }
     reportMissingKey('absent:' + key, 'no dictionary entry for "' + key + '"; showing the key')
-    // Interpolated like any other text so a runtime-built key carrying `{name}` renders exactly as
-    // the pre-dictionary behaviour did; with a literal key this is the key itself.
+    // Interpolated like any other text, so a runtime-built key with `{name}` renders as it did before the dictionary.
     return interpolate(key, params)
   }
 }
@@ -84,8 +65,7 @@ function localeOf(props?: LocaleProps | null): DictLocale {
     }
   }
   if (props && (props.localeId === 'en' || props.localeId === 'zh')) return props.localeId
-  // The overlay and the wizard hand the resolved id down as `locale`; without this a
-  // window opened from them resolved host-provided text as Chinese in an English UI.
+  // The overlay and wizard pass `locale` down; without this a window opened from them resolved host text wrongly.
   if (props && (props.locale === 'en' || props.locale === 'zh')) return props.locale
   return 'zh'
 }

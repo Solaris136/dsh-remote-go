@@ -1,15 +1,12 @@
 // client/src/toast.ts - the Toast list (region 14); after prompts.ts, before overlay-state.ts.
-//#region 14. toast
-
-/** What the toast region renders: either the list or the single toast an older caller passes. */
-interface ToastProps {
-  toasts?: ToastEntry[]
-  toast?: ToastEntry
-}
-
+type ToastProps = { toasts?: ToastEntry[]; toast?: ToastEntry }
 function Toast(props: ToastProps) {
   const toasts = props && Array.isArray(props.toasts) ? props.toasts : props && props.toast ? [props.toast] : []
   if (toasts.length === 0) return null
+  const item = (toast: ToastEntry, index: number) => {
+    const key = String(toast && toast.id !== undefined ? toast.id : index)
+    return h('div', { key, className: 'drg-toast', 'data-tone': (toast && toast.tone) || 'info' }, toast && toast.text)
+  }
   return h(
     'div',
     {
@@ -19,16 +16,6 @@ function Toast(props: ToastProps) {
       'aria-atomic': 'false',
       'data-testid': 'toast-region',
     },
-    toasts.map((toast, index) =>
-      h(
-        'div',
-        {
-          key: toast && toast.id !== undefined ? String(toast.id) : String(index),
-          className: 'drg-toast',
-          'data-tone': (toast && toast.tone) || 'info',
-        },
-        toast && toast.text,
-      ),
-    ),
+    toasts.map(item),
   )
 }
