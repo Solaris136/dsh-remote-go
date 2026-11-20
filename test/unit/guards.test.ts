@@ -8,10 +8,21 @@ const SRC = path.join(REPO_ROOT, 'src')
 const INTEGRATION = path.join(REPO_ROOT, 'test', 'integration')
 // The composed browser half is build output: `pnpm build` writes `dist/client.js`.
 const CLIENT = path.join(REPO_ROOT, 'dist', 'client.js')
-
+const relativeTo = (file, base = SRC) => path.relative(base, file).split(path.sep).join('/')
 const MARKER = /\/\/\s*swallow-ok:\s*(\S[^\n]*)/
 const REASON_FIELD = /\breason\s*:/
-
+// Every `src/**/*.ts` once, as `{ file, rel, raw, text }`; `text` has comments blanked, line breaks kept. `raw` is the
+// file itself; the emitted `.js` twins in `dist/` are not scanned, so nothing is reported twice.
+async function srcSources() {
+  const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+  return Promise.all(
+    files.map(async (file) => {
+      const raw = await readFile(file, 'utf8')
+      return { file, rel: relativeTo(file), raw, text: stripComments(raw) }
+    }),
+  )
+}
+/** Every catch block in one source text, with the `reason:` it returns and its own line number. */
 function catchBlocks(text, file) {
   const stripped = stripComments(text)
   const blocks = []
@@ -29,7 +40,7 @@ function catchBlocks(text, file) {
   }
   return blocks
 }
-
+/** A catch that returns a typed reason must distinguish the failure or say `// swallow-ok: <why>`. */
 function violation(block) {
   if (!REASON_FIELD.test(block.body)) return null
   const distinguished =
@@ -43,9 +54,7 @@ function violation(block) {
   if (marker && marker[1].trim().split(/\s+/).length >= 2) return null
   return { file: block.file, line: block.line, marked: Boolean(marker) }
 }
-
 const scanCatch = (code) => catchBlocks(code, 'fixture.js').map(violation).filter(Boolean)
-
 const catchFixture = (body) =>
   [
     'function read(ssh) {',
@@ -59,14 +68,12 @@ const catchFixture = (body) =>
 
 describe('swallow-guard', () => {
   test('no catch turns an unknown failure into a typed reason without saying so', async () => {
-    // The sources are TypeScript: the emitted `.js` now lives in `dist/` and would be the same
-    // text, so scanning the `.ts` files is both the source of truth and the only non-duplicate.
-    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+    // The sources are TypeScript and the emitted `.js` is the same text, so scanning the `.ts` avoids duplicates.
+    const files = await srcSources()
     assert.ok(files.length > 0, 'no source files found to guard')
     const failures = []
-    for (const file of files) {
-      const text = await readFile(file, 'utf8')
-      for (const block of catchBlocks(text, path.relative(SRC, file))) {
+    for (const { rel, raw } of files) {
+      for (const block of catchBlocks(raw, rel)) {
         const found = violation(block)
         if (found) failures.push(found)
       }
@@ -81,13 +88,14 @@ describe('swallow-guard', () => {
     )
   })
   test('planted regression: a reason of any shape is flagged (no denylist)', () => {
-    const fixtures = [
+    for (const fixture of [
       catchFixture('    return { ok: false, reason: REASON }'),
       catchFixture('    return { ok: false, reason: remoteReasonFor(error) }'),
       catchFixture("    return { ok: false, reason: 'ssh-unreachable' }"),
       catchFixture("    const errorLine = String(error)\n    return { ok: false, reason: 'read-failed' }"),
-    ]
-    for (const fixture of fixtures) assert.equal(scanCatch(fixture).length, 1)
+    ]) {
+      assert.equal(scanCatch(fixture).length, 1)
+    }
   })
   test('planted regression: prose containing "throw"/"error" does not count as distinguished', () => {
     const fixture = catchFixture(
@@ -116,35 +124,19 @@ describe('swallow-guard', () => {
     assert.equal(scanCatch(bare).length, 1, 'a marker without a stated reason must not silence the guard')
   })
   test('the scanner covers src recursively, not just the top level', async () => {
-    const files = (await walkFiles(SRC, { extensions: /\.ts$/ })).map((file) => path.relative(SRC, file))
-    assert.ok(files.length > 0)
+    const names = (await srcSources()).map((entry) => entry.rel)
+    assert.ok(names.length > 0)
     assert.deepEqual(
-      files.filter((file) => !file.endsWith('.ts')),
+      names.filter((name) => !name.endsWith('.ts')),
       [],
     )
-    assert.ok(files.includes('service.ts'), 'top-level sources are still scanned')
+    assert.ok(names.includes('service.ts'), 'top-level sources are still scanned')
   })
 })
-
-const NON_STATE_FIELDS = new Set([
-  'map',
-  'filter',
-  'every',
-  'some',
-  'find',
-  'length',
-  'json',
-  'slice',
-  'join',
-  'sort',
-  'includes',
-  'textContent',
-  'hostId',
-  'forEach',
-  'then',
-  'catch',
-])
-
+// Member/accessor names on a list or response object, never session state of their own.
+const NON_STATE_FIELDS = new Set(
+  'map filter every some find length json slice join sort includes textContent hostId forEach then catch'.split(' '),
+)
 function fieldsOf(source, receivers) {
   const fields = new Set()
   for (const receiver of receivers) {
@@ -155,7 +147,7 @@ function fieldsOf(source, receivers) {
   }
   return fields
 }
-
+/** Every argument list of an `assert.*(...)` call in `source`, concatenated. */
 function assertionArguments(source) {
   const parts = []
   for (const match of source.matchAll(/\bassert\.[A-Za-z]+(?:\.[A-Za-z]+)?\s*\(/g)) {
@@ -165,11 +157,10 @@ function assertionArguments(source) {
   }
   return parts.join('\n')
 }
-
+/** The assertion block that follows a wait call: up to the next test, divider or dedent. */
 function assertionWindow(rest) {
-  const lines = rest.split('\n').slice(0, 40)
   const kept = []
-  for (const line of lines) {
+  for (const line of rest.split('\n').slice(0, 40)) {
     if (/^\s*await t\.test\(/.test(line) || /^\s*test\(/.test(line)) break
     if (/^\s*\/\/ ----/.test(line)) break
     kept.push(line)
@@ -177,19 +168,15 @@ function assertionWindow(rest) {
   }
   return kept.join('\n')
 }
-
 function predicateViolations(text, file) {
   const found = []
-  const waitCall = /\b(waitForMirrors|pollUntil)\s*\(/g
-  for (const match of text.matchAll(waitCall)) {
+  for (const match of text.matchAll(/\b(waitForMirrors|pollUntil)\s*\(/g)) {
     const open = match.index + match[0].length - 1
     const close = matchingBracket(text, open)
     if (close < 0) continue
     const call = text.slice(match.index, close + 1)
-    const predicate = (() => {
-      const arrow = call.indexOf('=>')
-      return arrow < 0 ? call : call.slice(arrow)
-    })()
+    const arrow = call.indexOf('=>')
+    const predicate = arrow < 0 ? call : call.slice(arrow)
     const receivers = new Set(['list'])
     for (const param of predicate.matchAll(/\(\s*([A-Za-z_$][\w$]*)\s*(?:,[^)]*)?\)\s*=>/g)) receivers.add(param[1])
     for (const param of predicate.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) receivers.add(param[1])
@@ -218,8 +205,7 @@ function predicateViolations(text, file) {
     const callbackFields = new Set()
     for (const entry of asserted) {
       if (!entry.startsWith('__callback:')) continue
-      const param = entry.slice('__callback:'.length)
-      for (const field of fieldsOf(after, [param])) callbackFields.add(field)
+      for (const field of fieldsOf(after, [entry.slice('__callback:'.length)])) callbackFields.add(field)
     }
     for (const entry of asserted) if (!entry.startsWith('__callback:')) callbackFields.add(entry)
     const missing = [...callbackFields].filter((field) => !predicateFields.has(field))
@@ -230,7 +216,6 @@ function predicateViolations(text, file) {
   }
   return found
 }
-
 const TRANSIENT_SNAPSHOT_WAITS = new Map([])
 
 describe('predicate-guard', () => {
@@ -241,8 +226,7 @@ describe('predicate-guard', () => {
     assert.ok(names.length > 0, 'no e2e suites found to guard')
     const failures = []
     for (const name of names) {
-      const text = await readFile(path.join(INTEGRATION, name), 'utf8')
-      failures.push(...predicateViolations(text, name))
+      failures.push(...predicateViolations(await readFile(path.join(INTEGRATION, name), 'utf8'), name))
     }
     const unaccepted = failures.filter((entry) => !TRANSIENT_SNAPSHOT_WAITS.has(entry.key))
     assert.deepEqual(
@@ -289,7 +273,6 @@ describe('predicate-guard', () => {
     assert.deepEqual(predicateViolations(fixture, 'fixture.e2e.js'), [])
   })
 })
-
 const INCLUDE_DIRS = ['src', 'scripts', 'test', 'e2e']
 // The published entry points are build output: `pnpm build` writes them into `dist/`.
 const INCLUDE_FILES = ['dist/index.js', 'dist/client.js']
@@ -303,11 +286,10 @@ const SKIP_DIRS = new Set([
   '_research',
   '_tools',
 ])
-
 const SPAWN_RE = /(?<![\w$])(?:[A-Za-z_$][\w$]*\.)?(spawn|spawnSync|execFile|execFileSync|execSync|fork)\s*\(/g
 const EXEC_RE = /(?<![\w.$])exec\s*\(/g
 const OPT_OUT = 'windowsHide-ignore'
-
+/** The `(...)` argument list that starts at the first `(` after `start`. */
 function callArguments(source, start) {
   const begin = source.indexOf('(', start)
   if (begin === -1) return { text: '', closeIndex: -1 }
@@ -316,29 +298,22 @@ function callArguments(source, start) {
     ? { text: source.slice(begin), closeIndex }
     : { text: source.slice(begin, closeIndex + 1), closeIndex }
 }
-
 function looksLikeDefinition(source, start, closeIndex) {
   let cursor = closeIndex + 1
   while (cursor < source.length && /\s/.test(source[cursor])) cursor += 1
   if (source[cursor] === '{') return true
-  // An interface member has no body: it ends in a return type annotation
-  // (`exec(command: string): Promise<X>`). The emitted `.js` this scanner used to read had no
-  // interfaces, so the annotation form only appeared once the sources became TypeScript. A
-  // ternary's `: ` is ruled out by requiring the name to be the first token on its line, which
-  // is where a member declaration starts.
+  // An interface member has no body and ends in a return type annotation (`exec(command: string): Promise<X>`). A
+  // ternary's `: ` is ruled out: the name must be the first token on its line, where a member declaration starts.
   if (source[cursor] !== ':') return false
   const lineStart = source.lastIndexOf('\n', start - 1) + 1
   return /^\s*(?:(?:public|private|protected|static|readonly|async|override|get|set)\s+)*$/.test(
     source.slice(lineStart, start),
   )
 }
-
 async function findCallSites() {
   const files = []
   for (const dir of INCLUDE_DIRS) {
     files.push(
-      // `.ts` is the source of truth since the test/script migration; the emitted `.js` in
-      // `dist/` is not scanned, so a finding is never reported twice for one call site.
       ...(await walkFiles(path.join(REPO_ROOT, dir), { extensions: /\.(?:js|mjs|cjs|ts)$/, skipDirs: SKIP_DIRS })),
     )
   }
@@ -349,7 +324,7 @@ async function findCallSites() {
     const raw = await readFile(file, 'utf8')
     const source = stripComments(raw)
     const rawLines = raw.split('\n')
-    const scan = (regex) => {
+    for (const regex of [SPAWN_RE, EXEC_RE]) {
       for (const match of source.matchAll(regex)) {
         const index = match.index ?? 0
         const args = callArguments(source, index)
@@ -365,8 +340,6 @@ async function findCallSites() {
         })
       }
     }
-    scan(SPAWN_RE)
-    scan(EXEC_RE)
   }
   return sites
 }
@@ -405,79 +378,44 @@ describe('e2e-child-process-guard', () => {
     )
   })
 })
-
-const APP_TOKENS = [
-  '--dsw-alias-bg-base',
-  '--dsw-alias-bg-layer-1',
-  '--dsw-alias-bg-layer-2',
-  '--dsw-alias-bg-layer-3',
-  '--dsw-alias-bg-mask-1',
-  '--dsw-alias-border-l1',
-  '--dsw-alias-border-l2',
-  '--dsw-alias-border-l3',
-  '--dsw-alias-border-l4',
-  '--dsw-alias-brand-primary',
-  '--dsw-alias-button-primary-fill',
-  '--dsw-alias-button-primary-hover',
-  '--dsw-alias-interactive-bg-active',
-  '--dsw-alias-interactive-bg-hover',
-  '--dsw-alias-interactive-bg-hover-danger',
-  '--dsw-alias-label-caption',
-  '--dsw-alias-label-primary',
-  '--dsw-alias-label-primary-foreground',
-  '--dsw-alias-label-secondary',
-  '--dsw-alias-label-tertiary',
-  '--dsw-alias-link',
-  '--dsw-alias-scrollbar-bg-l2',
-  '--dsw-alias-scrollbar-hover-l2',
-  '--dsw-alias-state-business-primary',
-  '--dsw-alias-state-error-primary',
-  '--dsw-alias-state-idle-primary',
-  '--dsw-alias-state-success-primary',
-  '--dsw-alias-state-success-tertiary',
-  '--dsw-alias-state-warn-label',
-  '--dsw-alias-state-warn-primary',
-  '--dsw-alias-state-warn-tertiary',
-  '--dsw-alias-toast-bg',
-  '--dsw-alias-toast-label',
-  '--dsw-elevation-panel',
-  '--dsw-elevation-prominent',
-  '--dsw-focus-ring-color',
-  '--dsw-focus-ring-width',
-  '--dsw-font-family',
-  '--dsw-font-markdown-code-font-family',
-  '--dsw-mask-blur',
-  '--dsw-menu-backdrop-filter',
-  '--dsw-radius-lg',
-  '--dsw-radius-md',
-  '--dsw-radius-panel',
-  '--dsw-radius-sm',
-  '--dsw-radius-xs',
-  '--dsw-specific-menu',
-  '--dsw-static-violet-400',
-]
-
+// The published `--dsw-*` tokens the client may read, grouped by family with the shared prefix stripped.
+const APP_TOKENS = new Set(
+  [
+    'alias-bg-base alias-bg-layer-1 alias-bg-layer-2 alias-bg-layer-3 alias-bg-mask-1',
+    'alias-border-l1 alias-border-l2 alias-border-l3 alias-border-l4 alias-brand-primary',
+    'alias-button-primary-fill alias-button-primary-hover',
+    'alias-interactive-bg-active alias-interactive-bg-hover alias-interactive-bg-hover-danger',
+    'alias-label-caption alias-label-primary alias-label-primary-foreground alias-label-secondary alias-label-tertiary',
+    'alias-link alias-scrollbar-bg-l2 alias-scrollbar-hover-l2',
+    'alias-state-business-primary alias-state-error-primary alias-state-idle-primary',
+    'alias-state-success-primary alias-state-success-tertiary',
+    'alias-state-warn-label alias-state-warn-primary alias-state-warn-tertiary',
+    'alias-toast-bg alias-toast-label',
+    'elevation-panel elevation-prominent focus-ring-color focus-ring-width',
+    'font-family font-markdown-code-font-family mask-blur menu-backdrop-filter',
+    'radius-lg radius-md radius-panel radius-sm radius-xs',
+    'specific-menu static-violet-400',
+  ]
+    .join(' ')
+    .split(' ')
+    .map((name) => `--dsw-${name}`),
+)
 const clientSource = () => readFile(CLIENT, 'utf8')
-
 async function clientCss() {
-  const source = await clientSource()
-  const match = source.match(/const\s+CSS\s*=\s*`([\s\S]*?)`/)
+  const match = (await clientSource()).match(/const\s+CSS\s*=\s*`([\s\S]*?)`/)
   assert.ok(match, 'the client half must keep its stylesheet in a `const CSS = ` template literal')
   return match[1]
 }
-
 async function rowCss() {
-  const source = await clientSource()
-  const match = source.match(/style\.textContent = \[([\s\S]*?)\]\.join\(''\)/)
+  const match = (await clientSource()).match(/style\.textContent = \[([\s\S]*?)\]\.join\(''\)/)
   assert.ok(match, 'the switcher row must keep its styles in the style.textContent array')
   const withoutComments = match[1].replace(/^\s*\/\/.*$/gm, '')
   const literals = [...withoutComments.matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((found) => found[1])
   assert.ok(literals.length > 10, `expected the row stylesheet string array, found ${literals.length} literals`)
   return literals.join('')
 }
-
 const stripCssComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '')
-
+/** The stylesheet with every `@media <header> { … }` block removed (depth-counted braces). */
 function stripAtRule(css, header) {
   const marker = '@media ' + header
   let rest = ''
@@ -489,9 +427,8 @@ function stripAtRule(css, header) {
       break
     }
     rest += css.slice(index, start)
-    const open = css.indexOf('{', start)
     let depth = 1
-    let cursor = open + 1
+    let cursor = css.indexOf('{', start) + 1
     while (cursor < css.length && depth > 0) {
       if (css[cursor] === '{') depth += 1
       else if (css[cursor] === '}') depth -= 1
@@ -501,7 +438,6 @@ function stripAtRule(css, header) {
   }
   return rest
 }
-
 function blocksFor(css, selector) {
   const blocks = []
   for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
@@ -552,7 +488,7 @@ describe('client-styles', () => {
       'the stylesheet has an unbalanced block comment',
     )
     const stripped = stripCssComments(css)
-    const styled = [
+    for (const selector of [
       '.drg-check',
       '.drg-form-grid',
       '.drg-chip',
@@ -564,8 +500,7 @@ describe('client-styles', () => {
       '.drg-section-title',
       '.drg-conflict-processes',
       '.drg-keyfile-row',
-    ]
-    for (const selector of styled) {
+    ]) {
       assert.ok(blocksFor(stripped, selector).length > 0, `${selector} has no live declaration block`)
     }
   })
@@ -611,11 +546,10 @@ describe('client-styles', () => {
     }
   })
   test('the plugin reads only published theme tokens', async () => {
-    const allowed = new Set(APP_TOKENS)
     const css = await clientCss()
     const row = await rowCss()
     const referenced = new Set([...(css + row).matchAll(/--dsw-[a-z0-9-]+/g)].map((found) => found[0]))
-    const unknown = [...referenced].filter((name) => !allowed.has(name)).sort()
+    const unknown = [...referenced].filter((name) => !APP_TOKENS.has(name)).sort()
     assert.deepEqual(unknown, [], `unknown --dsw-* token(s): ${unknown.join(', ')} (see APP_TOKENS)`)
     for (const stale of [
       '--dsw-alias-state-success,',
@@ -656,7 +590,7 @@ describe('client-compat', () => {
   })
   test('the client half uses no desktop-only (Electron) capability', async () => {
     const source = await clientSource()
-    const forbidden = [
+    for (const pattern of [
       /\brequire\(\s*['"]electron['"]\s*\)/,
       /\bwindow\.dsh\b/,
       /\bglobalThis\.dsh\b/,
@@ -664,8 +598,7 @@ describe('client-compat', () => {
       /\bipcRenderer\b/,
       /\bshell\.openExternal\b/,
       /\bnodeIntegration\b/,
-    ]
-    for (const pattern of forbidden) {
+    ]) {
       assert.equal(pattern.test(source), false, `the client half must not use ${pattern}`)
     }
   })
@@ -681,8 +614,7 @@ describe('client-compat', () => {
   })
   test('the client opens an external window only through the capability bridge', async () => {
     const source = await clientSource()
-    // An external window is a user-visible action the user asked for inside the framed page, so
-    // exactly one call site exists and it is the bridge's — never the global `window.open`.
+    // An external window is the user's click inside the framed page: one call site, the bridge's — never `window.open`.
     assert.doesNotMatch(source, /window\.open\s*\(/, 'the global window.open must never be called')
     assert.equal((source.match(/_blank/g) ?? []).length, 1, 'exactly one new-window call site')
     assert.match(source, /win\.open\(url, '_blank', 'noopener,noreferrer'\)/)
@@ -705,115 +637,62 @@ describe('client-compat', () => {
     assert.equal(hostOnly.length, 0, 'the client bundle must not import the host half at runtime')
   })
 })
-
-/* ── runtime-writer-guard (design-arch §2.3 / PLAN review item 2) ─────────────────────────────
- *
- * What this guard actually enforces: **the session block names every writer, and `status` has
- * exactly one.** It used to be described as "exactly one writer per field", which the table below
- * never said — eleven fields list a second owner, and pretending otherwise made the gate look
- * stronger than it is.
- *
- * The facts (design-arch §2.3): P2 step 4 moved the 16 direct + 7 indirect `status` writes onto
- * `dispatch`, so `status` is the one field with a single owner and no staging excuse; a catch that
- * sets `runtime.status = 'error'` directly forks the SSE frame sequence from the state machine.
- * Every other session field names the owners the staging still has, and a new writer has to be
- * added to its list here (and to the `RuntimeSession` comment in `host-runtime.ts`) in the same
- * change — that is what "registered" means in those two places.
- *
- *   status                  — fsm.ts only. The one single-writer field; never grows an owner.
- *   desired                 — fsm.ts only.
- *   connectCancelled        — fsm.ts only.
- *   transportLost           — fsm.ts only.
- *   reconnectAttempts       — fsm.ts only (`reconnect.scheduled` adopted the budget).
- *   error                   — fsm.ts only.
- *   phase / progress        — the connect-progress line is pure UI (it never changes `status`); it
- *                             keeps writing the two presentation fields until P2 step 7 moves
- *                             `step.entered` into the pipeline.
- *   warning / warningSource — two action-scoped facts have no event of their own: the `alongside`
- *                             decision and the "managed stop was not confirmed" restart branch.
- *                             `connect.succeeded` still owns clearing the stale restart warning.
- *   closing                 — the teardown path marks the link dead before it releases the
- *                             transport; shutdown is not an event the FSM owns yet.
- *   linkBusy / linkToken    — the one-shot token API (`beginLinkWork`/`endLinkWork`/
- *                             `cancelLinkWork`) is the token plumbing P2 step 7 moves onto
- *                             `dispatch(activity.begin)`/`link.cancelled`; until then it is the
- *                             storage form of `activity`/`epoch`.
- *   remoteFailures / remoteEpisode / episodeSource / episodeCooldownUntil
- *                           — `watchdog.ts` owns the policy writes and `host-lifecycle.ts` owns the
- *                             timer primitive (`stopRemoteHeartbeat`) that resets them. The FSM used
- *                             to be a third writer of the same four fields through the dead
- *                             `remote.*` rules; those are gone, and `writeBack` no longer touches
- *                             them (B9, docs/invariants.md).
- *   connectPromise / restartPromise / reattachPromise
- *                           — executor-held by design (§2.4.5); the pipeline owns the promises,
- *                             the FSM owns `activity`.
- *
- * `host-runtime.ts` is deliberately absent from every list: it builds the initial object literal in
- * `createRuntime`, which is initialization, not a write of the block (and it holds no assignment).
- */
-const SESSION_WRITERS = {
-  // The one single-writer field: the FSM owns it, nothing else may ever appear in this list.
-  status: ['runtime/fsm.ts'],
-  // fsm.ts only, like `status` — recorded so a second owner is a reviewed edit, not a quiet one.
-  desired: ['runtime/fsm.ts'],
-  connectCancelled: ['runtime/fsm.ts'],
-  transportLost: ['runtime/fsm.ts'],
-  reconnectAttempts: ['runtime/fsm.ts'],
-  error: ['runtime/fsm.ts'],
-  // Shared with the pure-UI progress line (it never touches `status`).
-  phase: ['runtime/fsm.ts', 'connect-progress.ts'],
-  progress: ['runtime/fsm.ts', 'connect-progress.ts'],
-  // Shared with the two action-scoped warning branches.
-  warning: ['runtime/fsm.ts', 'connect/launch.ts', 'connect/restart.ts'],
-  warningSource: ['runtime/fsm.ts', 'connect/launch.ts', 'connect/restart.ts'],
-  // Shared with the token/teardown plumbing (it owns the timer block).
-  closing: ['runtime/fsm.ts', 'host-lifecycle.ts'],
-  linkBusy: ['runtime/fsm.ts', 'host-lifecycle.ts'],
-  linkToken: ['runtime/fsm.ts', 'host-lifecycle.ts'],
-  // The watchdog owns liveness; host-lifecycle keeps only the timer primitive that resets them.
-  remoteFailures: ['host-lifecycle.ts', 'watchdog.ts'],
-  remoteEpisode: ['host-lifecycle.ts', 'watchdog.ts'],
-  episodeSource: ['host-lifecycle.ts', 'watchdog.ts'],
-  episodeCooldownUntil: ['host-lifecycle.ts', 'watchdog.ts'],
-  // Executor-held promises (§2.4.5): one owner each, by construction.
-  connectPromise: ['connect/pipeline.ts'],
-  restartPromise: ['connect/restart.ts'],
-  reattachPromise: ['connect/reattach.ts'],
-}
-
+/* runtime-writer-guard — the session block names every writer, and `status` has exactly one. Not one writer per
+ * field: eleven fields name a second owner, and pretending otherwise made the gate look stronger than it is. `status`
+ * is special because the pipeline moved its writes onto `dispatch`, so a catch that sets it directly forks the SSE
+ * frames from the state machine. Every other field names the owners the staging still has, and a new writer must be
+ * registered here and in the `RuntimeSession` comment of `host-runtime.ts` together — that file is deliberately
+ * absent because `createRuntime` builds the initial object literal, which is initialization, not a write. */
+const SESSION_WRITERS = Object.fromEntries(
+  [
+    // The one single-writer field: the FSM owns it, nothing else may ever appear in this list.
+    [['status', 'desired', 'connectCancelled', 'transportLost', 'reconnectAttempts', 'error'], ['runtime/fsm.ts']],
+    // The connect-progress line is pure UI; it never changes `status`.
+    [
+      ['phase', 'progress'],
+      ['runtime/fsm.ts', 'connect-progress.ts'],
+    ],
+    // Two action-scoped facts have no event of their own: `alongside` and the unconfirmed restart.
+    [
+      ['warning', 'warningSource'],
+      ['runtime/fsm.ts', 'connect/launch.ts', 'connect/restart.ts'],
+    ],
+    // The token/teardown plumbing owns the timer block and the link tokens.
+    [
+      ['closing', 'linkBusy', 'linkToken'],
+      ['runtime/fsm.ts', 'host-lifecycle.ts'],
+    ],
+    // The watchdog owns liveness; host-lifecycle keeps only the timer primitive that resets them.
+    [
+      ['remoteFailures', 'remoteEpisode', 'episodeSource', 'episodeCooldownUntil'],
+      ['host-lifecycle.ts', 'watchdog.ts'],
+    ],
+    // Executor-held promises: one owner each, by construction.
+    [['connectPromise'], ['connect/pipeline.ts']],
+    [['restartPromise'], ['connect/restart.ts']],
+    [['reattachPromise'], ['connect/reattach.ts']],
+  ].flatMap(([fields, owners]) => fields.map((field) => [field, owners])),
+)
 const SESSION_FIELDS = Object.keys(SESSION_WRITERS)
-
-/**
- * The one field the guard forbids a second owner for. Everything else names the owners the staging
- * still has (see the comment above the table); `status` is the field the whole step exists for.
- */
+/** The one field the guard forbids a second owner for; everything else names the owners it still has. */
 const SINGLE_WRITER = 'status'
-
 /** The session fields the `RuntimeSession` declaration lists, read from the source itself. */
 function declaredSessionFields(text) {
   const stripped = stripComments(text)
-  const marker = 'export interface RuntimeSession {'
-  const open = stripped.indexOf(marker)
+  const open = stripped.indexOf('export interface RuntimeSession {')
   if (open < 0) return []
-  const brace = stripped.indexOf('{', open)
-  const close = matchingBracket(stripped, brace)
+  const close = matchingBracket(stripped, stripped.indexOf('{', open))
   if (close < 0) return []
-  const body = stripped.slice(brace + 1, close)
   const fields = []
-  for (const line of body.split('\n')) {
+  for (const line of stripped.slice(stripped.indexOf('{', open) + 1, close).split('\n')) {
     const match = /^ {2}([A-Za-z_$][\w$]*)\??:/.exec(line)
     if (match) fields.push(match[1])
   }
   return fields
 }
-
-/**
- * One assignment to a session field of a runtime variable. Comparisons (`===`, `==`, `!==`) and
- * arrow functions are excluded by the lookahead; `+=`/`-=` count as writes.
- */
+// One `runtime.<field> = …` write; the lookahead excludes comparisons and arrows, `+=`/`-=` count as writes.
 const sessionWrite = (field) => new RegExp(`\\b(?:runtime|rt)\\.${field}\\s*(?:\\+=|-=|=(?!=))`, 'g')
-
-/** Every `runtime.<session field> = …` in one source text, as `[{ field, line }]`. */
+/** Every `runtime.<session field> = …` in one comment-free source text, as `[{ field, line }]`. */
 function sessionWrites(text) {
   const stripped = stripComments(text)
   const found = []
@@ -827,8 +706,7 @@ function sessionWrites(text) {
 
 describe('runtime-writer-guard', () => {
   test('the session block names every writer, and status has exactly one', async () => {
-    // The declaration the guard enforces, as data: one single-writer field, one owner list per
-    // field, and a table that covers exactly the fields `RuntimeSession` declares.
+    // The enforced declaration as data: one single-writer field, an owner list per field, RuntimeSession's fields.
     assert.deepEqual(
       SESSION_WRITERS[SINGLE_WRITER],
       ['runtime/fsm.ts'],
@@ -843,25 +721,24 @@ describe('runtime-writer-guard', () => {
       [...SESSION_FIELDS].sort(),
       'a session field was added or removed without registering its owner',
     )
-    // Sources only: the emitted `.js` twins are the same text and would double every finding.
-    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
-    assert.ok(files.includes(path.join(SRC, 'service.ts')), 'the scanner must cover src recursively')
+    const files = await srcSources()
+    assert.ok(
+      files.some((entry) => entry.rel === 'service.ts'),
+      'the scanner must cover src recursively',
+    )
     const failures = []
-    for (const file of files) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      const text = await readFile(file, 'utf8')
+    for (const { rel, text } of files) {
       for (const write of sessionWrites(text)) {
         const owners = SESSION_WRITERS[write.field]
-        if (!owners.includes(relative)) {
+        if (!owners.includes(rel)) {
           failures.push(
-            `${relative}:${write.line} — runtime.${write.field} is written outside its registered owners (${owners.join(', ')})`,
+            `${rel}:${write.line} — runtime.${write.field} is written outside its registered owners (${owners.join(', ')})`,
           )
         }
       }
     }
     assert.deepEqual(failures, [], 'a module writes a session field it does not own')
   })
-
   test('planted regression: a status write in a non-owner module is flagged', () => {
     const fixture = ['export function mark(runtime) {', "  runtime.status = 'error'", '}'].join('\n')
     assert.deepEqual(sessionWrites(fixture), [{ field: 'status', line: 2 }])
@@ -870,82 +747,54 @@ describe('runtime-writer-guard', () => {
     assert.deepEqual(sessionWrites('const view = { status: runtime.status }'), [])
     assert.deepEqual(sessionWrites("job.phase = 'ready'"), [])
   })
-
   test('the non-FFSM modules no longer write the status at all', async () => {
-    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
     const offenders = []
-    for (const file of files) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      if (SESSION_WRITERS.status.includes(relative)) continue
-      const text = stripComments(await readFile(file, 'utf8'))
-      const bare = [...text.matchAll(/\.status\s*=(?!=)/g)]
-      for (const match of bare) {
-        offenders.push(`${relative}:${text.slice(0, match.index).split('\n').length}`)
+    for (const { rel, text } of await srcSources()) {
+      if (SESSION_WRITERS.status.includes(rel)) continue
+      for (const match of text.matchAll(/\.status\s*=(?!=)/g)) {
+        offenders.push(`${rel}:${text.slice(0, match.index).split('\n').length}`)
       }
     }
     assert.deepEqual(offenders, [], 'a `status` assignment exists outside the FSM/factory')
   })
-
   test('the Reporter no longer assigns a whole patch onto the runtime', async () => {
-    // `Object.assign(runtime, { status, error, warning })` was the indirect writer `progress.set`
-    // used. The method is gone; a reintroduced whole-object write must fail this guard too.
-    const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+    // progress.set's indirect writer was `Object.assign(runtime, {...})`; a whole-object write must fail too.
     const offenders = []
-    for (const file of files) {
-      const text = stripComments(await readFile(file, 'utf8'))
-      if (/Object\.assign\(\s*(?:runtime|rt)\b/.test(text)) {
-        offenders.push(path.relative(SRC, file).split(path.sep).join('/'))
-      }
-      if (/\bprogress\.set\s*\(/.test(text)) {
-        offenders.push(`${path.relative(SRC, file).split(path.sep).join('/')} (progress.set)`)
-      }
+    for (const { rel, text } of await srcSources()) {
+      if (/Object\.assign\(\s*(?:runtime|rt)\b/.test(text)) offenders.push(rel)
+      if (/\bprogress\.set\s*\(/.test(text)) offenders.push(`${rel} (progress.set)`)
     }
     assert.deepEqual(offenders, [], 'a whole-runtime patch writer came back')
   })
 
   test('warningSource is still declared on the runtime type', async () => {
-    // §2.3 item 4: the field that three modules wrote while it was undeclared must stay declared.
+    // The field three modules wrote while it was undeclared must stay declared.
     const source = await readFile(path.join(SRC, 'host-runtime.ts'), 'utf8')
     assert.match(source, /warningSource:\s*WarningSource \| null/)
   })
 })
-
-/* ── watchdog-bus-guard (design-arch §1.7 / P2 step 9) ────────────────────────────────────────
- *
- * The watchdog used to reach its two one-shot actions back through `ctx` (`requestReattach`,
- * `repairTunnel`). P2 step 9 replaced them with a synchronous bus whose subscriber is a single
- * module, so "who reacts to a confirmed/recovered episode" has exactly one answer. These scans keep
- * that property from silently growing a second wiring point:
- *
- *   - `ctx.bus.subscribe(` exists only in `connect/watchdog.ts`;
- *   - the two retired reverse callbacks are gone from `src/`;
- *   - the liveness machine lives in `watchdog.ts`, and `host-lifecycle.ts` (which may not import
- *     `connect/*` except `connect/ownership`) does not import it.
- */
+/* watchdog-bus-guard — the watchdog used to reach its two one-shot actions back through `ctx` (`requestReattach`,
+ * `repairTunnel`); a synchronous bus with a single subscriber replaced them, so "who reacts to a confirmed or recovered
+ * episode" has one answer. These scans keep a second wiring point from appearing: `ctx.bus.subscribe(` only in
+ * `connect/watchdog.ts`, the two retired reverse callbacks gone from `src/`, and `host-lifecycle.ts` (no
+ * `connect/*` import except `connect/ownership`) not importing the liveness machine. */
 describe('watchdog-bus-guard', () => {
   test('the bus has exactly one subscriber', async () => {
     const subscribers = []
-    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      const text = stripComments(await readFile(file, 'utf8'))
-      if (/\bbus\s*\.\s*subscribe\s*\(/.test(text)) subscribers.push(relative)
+    for (const { rel, text } of await srcSources()) {
+      if (/\bbus\s*\.\s*subscribe\s*\(/.test(text)) subscribers.push(rel)
     }
     assert.deepEqual(subscribers, ['connect/watchdog.ts'], 'a second module subscribed to the watchdog bus')
   })
-
   test('the two reverse callbacks are gone from the sources', async () => {
     const offenders = []
-    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      const text = stripComments(await readFile(file, 'utf8'))
-      // `requestReattach` is retired entirely. `repairTunnel` stays as the action's own name, but
-      // it must never be reached again as a member of the context (`ctx.repairTunnel?.(…)`).
-      if (/\brequestReattach\b/.test(text)) offenders.push(`${relative} names requestReattach`)
-      if (/\.\s*repairTunnel\s*\??\.?\s*\(/.test(text)) offenders.push(`${relative} calls ctx.repairTunnel`)
+    for (const { rel, text } of await srcSources()) {
+      // `requestReattach` is retired; `repairTunnel` stays as the action's name but must never be a context member.
+      if (/\brequestReattach\b/.test(text)) offenders.push(`${rel} names requestReattach`)
+      if (/\.\s*repairTunnel\s*\??\.?\s*\(/.test(text)) offenders.push(`${rel} calls ctx.repairTunnel`)
     }
     assert.deepEqual(offenders, [], 'a retired reverse callback came back')
   })
-
   test('host-lifecycle does not import the watchdog it used to contain', async () => {
     const source = await readFile(path.join(SRC, 'host-lifecycle.ts'), 'utf8')
     assert.doesNotMatch(source, /from '\.\/watchdog\.js'/)
@@ -954,50 +803,35 @@ describe('watchdog-bus-guard', () => {
     assert.match(source, /export function stopRemoteHeartbeat/)
   })
 })
-
-/* ── ssh-port-guard (design-ssh §7 S4 / decision D4) ───────────────────────────────────────────
- *
- * `SshPort` is the only surface the host half may depend on (P5). Two imports stay inside the
- * adapter layer: the ssh2 adapter module itself (`src/ssh.ts`, reached only by the assembly root
- * that builds the default factory) and the vendored ssh2 bundle (the adapter plus its SFTP
- * capability module). A third module reaching over either edge would re-couple the host half to
- * ssh2 — the exact debt P5 retires — so both are machine-checked.
- */
+/* ssh-port-guard — `SshPort` is the only surface the host half may depend on; two imports stay in the adapter layer:
+ * the ssh2 adapter (`src/ssh.ts`, reached only by the assembly root that builds the default factory) and the vendored
+ * ssh2 bundle. A third module reaching over either edge would re-couple the host half, so both are checked. */
 describe('ssh-port-guard', () => {
   const ADAPTER_MODULE = new Set(['ssh.ts'])
   const ASSEMBLY_ROOTS = new Set(['context.ts'])
   const SSH2_CONSUMERS = new Set(['ssh.ts', 'ssh-sftp.ts'])
   const IMPORT_SPECIFIER = /(?:from\s+|import\s*\(\s*)['"]([^'"]+)['"]/g
-
-  async function importsOf(file) {
-    const text = stripComments(await readFile(file, 'utf8'))
-    return [...text.matchAll(IMPORT_SPECIFIER)].map((match) => match[1])
-  }
-
+  const importsOf = (text) => [...stripComments(text).matchAll(IMPORT_SPECIFIER)].map((match) => match[1])
   test('only the assembly root imports the ssh2 adapter module', async () => {
     const offenders = []
-    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      if (ADAPTER_MODULE.has(relative) || ASSEMBLY_ROOTS.has(relative)) continue
-      for (const specifier of await importsOf(file)) {
-        if (/(?:^|\/)ssh\.js$/.test(specifier)) offenders.push(`${relative} imports ${specifier}`)
+    for (const { rel, text } of await srcSources()) {
+      if (ADAPTER_MODULE.has(rel) || ASSEMBLY_ROOTS.has(rel)) continue
+      for (const specifier of importsOf(text)) {
+        if (/(?:^|\/)ssh\.js$/.test(specifier)) offenders.push(`${rel} imports ${specifier}`)
       }
     }
     assert.deepEqual(offenders, [], 'a module outside the assembly root depends on the ssh2 adapter class')
   })
-
   test('only the adapter layer imports the vendored ssh2 bundle', async () => {
     const offenders = []
-    for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
-      const relative = path.relative(SRC, file).split(path.sep).join('/')
-      if (SSH2_CONSUMERS.has(relative)) continue
-      for (const specifier of await importsOf(file)) {
-        if (specifier.includes('vendor/ssh2')) offenders.push(`${relative} imports ${specifier}`)
+    for (const { rel, text } of await srcSources()) {
+      if (SSH2_CONSUMERS.has(rel)) continue
+      for (const specifier of importsOf(text)) {
+        if (specifier.includes('vendor/ssh2')) offenders.push(`${rel} imports ${specifier}`)
       }
     }
     assert.deepEqual(offenders, [], 'a module outside the ssh2 adapter imports the vendored bundle')
   })
-
   test('the port declaration stays transport-agnostic', async () => {
     const source = await readFile(path.join(SRC, 'ssh-port.ts'), 'utf8')
     assert.doesNotMatch(source, /vendor\/ssh2/, 'the port must not name the ssh2 implementation')

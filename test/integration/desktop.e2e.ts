@@ -25,14 +25,10 @@ import {
   writeFailureArtifacts,
 } from './harness-support.ts'
 import { closeManageWindow, emulateReducedMotion, openManageWindow } from './ui-steps.ts'
-
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(HERE, '..', '..')
-
 const ONBOARDING_LABELS = ['稍后配置', 'Set up later', 'Configure later', '稍后', 'Later']
-
 const DESKTOP_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'dsh-remote-go']
-
 async function freePort() {
   return await new Promise((resolve, reject) => {
     const server = createServer()
@@ -44,7 +40,6 @@ async function freePort() {
     })
   })
 }
-
 async function installDesktopProfile(input) {
   const profileDir = path.join(input.dshHome, 'profiles', 'desktop')
   mkdirSync(profileDir, { recursive: true })
@@ -71,7 +66,6 @@ async function installDesktopProfile(input) {
   assert.equal(existsSync(installed), true, `the desktop profile install is missing dist/client.js at ${installed}`)
   return profileDir
 }
-
 function launchDesktop(input) {
   const env = { ...input.env, DSH_HOME: input.dshHome }
   delete env.ELECTRON_RUN_AS_NODE
@@ -89,12 +83,10 @@ function launchDesktop(input) {
   child.stderr?.on('data', (chunk) => logs.push(chunk.toString('utf8')))
   return { child, logs, stop: () => stopChild(child) }
 }
-
 function activateElement(node) {
   node.click()
   return true
 }
-
 async function connectOverCdp(options) {
   const version = await pollUntil(
     async () => {
@@ -109,7 +101,6 @@ async function connectOverCdp(options) {
   })
   return { browser, version }
 }
-
 async function findPage(browser, predicate, timeoutMs) {
   return await pollUntil(
     async () => {
@@ -119,7 +110,6 @@ async function findPage(browser, predicate, timeoutMs) {
     { timeoutMs, intervalMs: 300, label: 'a matching renderer page' },
   )
 }
-
 const isWelcomeUrl = (url) => {
   try {
     return new URL(url).pathname.endsWith('welcome.html')
@@ -134,7 +124,6 @@ const isAppUrl = (url) => {
     return false
   }
 }
-
 async function dismissOnboarding(browser, consoleErrors) {
   const welcome = await findPage(browser, isWelcomeUrl, 90_000).catch(() => null)
   if (!welcome) return false
@@ -259,8 +248,8 @@ test('the desktop shell renders the host-management window with legible buttons'
       })
       page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
       await page.setViewport({ width: 1400, height: 950 }).catch(() => {})
-      // An occluded desktop window pauses the dialog fade-in at opacity 0, which
-      // would make the contrast measurement depend on window focus.
+      // An occluded desktop window pauses the dialog fade-in at opacity 0, which would make the contrast measurement
+      // depend on window focus.
       await emulateReducedMotion(page)
       console.log(
         `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,

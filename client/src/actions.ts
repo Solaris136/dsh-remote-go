@@ -1,60 +1,20 @@
 // client/src/actions.ts - the overlay host's commands (downloads, host actions, dialog plumbing) as one factory; after manage-window.ts, before plugin-overlay.ts.
-/**
- * Every promise-chained command the overlay host offers: the download jobs, the host actions, the
- * prompts and the wizard. They were the body of `PluginOverlay` (P3c, design-client.md §4.3) and are
- * moved here verbatim: a command only needs the Host API - which is script scope - plus the
- * overlay's own setters and refs.
- *
- * `deps` is that per-render state. It is rebuilt on every render and the component destructures the
- * result under the same names, so every call site and every closure the command used to capture is
- * unchanged: a command still reads the `target` / `pendingDelete` / `diagnose` of the render it
- * belongs to, exactly as the inline declarations did.
- */
+/** The overlay host's commands, built from `deps`: the per-render state, rebuilt every render. */
+// Destructured under the same names, so a command reads its own render's `target` / `pendingDelete` / `diagnose`.
 function createOverlayActions(deps: OverlayActionDeps) {
-  const {
-    props,
-    t,
-    locale,
-    notify,
-    errorMessage,
-    remote,
-    downloadJobsRef,
-    setDownloadJobs,
-    downloadPolls,
-    downloadRemoval,
-    downloadHandlerRef,
-    target,
-    setTarget,
-    setManageOpen,
-    setManageView,
-    setConnectHostId,
-    setRemoteUrl,
-    setBusyHostId,
-    diagnose,
-    setDiagnose,
-    pendingDelete,
-    setPendingDelete,
-    deleting,
-    setDeleting,
-    deleteArmed,
-    setDeleteArmed,
-    setPasswordPrompt,
-    setConflictBusy,
-    setFingerprintBusy,
-    hostsRef,
-    pendingSwitch,
-    pendingIntent,
-  } = deps
-
+  const { props, t, locale, notify, errorMessage, remote, downloadJobsRef, setDownloadJobs, downloadPolls } = deps
+  const { downloadRemoval, downloadHandlerRef, target, setTarget, setManageOpen, setManageView } = deps
+  const { setConnectHostId, setRemoteUrl, setBusyHostId, diagnose, setDiagnose, pendingDelete, setPendingDelete } = deps
+  const { deleting, setDeleting, deleteArmed, setDeleteArmed, setPasswordPrompt, setConflictBusy, setFingerprintBusy } =
+    deps
+  const { hostsRef, pendingSwitch, pendingIntent } = deps
   /** Merge one Host job frame into the local card map, never letting a slow frame regress it. */
   const updateDownloadView = (job: DownloadCardView) => {
     if (!job || typeof job.id !== 'string') return null
     const current = downloadJobsRef.current[job.id] || null
     const merged = { ...(current || {}), ...job }
     const rank: Record<DownloadPhase, number> = { preparing: 0, ready: 1, saving: 2, done: 3, error: 3 }
-    if (current && (rank[job.phase] ?? 0) < (rank[current.phase] ?? 0)) {
-      merged.phase = current.phase
-    }
+    if (current && (rank[job.phase] ?? 0) < (rank[current.phase] ?? 0)) merged.phase = current.phase
     merged.doneBytes = Math.max(Number(current?.doneBytes) || 0, Number(job.doneBytes) || 0)
     merged.totalBytes = Math.max(Number(current?.totalBytes) || 0, Number(job.totalBytes) || 0)
     const next = { ...downloadJobsRef.current, [job.id]: merged }
@@ -81,13 +41,13 @@ function createOverlayActions(deps: OverlayActionDeps) {
       downloadJobsRef.current = next
       setDownloadJobs(next)
     }
-    if (delay && typeof setTimeout === 'function') {
-      const timer = setTimeout(drop, delay)
-      unrefTimer(timer)
-      downloadRemoval.current.set(id, timer)
-    } else {
+    if (!delay || typeof setTimeout !== 'function') {
       drop()
+      return
     }
+    const timer = setTimeout(drop, delay)
+    unrefTimer(timer)
+    downloadRemoval.current.set(id, timer)
   }
 
   /** Poll as a fallback for EventSource gaps; SSE normally stops this before it runs. */
@@ -106,12 +66,11 @@ function createOverlayActions(deps: OverlayActionDeps) {
         },
         (error) => {
           clearDownloadPoll(id)
-          const current = downloadJobsRef.current[id]
-          if (current && (current.phase === 'preparing' || current.phase === 'ready')) {
-            updateDownloadView({ id, phase: 'error', error: toErrorView(error) })
-            notify(errorMessage(error), 'error')
-            removeDownloadView(id, 5000)
-          }
+          const latest = downloadJobsRef.current[id]
+          if (!latest || (latest.phase !== 'preparing' && latest.phase !== 'ready')) return
+          updateDownloadView({ id, phase: 'error', error: toErrorView(error) })
+          notify(errorMessage(error), 'error')
+          removeDownloadView(id, 5000)
         },
       )
     }, 700)
@@ -122,8 +81,7 @@ function createOverlayActions(deps: OverlayActionDeps) {
   /** A completed job is already written to the chosen local path by the Host. */
   const finishSavedDownload = (job: DownloadCardView) => {
     if (!job || typeof job.id !== 'string') return
-    const destination = job.destination || job.path || ''
-    notify(t('downloadSavedTo', { path: destination }), 'success')
+    notify(t('downloadSavedTo', { path: job.destination || job.path || '' }), 'success')
     updateDownloadView({ id: job.id, phase: 'done' })
     removeDownloadView(job.id, 1400)
     // The bytes never leave the Host, so release the job slot immediately.
@@ -136,23 +94,18 @@ function createOverlayActions(deps: OverlayActionDeps) {
     const previous = downloadJobsRef.current[job.id]
     const merged = updateDownloadView(job)
     if (!merged) return
-    if (merged.phase === 'ready') {
-      finishSavedDownload(merged)
-      return
+    if (merged.phase === 'ready') return finishSavedDownload(merged)
+    if (merged.phase !== 'error') return
+    clearDownloadPoll(job.id)
+    if (!previous || previous.phase !== 'error') {
+      const view = merged.error && typeof merged.error === 'object' ? merged.error : null
+      const detail = view ? resolveText(view.detail, locale) : ''
+      const title = view ? resolveText(view.title, locale) : ''
+      notify(detail ? (title ? title + ' ' : '') + detail : title || t('downloadFailed'), 'error')
     }
-    if (merged.phase === 'error') {
-      clearDownloadPoll(job.id)
-      if (!previous || previous.phase !== 'error') {
-        const view = merged.error && typeof merged.error === 'object' ? merged.error : null
-        const detail = view ? resolveText(view.detail, locale) : ''
-        const title = view ? resolveText(view.title, locale) : ''
-        notify(detail ? (title ? title + ' ' : '') + detail : title || t('downloadFailed'), 'error')
-      }
-      removeDownloadView(job.id, 5000)
-    }
+    removeDownloadView(job.id, 5000)
   }
   downloadHandlerRef.current = handleDownloadJob
-
   /** Start one Host job; every job streams into the directory picked by the user. */
   const startHostDownload = (request: { hostId: string; path: string; name: string }, destination: string) => {
     const fallbackName = request.name || request.path.split('/').pop() || 'download'
@@ -161,11 +114,8 @@ function createOverlayActions(deps: OverlayActionDeps) {
       (job) => {
         const merged = updateDownloadView(job)
         if (!merged) return
-        if (merged.phase === 'ready') {
-          finishSavedDownload(merged)
-        } else if (merged.phase === 'preparing') {
-          startDownloadPoll(job.id)
-        }
+        if (merged.phase === 'ready') finishSavedDownload(merged)
+        else if (merged.phase === 'preparing') startDownloadPoll(job.id)
       },
       (error) => notify(errorMessage(error), 'error'),
     )
@@ -216,10 +166,7 @@ function createOverlayActions(deps: OverlayActionDeps) {
     })
   }
 
-  /**
-   * One Host-API call with the window's choreography: the host goes busy, success refreshes
-   * the state, a failure reaches the toast, and the flag clears either way.
-   */
+  /** One Host-API call: busy on, success refreshes, a failure reaches the toast, and the flag clears either way. */
   const runAction = <T>(host: HostLike, work: () => Promise<T>, done?: (result: T) => void) => {
     if (!host || !host.id) return undefined
     setBusyHostId(host.id)
@@ -246,10 +193,7 @@ function createOverlayActions(deps: OverlayActionDeps) {
       () => setPasswordPrompt(null),
     )
 
-  /**
-   * Show this host's connect body (progress + log) in the management window. Used by every
-   * action that rebuilds a link in place: opening a host, reconnecting, restarting.
-   */
+  /** Show this host's connect body (progress + log) in the management window. */
   const showConnectWindow = (host: HostLike) => {
     if (!host || typeof host.id !== 'string') return
     setConnectHostId(host.id)
@@ -257,11 +201,8 @@ function createOverlayActions(deps: OverlayActionDeps) {
     setManageOpen(true)
   }
 
-  /**
-   * Start a connection, asking for the password first when the host uses password auth
-   * and none is remembered. A saved password is never read by the Client: the Host tries
-   * it, and the prompt only appears when the Host reports an auth failure.
-   */
+  /** Start a connection, asking for the password first when the host uses password auth and none is remembered. */
+  // A saved password is never read by the Client: the Host tries it, and the prompt appears only on its auth failure.
   const openHost = (host: HostLike, options?: ConnectRequest) => {
     if (!host) return
     const opts = options || {}
@@ -270,34 +211,26 @@ function createOverlayActions(deps: OverlayActionDeps) {
     const needsConnect = statusOf(host.status).connect === true
     const ready = host.status === 'connected'
     if (needsConnect && host.authType === 'password' && password === null) {
-      if (host.passwordSaved === true) {
-        // A remembered password is never read by the Client: try the connect without one,
-        // and only ask when the Host says that password no longer works (audit S2-2).
-        pendingSwitch.current = host.id
-        showConnectWindow(host)
-        setTarget(host.id)
-        api.activate(host.id).catch(() => {})
-        setBusyHostId(host.id)
-        api.connect(host.id, {}).then(
-          () => {
-            setBusyHostId(null)
-            remote.refresh()
-          },
-          (error) => {
-            setBusyHostId(null)
-            const view = toErrorView(error)
-            if (view && view.code === 'auth') {
-              setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
-              return
-            }
-            notify(errorMessage(error), 'error')
-          },
-        )
-        return
-      }
       pendingSwitch.current = host.id
       showConnectWindow(host)
-      setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
+      if (host.passwordSaved !== true) {
+        setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
+        return
+      }
+      setTarget(host.id)
+      api.activate(host.id).catch(() => {})
+      setBusyHostId(host.id)
+      api.connect(host.id, {}).then(
+        () => {
+          setBusyHostId(null)
+          remote.refresh()
+        },
+        (error) => {
+          setBusyHostId(null)
+          if (toErrorView(error).code === 'auth') setPasswordPrompt({ host, intent: 'open', error: null, busy: false })
+          else notify(errorMessage(error), 'error')
+        },
+      )
       return
     }
     pendingSwitch.current = ready ? null : host.id
@@ -309,14 +242,12 @@ function createOverlayActions(deps: OverlayActionDeps) {
     if (needsConnect) performConnect(host, password, rememberPassword)
   }
 
-  // The switcher and the Settings page name one target: open a host, leave one, show
-  // host management, or hand the window back to the local page.
+  // Switcher and Settings name one target: open a host, leave one, manage hosts, or hand the window back to local.
   const applyIntent = (intent: PanelRequest | null | undefined) => {
     if (!intent || typeof intent !== 'object') return
     if (intent.kind === 'manage') {
       pendingIntent.current = null
-      // The explicit entry always shows the list, even while a connection is running: the
-      // connect window is what a host pick opens, not what 管理界面 means.
+      // The explicit entry always shows the list, even while a connection is running.
       setManageView('list')
       setManageOpen(true)
       remote.refresh()
@@ -326,16 +257,14 @@ function createOverlayActions(deps: OverlayActionDeps) {
       pendingIntent.current = null
       setManageOpen(false)
       setTarget(null)
-      // The Host side remembers which host fills the window; nothing does while local
-      // content is up, so clear it instead of leaving a stale "current".
+      // Nothing fills the window while local content is up, so clear the Host's "current" instead.
       api.clearActive().catch(() => {})
       return
     }
     const host = hostsRef.current.find((item) => item && item.id === intent.hostId) || null
     if (intent.kind === 'disconnect') {
       pendingIntent.current = null
-      // Disconnecting hands the window back once the Host confirms (see `disconnectHost`): doing it here would show
-      // the local page even if the disconnect then failed.
+      // Disconnecting hands the window back once the Host confirms (see `disconnectHost`).
       if (host !== null) disconnectHost(host)
       return
     }
@@ -347,10 +276,8 @@ function createOverlayActions(deps: OverlayActionDeps) {
     openHost(host)
   }
 
-  // The remote UI goes away with the connection: give its renderer back now, and hand the
-  // window back if that is where it is pointing. The update is functional on purpose: this
-  // callback runs from the long-lived intent subscription, whose closure still holds the
-  // target it was created with, so a captured value would miss the host the window is on.
+  // The remote UI goes with the connection: release its renderer, and hand the window back if it points there.
+  // The update is functional on purpose: the long-lived intent subscription's closure still holds the old target.
   const disconnectHost = (host: HostLike) =>
     runAction(
       host,
@@ -374,12 +301,8 @@ function createOverlayActions(deps: OverlayActionDeps) {
     runAction(host, () => api.reconnect(host.id))
   }
 
-  /**
-   * Restart the managed remote web. The Host stops the pid it launched on the same SSH
-   * session and re-runs `[start]`; the state stream shows `restarting-remote` and the
-   * carrier navigates to the new launch URL once the host is connected again. The connect
-   * window is what shows the restart's progress and the log it writes.
-   */
+  /** Restart the remote web: the Host stops the pid it launched on that SSH session and re-runs `[start]`. */
+  // `/state` then shows `restarting-remote`, and the connect window carries the log.
   const restartHost = (host: HostLike) => {
     if (!host) return undefined
     showConnectWindow(host)
@@ -388,19 +311,14 @@ function createOverlayActions(deps: OverlayActionDeps) {
       () => api.restart(host.id),
       (result) => {
         // A repair or another one-shot action owns the link: say so instead of doing nothing.
-        if (result && result.accepted === false && result.reason === 'busy') {
-          notify(t('remoteRestartBusy'), 'info')
-        }
+        if (result && result.accepted === false && result.reason === 'busy') notify(t('remoteRestartBusy'), 'info')
       },
     )
   }
 
-  /**
-   * Stop the remote DSH this connection manages (the "Stop remote DSH" card action). The
-   * Host stops only the process it launched or took over, then releases the tunnel and the
-   * SSH session; the host lands on `disconnected` with its settings kept. The remote UI
-   * goes away with the link, so its carrier is released here as well.
-   */
+  /** Stop the remote DSH this connection manages: the Host stops only the process it launched or took over. */
+  // That releases the tunnel and the SSH session; the host lands on `disconnected` with its settings kept.
+  // The remote UI goes with the link, so its carrier is released here as well.
   const stopRemoteHost = (host: HostLike) => {
     if (!host) return undefined
     return runAction(
@@ -427,17 +345,13 @@ function createOverlayActions(deps: OverlayActionDeps) {
 
   const runDiagnose = (host: HostLike) => {
     if (!host || !host.id) return
+    const mine = (current: DiagnoseState | null) => current && current.host && current.host.id === host.id
     setDiagnose({ host, status: 'loading', report: null, error: null })
     api.diagnose(host.id).then(
-      (report) =>
-        setDiagnose((current) =>
-          current && current.host && current.host.id === host.id ? { ...current, status: 'done', report } : current,
-        ),
+      (report) => setDiagnose((current) => (mine(current) ? { ...current, status: 'done', report } : current)),
       (error) =>
         setDiagnose((current) =>
-          current && current.host && current.host.id === host.id
-            ? { ...current, status: 'error', error: toErrorView(error) }
-            : current,
+          mine(current) ? { ...current, status: 'error', error: toErrorView(error) } : current,
         ),
     )
   }
@@ -447,12 +361,8 @@ function createOverlayActions(deps: OverlayActionDeps) {
 
   const confirmDeleteHost = () => {
     if (!pendingDelete || deleting) return
-    // A connecting host has a live link-work action behind it: one more click is what makes
-    // the user read the warning instead of losing that connection to a single Enter (S3).
-    if (pendingDelete.status === 'connecting' && deleteArmed !== true) {
-      setDeleteArmed(true)
-      return
-    }
+    // A connecting host has live link work: a second click makes the user read the warning instead of losing the link.
+    if (pendingDelete.status === 'connecting' && deleteArmed !== true) return setDeleteArmed(true)
     setDeleting(true)
     const deletedId = pendingDelete.id
     api

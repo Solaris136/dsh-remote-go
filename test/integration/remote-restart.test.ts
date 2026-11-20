@@ -14,14 +14,11 @@ import { SshConnection } from '../../dist/src/ssh.js'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
 const SIM_SCRIPT = path.join(ROOT, 'e2e', 'sim', 'simulated-remote.mjs')
-
 const QUIET = { warn() {}, info() {}, debug() {}, error() {} }
 const CREDENTIALS = { username: 'sim', password: 'sim' }
-
 function tail(lines) {
   return lines.slice(-15).join('')
 }
-
 function readState(file) {
   try {
     return JSON.parse(readFileSync(file, 'utf8'))
@@ -29,7 +26,6 @@ function readState(file) {
     return null
   }
 }
-
 async function waitForState(file, predicate, label, timeoutMs = 30_000) {
   const started = Date.now()
   while (Date.now() - started <= timeoutMs) {
@@ -39,7 +35,6 @@ async function waitForState(file, predicate, label, timeoutMs = 30_000) {
   }
   throw new Error(`${label} timed out after ${timeoutMs}ms`)
 }
-
 async function waitFor(predicate, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10_000
   const started = Date.now()
@@ -49,7 +44,6 @@ async function waitFor(predicate, options = {}) {
   }
   throw new Error(`${options.label ?? 'condition'} timed out after ${timeoutMs}ms`)
 }
-
 async function startSimulator(stateFile) {
   const logs = []
   const child = spawn(process.execPath, [SIM_SCRIPT, '--serve', '--state-file', stateFile], {
@@ -72,7 +66,6 @@ async function startSimulator(stateFile) {
   )
   return { child, state, logs }
 }
-
 async function stopSimulator(child) {
   if (!child || child.exitCode !== null) return true
   const exited = new Promise((resolve) => child.once('exit', resolve))
@@ -90,7 +83,6 @@ async function stopSimulator(child) {
   }
   return true
 }
-
 function httpGet(port, pathname) {
   return new Promise((resolve, reject) => {
     const request = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET' }, (response) => {
@@ -103,7 +95,6 @@ function httpGet(port, pathname) {
     request.end()
   })
 }
-
 /** The plugin exactly as it runs locally, pointed at the simulated SSH endpoint. */
 async function startPlugin(state, dir) {
   const store = new HostStore({ dir: path.join(dir, 'state'), logger: QUIET })
@@ -206,8 +197,8 @@ test(
         assert.ok(reported, `unexpected restart answer: ${restart.stdout}`)
         const newRemotePort = Number(reported[1])
         assert.notEqual(newRemotePort, before.remote.port)
-        // The remote is up again on the new port, but the run registry still names the old one -
-        // exactly the state a plugin-market restart leaves behind.
+        // The remote is up again on the new port, but the run registry still names the old one - exactly the state a
+        // plugin-market restart leaves behind.
         await waitForState(stateFile, (value) => Number(value.remotePort) === newRemotePort, 'simulator restart')
 
         // A proxy 502 is the real trigger: it is not trusted on its own, the probes confirm it.

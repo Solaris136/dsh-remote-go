@@ -1,28 +1,15 @@
 import { EventEmitter } from 'node:events'
 import { Duplex } from 'node:stream'
 import { closedError } from '../../dist/src/ssh-failures.js'
-
-/**
- * The test double for `SshPort` (design-ssh §7).
- *
- * It is a *reference implementation of the contract*, not a stub: the same conformance suite
- * (`test/unit/ssh-port-contract.test.js`) runs against this class and against the real ssh2
- * adapter, so any behaviour that only one of them has is a contract hole. What it deliberately
- * does not implement is the four optional download capabilities — exactly like the pre-P5 fake,
- * so `local-download.ts` / `remote-files.ts` keep exercising their "unsupported" branches.
- *
- * Simulation knobs (all constructor inputs, no extra prototype methods, so
- * `test/unit/fake-remote.test.js`'s "the fake only stands in for real methods" guard keeps
- * passing):
- *   - `connect`: replace the handshake; `onConnectRequest(options)` observes the dial options.
- *   - `exec`: replace one command's result; otherwise `output`/`outputChunks`/`hangOnExec` shape
- *     the default command.
- *   - `connectError` + `closeBeforeConnectReject`: a handshake that dies (close first, then reject).
- *   - `hostKey`: emit `hostkey-pending` before the handshake completes.
- *
- * The class keeps `connected` a writable field on purpose: several suites drive a live transport
- * by assigning it (`ssh.connected = true`), and a getter would break them.
- */
+/* The test double for `SshPort` (design-ssh §7). It is a *reference implementation of the contract*, not a stub: the
+ * same conformance suite runs against this class and the real ssh2 adapter, so a behaviour only one of them has is a
+ * contract hole. It deliberately lacks the four optional download capabilities — like the pre-P5 fake — so
+ * `local-download.ts` / `remote-files.ts` keep exercising their "unsupported" branches. Simulation knobs are
+ * constructor inputs only, no extra prototype methods (which `fake-remote.test.js`'s guard checks): `connect` replaces
+ * the handshake and `onConnectRequest(options)` observes the dial options; `exec` replaces one command, while
+ * `output`/`outputChunks`/`hangOnExec` shape the default; `connectError` + `closeBeforeConnectReject` is a handshake
+ * that dies (close first, then reject); `hostKey` emits `hostkey-pending` before the handshake completes.
+ * `connected` stays writable on purpose: suites drive a live transport by assigning it; a getter would break them. */
 export class FakeSshPort extends EventEmitter {
   constructor(input = {}) {
     super()
@@ -46,20 +33,17 @@ export class FakeSshPort extends EventEmitter {
     /** A host key to announce (`hostkey-pending`) before the handshake resolves. */
     this.hostKey = input.hostKey ?? null
     this.info = input.info ?? { fingerprint: 'SHA256:fake', keyType: 'ssh-ed25519', serverBanner: null }
-    // Same safety rule as the real adapter (decision D5): an adapter that can emit `error` keeps a
-    // permanent listener, so a stray emit can never throw through the Host process. The double
-    // emits none today, but the conformance suite pins the rule for both implementations.
+    // Same safety rule as the real adapter: an adapter that can emit `error` keeps a permanent listener, so a stray
+    // emit can never throw through the Host process; the double emits none, but the suite pins it for both.
     this.on('error', () => {})
   }
-
   async connect() {
     this.onConnectRequest?.(this.options)
     if (this.connectImpl) return this.connectImpl()
     if (this.connectError) {
       if (this.closeBeforeConnectReject) {
         this.connected = false
-        // Contract (decision D3): the event arrives before the rejection. The pipeline's watchers
-        // depend on it to settle a prompt parked on a handshake that died.
+        // Contract: the event arrives before the rejection, so the pipeline can settle a prompt parked on it.
         this.emit('close')
       }
       throw this.connectError
@@ -69,7 +53,6 @@ export class FakeSshPort extends EventEmitter {
     this.emit('ready', this.info)
     return this.info
   }
-
   async exec(command, options = {}) {
     this.calls.push({ command, options })
     if (!this.connected) throw closedError()
@@ -79,8 +62,7 @@ export class FakeSshPort extends EventEmitter {
       if (timeoutMs > 0) await new Promise((resolve) => setTimeout(resolve, timeoutMs))
       return { code: null, signal: null, stdout: '', stderr: '', timedOut: true }
     }
-    // Mirror the adapter's capture rule: a chunk is appended whole while the capture is still
-    // under `maxBytes`, and nothing is appended once it is not. No error, no flag (contract).
+    // Mirror the adapter's capture rule: a chunk is appended whole while the capture is under `maxBytes`, never after.
     const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : Number.POSITIVE_INFINITY
     let stdout = ''
     for (const chunk of this.outputChunks) {
@@ -95,7 +77,6 @@ export class FakeSshPort extends EventEmitter {
     }
     return { code: 0, signal: null, stdout, stderr: '', timedOut: false }
   }
-
   async forwardOut() {
     if (!this.connected) throw closedError()
     return new Duplex({
@@ -105,13 +86,11 @@ export class FakeSshPort extends EventEmitter {
       },
     })
   }
-
   async dispose() {
     this.disposed = true
     this.connected = false
     this.emit('close')
   }
-
   simulateClose() {
     this.connected = false
     this.emit('close')

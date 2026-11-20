@@ -1,17 +1,7 @@
 // client/src/guest-storage.ts - mountGuestStorage: the guest frame's private localStorage partition (9b 4/11); after guest-tools.ts, before carrier-pool.ts.
-/**
- * A same-origin frame shares this origin's `localStorage`, so the remote UI and this page would
- * keep their preferences in one place and overwrite each other. Give the frame a private key
- * space: `localStorage` becomes a Storage-shaped view whose keys carry a `drg:<hostId>:`
- * prefix. Writes from the frame can no longer touch a local preference, and its own values
- * survive a local edit because they live under different keys.
- *
- * Boundaries (documented in docs/design.md): values the page read before this injection came
- * from the shared store; `sessionStorage`, cookies and IndexedDB are untouched; a `storage`
- * event from another same-origin document is dropped while it is not this host's key, but only
- * for listeners registered after this script — a listener the page installed at boot already
- * ran.
- */
+/** A same-origin frame shares this origin's `localStorage`, so this page and the remote UI overwrite each other. */
+// Give it a private key space: a Storage-shaped view whose keys carry a `drg:<hostId>:` prefix, so writes stay apart.
+// `sessionStorage`, cookies and IndexedDB are untouched; foreign `storage` events are dropped after this script.
 function mountGuestStorage(win: Window, hostId: unknown): string {
   try {
     if (typeof hostId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(hostId)) return 'bad-id'
@@ -65,8 +55,7 @@ function mountGuestStorage(win: Window, hostId: unknown): string {
     }
     try {
       Object.defineProperty(win, 'localStorage', {
-        // Non-configurable: the page must not be able to `delete window.localStorage` and
-        // fall back to the shared origin store (documented data-hygiene limit, audit S3).
+        // Non-configurable: a page must not `delete window.localStorage` and fall back to the shared origin store.
         configurable: false,
         enumerable: true,
         get: function () {
@@ -77,8 +66,7 @@ function mountGuestStorage(win: Window, hostId: unknown): string {
       return 'blocked'
     }
     win.__drgStoragePartition = hostId
-    // Another document on this origin writing a preference raises `storage` here; the remote
-    // UI must not follow the local page. Only keys outside this host's namespace are dropped.
+    // Another document on this origin writing a preference raises `storage` here, which the remote UI must not follow.
     if (typeof win.addEventListener === 'function') {
       try {
         win.addEventListener(

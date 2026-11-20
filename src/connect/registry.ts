@@ -1,8 +1,4 @@
-/**
- * Run-registry reads that must not fail their caller: a missing or unreadable `run/web.json` only
- * means the action cannot attribute the running pid, which is one debug line, not a connection
- * failure (design-arch §3.3: this is the single implementation).
- */
+/** Run-registry reads that must not fail their caller: a missing or unreadable `run/web.json` only means the action cannot attribute the running pid, which is one debug line, not a connection failure. */
 import type { RemoteDeps, Reporter } from '../context.js'
 import type { HostRuntime } from '../host-runtime.js'
 import type { RemoteLayout } from '../layout.js'
@@ -17,7 +13,6 @@ export async function readRegistryQuietly(
   try {
     return await ctx.deps.readRegistry(runtime.ssh, layout)
   } catch (error) {
-    // swallow-ok: registry absence only means the restart cannot attribute the running pid
     ctx.progress.log(runtime, 'debug', 'restart: registry read failed:', messageOf(error))
     return null
   }

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict'
 import { FakeTunnel, createHost, makeTestService, waitFor } from '../helpers/fake-remote.ts'
 import { remoteHeartbeatTick } from '../../dist/src/watchdog.js'
 
-const LAYOUT_HOME = '/home/ubuntu/.dsh'
-
+const HOME = '/home/ubuntu/.dsh'
+/** A mutable run registry, so a re-attach's rewrite is visible to the next stop, and `clear()` mirrors the port. */
 function registryStore(initial = null) {
   let value = initial
   return {
@@ -22,42 +22,63 @@ function registryStore(initial = null) {
     get: () => value,
   }
 }
-
+/** The record a launch writes: the pid/port this connection is allowed to stop. */
 function registryRecord(pid = 4242, port = 38123) {
-  return {
-    pid,
-    port,
-    profile: 'web',
-    dshHome: LAYOUT_HOME,
-    launch: 'browser-carrier-v1',
-    origin: 'launch',
-  }
+  return { pid, port, profile: 'web', dshHome: HOME, launch: 'browser-carrier-v1', origin: 'launch' }
 }
-
+/** One `startWeb` answer, shaped like the real port's. */
 function webInfo(port, token, pid) {
   return {
     pid,
     port,
     token,
     url: `http://127.0.0.1:${port}/?token=${token}`,
-    logPath: `${LAYOUT_HOME}/remote-go/logs/web.log`,
+    logPath: `${HOME}/remote-go/logs/web.log`,
     startedAt: new Date().toISOString(),
     rawLine: '',
     profile: 'web',
-    dshHome: LAYOUT_HOME,
+    dshHome: HOME,
   }
 }
-
+/** The connect log of one host, joined into one string. */
 function messagesOf(service, id) {
-  const runtime = service.runtimes.get(id)
-  return (runtime?.logs ?? []).map((entry) => entry.message).join('\n')
+  return (service.runtimes.get(id)?.logs ?? []).map((entry) => entry.message).join('\n')
 }
-
-/** Connect one host the ordinary way and hand back its runtime. */
-async function connectHost(service, host) {
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-  return service.runtimes.get(host.id)
+/** Record every pid the service asks the remote to stop; `reply` is the port's answer. */
+function stopRecorder({ reply = { ok: true, output: 'STOPPED' }, after } = {}) {
+  const stopped = []
+  const stopWeb = async (_ssh, _layout, options) => {
+    stopped.push(options?.pid)
+    const pending = after?.()
+    if (pending) await pending
+    return reply
+  }
+  return { stopped, stopWeb }
+}
+/** A promise the test resolves by hand, so one async step can be held mid-flight. */
+function hold() {
+  let release = () => {}
+  const promise = new Promise((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+// The standard stop scenario: one host connected the ordinary way, its launch having written `registryRecord()`.
+// `registry` and `stops` can be supplied by a test that asserts on them.
+async function stopScenario(options = {}) {
+  const { host: hostOptions, registry = registryStore(null), stops = stopRecorder(), ...serviceOptions } = options
+  const made = await makeTestService({
+    readRegistry: registry.read,
+    writeRegistry: registry.write,
+    stopWeb: stops.stopWeb,
+    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+    ...serviceOptions,
+  })
+  const host = await createHost(made.service, hostOptions)
+  await made.service.connect(host.id)
+  await waitFor(() => made.service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  registry.set(registryRecord())
+  return { ...made, host, registry, stopped: stops.stopped, runtime: made.service.runtimes.get(host.id) }
 }
 
 test('stop refuses every state that cannot support it', async () => {
@@ -72,7 +93,8 @@ test('stop refuses every state that cannot support it', async () => {
     () => service.stopRemote(host.id),
     (error) => error.code === 'stop-unavailable',
   )
-  await connectHost(service, host)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   // A host that is busy with another one-shot action cannot interleave.
   runtime.linkBusy = 'restart'
   await assert.rejects(
@@ -115,40 +137,33 @@ test('stop refuses every state that cannot support it', async () => {
 })
 
 test('stop the launched instance: the pid is signalled and the host is kept disconnected', async () => {
-  const registry = registryStore(null)
-  const stopped = []
   const tunnels = []
+  const registry = registryStore(null)
+  const stops = stopRecorder({
+    // `stopRemoteWeb` removes run/web.json as part of the stop.
+    after: () => registry.clear(),
+  })
   let starts = 0
-  const { service, events } = await makeTestService({
-    readRegistry: registry.read,
-    writeRegistry: registry.write,
+  const { service, events, host, runtime } = await stopScenario({
+    host: { keepAlive: 'idle' },
+    registry,
+    stops,
     tunnelFactory: async (options) => {
       const tunnel = new FakeTunnel(45100 + tunnels.length + 1)
       tunnels.push({ remotePort: options.remotePort, tunnel })
       return tunnel
-    },
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      // `stopRemoteWeb` removes run/web.json as part of the stop.
-      registry.clear()
-      return { ok: true, output: 'STOPPED' }
     },
     startWeb: async () => {
       starts += 1
       return webInfo(38123, 'tok_first', 4242)
     },
   })
-  const host = await createHost(service, { keepAlive: 'idle' })
-  await connectHost(service, host)
-  registry.set(registryRecord())
-  const runtime = service.runtimes.get(host.id)
   const sshEvents = events.filter((event) => event.type === 'ssh').length
 
-  const result = await service.stopRemote(host.id)
-  assert.deepEqual(result, { ok: true, pid: 4242 })
+  assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
 
   // Only the one bound pid was signalled, once.
-  assert.deepEqual(stopped, [4242])
+  assert.deepEqual(stops.stopped, [4242])
   const view = service.snapshot().hosts[0]
   assert.equal(view.status, 'disconnected')
   assert.equal(view.progress, null)
@@ -189,24 +204,11 @@ test('stop the launched instance: the pid is signalled and the host is kept disc
 
 test('stop with keepAlive "stop" sends exactly one stop signal and arms no idle stop', async () => {
   const registry = registryStore(null)
-  const stopped = []
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      registry.clear()
-      return { ok: true, output: 'STOPPED' }
-    },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
-  })
-  // The `stop` policy normally stops the remote web itself when the link is torn down; the
-  // explicit action already did that, so teardown must not signal the pid a second time.
-  const host = await createHost(service, { keepAlive: 'stop' })
-  await connectHost(service, host)
-  registry.set(registryRecord())
-  const runtime = service.runtimes.get(host.id)
+  const stops = stopRecorder({ after: () => registry.clear() })
+  const { service, host, runtime } = await stopScenario({ host: { keepAlive: 'stop' }, registry, stops })
+  // The `stop` policy normally stops the remote web on teardown; the explicit action already did, so no second signal.
   assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
-  assert.deepEqual(stopped, [4242], 'the managed pid is signalled once, by the explicit action')
+  assert.deepEqual(stops.stopped, [4242], 'the managed pid is signalled once, by the explicit action')
   assert.equal(runtime.idleTimer, null)
   assert.equal(runtime.ssh, null)
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')
@@ -216,15 +218,11 @@ test('stop with keepAlive "stop" sends exactly one stop signal and arms no idle 
 
 test('stop with keepAlive "stop" and an already-gone pid signals nothing', async () => {
   const registry = registryStore(null)
-  const stopped = []
   const cleared = []
   let identityGone = false
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+  const { service, host, stopped, runtime } = await stopScenario({
+    host: { keepAlive: 'stop' },
+    registry,
     clearRegistry: async (_ssh, layout) => {
       cleared.push(layout)
       registry.clear()
@@ -237,20 +235,15 @@ test('stop with keepAlive "stop" and an already-gone pid signals nothing', async
             ok: true,
             startTime: `start-${pid}`,
             command: 'node /opt/dsh/bin.js web --profile web --no-open',
-            dshHome: LAYOUT_HOME,
+            dshHome: HOME,
           },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
   })
-  const host = await createHost(service, { keepAlive: 'stop' })
-  await connectHost(service, host)
-  registry.set(registryRecord())
   identityGone = true
   assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
-  // The pid was proven missing: the action only clears its registry, and the `stop` policy's
-  // teardown must not send the signal the action deliberately did not send.
+  // The pid was proven missing: the action only clears its registry, and teardown must not send the signal it withheld.
   assert.deepEqual(stopped, [], 'a pid proven gone must never be signalled by the teardown either')
   assert.equal(cleared.length, 1)
-  assert.equal(service.runtimes.get(host.id).idleTimer, null)
+  assert.equal(runtime.idleTimer, null)
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')
   await service.shutdown()
 })
@@ -258,22 +251,14 @@ test('stop with keepAlive "stop" and an already-gone pid signals nothing', async
 test('a stopped host never reconnects on its own', async () => {
   const registry = registryStore(null)
   let starts = 0
-  const { service, events } = await makeTestService({
-    readRegistry: registry.read,
-    writeRegistry: registry.write,
-    stopWeb: async () => {
-      registry.clear()
-      return { ok: true, output: 'STOPPED' }
-    },
+  const { service, events, host, runtime } = await stopScenario({
+    registry,
+    stops: stopRecorder({ after: () => registry.clear() }),
     startWeb: async () => {
       starts += 1
       return webInfo(38123, 'tok_first', 4242)
     },
   })
-  const host = await createHost(service)
-  await connectHost(service, host)
-  registry.set(registryRecord())
-  const runtime = service.runtimes.get(host.id)
   const sshEvents = events.filter((event) => event.type === 'ssh').length
   await service.stopRemote(host.id)
   await new Promise((resolve) => setTimeout(resolve, 60))
@@ -285,22 +270,13 @@ test('a stopped host never reconnects on its own', async () => {
 })
 
 test('stop reports stopping-remote while the remote process is being stopped', async () => {
-  const registry = registryStore(null)
-  let release = () => {}
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
+  const gate = hold()
+  const { service, host } = await stopScenario({
     stopWeb: async () => {
-      await gate
+      await gate.promise
       return { ok: true, output: 'STOPPED' }
     },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
   })
-  const host = await createHost(service)
-  await connectHost(service, host)
-  registry.set(registryRecord())
   const work = service.stopRemote(host.id)
   await waitFor(
     () => {
@@ -312,7 +288,7 @@ test('stop reports stopping-remote while the remote process is being stopped', a
   const view = service.snapshot().hosts[0]
   assert.equal(view.phase, 'start')
   assert.deepEqual(view.progress, { code: 'stopping-remote', params: { pid: 4242, port: 38123 } })
-  release()
+  gate.release()
   await work
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')
   await service.shutdown()
@@ -320,22 +296,16 @@ test('stop reports stopping-remote while the remote process is being stopped', a
 
 test('stop from remote-unreachable clears the stale registry and releases the link', async () => {
   const registry = registryStore(null)
-  const stopped = []
   const cleared = []
   let identityGone = false
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    writeRegistry: registry.write,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+  const { service, host, stopped } = await stopScenario({
+    host: { keepAlive: 'keep' },
+    registry,
     clearRegistry: async (_ssh, layout) => {
       cleared.push(layout)
       registry.clear()
       return { ok: true, output: '' }
     },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
     remoteStatus: async () => null,
     resolveRemote: async () => ({ ok: false, reason: 'no-running-web' }),
     processIdentity: async (_ssh, pid) =>
@@ -345,20 +315,16 @@ test('stop from remote-unreachable clears the stale registry and releases the li
             ok: true,
             startTime: `start-${pid}`,
             command: 'node /opt/dsh/bin.js web --profile web --no-open',
-            dshHome: LAYOUT_HOME,
+            dshHome: HOME,
           },
   })
-  const host = await createHost(service, { keepAlive: 'keep' })
-  await connectHost(service, host)
-  registry.set(registryRecord())
   await remoteHeartbeatTick(service.ctx, service.runtimes.get(host.id))
   await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'remote-unreachable' })
   assert.equal(service.snapshot().hosts[0].error.code, 'remote-unreachable')
   // The process that used to back this host is gone before the user asks to close it.
   identityGone = true
 
-  const result = await service.stopRemote(host.id)
-  assert.deepEqual(result, { ok: true, pid: 4242 })
+  assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 4242 })
   // The process is already gone: nothing is signalled, only its stale record is removed.
   assert.deepEqual(stopped, [])
   assert.equal(cleared.length, 1)
@@ -373,18 +339,7 @@ test('stop from remote-unreachable clears the stale registry and releases the li
 })
 
 test('stop refuses a pid the run registry does not name', async () => {
-  const registry = registryStore(null)
-  const stopped = []
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
-  })
-  const host = await createHost(service)
-  await connectHost(service, host)
+  const { service, host, registry, stopped } = await stopScenario()
   // The launch's registry record was removed (or was never written).
   registry.set(null)
   await assert.rejects(
@@ -405,19 +360,7 @@ test('stop refuses a pid the run registry does not name', async () => {
 })
 
 test('stop never signals a pid this connection did not launch or take over', async () => {
-  const registry = registryStore(null)
-  const stopped = []
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
-  })
-  const host = await createHost(service)
-  const runtime = await connectHost(service, host)
-  registry.set(registryRecord())
+  const { service, host, runtime, stopped } = await stopScenario()
   // The registry names the pid, but nothing proves this connection owns it any more.
   runtime.launched.delete(4242)
   runtime.bound = null
@@ -433,19 +376,7 @@ test('stop never signals a pid this connection did not launch or take over', asy
 })
 
 test('stop never signals a pid kept alongside the managed instance', async () => {
-  const registry = registryStore(null)
-  const stopped = []
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
-  })
-  const host = await createHost(service)
-  const runtime = await connectHost(service, host)
-  registry.set(registryRecord())
+  const { service, host, runtime, stopped } = await stopScenario()
   runtime.alongsidePids = [4242]
   await assert.rejects(
     () => service.stopRemote(host.id),
@@ -458,27 +389,16 @@ test('stop never signals a pid kept alongside the managed instance', async () =>
 })
 
 test('stop never signals a pid that was reused by another process', async () => {
-  const registry = registryStore(null)
-  const stopped = []
   let startTime = '1000'
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+  const { service, host, runtime, stopped } = await stopScenario({
     processIdentity: async (_ssh, pid) => ({
       ok: true,
       startTime,
       command: 'node /opt/dsh/bin.js web --profile web --no-open',
-      dshHome: LAYOUT_HOME,
+      dshHome: HOME,
     }),
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
   })
-  const host = await createHost(service)
-  await connectHost(service, host)
-  registry.set(registryRecord())
-  assert.equal(service.runtimes.get(host.id).launched.get(4242).startTime, '1000')
+  assert.equal(runtime.launched.get(4242).startTime, '1000')
   // The remote pid now belongs to a different process: the kernel start time moved.
   startTime = '9999'
   await assert.rejects(
@@ -493,21 +413,16 @@ test('stop never signals a pid that was reused by another process', async () => 
 
 test('stop a re-attached instance, then reconnect starts a clean new one', async () => {
   const registry = registryStore(null)
-  const stopped = []
   const starts = []
   const tunnels = []
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    writeRegistry: registry.write,
+  const stops = stopRecorder({ after: () => registry.clear() })
+  const { service, host, runtime, stopped } = await stopScenario({
+    registry,
+    stops,
     tunnelFactory: async (options) => {
       const tunnel = new FakeTunnel(46000 + tunnels.length + 1)
       tunnels.push({ remotePort: options.remotePort, tunnel })
       return tunnel
-    },
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      registry.clear()
-      return { ok: true, output: 'STOPPED' }
     },
     startWeb: async () => {
       starts.push(true)
@@ -522,13 +437,10 @@ test('stop a re-attached instance, then reconnect starts a clean new one', async
       url: 'http://127.0.0.1:38010/?token=tok_reattached',
       version: '0.2.2-rc.1',
       profile: 'web',
-      dshHome: LAYOUT_HOME,
+      dshHome: HOME,
       source: 'log',
     }),
   })
-  const host = await createHost(service)
-  const runtime = await connectHost(service, host)
-  registry.set(registryRecord())
   // The remote restarted itself: the watchdog re-attaches to pid 777 (origin reattach).
   await remoteHeartbeatTick(service.ctx, runtime)
   await waitFor(() => service.snapshot().hosts[0].remote.pid === 777, { label: 're-attached' })
@@ -537,8 +449,7 @@ test('stop a re-attached instance, then reconnect starts a clean new one', async
   assert.equal(registry.get().origin, 'reattach')
 
   // The user explicitly stops it: exactly the bound pid is signalled.
-  const result = await service.stopRemote(host.id)
-  assert.deepEqual(result, { ok: true, pid: 777 })
+  assert.deepEqual(await service.stopRemote(host.id), { ok: true, pid: 777 })
   assert.deepEqual(stopped, [777])
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')
   assert.equal(runtime.bound, null)
@@ -565,15 +476,9 @@ test('stop a re-attached instance, then reconnect starts a clean new one', async
 })
 
 test('a failed stop keeps the connected link and explains the reason', async () => {
-  const registry = registryStore(null)
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
-    stopWeb: async () => ({ ok: false, output: 'kill: Operation not permitted' }),
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
+  const { service, host, runtime } = await stopScenario({
+    stops: stopRecorder({ reply: { ok: false, output: 'kill: Operation not permitted' } }),
   })
-  const host = await createHost(service)
-  const runtime = await connectHost(service, host)
-  registry.set(registryRecord())
   await assert.rejects(
     () => service.stopRemote(host.id),
     (error) => error.code === 'stop-unavailable' && /干净停止|clean stop/.test(error.detail.zh + error.detail.en),
@@ -591,29 +496,19 @@ test('a failed stop keeps the connected link and explains the reason', async () 
 })
 
 test('a disconnect during the stop owns the final state', async () => {
-  const registry = registryStore(null)
-  let release = () => {}
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
-  const { service } = await makeTestService({
-    readRegistry: registry.read,
+  const gate = hold()
+  const { service, host } = await stopScenario({
     stopWeb: async () => {
-      await gate
+      await gate.promise
       return { ok: true, output: 'STOPPED' }
     },
-    startWeb: async () => webInfo(38123, 'tok_first', 4242),
   })
-  const host = await createHost(service)
-  await connectHost(service, host)
-  registry.set(registryRecord())
   const work = service.stopRemote(host.id)
   await waitFor(() => service.snapshot().hosts[0].progress?.code === 'stopping-remote')
   await service.disconnect(host.id)
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')
-  release()
-  const result = await work
-  assert.deepEqual(result, { ok: true, pid: 4242 })
+  gate.release()
+  assert.deepEqual(await work, { ok: true, pid: 4242 })
   await new Promise((resolve) => setTimeout(resolve, 30))
   // The late stop must not resurrect a connection state after the disconnect.
   assert.equal(service.snapshot().hosts[0].status, 'disconnected')

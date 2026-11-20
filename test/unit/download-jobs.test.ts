@@ -5,7 +5,7 @@ import { errors } from '../../dist/src/errors.js'
 
 const runtime = { id: 'h_1', status: 'connected', ssh: {} }
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms))
-
+/** A job collection plus the client-safe events it published. */
 function makeJobs(readDownload, options = {}) {
   const events = []
   const jobs = createDownloadJobs({
@@ -15,6 +15,19 @@ function makeJobs(readDownload, options = {}) {
     ...options,
   })
   return { jobs, events }
+}
+/** A deferred a preparation can await; `release()` lets it finish. */
+function gate() {
+  let release
+  const promise = new Promise((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+/** Wait for a job's preparation to settle, then read the client view. */
+async function settle(jobs, jobId, ms = 20) {
+  await tick(ms)
+  return jobs.status(jobId)
 }
 
 test('a download job streams, publishes progress and becomes ready', async () => {
@@ -28,8 +41,7 @@ test('a download job streams, publishes progress and becomes ready', async () =>
   const started = jobs.start(runtime, '/home/ubuntu/report.md', { destination: 'C:/Downloads' })
   assert.equal(started.phase, 'preparing')
   assert.equal(started.hostId, 'h_1')
-  await tick(30)
-  const ready = jobs.status(started.id)
+  const ready = await settle(jobs, started.id, 30)
   assert.equal(ready.phase, 'ready')
   assert.equal(ready.doneBytes, 10)
   assert.equal(ready.totalFiles, 1)
@@ -40,17 +52,10 @@ test('a download job streams, publishes progress and becomes ready', async () =>
 test('a folder job writes to the chosen directory', async () => {
   const { jobs, events } = makeJobs(async (_runtime, _path, options) => {
     assert.equal(options.destination, 'C:/Users/me/Downloads')
-    return {
-      kind: 'folder',
-      name: 'project',
-      destination: 'C:/Users/me/Downloads/project',
-      totalBytes: 42,
-      files: 2,
-    }
+    return { kind: 'folder', name: 'project', destination: 'C:/Users/me/Downloads/project', totalBytes: 42, files: 2 }
   })
   const started = jobs.start(runtime, '/home/ubuntu/project', { destination: 'C:/Users/me/Downloads' })
-  await tick(20)
-  const ready = jobs.status(started.id)
+  const ready = await settle(jobs, started.id)
   assert.equal(ready.kind, 'folder')
   assert.equal(ready.name, 'project')
   assert.equal(ready.destination, 'C:/Users/me/Downloads/project')
@@ -64,11 +69,8 @@ test('the job carries the home root the API judged against into the writer', asy
     seen.push(options.home)
     return { kind: 'file', name: 'a.txt', destination: '/home/me/Downloads/a.txt', totalBytes: 1, files: 1 }
   })
-  const started = jobs.start(runtime, '/home/ubuntu/a.txt', {
-    destination: '/home/me/Downloads',
-    home: '/home/me',
-  })
-  await tick(20)
+  const started = jobs.start(runtime, '/home/ubuntu/a.txt', { destination: '/home/me/Downloads', home: '/home/me' })
+  await settle(jobs, started.id)
   // The writer must judge the same root the pre-flight used, not `os.homedir()`.
   assert.deepEqual(seen, ['/home/me'])
   assert.equal('home' in jobs.status(started.id), false, 'the home root is not part of the client view')
@@ -76,58 +78,42 @@ test('the job carries the home root the API judged against into the writer', asy
 
 test('a failed preparation publishes a client-safe error and keeps the job for inspection', async () => {
   const { jobs, events } = makeJobs(async () => {
-    throw errors.remoteFileUnavailable({
-      zh: '没有权限。',
-      en: 'Permission denied.',
-    })
+    throw errors.remoteFileUnavailable({ zh: '没有权限。', en: 'Permission denied.' })
   })
   const started = jobs.start(runtime, '/home/ubuntu/secret')
-  await tick(20)
-  const failed = jobs.status(started.id)
+  const failed = await settle(jobs, started.id)
   assert.equal(failed.phase, 'error')
   assert.equal(failed.error.code, 'remote-file-unavailable')
   assert.ok(events.some((job) => job.phase === 'error'))
 })
 
 test('simultaneous preparations are bounded', async () => {
-  let release
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
+  const pending = gate()
   const { jobs } = makeJobs(
     async () => {
-      await gate
+      await pending.promise
       return { kind: 'file', name: 'a', data: Buffer.from('a') }
     },
     { maxPreparing: 1 },
   )
   const first = jobs.start(runtime, '/home/ubuntu/a')
   assert.throws(() => jobs.start(runtime, '/home/ubuntu/b'), /download-busy/)
-  release()
-  await tick(20)
-  assert.equal(jobs.status(first.id).phase, 'ready')
+  pending.release()
+  assert.equal((await settle(jobs, first.id)).phase, 'ready')
 })
 
 test('cancel removes a preparing job and ignores its late result', async () => {
-  let release
-  const gate = new Promise((resolve) => {
-    release = resolve
-  })
-  const events = []
-  const jobs = createDownloadJobs({
-    emit: (job) => events.push(job),
-    logger: { warn() {}, debug() {} },
-    readDownload: async (_runtime, _path, options) => {
-      options.onProgress({ doneBytes: 1, totalBytes: 2, doneFiles: 0, totalFiles: 1 })
-      await gate
-      return { kind: 'file', name: 'a', data: Buffer.from('a') }
-    },
+  const pending = gate()
+  const { jobs, events } = makeJobs(async (_runtime, _path, options) => {
+    options.onProgress({ doneBytes: 1, totalBytes: 2, doneFiles: 0, totalFiles: 1 })
+    await pending.promise
+    return { kind: 'file', name: 'a', data: Buffer.from('a') }
   })
   const started = jobs.start(runtime, '/home/ubuntu/a')
   await tick(5)
   assert.equal(jobs.cancel(started.id), true)
   assert.equal(jobs.cancel(started.id), false)
-  release()
+  pending.release()
   await tick(20)
   assert.equal(jobs.size, 0)
   assert.equal(
@@ -148,7 +134,5 @@ test('a folder job surfaces the names the download deliberately skipped', async 
     return { kind: 'folder', name: 'project', destination: 'C:/Downloads/project', totalBytes: 6, files: 2 }
   })
   const started = jobs.start(runtime, '/home/ubuntu/project', { destination: 'C:/Downloads' })
-  await tick(20)
-  const ready = jobs.status(started.id)
-  assert.deepEqual(ready.ignoredNames, ['desktop.ini', 'setup.lnk'])
+  assert.deepEqual((await settle(jobs, started.id)).ignoredNames, ['desktop.ini', 'setup.lnk'])
 })

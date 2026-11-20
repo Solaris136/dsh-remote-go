@@ -1,26 +1,18 @@
-/**
- * Small pure helpers shared by the host half, unit-tested with node:test.
- */
-
-/** The two-language text pair every user-facing string in this plugin uses. */
+/** Small pure helpers shared by the host half, unit-tested with node:test. */
 export interface BilingualText {
   zh: string
   en: string
 }
-
-/** A parsed `[user@]host[:port]` destination; `null` means "not given", never "empty". */
+/** A parsed `[user@]host[:port]`; `null` means "not given", never "empty". */
 export interface SshDestination {
   user: string | null
   host: string
   port: number | null
 }
-
 /** The slice of `console` the host half reports through; tests pass a collector. */
 export interface Logger {
   warn?: (...args: unknown[]) => void
 }
-
-/** A promise that resolves at most once: through `settle`, or through `onTimeout`. */
 export interface Decision<T> {
   promise: Promise<T>
   settle: (value: T) => void
@@ -51,22 +43,17 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 const LOG_LEVELS: Record<string, number> = { error: 0, warn: 1, info: 2, debug: 3 }
-
+const LOOPBACK_NAMES = new Set(['localhost', '::1', '::ffff:127.0.0.1'])
 /** Prototype-chain names that must never be written by a merge. */
 const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
-/**
- * Recursively merge `patch` into `base` (arrays and scalars replace). Only keys
- * `base` declares are written, so untrusted input can change known values but
- * never invent a property or poison the prototype.
- */
+/** Merge `patch` into `base` (arrays/scalars replace); only keys `base` declares are written, so untrusted input cannot invent a property or poison the prototype. */
 export function deepMerge<T>(base: T, patch: unknown): T {
   if (!isPlainObject(base) || !isPlainObject(patch)) return (patch === undefined ? base : patch) as T
-  const out = { ...base } as Record<string, unknown>
+  const out: Record<string, unknown> = { ...base }
   for (const key of Object.keys(base)) {
-    if (UNSAFE_KEYS.has(key)) continue
     const value = patch[key]
-    if (value === undefined) continue
+    if (value === undefined || UNSAFE_KEYS.has(key)) continue
     out[key] = isPlainObject(value) && isPlainObject(base[key]) ? deepMerge(base[key], value) : value
   }
   return out as T
@@ -87,44 +74,27 @@ export function expandHome(value: unknown, home: string): string {
 export function parseSshDestination(raw: unknown): SshDestination {
   const text = String(raw ?? '').trim()
   if (text === '') return { user: null, host: '', port: null }
-  let user = null
-  let rest = text
-  const at = rest.lastIndexOf('@')
-  if (at >= 0) {
-    user = rest.slice(0, at)
-    rest = rest.slice(at + 1)
-  }
-  let host = rest
-  let port = null
+  const at = text.lastIndexOf('@')
+  const user = (at >= 0 ? text.slice(0, at) : '') || null
+  const rest = at >= 0 ? text.slice(at + 1) : text
   if (rest.startsWith('[')) {
     const close = rest.indexOf(']')
-    if (close > 0) {
-      host = rest.slice(1, close)
-      const tail = rest.slice(close + 1)
-      if (/^:\d+$/.test(tail)) port = Number(tail.slice(1))
-    }
-  } else {
-    const colon = rest.lastIndexOf(':')
-    if (colon > 0 && rest.indexOf(':') === colon) {
-      const maybePort = rest.slice(colon + 1)
-      if (/^\d{1,5}$/.test(maybePort)) {
-        host = rest.slice(0, colon)
-        port = Number(maybePort)
-      }
-    }
+    const tail = close > 0 ? rest.slice(close + 1) : ''
+    const port = /^:\d+$/.test(tail) ? Number(tail.slice(1)) : null
+    return { user, host: close > 0 ? rest.slice(1, close) : rest, port }
   }
-  return { user: user || null, host, port }
+  const colon = rest.lastIndexOf(':')
+  const maybePort = rest.slice(colon + 1)
+  const port = colon > 0 && rest.indexOf(':') === colon && /^\d{1,5}$/.test(maybePort) ? Number(maybePort) : null
+  return { user, host: port === null ? rest : rest.slice(0, colon), port }
 }
 
 export function isLoopbackHost(host: string | null | undefined): boolean {
-  if (!host) return false
-  const normalized = host
+  const normalized = (host ?? '')
     .trim()
     .toLowerCase()
     .replace(/^\[|\]$/g, '')
-  if (normalized === 'localhost' || normalized === '::1') return true
-  if (normalized === '::ffff:127.0.0.1') return true
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)
+  return LOOPBACK_NAMES.has(normalized) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)
 }
 
 export function shellQuote(value: unknown): string {
@@ -134,15 +104,12 @@ export function shellQuote(value: unknown): string {
 export function headTail(text: unknown, max = 4000): string {
   const value = String(text ?? '')
   if (value.length <= max) return value
-  const head = value.slice(0, Math.floor(max / 2))
-  const tail = value.slice(-Math.floor(max / 2))
-  return `${head}\n…\n${tail}`
+  const half = Math.floor(max / 2)
+  return `${value.slice(0, half)}\n…\n${value.slice(-half)}`
 }
 
 export function logVisible(level: string, threshold = 'info'): boolean {
-  const rank = LOG_LEVELS[level] ?? LOG_LEVELS.info
-  const floor = LOG_LEVELS[threshold] ?? LOG_LEVELS.info
-  return rank >= floor
+  return (LOG_LEVELS[level] ?? LOG_LEVELS.info) >= (LOG_LEVELS[threshold] ?? LOG_LEVELS.info)
 }
 
 /** Message of an unknown thrown value, so catch blocks need not spell the ternary. */
@@ -155,11 +122,7 @@ export function isPid(value: unknown): boolean {
   return Number.isInteger(value) && (value as number) > 0
 }
 
-/**
- * A promise that resolves at most once: through `settle`, or with `onTimeout()`
- * when the deadline passes first. `onSettled` runs before the promise resolves so
- * a caller can clear the pending slot it installed on both paths.
- */
+/** A promise that resolves at most once: through `settle`, or with `onTimeout()` when the deadline passes first; `onSettled` runs before the resolution so a caller can clear the slot it installed on both paths. */
 export function createDecision<T>(timeoutMs: number, onTimeout: () => T, onSettled?: (value: T) => void): Decision<T> {
   let settle!: (value: T) => void
   const promise = new Promise<T>((resolve) => {

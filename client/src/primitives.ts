@@ -1,30 +1,38 @@
 // client/src/primitives.ts - RemoteIcon/strokeIcon and the small primitives (StatusDot, Badge, Button, IconButton, DownloadCenter, Spinner); after api-client.ts, before dialogs.ts.
 //#region 7. icons and small UI primitives
-
 /** What an icon component reads: the CSS size in px, and whether it is the active nav item. */
 interface IconProps {
   size?: number
   active?: boolean
 }
 
+/** The attributes both icons share: the box, the current-colour round stroke and the aria hiding. */
+function iconAttributes(size: number, viewBox: string, strokeWidth: number) {
+  return {
+    width: size,
+    height: size,
+    viewBox,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+    focusable: 'false',
+    style: { display: 'block' },
+  }
+}
+
+/** The CSS size an icon reads: its own prop when that is a positive number, otherwise the icon family's default. */
+function iconSize(props: IconProps, fallback: number): number {
+  return props && typeof props.size === 'number' && props.size > 0 ? props.size : fallback
+}
+
 function RemoteIcon(props: IconProps) {
-  const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 18
-  const active = props && props.active === true
+  const size = iconSize(props, 18)
   return h(
     'svg',
-    {
-      width: size,
-      height: size,
-      viewBox: '0 0 24 24',
-      fill: 'none',
-      stroke: 'currentColor',
-      strokeWidth: active ? 1.9 : 1.6,
-      strokeLinecap: 'round',
-      strokeLinejoin: 'round',
-      'aria-hidden': 'true',
-      focusable: 'false',
-      style: { display: 'block' },
-    },
+    iconAttributes(size, '0 0 24 24', props && props.active === true ? 1.9 : 1.6),
     h('rect', { x: 2.5, y: 4, width: 12, height: 9.5, rx: 2 }),
     h('path', { d: 'M5.75 17.5h5' }),
     h('path', { d: 'M8.25 13.5v4' }),
@@ -33,25 +41,14 @@ function RemoteIcon(props: IconProps) {
   )
 }
 
+/** An icon component built from its stroke paths: the same box and stroke rules as `RemoteIcon`, one size smaller. */
 function strokeIcon(paths: string[], viewBox?: string): (props: IconProps) => ReactElement {
   return function Icon(props: IconProps) {
-    const size = props && typeof props.size === 'number' && props.size > 0 ? props.size : 16
+    const size = iconSize(props, 16)
     return h(
       'svg',
-      {
-        width: size,
-        height: size,
-        viewBox: viewBox || '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 1.7,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': 'true',
-        focusable: 'false',
-        style: { display: 'block' },
-      },
-      paths.map((d: string, index: number) => h('path', { key: String(index), d })),
+      iconAttributes(size, viewBox || '0 0 24 24', 1.7),
+      paths.map((d, index) => h('path', { key: String(index), d })),
     )
   }
 }
@@ -74,6 +71,7 @@ interface StatusDotProps {
   title?: string
 }
 
+/** The host status dot: the tone comes from `statusOf`, and the label is its accessible name when there is one. */
 function StatusDot(props: StatusDotProps) {
   const status = props && typeof props.status === 'string' ? props.status : 'unconfigured'
   const tone = statusOf(status).tone
@@ -95,15 +93,7 @@ interface BadgeProps {
 
 function Badge(props: BadgeProps) {
   const tone = props && typeof props.tone === 'string' ? props.tone : 'idle'
-  return h(
-    'span',
-    {
-      className: 'drg-badge',
-      'data-tone': tone,
-      title: props && props.title,
-    },
-    props && props.children,
-  )
+  return h('span', { className: 'drg-badge', 'data-tone': tone, title: props && props.title }, props && props.children)
 }
 
 interface ButtonProps {
@@ -119,14 +109,12 @@ interface ButtonProps {
 
 function Button(props: ButtonProps) {
   const variant = props.variant || 'secondary'
-  const className = ['drg-btn', 'drg-btn-' + variant].join(' ')
-  const onClick = props.onClick
   return h(
     'button',
     {
       type: 'button',
-      className,
-      onClick: typeof onClick === 'function' ? onClick : undefined,
+      className: 'drg-btn drg-btn-' + variant,
+      onClick: typeof props.onClick === 'function' ? props.onClick : undefined,
       disabled: props.disabled === true || props.busy === true,
       title: props.title,
       'aria-label': props.ariaLabel,
@@ -154,6 +142,7 @@ function IconButton(props: IconButtonProps) {
       className: 'drg-iconbtn',
       onClick: typeof props.onClick === 'function' ? props.onClick : undefined,
       disabled: props.disabled === true,
+      // The title and the accessible name are the same label: the icon carries no text of its own.
       title: props.label,
       'aria-label': props.label,
       'data-testid': props.testId,
@@ -173,19 +162,12 @@ function formatBytes(value: unknown): string {
     amount /= 1024
     unit += 1
   }
+  // A whole-number unit keeps its integer; a fractional one gets a single decimal (and drops it at 10+).
   const digits = unit === 0 ? 0 : amount >= 10 ? 0 : 1
   return amount.toFixed(digits) + ' ' + units[unit]
 }
 
-/**
- * Draggable stack for the transient download cards. The stack stays anchored to
- * the bottom-right by CSS and is moved with a transform, so dragging never changes
- * layout or the guest behind it. Clamping keeps at least a corner on screen.
- */
-/**
- * The slice of a pointer event the drag reads. React's synthetic type widens `target` to
- * `EventTarget`, but the handler calls `closest` on it, so the DOM shape is named here.
- */
+/** The slice of a pointer event the drag reads: React widens `target`, yet the handler calls `closest` on it. */
 interface PointerDragEvent {
   button?: number
   pointerId: number
@@ -221,15 +203,23 @@ interface DownloadCenterProps extends LocaleProps {
   onDismiss?: (job: DownloadCardView) => void
 }
 
+/** Draggable stack for the transient cards: anchored bottom-right by CSS, moved by transform, so no layout changes. */
+// Clamping keeps at least a corner on screen.
 function DownloadCenter(props: DownloadCenterProps) {
   const jobs = Array.isArray(props.jobs) ? props.jobs : []
   const [offset, setOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
   const stackRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<DownloadDragState | null>(null)
+  /** The drag this pointer owns, or null: another pointer's move or release is never this drag's. */
+  const dragOf = (event: PointerDragEvent): DownloadDragState | null => {
+    const drag = dragRef.current
+    return drag && drag.pointerId === event.pointerId ? drag : null
+  }
 
   const onPointerDown = (event: PointerDragEvent) => {
     if (event.button !== undefined && event.button !== 0) return
     const target = event.target
+    // A press on one of the card's own buttons is a click, never the start of a drag.
     if (target && typeof target.closest === 'function' && target.closest('button')) return
     if (!stackRef.current || !event.currentTarget) return
     const rect = stackRef.current.getBoundingClientRect()
@@ -250,10 +240,11 @@ function DownloadCenter(props: DownloadCenterProps) {
   }
 
   const onPointerMove = (event: PointerDragEvent) => {
-    const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
+    const drag = dragOf(event)
+    if (!drag) return
     const x = drag.x + (event.clientX - drag.startX)
     const y = drag.y + (event.clientY - drag.startY)
+    // The bounds are the stack's rect plus its current offset, so a dragged stack still keeps 8px on screen.
     const minX = drag.x + (8 - drag.rect.left)
     const maxX = drag.x + (window.innerWidth - 8 - drag.rect.right)
     const minY = drag.y + (8 - drag.rect.top)
@@ -266,8 +257,7 @@ function DownloadCenter(props: DownloadCenterProps) {
   }
 
   const onPointerEnd = (event: PointerDragEvent) => {
-    const drag = dragRef.current
-    if (!drag || drag.pointerId !== event.pointerId) return
+    if (!dragOf(event)) return
     dragRef.current = null
     try {
       if (event.currentTarget && event.currentTarget.hasPointerCapture?.(event.pointerId)) {
@@ -302,11 +292,12 @@ function DownloadCenter(props: DownloadCenterProps) {
   )
 }
 
-/**
- * Bottom-right download card. It is transient (one per active job), shows a real
- * determinate bar once the Host has an inventory, and stays indeterminate while a
- * folder is still being enumerated. The header is the drag handle.
- */
+/** One header action button: Cancel while the job runs, Close once it is over. */
+function downloadAction(label: string, onClick: () => void) {
+  return h('button', { type: 'button', className: 'drg-download-action', onClick }, label)
+}
+
+/** One card per job: determinate with an inventory, indeterminate while a folder is still being enumerated. */
 function DownloadProgress(props: DownloadProgressProps) {
   const t = translatorOf(props)
   const job = props.job
@@ -324,8 +315,7 @@ function DownloadProgress(props: DownloadProgressProps) {
       ? t('downloadPreparing', { name })
       : t('downloadSaved', { name })
   const detail = failed && job.error ? resolveText(job.error.detail, localeOf(props)) : ''
-  const meta = []
-  if (total > 0) meta.push(formatBytes(done) + ' / ' + formatBytes(total))
+  const meta = total > 0 ? [formatBytes(done) + ' / ' + formatBytes(total)] : []
   if (Number(job.totalFiles) > 0) {
     meta.push(t('downloadFiles', { done: Number(job.doneFiles) || 0, total: Number(job.totalFiles) || 0 }))
   }
@@ -337,6 +327,7 @@ function DownloadProgress(props: DownloadProgressProps) {
       : preparing
         ? t('downloadInProgress')
         : title
+  const width = (total > 0 ? percent : preparing ? 35 : 100) + '%'
   return h(
     'div',
     {
@@ -363,32 +354,10 @@ function DownloadProgress(props: DownloadProgressProps) {
           [2, 7, 12].map((cy) => [2, 8].map((cx) => h('circle', { key: cx + '-' + cy, cx, cy, r: 1.1 }))),
         ),
       ),
-      // The visible title is the drag handle's label; the live region below announces it
-      // once, and buttons stay outside the status so a screen reader is not told to press
-      // Cancel as part of the status (audit S3).
+      // The visible title labels the handle; the live region announces it once, and buttons stay outside the status.
       h('span', { className: 'drg-download-title', title, 'aria-hidden': 'true' }, title),
-      cancellable
-        ? h(
-            'button',
-            {
-              type: 'button',
-              className: 'drg-download-action',
-              onClick: () => props.onCancel(job),
-            },
-            t('downloadCancel'),
-          )
-        : null,
-      dismissible
-        ? h(
-            'button',
-            {
-              type: 'button',
-              className: 'drg-download-action',
-              onClick: () => props.onDismiss(job),
-            },
-            t('downloadClose'),
-          )
-        : null,
+      cancellable ? downloadAction(t('downloadCancel'), () => props.onCancel(job)) : null,
+      dismissible ? downloadAction(t('downloadClose'), () => props.onDismiss(job)) : null,
     ),
     h(
       'div',
@@ -412,10 +381,7 @@ function DownloadProgress(props: DownloadProgressProps) {
         'aria-valuenow': total > 0 ? percent : undefined,
         'aria-valuetext': progressText,
       },
-      h('span', {
-        className: 'drg-download-fill',
-        style: { width: (total > 0 ? percent : preparing ? 35 : 100) + '%' },
-      }),
+      h('span', { className: 'drg-download-fill', style: { width } }),
     ),
     h(
       'div',
@@ -432,12 +398,6 @@ interface SpinnerProps {
 }
 
 function Spinner(props: SpinnerProps) {
-  return h('span', {
-    className: 'drg-spinner',
-    style: {
-      width: props && props.size ? props.size + 'px' : '16px',
-      height: props && props.size ? props.size + 'px' : '16px',
-    },
-    'aria-hidden': 'true',
-  })
+  const px = props && props.size ? props.size : 16
+  return h('span', { className: 'drg-spinner', style: { width: px + 'px', height: px + 'px' }, 'aria-hidden': 'true' })
 }

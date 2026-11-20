@@ -1,6 +1,5 @@
 // client/src/settings.ts - SettingsModal and the settings draft/patch/validation helpers (region 12); after diagnostics.ts, before prompts.ts.
 //#region 12. settings modal
-
 /** The settings draft: the flat form fields the modal edits, before they become a patch. */
 interface SettingsDraft extends Record<string, unknown> {
   defaultPort?: number
@@ -16,6 +15,45 @@ interface SettingsDraft extends Record<string, unknown> {
   logLevel?: 'error' | 'warn' | 'info' | 'debug'
   profile?: string
 }
+
+/** The select fields' option keys by draft key (`formRow` translates them). */
+const OPTIONS: Record<string, string[][]> = {
+  defaultAuth: [
+    ['key', 'settings.defaultAuthKey'],
+    ['password', 'settings.defaultAuthPassword'],
+  ],
+  hostKeyPolicy: [
+    ['first-use', 'settings.hostKeyPolicyFirstUse'],
+    ['strict', 'settings.hostKeyPolicyStrict'],
+  ],
+  language: [
+    ['auto', 'settings.languageAuto'],
+    ['zh', 'settings.languageZh'],
+    ['en', 'settings.languageEn'],
+  ],
+  logLevel: ['error', 'warn', 'info', 'debug'].map((level) => [level, level]),
+}
+/** One row per entry, in render order: `[kind, draft key, label key, hint key?, test id?]`. */
+const SSH_ROWS: string[][] = [
+  ['number', 'defaultPort', 'settings.defaultPort', 'settings.defaultPortHint', 'settings-defaultPort'],
+  ['select', 'defaultAuth', 'settings.defaultAuth'],
+  [
+    'number',
+    'connectTimeoutSec',
+    'settings.connectTimeout',
+    'settings.connectTimeoutHint',
+    'settings-connectTimeoutSec',
+  ],
+]
+const RECONNECT_ROWS: string[][] = [
+  ['number', 'maxAttempts', 'settings.maxAttempts', undefined, 'settings-maxAttempts'],
+  ['number', 'baseDelayMs', 'settings.baseDelay', undefined, 'settings-baseDelayMs'],
+]
+const BOOTSTRAP_ROWS: string[][] = [['text', 'profile', 'settings.profile', 'settings.profileHint', 'settings-profile']]
+const OTHER_ROWS: string[][] = [
+  ['select', 'language', 'settings.language'],
+  ['select', 'logLevel', 'settings.logLevel'],
+]
 
 function settingsPatchFromDraft(draft: SettingsDraft): SettingsPatch {
   const clamp = (value: unknown, limit: HostRange, fallback: number) => {
@@ -36,9 +74,7 @@ function settingsPatchFromDraft(draft: SettingsDraft): SettingsPatch {
     saveTokens: draft.saveTokens === true,
     language: draft.language === 'zh' || draft.language === 'en' ? draft.language : 'auto',
     logLevel: ['error', 'warn', 'info', 'debug'].indexOf(draft.logLevel) >= 0 ? draft.logLevel : 'info',
-    bootstrap: {
-      profile: String(draft.profile || 'web').trim() || 'web',
-    },
+    bootstrap: { profile: String(draft.profile || 'web').trim() || 'web' },
   }
 }
 
@@ -80,34 +116,29 @@ function SettingsModal(props: SettingsModalProps) {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   // Key-file picker overlay for the default key path.
   const [keyPicker, setKeyPicker] = useState(false)
-  const patch = (patchValue: Record<string, unknown>) => {
-    setDraft((current) => ({ ...current, ...patchValue }))
+  const patch = (values: Record<string, unknown>) => {
+    setDraft((current) => ({ ...current, ...values }))
+    // Correcting a field clears its own error instead of leaving a stale message until the next save.
     setFieldErrors((current) => {
+      const touched = Object.keys(values).filter((key) => current[key] !== undefined)
+      if (touched.length === 0) return current
       const next = { ...current }
-      let changed = false
-      for (const key of Object.keys(patchValue)) {
-        if (next[key] !== undefined) {
-          delete next[key]
-          changed = true
-        }
-      }
-      return changed ? next : current
+      for (const key of touched) delete next[key]
+      return next
     })
   }
-  const set = (field: string) => (value: unknown) => patch({ [field]: value })
-
-  const fieldRow = (spec: FormRowSpec) => {
-    const row = formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
-    // The settings body is built from `.map(fieldRow)`: every element needs a stable key or
-    // React reports a missing-key warning on every render.
-    return React.cloneElement(row, { key: spec.key })
-  }
-  const focusField = (field: string) => {
+  const set = (name: string) => (value: unknown) => patch({ [name]: value })
+  const field = (spec: FormRowSpec) => formRow(t, draft, patch, { ...spec, error: fieldErrors[spec.key] })
+  // The body is built from `.map`: every element needs a stable key or React warns on every render.
+  const rows = (specs: string[][]) =>
+    specs.map(([kind, key, label, hint, testId]) => field({ kind, key, label, hint, testId, options: OPTIONS[key] }))
+  const check = (key: string, label: DictKey) =>
+    h(CheckRow, { key, checked: draft[key] === true, label: t(label), onChange: set(key) })
+  const focusField = (name: string) => {
     if (typeof document === 'undefined' || !document.querySelector) return
-    const node = document.querySelector<HTMLElement>('[data-testid="settings-' + field + '"]')
+    const node = document.querySelector<HTMLElement>('[data-testid="settings-' + name + '"]')
     if (node && typeof node.focus === 'function') node.focus()
   }
-
   const handleSave = async () => {
     const invalid = validateSettingsDraft(draft)
     if (invalid !== null) {
@@ -128,18 +159,33 @@ function SettingsModal(props: SettingsModalProps) {
       setError(toErrorView(saveError))
     }
   }
-
+  const pickKey = () => setKeyPicker(true)
+  const saveLabel = t('settings.saveSettings')
+  const pickLabel = t('settings.keyPathPick')
+  // Spread the children: passing the variadic array as one child would make React demand a key per element.
+  const section = (title: string, ...children: ReactNode[]) =>
+    box('section', 'drg-settings-section', box('h3', 'drg-section-title', title), ...children)
   const footer = footerRow(
-    // Same dismissal contract as Escape / the backdrop / the header ×: a save in flight
-    // cannot be cancelled by the footer button either.
+    // A save in flight cannot be cancelled by the footer button either.
     h(Button, { variant: 'ghost', testId: 'settings-cancel', disabled: saving, onClick: props.onClose }, t('cancel')),
-    h(
-      Button,
-      { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave },
-      t('settings.saveSettings'),
+    h(Button, { variant: 'primary', testId: 'settings-save', busy: saving, onClick: handleSave }, saveLabel),
+  )
+  const keyPathField = h(
+    Field,
+    { label: t('settings.defaultKeyPath'), hint: t('settings.defaultKeyPathHint'), wide: true },
+    box(
+      'div',
+      'drg-field-inline',
+      h(TextInput, {
+        value: draft.defaultKeyPath,
+        placeholder: t('wizard.keyPathPlaceholder'),
+        ariaLabel: t('settings.defaultKeyPath'),
+        testId: 'settings-default-key-path',
+        onChange: set('defaultKeyPath'),
+      }),
+      h(Button, { variant: 'secondary', testId: 'settings-default-key-path-pick', onClick: pickKey }, pickLabel),
     ),
   )
-
   return h(
     React.Fragment,
     null,
@@ -158,150 +204,24 @@ function SettingsModal(props: SettingsModalProps) {
       box(
         'div',
         'drg-settings',
-        box(
-          'section',
-          'drg-settings-section',
-          box('h3', 'drg-section-title', t('settings.ssh')),
-          box(
-            'div',
-            'drg-form-grid drg-form-grid-3',
-            [
-              {
-                kind: 'number',
-                key: 'defaultPort',
-                label: 'settings.defaultPort',
-                hint: 'settings.defaultPortHint',
-                testId: 'settings-defaultPort',
-              },
-              {
-                kind: 'select',
-                key: 'defaultAuth',
-                label: 'settings.defaultAuth',
-                options: [
-                  ['key', 'settings.defaultAuthKey'],
-                  ['password', 'settings.defaultAuthPassword'],
-                ],
-              },
-              {
-                kind: 'number',
-                key: 'connectTimeoutSec',
-                label: 'settings.connectTimeout',
-                hint: 'settings.connectTimeoutHint',
-                testId: 'settings-connectTimeoutSec',
-              },
-            ].map(fieldRow),
-            h(
-              Field,
-              { label: t('settings.defaultKeyPath'), hint: t('settings.defaultKeyPathHint'), wide: true },
-              box(
-                'div',
-                'drg-field-inline',
-                h(TextInput, {
-                  value: draft.defaultKeyPath,
-                  placeholder: t('wizard.keyPathPlaceholder'),
-                  ariaLabel: t('settings.defaultKeyPath'),
-                  testId: 'settings-default-key-path',
-                  onChange: set('defaultKeyPath'),
-                }),
-                h(
-                  Button,
-                  {
-                    variant: 'secondary',
-                    testId: 'settings-default-key-path-pick',
-                    onClick: () => setKeyPicker(true),
-                  },
-                  t('settings.keyPathPick'),
-                ),
-              ),
-            ),
-          ),
-        ),
-        box(
-          'section',
-          'drg-settings-section',
-          box('h3', 'drg-section-title', t('settings.security')),
-          h(
-            Field,
-            { label: t('settings.hostKeyPolicy') },
-            h(Select, {
-              value: draft.hostKeyPolicy,
-              ariaLabel: t('settings.hostKeyPolicy'),
-              options: [
-                { value: 'first-use', label: t('settings.hostKeyPolicyFirstUse') },
-                { value: 'strict', label: t('settings.hostKeyPolicyStrict') },
-              ],
-              onChange: set('hostKeyPolicy'),
-            }),
-          ),
-          h(CheckRow, {
-            checked: draft.saveTokens === true,
-            label: t('settings.saveTokens'),
-            onChange: set('saveTokens'),
-          }),
+        section(t('settings.ssh'), box('div', 'drg-form-grid drg-form-grid-3', rows(SSH_ROWS), keyPathField)),
+        section(
+          t('settings.security'),
+          rows([['select', 'hostKeyPolicy', 'settings.hostKeyPolicy']]),
+          check('saveTokens', 'settings.saveTokens'),
           box('p', 'drg-field-hint', t('settings.saveTokensHint')),
           draft.saveTokens === true ? h(Notice, { tone: 'warn', title: t('settings.saveTokensRisk') }) : null,
           h('div', { className: 'drg-divider' }),
           box('h3', 'drg-section-title', t('settings.reconnect')),
-          h(CheckRow, {
-            checked: draft.autoReconnectEnabled === true,
-            label: t('settings.reconnectEnabled'),
-            onChange: set('autoReconnectEnabled'),
-          }),
-          box(
-            'div',
-            'drg-form-grid',
-            [
-              { kind: 'number', key: 'maxAttempts', label: 'settings.maxAttempts', testId: 'settings-maxAttempts' },
-              { kind: 'number', key: 'baseDelayMs', label: 'settings.baseDelay', testId: 'settings-baseDelayMs' },
-            ].map(fieldRow),
-          ),
+          check('autoReconnectEnabled', 'settings.reconnectEnabled'),
+          box('div', 'drg-form-grid', rows(RECONNECT_ROWS)),
         ),
-        box(
-          'section',
-          'drg-settings-section',
-          box('h3', 'drg-section-title', t('settings.bootstrap')),
+        section(
+          t('settings.bootstrap'),
           box('p', 'drg-field-hint', t('settings.bootstrapHint')),
-          box(
-            'div',
-            'drg-form-grid',
-            [
-              {
-                kind: 'text',
-                key: 'profile',
-                label: 'settings.profile',
-                hint: 'settings.profileHint',
-                testId: 'settings-profile',
-              },
-            ].map(fieldRow),
-          ),
+          box('div', 'drg-form-grid', rows(BOOTSTRAP_ROWS)),
         ),
-        box(
-          'section',
-          'drg-settings-section',
-          box('h3', 'drg-section-title', t('settings.other')),
-          box(
-            'div',
-            'drg-form-grid drg-form-grid-3',
-            [
-              {
-                kind: 'select',
-                key: 'language',
-                label: 'settings.language',
-                options: [
-                  ['auto', 'settings.languageAuto'],
-                  ['zh', 'settings.languageZh'],
-                  ['en', 'settings.languageEn'],
-                ],
-              },
-              {
-                kind: 'select',
-                key: 'logLevel',
-                label: 'settings.logLevel',
-                options: ['error', 'warn', 'info', 'debug'].map((level) => [level, level]),
-              },
-            ].map(fieldRow),
-          ),
-        ),
+        section(t('settings.other'), box('div', 'drg-form-grid drg-form-grid-3', rows(OTHER_ROWS))),
         error ? h(Notice, { tone: 'error' }, resolveText(error.detail, locale)) : null,
       ),
     ),

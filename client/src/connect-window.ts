@@ -6,11 +6,13 @@ interface ConnectProgressProps extends LocaleProps {
   title?: ReactNode
 }
 
+/** The takeover body's progress: the host's current phase, the phase list and the Host's own progress line. */
 function ConnectProgress(props: ConnectProgressProps) {
   const t = translatorOf(props)
   const host: Partial<HostView> = props.host || {}
   const current = host.phase ? PHASES.indexOf(host.phase) : -1
   const name = host.name || host.id || ''
+  const progressCode = host.progress ? host.progress.code : undefined
   return box(
     'div',
     'drg-progress',
@@ -20,11 +22,7 @@ function ConnectProgress(props: ConnectProgressProps) {
       h(Spinner, { size: 22 }),
       box('h2', 'drg-progress-title', props.title || t('viewportConnecting', { name })),
     ),
-    h(
-      'p',
-      { className: 'drg-progress-line', 'data-progress': host.progress ? host.progress.code : undefined },
-      progressText(t, host.progress),
-    ),
+    h('p', { className: 'drg-progress-line', 'data-progress': progressCode }, progressText(t, host.progress)),
     box(
       'ol',
       'drg-phases',
@@ -38,8 +36,7 @@ function ConnectProgress(props: ConnectProgressProps) {
             { className: 'drg-phase-mark', 'aria-hidden': 'true' },
             state === 'done' ? h(IconCheck, { size: 12 }) : null,
           ),
-          // PHASES is the contract list and every id has a `phase.<id>` label (i18n.test.ts keeps
-          // the pair honest), so this runtime-built key is sound even though it cannot be a literal.
+          // PHASES is the contract list, every id has a `phase.<id>` label (i18n.test.ts checks), so this key is sound.
           h('span', null, t(dictionaryKey('phase.' + phase))),
         )
       }),
@@ -55,6 +52,7 @@ interface FingerprintCardProps extends LocaleProps {
   onReject?: () => void
 }
 
+/** The host-key prompt: a changed key is the error tone, an observed one warning, both accepted via `onAccept`. */
 function FingerprintCard(props: FingerprintCardProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
@@ -126,13 +124,18 @@ function FingerprintCard(props: FingerprintCardProps) {
   )
 }
 
-interface ErrorCardProps extends LocaleProps {
-  error?: unknown
+/** The three follow-up actions an error offers: the error card takes them, the connect window only forwards them. */
+interface ErrorActions {
   onRetry?: () => void
   onDiagnose?: () => void
   onBack?: () => void
 }
 
+interface ErrorCardProps extends LocaleProps, ErrorActions {
+  error?: unknown
+}
+
+/** The failure body: the error view's title, detail and next steps, and only the actions this error offers. */
 function ErrorCard(props: ErrorCardProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
@@ -161,6 +164,7 @@ function ErrorCard(props: ErrorCardProps) {
     box(
       'div',
       'drg-row drg-row-wrap',
+      // A non-retryable error must not offer Retry: the Host said the same request would fail again.
       view.retryable !== false && typeof props.onRetry === 'function'
         ? h(Button, { variant: 'primary', testId: 'error-retry', onClick: props.onRetry }, t('retry'))
         : null,
@@ -174,6 +178,7 @@ function ErrorCard(props: ErrorCardProps) {
   )
 }
 
+/** The local clock time a log line was written at (empty for a timestamp that cannot be read). */
 function logClock(iso: unknown): string {
   const when = typeof iso === 'string' && iso !== '' ? new Date(iso) : null
   if (when === null || Number.isNaN(when.getTime())) return ''
@@ -183,7 +188,6 @@ function logClock(iso: unknown): string {
 
 /** The connect phases that own a log line; an unknown id prints as itself. */
 const CONNECT_LOG_PHASES = new Set(['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying', 'ready'])
-
 /** A line's text: the Host's bilingual line when present, otherwise the raw message. */
 function connectLogText(entry: ConnectLogEntry, locale: DictLocale): string {
   const localized = resolveText(entry.text, locale)
@@ -198,6 +202,7 @@ interface ConnectLogProps extends LocaleProps {
   host?: Partial<HostView> | null
 }
 
+/** Follows the tail until the user scrolls away; `data-boundary` marks where the current attempt began. */
 function ConnectLog(props: ConnectLogProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
@@ -262,16 +267,14 @@ function ConnectLog(props: ConnectLogProps) {
   )
 }
 
-interface ConnectWindowProps extends LocaleProps {
+interface ConnectWindowProps extends LocaleProps, ErrorActions {
   host?: HostView | null
   fingerprintBusy?: boolean
   onAcceptFingerprint?: (remember: boolean) => void
   onRejectFingerprint?: () => void
-  onRetry?: () => void
-  onDiagnose?: () => void
-  onBack?: () => void
 }
 
+/** The takeover body: the host's warning and version parity above one of the three link states, then the log. */
 function ConnectWindow(props: ConnectWindowProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)

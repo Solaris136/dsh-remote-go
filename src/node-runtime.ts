@@ -1,9 +1,5 @@
-/**
- * The plugin's own Node.js runtime on the remote: an official build, SHA-256 verified, under `$DSH_HOME/remote-go/node`; commands are fixed templates, never user-composed.
- *
- * The artifact scripts themselves — checksum discovery, verified download and unpack — live in
- * `node/download.ts`; this module decides what can be reused and runs the install.
- */
+/** The plugin's Node.js runtime on the remote: an official build, SHA-256 verified, under `$DSH_HOME/remote-go/node`,
+ * installed by fixed command templates (never user-composed). The artifact scripts live in `node/download.ts`. */
 import { errors } from './errors.js'
 import type { RemoteGoError } from './errors.js'
 import type { BilingualText } from './util.js'
@@ -31,7 +27,6 @@ export interface NodeInstallEvent {
   source?: string
 }
 
-/** The managed runtime `ensureRemoteNode` resolves to. */
 export interface ManagedNode {
   managed: true
   version: string
@@ -44,14 +39,16 @@ export interface ManagedNode {
 
 /** A failed resolution/install: the typed reason plus the technical detail to report. */
 export type NodeSetupFailure = { ok: false; reason: string; technical?: string }
+/** The normalized result of one remote command. */
+type RemoteResult = { code: number; stdout: string; stderr: string }
 
 export function managedNodeVersionFromEngine(range: unknown, fallback: string = MANAGED_NODE_VERSION_FALLBACK): string {
   const text = String(range ?? '').trim()
   if (text === '') return normalizeVersion(fallback)
   const first = text.split('||')[0].trim()
   if (first === '' || first === '*' || first === 'latest') return normalizeVersion(fallback)
-  // A strict `>` needs the next patch; `>=`, `^`, `~`, `=` and a bare version all
-  // mean that version itself.
+  // A strict `>` needs the next patch; `>=`, `^`, `~`, `=` and a bare version all mean that version
+  // itself.
   const strict = /^>\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(first)
   if (strict && !first.startsWith('>=')) {
     return normalizeVersion(`${Number(strict[1])}.${Number(strict[2] ?? 0)}.${Number(strict[3] ?? 0) + 1}`)
@@ -87,13 +84,10 @@ export function nodeDistArch(arch: unknown): string | null {
 function compareGlibc(left: unknown, right: unknown): number {
   const a = String(left ?? '').split('.')
   const b = String(right ?? '').split('.')
-  const length = Math.max(a.length, b.length)
-  for (let index = 0; index < length; index += 1) {
-    const x = Number.parseInt(a[index] ?? '0', 10)
-    const y = Number.parseInt(b[index] ?? '0', 10)
-    const leftValue = Number.isFinite(x) ? x : 0
-    const rightValue = Number.isFinite(y) ? y : 0
-    if (leftValue !== rightValue) return leftValue < rightValue ? -1 : 1
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const x = Number.parseInt(a[index] ?? '0', 10) || 0
+    const y = Number.parseInt(b[index] ?? '0', 10) || 0
+    if (x !== y) return x < y ? -1 : 1
   }
   return 0
 }
@@ -128,20 +122,12 @@ export function parseNodeScanOutput(stdout: unknown): NodeInstallation[] {
   return versions
 }
 
-function technicalOf(error: unknown): string {
-  return messageOf(error ?? '')
-}
-
 function nodeError(detail: BilingualText, technical?: string): RemoteGoError {
   return errors.nodeInstallFailed(detail, technical ? { technical } : undefined)
 }
 
 /** Run one remote command and normalize whatever shape the transport returned. */
-async function runRemote(
-  ssh: SshPort,
-  command: string,
-  options: SshExecOptions,
-): Promise<{ code: number; stdout: string; stderr: string }> {
+async function runRemote(ssh: SshPort, command: string, options: SshExecOptions): Promise<RemoteResult> {
   const result = await ssh.exec(command, options)
   return {
     code: typeof result?.code === 'number' ? result.code : 0,
@@ -151,7 +137,7 @@ async function runRemote(
 }
 
 async function scanManagedNode(ssh: SshPort, layout: RemoteLayout): Promise<NodeInstallation[]> {
-  let result: { code: number; stdout: string; stderr: string }
+  let result: RemoteResult
   try {
     result = await runRemote(ssh, buildNodeScanScript(layout), {
       timeoutMs: NODE_SCAN_TIMEOUT_MS,
@@ -160,7 +146,7 @@ async function scanManagedNode(ssh: SshPort, layout: RemoteLayout): Promise<Node
   } catch (error) {
     throw nodeError(
       { zh: '无法检查远端托管的 Node。', en: 'Could not inspect the managed Node on the remote.' },
-      technicalOf(error),
+      messageOf(error ?? ''),
     )
   }
   if (result.code !== 0) {
@@ -179,7 +165,7 @@ async function resolveNodeRelease(
   ssh: SshPort,
   input: { layout: RemoteLayout; version: string; arch: string; bases?: readonly string[] },
 ): Promise<{ ok: true; release: NodeRelease } | NodeSetupFailure> {
-  let result: { code: number; stdout: string; stderr: string }
+  let result: RemoteResult
   try {
     result = await runRemote(
       ssh,
@@ -192,9 +178,8 @@ async function resolveNodeRelease(
       { timeoutMs: NODE_CHECKSUM_TIMEOUT_MS, maxBytes: 200_000 },
     )
   } catch (error) {
-    // swallow-ok: unreachable — a transport failure is reported as a typed resolution
-    // reason; the caller turns it into the install error.
-    return { ok: false, reason: 'unreachable', technical: technicalOf(error) }
+    // swallow-ok: unreachable — a transport failure is reported as a typed resolution reason
+    return { ok: false, reason: 'unreachable', technical: messageOf(error ?? '') }
   }
   if (result.code === 0) {
     const release = parseNodeChecksumOutput(result.stdout, {
@@ -205,9 +190,7 @@ async function resolveNodeRelease(
     if (release) return { ok: true, release }
     return { ok: false, reason: 'no-checksum', technical: headTail(result.stdout, 600) }
   }
-  if (result.code === 9 || result.stdout.includes('FAILED\tno-fetch')) {
-    return { ok: false, reason: 'no-fetch' }
-  }
+  if (result.code === 9 || result.stdout.includes('FAILED\tno-fetch')) return { ok: false, reason: 'no-fetch' }
   if (result.code === 5) {
     return { ok: false, reason: 'unreachable', technical: headTail(result.stderr || result.stdout, 600) }
   }
@@ -258,7 +241,7 @@ async function installNodeRelease(
       failure = parts.slice(1).filter(Boolean).join(' ') || 'failed'
     }
   }
-  let result: { code: number; stdout: string; stderr: string }
+  let result: RemoteResult
   try {
     result = await runRemote(
       ssh,
@@ -275,9 +258,8 @@ async function installNodeRelease(
       },
     )
   } catch (error) {
-    // swallow-ok: unreachable — same contract as the checksum step: the caller turns
-    // it into the install error with the technical detail.
-    return { ok: false, reason: 'unreachable', technical: technicalOf(error) }
+    // swallow-ok: unreachable — same contract as the checksum step, the caller reports it
+    return { ok: false, reason: 'unreachable', technical: messageOf(error ?? '') }
   }
   if (result.code !== 0 || !dir) {
     return {
@@ -286,9 +268,7 @@ async function installNodeRelease(
       technical: headTail(`${result.stdout}\n${result.stderr}`, 800),
     }
   }
-  if (dir !== expectedDir) {
-    return { ok: false, reason: 'unexpected-location', technical: dir }
-  }
+  if (dir !== expectedDir) return { ok: false, reason: 'unexpected-location', technical: dir }
   return { ok: true, dir }
 }
 
@@ -317,8 +297,8 @@ export async function ensureRemoteNode(ssh: SshPort, options: EnsureRemoteNodeOp
     })
   }
   if (String(facts.os ?? '') !== 'Linux') {
-    // The official builds this module installs are Linux-only; refusing here keeps a
-    // Darwin/Windows remote from downloading a binary that could never run.
+    // The official builds this module installs are Linux-only; refusing here keeps a Darwin/Windows
+    // remote from downloading a binary that could never run.
     throw errors.unsupportedOs(`${facts.os ?? 'unknown'} ${facts.arch ?? ''}`.trim())
   }
   if (facts.libc === 'glibc' && facts.glibcVersion && compareGlibc(facts.glibcVersion, NODE_MIN_GLIBC) < 0) {
@@ -353,12 +333,7 @@ export async function ensureRemoteNode(ssh: SshPort, options: EnsureRemoteNodeOp
   let installedNow = false
   if (!current) {
     onProgress({ step: 'checksum', version })
-    const resolved = await resolveNodeRelease(ssh, {
-      layout,
-      version,
-      arch,
-      bases: options.bases,
-    })
+    const resolved = await resolveNodeRelease(ssh, { layout, version, arch, bases: options.bases })
     if (resolved.ok === false) {
       throw nodeError(resolveFailureDetail(resolved.reason, version), resolved.technical ?? `reason=${resolved.reason}`)
     }

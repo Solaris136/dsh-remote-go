@@ -1,9 +1,7 @@
 import { applyColorScheme } from './ui-steps.ts'
 
 export const MIN_CONTRAST = 3
-
 export const PRIMARY_TEST_IDS = ['host-add', 'host-add-empty']
-
 export function measureButtons() {
   function parseColor(value) {
     const match = /rgba?\(([^)]+)\)/.exec(value ?? '')
@@ -96,8 +94,8 @@ export function measureButtons() {
       labelRatio: renderedLabel ? round(contrast(renderedLabel, background.color)) : null,
     }
   })
-  // 11–12px metadata is normal-size text for WCAG: 4.5:1, not the 3:1 large-text floor. It used
-  // to be excluded from this check entirely, so `label-caption` slipped through (review).
+  // 11–12px metadata is normal-size text for WCAG: 4.5:1, not the 3:1 large-text floor. It used to be excluded from
+  // this check entirely, so `label-caption` slipped through (review).
   const smallText = [...section.querySelectorAll('.drg-card-meta dt, .drg-card-meta dd')].map((node) => {
     const style = getComputedStyle(node)
     const background = effectiveBackground(node)
@@ -118,9 +116,9 @@ export function measureButtons() {
     bodyBackground: getComputedStyle(document.body).backgroundColor,
     sectionBackground: format(sectionBackground.color),
     sectionGradient: sectionBackground.gradient,
-    // A dialog mounts with a 160ms fade; measuring while it runs can catch opacity 0 and
-    // report a false contrast failure (the desktop shell occasionally re-opened the window
-    // right before the measurement). Stability means: no animation is still running.
+    // A dialog mounts with a 160ms fade; measuring while it runs can catch opacity 0 and report a false contrast
+    // failure (the desktop shell occasionally re-opened the window right before the measurement). Stability means: no
+    // animation is still running.
     animations:
       typeof document.getAnimations === 'function'
         ? document.getAnimations().filter((animation) => animation.playState === 'running').length
@@ -129,7 +127,6 @@ export function measureButtons() {
     smallText,
   }
 }
-
 export async function measureStable(page, options) {
   const timeoutMs = options.timeoutMs ?? 60_000
   const started = Date.now()
@@ -160,7 +157,6 @@ export async function measureStable(page, options) {
       `(expected body background != ${options.previousBodyBackground ?? '(any)'}; running animations: ${JSON.stringify(running)})`,
   )
 }
-
 export async function assertMeasured(measured, mode) {
   const { default: assert } = await import('node:assert/strict')
   assert.equal(measured.mounted, true, `${mode}: the host-management window did not mount`)
@@ -173,8 +169,8 @@ export async function assertMeasured(measured, mode) {
     measured.buttons.length >= 2,
     `${mode}: expected the plugin's action buttons, found ${measured.buttons.length}`,
   )
-  // A clean profile has no host cards, so `smallText` would be empty and the 4.5:1 loop below
-  // would never run (review nit 4). The fixtures seed one host; require it to be measured.
+  // A clean profile has no host cards, so `smallText` would be empty and the 4.5:1 loop below would never run (review
+  // nit 4). The fixtures seed one host; require it to be measured.
   assert.ok(
     (measured.smallText?.length ?? 0) > 0,
     `${mode}: no 11-12px host-card metadata was measured; the contrast gate would be vacuous`,
@@ -204,8 +200,8 @@ export async function assertMeasured(measured, mode) {
     )
   }
   const primary = measured.buttons.filter((button) => PRIMARY_TEST_IDS.includes(button.testId))
-  // The fixtures now seed a host, so the empty-state button (`host-add-empty`) is not rendered;
-  // the normal `host-add` action must still be present and measured.
+  // The fixtures now seed a host, so the empty-state button (`host-add-empty`) is not rendered; the normal `host-add`
+  // action must still be present and measured.
   assert.ok(
     primary.length >= 1,
     `${mode}: the primary button under test is missing (found ${JSON.stringify(measured.buttons.map((button) => button.testId))})`,
@@ -217,7 +213,6 @@ export async function assertMeasured(measured, mode) {
   )
   return measured
 }
-
 export async function assertLightAndDark(page, mode) {
   const { default: assert } = await import('node:assert/strict')
   await applyColorScheme(page, 'light', null)

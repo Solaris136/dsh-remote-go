@@ -1,15 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, rmSync } from 'node:fs'
-import http from 'node:http'
+import { rmSync } from 'node:fs'
 import path from 'node:path'
-import process from 'node:process'
-import { fileURLToPath } from 'node:url'
+import { assertNoPageErrors, collectPageErrors, openBrowserPage, serveHarness } from '../helpers/browser.ts'
 import { makeTempRoot, resolveBrowser, skipOrFail, waitFor } from './harness-support.ts'
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-// The plugin serves the built artifact: `dist/client.js` (scripts/build-client.mjs).
-const CLIENT_PATH = path.join(ROOT, 'dist', 'client.js')
 
 const GUEST_HTML = `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>DeepSeek Harness</title></head>
@@ -24,17 +18,14 @@ const GUEST_HTML = `<!doctype html>
   window.emitTarget = (target) => window.__drgBridgeSink({ target })
 </script>
 </body></html>`
-
 const NOT_DSH_HTML = `<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>proxy error</title></head>
 <body><h1>404: unknown host</h1></body></html>`
-
 const ROUTES = {
   '/dsh-remote-go/remote/h_a/': GUEST_HTML,
   '/dsh-remote-go/remote/h_pw/': GUEST_HTML,
   '/dsh-remote-go/remote/h_bad/': NOT_DSH_HTML,
 }
-
 /** The harness page: real React overlay over a stubbed Host API, an EventSource and two guests. */
 function harnessPage() {
   return `<!doctype html>
@@ -156,8 +147,7 @@ function harnessPage() {
       this.url = url
       this.listeners = {}
       this.closed = false
-      // 0 = CONNECTING until told otherwise; a test that wants the "permanent refusal" path
-      // (an older Host without /events/logs) sets 2 before emitting an error.
+ // 0 = CONNECTING until told otherwise; the "permanent refusal" path (an older Host) sets 2 before emitting an error.
       this.readyState = 0
       window.__streams.push(this)
     }
@@ -193,8 +183,7 @@ function harnessPage() {
     window.__streams.filter((stream) => String(stream.url).endsWith('/events/logs'))
   window.__pushState = (state) => {
     window.__state = state
-    // The client may have rebuilt its EventSource: every live instance gets the frame, the
-    // closed ones ignore it inside the client.
+    // The client may have rebuilt its EventSource: every live instance gets the frame, closed ones ignore it.
     for (const stream of window.__streams) {
       if (!stream.closed) stream.emit('state', { data: JSON.stringify(state) })
     }
@@ -235,20 +224,6 @@ function harnessPage() {
 </script>
 </body></html>`
 }
-
-function listen(server) {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.removeListener('error', reject)
-      resolve(server.address().port)
-    })
-  })
-}
-function close(server) {
-  return new Promise((resolve) => server.close(() => resolve(undefined)))
-}
-
 test(
   'client dialogs, host editing, password flow, live stream, downloads and carrier failures',
   { timeout: 180_000 },
@@ -259,79 +234,18 @@ test(
       return
     }
     const tempRoot = makeTempRoot('dsh-remote-go-client-ui')
-    let browser = null
+    let session = null
     let server = null
     try {
-      const esbuild = await import('esbuild')
-      const reactBundle = (
-        await esbuild.build({
-          stdin: {
-            contents: `import React from 'react'
-import { createRoot } from 'react-dom/client'
-window.React = React
-window.ReactDOM = { createRoot }`,
-            resolveDir: ROOT,
-            loader: 'js',
-          },
-          bundle: true,
-          write: false,
-          format: 'iife',
-          platform: 'browser',
-          logLevel: 'silent',
-        })
-      ).outputFiles[0].text
-      const harness = harnessPage()
-      server = http.createServer((req, res) => {
-        const pathname = new URL(req.url ?? '/', 'http://x').pathname
-        if (pathname === '/') {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(harness)
-          return
-        }
-        if (pathname === '/react.js') {
-          res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-          res.end(reactBundle)
-          return
-        }
-        if (pathname === '/client.js') {
-          res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-          res.end(readFileSync(CLIENT_PATH))
-          return
-        }
-        if (pathname === '/dsh-remote-go/remote/h_hang/') {
-          // Never answer: the carrier's load timeout owns this case.
-          return
-        }
-        if (Object.prototype.hasOwnProperty.call(ROUTES, pathname)) {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(ROUTES[pathname])
-          return
-        }
-        res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })
-        res.end('not found')
-      })
-      const port = await listen(server)
-      const puppeteer = (await import('puppeteer-core')).default
-      browser = await puppeteer.launch({
-        executablePath: browserPath,
-        headless: 'new',
-        userDataDir: path.join(tempRoot, 'profile'),
-        args: [
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-gpu',
-          // Hosted Ubuntu runners restrict unprivileged user namespaces: Chromium aborts with
-          // "No usable sandbox!" without this (same as the other browser suites).
-          ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
-        ],
-      })
-      const page = await browser.newPage()
-      const errors = []
-      page.on('pageerror', (error) => errors.push(String(error?.message ?? error)))
-      page.on('console', (message) => {
-        if (message.type() === 'error') errors.push('console: ' + message.text())
-      })
-      await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      server = await serveHarness(
+        { '/': harnessPage(), ...ROUTES },
+        // A frame that never commits: the carrier's load timeout owns this case, so the request is never answered.
+        { onRequest: (_req, _res, pathname) => pathname === '/dsh-remote-go/remote/h_hang/' },
+      )
+      session = await openBrowserPage(browserPath, { userDataDir: path.join(tempRoot, 'profile') })
+      const page = session.page
+      const errors = collectPageErrors(page, { console: 'console: ' })
+      await page.goto(`http://127.0.0.1:${server.port}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       await page.waitForFunction(() => Boolean(window.__harness), { timeout: 15_000 })
       const escape = async () => {
         await page.keyboard.press('Escape')
@@ -357,6 +271,18 @@ window.ReactDOM = { createRoot }`,
         if (await page.$('[data-testid="manage-window"]')) await escape()
         await page.waitForFunction(() => !document.querySelector('[data-testid="manage-window"]'), { timeout: 5000 })
       }
+      /** Publish a state frame with one host patched, the way a running Host reports progress. */
+      const patchHost = (hostId, patch) =>
+        page.evaluate(
+          ({ hostId, patch }) => {
+            window.__pushState({
+              ...window.__state,
+              rev: window.__state.rev + 1,
+              hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
+            })
+          },
+          { hostId, patch },
+        )
       const openWizard = async (mode, hostId) => {
         await page.evaluate(
           ({ mode, hostId }) => {
@@ -404,8 +330,7 @@ window.ReactDOM = { createRoot }`,
       await t.test('manage + password and manage + delete close one layer at a time', async () => {
         // manage + password prompt
         await openManage()
-        // A remembered password is tried first; force that attempt to fail so the prompt appears
-        // while the management window stays open.
+        // A remembered password is tried first; force that attempt to fail so the prompt appears with the window open.
         await page.evaluate(() => {
           window.__connectMode = 'auth-error'
         })
@@ -438,9 +363,8 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('the manage window can confirm stopping its remote DSH', async () => {
-        // The confirmation is rendered inside the management window. While it is on top, the
-        // layer that hosts it gets `inert` - and a nested dialog inherits that, so every button
-        // and its backdrop used to accept no input at all (the window read as frozen).
+        // The confirmation renders inside the management window: while it is on top the hosting layer gets `inert`, and
+        // nested dialog inherited that, so every button and backdrop accepted no input (the window read as frozen).
         await openManage()
         await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-stop-remote"]')
         await page.waitForSelector('[data-testid="stop-remote-dialog"]', { visible: true, timeout: 5000 })
@@ -460,8 +384,7 @@ window.ReactDOM = { createRoot }`,
         assert.deepEqual(nested.inertAncestors, [], 'the confirmation must not sit inside an inert layer')
         assert.equal(nested.hitTest, true, 'the confirmation button must receive the click')
 
-        // The hosting layer is no longer inert, so the nested backdrop is what has to shield the
-        // window below: a click on a card action must cancel the confirmation, not reach the card.
+        // The hosting layer is no longer inert, so the nested backdrop shields the window below from card actions.
         const behind = await page.evaluate(() => {
           const card = document
             .querySelector('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-open"]')
@@ -514,17 +437,6 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('restart and reconnect open the connect window with their progress and log', async () => {
-        const patchHost = (hostId, patch) =>
-          page.evaluate(
-            ({ hostId, patch }) => {
-              window.__pushState({
-                ...window.__state,
-                rev: window.__state.rev + 1,
-                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
-              })
-            },
-            { hostId, patch },
-          )
         const logLine = (seq, message) => ({
           seq,
           at: new Date().toISOString(),
@@ -588,21 +500,9 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('a connecting host stays listed and its card reopens the progress window', async () => {
-        const setHost = (hostId, patch) =>
-          page.evaluate(
-            ({ hostId, patch }) => {
-              window.__pushState({
-                ...window.__state,
-                rev: window.__state.rev + 1,
-                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
-              })
-            },
-            { hostId, patch },
-          )
         await openManage()
-        await setHost('h_v6', { status: 'connecting', phase: 'ssh', progress: { code: 'ssh-connecting' }, logs: [] })
-        // A connecting host is no longer filtered out of the list, so closing the connect window
-        // never leaves the connection without a progress view.
+        await patchHost('h_v6', { status: 'connecting', phase: 'ssh', progress: { code: 'ssh-connecting' }, logs: [] })
+        // A connecting host is no longer filtered out, so closing the connect window never leaves it without progress.
         await page.waitForSelector('[data-testid="host-card"][data-host-id="h_v6"][data-status="connecting"]', {
           timeout: 5000,
         })
@@ -626,7 +526,7 @@ window.ReactDOM = { createRoot }`,
           'the log comes back with the window',
         )
         // Put the harness fixture back for the scenarios that follow.
-        await setHost('h_v6', { status: 'disconnected', phase: null, progress: null, logs: [] })
+        await patchHost('h_v6', { status: 'disconnected', phase: null, progress: null, logs: [] })
         await page.waitForSelector('[data-testid="host-list"]', { timeout: 5000 })
         await closeManage()
       })
@@ -791,9 +691,8 @@ window.ReactDOM = { createRoot }`,
           window.__connectAttempts = 0
         })
         await page.type('[data-testid="password-input"]', 'secret')
-        // The Enter that confirms an IME candidate: `isComposing` on the native event, and the
-        // legacy 229 every engine that loses the flag reports. Neither may submit the half-typed
-        // password (MWG `ime-safe-enter-submit`).
+        // The Enter that confirms an IME candidate (`isComposing`, and the legacy 229 engines report): neither may
+        // submit the half-typed password (MWG `ime-safe-enter-submit`).
         await page.evaluate(() => {
           const input = document.querySelector('[data-testid="password-input"]')
           input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }))
@@ -923,8 +822,7 @@ window.ReactDOM = { createRoot }`,
         )
         assert.match(banner, /实时连接已断开/)
         assert.match(banner, /正在轮询/)
-        // The degradation is also visible outside the management window (the reviewer saw the
-        // banner only there): the shell toast must carry it over the local page / a carrier.
+        // The degradation must be visible outside the management window too: the shell toast carries it there.
         await page.waitForFunction(
           () =>
             [...document.querySelectorAll('[data-testid="toast-region"] .drg-toast')].some((node) =>
@@ -992,8 +890,7 @@ window.ReactDOM = { createRoot }`,
         assert.match(painted.summary, /已连接 3/)
         assert.equal(painted.status, 'connected')
 
-        // A slow GET /state that resolves *after* a newer frame is stale as well: request a
-        // refresh while the response is held, then push the newer frame in between.
+        // A slow GET /state resolving after a newer frame is stale too: hold the refresh, push the newer frame between.
         await page.evaluate(() => {
           window.__slowState = window.__staleFrames.older
           window.__harness.face.panelStore.requestIntent({ kind: 'manage' })
@@ -1007,9 +904,8 @@ window.ReactDOM = { createRoot }`,
         assert.match(painted.summary, /已连接 3/, 'a late older GET response must not repaint the list')
         assert.equal(painted.status, 'connected')
 
-        // A Host restart / plugin reload starts a new publish instance with a fresh rev: its
-        // frames must be accepted even though rev went backwards (review feedback: otherwise the
-        // Client freezes on the old high-water mark forever).
+        // A Host restart or plugin reload starts a new publish instance with a fresh rev: its frames are accepted even
+        // though rev went backwards, or the Client freezes on the old high-water mark forever.
         await page.evaluate(() => {
           const base = window.__staleFrames.newer
           window.__pushState({
@@ -1063,8 +959,7 @@ window.ReactDOM = { createRoot }`,
           },
           { timeout: 5000 },
         )
-        // The guest row shows Local + its own host only: it must not paint another host's exit
-        // control (review blocker 1).
+        // The guest row shows Local + its own host only: it must not paint another host's exit control.
         const rowTargets = await frameHandle.evaluate(() =>
           [...document.querySelectorAll('#drg-host-row .drg-hr-item')]
             .map((node) => node.getAttribute('data-target'))
@@ -1099,14 +994,13 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('a re-ordered guest sidebar keeps the switcher row focused and open', async () => {
-        // The previous scenario hid the window without telling the overlay: the window is still
-        // the page's target, so hand it to the local page first and then ask for the host again -
-        // that is the transition a user makes, and it re-reveals the warm carrier.
+        // The previous scenario hid the window without telling the overlay: the window is still the page's target, so
+        // hand it to the local page first and then ask for the host
+        // again — the transition that re-reveals the warm carrier.
         await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'local' }))
         await page.waitForFunction(() => window.__harness.plugin.carrier.shown() === null, { timeout: 5000 })
         await page.evaluate(() => window.__harness.face.panelStore.requestIntent({ kind: 'open', hostId: 'h_a' }))
-        // The carrier goes up transparent and keeps `display:none` until it is revealed: a row
-        // inside a hidden document has no box and cannot take focus.
+        // The carrier goes up transparent with `display:none` until revealed: a row in a hidden document cannot focus.
         await waitFor(page, () => window.__harness.plugin.carrier.shown() === 'h_a', { timeout: 15_000 })
         await waitFor(
           page,
@@ -1131,8 +1025,7 @@ window.ReactDOM = { createRoot }`,
           },
           { timeout: 5000 },
         )
-        // The row is a `role=button` surface whose menu is one of its children: open it, and put
-        // the focus on the row itself, so a remove-then-insert would be visible in both.
+        // The row is a `role=button` with a menu child: open it and focus the row, so a remove-then-insert shows.
         const recorder = await frameHandle.evaluate(() => {
           const row = document.getElementById('drg-host-row')
           row.focus()
@@ -1147,8 +1040,7 @@ window.ReactDOM = { createRoot }`,
               return native.call(this, node, reference)
             }
           }
-          // The shell re-renders the sidebar and lands a sibling above the row, which is what
-          // makes the next placement move it.
+          // The shell re-renders the sidebar and lands a sibling above the row, so the next placement has to move it.
           const foreign = document.createElement('div')
           foreign.id = 'drg-shell-inserted'
           row.parentNode.insertBefore(foreign, row)
@@ -1183,14 +1075,12 @@ window.ReactDOM = { createRoot }`,
           assert.equal(placed.expanded, 'true', 'the open menu survives it')
           assert.equal(placed.open, true)
         } else {
-          // No `moveBefore`: the placement falls back to the insertion this code always made. The
-          // position is what the test can require of that path.
+          // No `moveBefore`: the placement falls back to plain insertion; the position is all the test can require.
           assert.deepEqual(placed.moves, [])
         }
         assert.equal(placed.previousIsBrand, true, 'the row is back in its slot either way')
         assert.equal(placed.nextId, 'drg-shell-inserted')
-        // The fallback path exists on a page that has no `moveBefore` (an older engine): the row
-        // still lands where it belongs, which is the promise the module makes.
+        // The fallback path on a page without `moveBefore`: the row still lands where it belongs, which is the promise.
         const movesBefore = placed.moves.length
         await frameHandle.evaluate(() => {
           delete Element.prototype.moveBefore
@@ -1264,17 +1154,6 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('the connect log arrives on its own channel and never renders a line twice', async () => {
-        const patchHost = (hostId, patch) =>
-          page.evaluate(
-            ({ hostId, patch }) => {
-              window.__pushState({
-                ...window.__state,
-                rev: window.__state.rev + 1,
-                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
-              })
-            },
-            { hostId, patch },
-          )
         const line = (seq, message) => ({
           seq,
           at: new Date().toISOString(),
@@ -1289,16 +1168,14 @@ window.ReactDOM = { createRoot }`,
         await page.waitForFunction(() => window.__calls.some((call) => /\/restart$/.test(call.url)), { timeout: 5000 })
         await patchHost('h_a', { status: 'connecting', phase: 'ssh', progress: { code: 'ssh-connecting' }, logs: [] })
         await page.waitForSelector('[data-testid="connect-log"]', { timeout: 5000 })
-        // B1: the log channel is a second EventSource with its own path, opened only while a
-        // connect window exists (it did not exist before this host started connecting).
+        // B1: the log channel is a second EventSource with its own path, opened only while a connect window exists.
         const urls = await page.evaluate(() =>
           window.__logStreams().map((stream) => ({ url: stream.url, closed: stream.closed })),
         )
         assert.ok(urls.length >= 1, 'the log channel opens with the connect window')
         assert.equal(urls.at(-1).url, '/dsh-remote-go/api/events/logs')
         assert.equal(urls.at(-1).closed, false)
-        // The page may have moved to another publish generation in an earlier scenario: the frame
-        // must name the generation the client is on, or it is (correctly) dropped as foreign.
+        // The page may have moved to another generation: the frame must name the client's one or be dropped as foreign.
         const instance = await page.evaluate(() => window.__state.instance)
         const resetFrame = {
           hostId: 'h_a',
@@ -1310,9 +1187,8 @@ window.ReactDOM = { createRoot }`,
           entries: [line(1, 'first row'), line(2, 'second row'), line(3, 'third row')],
         }
 
-        // B2: rows come from `log` frames. The window is freshly opened, so a state refresh may
-        // still be in flight; a real Host answers a reconnect with a `reset`, and the harness has
-        // no server behind the fake stream, so the frame is re-sent until it lands.
+        // B2: rows come from `log` frames. The window is fresh and a state refresh may still be in flight; the harness
+        // has no server behind the fake stream, so the frame is re-sent until it lands.
         try {
           await page.waitForFunction(
             (frame) => {
@@ -1376,22 +1252,10 @@ window.ReactDOM = { createRoot }`,
 
       await t.test('a missing log channel falls back to the snapshot without degrading the banner', async () => {
         const line = { seq: 7, at: new Date().toISOString(), level: 'info', phase: 'ssh', message: 'from the snapshot' }
-        const patchHost = (hostId, patch) =>
-          page.evaluate(
-            ({ hostId, patch }) => {
-              window.__pushState({
-                ...window.__state,
-                rev: window.__state.rev + 1,
-                hosts: window.__state.hosts.map((host) => (host.id === hostId ? { ...host, ...patch } : host)),
-              })
-            },
-            { hostId, patch },
-          )
         await openManage()
         await page.click('[data-testid="host-card"][data-host-id="h_a"] [data-testid="host-restart"]')
         await page.waitForFunction(() => window.__calls.some((call) => /\/restart$/.test(call.url)), { timeout: 5000 })
-        // A failed connection is the status whose connect window carries a retry control, and its
-        // retry is a real user action that ends in `GET /state`.
+        // A failed connection's connect window carries a retry control, and its retry is a real `GET /state`.
         await patchHost('h_a', {
           status: 'error',
           phase: 'ssh',
@@ -1407,8 +1271,7 @@ window.ReactDOM = { createRoot }`,
         })
         await page.waitForSelector('[data-testid="connect-log"]', { timeout: 5000 })
         await page.waitForSelector('[data-testid="error-retry"]', { timeout: 5000 })
-        // The log channel dies (here: a permanent refusal, the shape an older Host answers). It
-        // must not raise the degraded banner: that banner belongs to the state channel.
+        // The log channel dies (a permanent refusal, as an older Host answers): it must not raise the degraded banner.
         await page.evaluate(() => window.__failStream('/events/logs'))
         await new Promise((resolve) => setTimeout(resolve, 300))
         assert.equal(
@@ -1454,11 +1317,11 @@ window.ReactDOM = { createRoot }`,
           page.evaluate(() => {
             const dialog = document.querySelector('[data-testid="manage-window"] [role="dialog"]')
             const style = getComputedStyle(dialog)
-            // `offsetWidth`/`offsetHeight` rather than the client rect: the dialog enters with a
-            // 160ms scale animation, and the layout box is what has to stay the same size.
+            // `offsetWidth`/`offsetHeight` rather than the client rect: the dialog enters with a 160ms scale animation
+            // and the box is what has to keep its size.
             const box = { width: dialog.offsetWidth, height: dialog.offsetHeight }
-            // The drawer is not open in this harness, so its rule is proven on an element of that
-            // class: both surfaces the forced-colors block touches have to be covered.
+            // The drawer is not open here, so its rule is proven on
+            // an element of that class: both forced-colors surfaces.
             const probe = document.createElement('div')
             probe.className = 'drg-drawer'
             document.querySelector('.drg-root').appendChild(probe)
@@ -1487,8 +1350,7 @@ window.ReactDOM = { createRoot }`,
         assert.equal(forced.style, 'solid')
         assert.equal(forced.drawer.width, '1px', 'and so does the drawer')
         assert.equal(forced.drawer.style, 'solid')
-        // Zero pixel difference outside the mode, and inside it `box-sizing: border-box` keeps the
-        // box the same size: the edge is drawn inward, not added to the panel.
+        // Zero pixel difference outside the mode, and `box-sizing: border-box` keeps the box: the edge is drawn inward.
         assert.deepEqual(forced.box, normal.box, 'the panel keeps its size')
         await page.emulateMediaFeatures([])
         const restored = await read()
@@ -1501,8 +1363,8 @@ window.ReactDOM = { createRoot }`,
         const target = '[data-testid="host-add"]'
         const motionOf = () =>
           page.evaluate((selector) => {
-            // Computed times come back in whichever unit the engine picked (`0.16s`, `160ms`,
-            // and `1e-05s` for the collapsed case), so they are normalised to milliseconds.
+            // Computed times come back in whichever unit the engine
+            // picked (`0.16s`, `160ms`, `1e-05s`): normalise to ms.
             const toMs = (value) => {
               const text = String(value).trim()
               if (text.endsWith('ms')) return Number.parseFloat(text)
@@ -1535,9 +1397,8 @@ window.ReactDOM = { createRoot }`,
         assert.ok(reduced.animation < 0.1, 'the dialog appears instead of animating in')
         assert.ok(reduced.backdrop < 0.1, 'the scrim too')
         await page.emulateMediaFeatures([])
-        // Keyboard focus keeps a visible ring: nothing removes an outline without replacing it.
-        // The ring reads two host tokens, and this harness paints no theme at all (every `--dsw-*`
-        // is undefined here, which makes the shorthand invalid and the ring invisible), so the two
+        // Keyboard focus keeps a visible ring: nothing removes an outline without replacing it. The ring reads two host
+        // tokens, and this harness paints no theme (every `--dsw-*` is undefined, so the shorthand is invalid), so the
         // values the shell supplies are declared for the measurement and removed afterwards.
         await page.evaluate(() => {
           document.documentElement.style.setProperty('--dsw-focus-ring-width', '2px')
@@ -1568,12 +1429,11 @@ window.ReactDOM = { createRoot }`,
       })
 
       await t.test('the page logged no errors', async () => {
-        const ignored = errors.filter((text) => !/Failed to load resource/.test(text))
-        assert.deepEqual(ignored, [])
+        assertNoPageErrors(errors)
       })
     } finally {
-      if (browser !== null) await browser.close().catch(() => {})
-      if (server !== null) await close(server)
+      if (session !== null) await session.close().catch(() => {})
+      if (server !== null) await server.close()
       rmSync(tempRoot, { recursive: true, force: true })
     }
   },

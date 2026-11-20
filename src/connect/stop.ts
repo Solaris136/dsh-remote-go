@@ -1,36 +1,21 @@
-/**
- * The explicit "stop remote DSH": prove the pid is the instance this connection is bound to,
- * signal it, clear the stale record and release the link onto `disconnected` (settings and
- * credentials kept, no automatic reconnect).
- */
-import type { ConnectProgressState } from '../connect-progress.js'
+/** The explicit "stop remote DSH": prove the pid is the instance this connection is bound to, signal it, clear the stale record and release the link onto `disconnected` (settings and credentials kept, no automatic reconnect). */
 import type { Config, ConnectCtx, HostState, RemoteDeps, Reporter, Transport } from '../context.js'
 import { errors, toErrorView } from '../errors.js'
-import type { ErrorView } from '../errors.js'
 import { endLinkWork, isLinkWorkCurrent } from '../host-lifecycle.js'
-import type { ConnectPhase, HostRuntime, HostStatus } from '../host-runtime.js'
+import type { HostRuntime } from '../host-runtime.js'
 import { layoutForRuntime } from '../layout.js'
 import { dispatch, scopeFactsFor } from '../runtime/dispatch.js'
 import { createRuntimeEffects } from '../runtime/effects.js'
+import type { StopSnapshot } from '../runtime/events.js'
 import type { BilingualText } from '../util.js'
 import { isPid } from '../util.js'
-import type { ConnectLogWriter } from './guards.js'
+import { linkActionState, type ConnectLogWriter } from './guards.js'
 import { OWNERSHIP_OPTIONS, proveOwnership } from './ownership.js'
 
 /** The remote web this connection stopped (null when it was already gone). */
 export interface StopRemoteResult {
   ok: boolean
   pid: number | null
-}
-
-/** The state a failed stop has to put back exactly as it found it. */
-interface StopState {
-  status: HostStatus
-  phase: ConnectPhase | null
-  progress: ConnectProgressState | null
-  error: ErrorView | null
-  uiReady: boolean
-  localPort: number | null
 }
 
 /** Why the explicit stop refused, as the bilingual `ErrorView.detail` the Client renders. */
@@ -77,22 +62,7 @@ function describeStopRefusal(reason: string, pid: number): BilingualText {
   }
 }
 
-/**
- * Stop the remote DSH this connection manages, then release the link: the tunnel closes,
- * the SSH session is released and the host lands on `disconnected` (settings and credentials
- * kept, no automatic reconnect) so the card offers Reconnect again. `run/web.json` is removed
- * by the stop itself, so the next connect starts a clean instance instead of raising the
- * "a manually started DSH is already running" conflict.
- *
- * Unlike the disconnect action this never kills a pid without an ownership proof: it reuses
- * the restart's `/proc` identity rules and additionally accepts the re-attached pid this
- * connection is bound to (docs/design.md §5.7). Available while connected and in the
- * `remote-unreachable` error state, which keeps the SSH session on purpose.
- *
- * @param ctx - service context.
- * @param runtime - host runtime.
- * @returns the stopped pid (null when already gone).
- */
+/** Stop the remote DSH this connection manages, then release the link so the card offers Reconnect again; unlike disconnect this never kills a pid without an ownership proof. */
 export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Promise<StopRemoteResult> {
   await ctx.init()
   if (runtime.connectPromise || runtime.linkBusy !== null) {
@@ -104,27 +74,19 @@ export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Pro
       { technical: 'reason=link-busy' },
     )
   }
-  const connected = runtime.status === 'connected' && runtime.ssh?.connected === true && runtime.tunnel !== null
-  const recoverable =
-    runtime.status === 'error' &&
-    runtime.error?.code === 'remote-unreachable' &&
-    runtime.ssh?.connected === true &&
-    runtime.facts !== null
-  if (!connected && !recoverable) throw errors.stopRemoteUnavailable()
-  // The `previous` snapshot is what `stop.refused` restores; it is captured before the action
-  // writes anything.
-  const previous: StopState = {
+  if (linkActionState(runtime) === null) throw errors.stopRemoteUnavailable()
+  // The `previous` snapshot is what `stop.refused` restores; it is captured before the action writes anything.
+  const previous: StopSnapshot = {
     status: runtime.status,
     phase: runtime.phase,
     progress: runtime.progress,
     error: runtime.error,
-    uiReady: runtime.remote.uiReady,
-    localPort: runtime.remote.localPort,
+    uiReady: runtime.remote.uiReady === true,
+    localPort: runtime.remote.localPort ?? null,
   }
-  // One transition owns `activity`/`epoch`, the `connecting` card and the action start (`run`).
-  // The token is the old `beginLinkWork` one (the rule adopts it), so `isLinkWorkCurrent` keeps
-  // the exact late-write semantics.
   const token = (Number(runtime.linkToken) || 0) + 1
+  // One transition owns `activity`/`epoch`, the `connecting` card and the action start (`run`); the token
+  // is the old `beginLinkWork` one, so `isLinkWorkCurrent` keeps the exact late-write semantics.
   const event = { type: 'stop.requested' as const, token, pid: runtime.remote.pid, port: runtime.remote.port }
   let started: Promise<StopRemoteResult> | null = null
   try {
@@ -140,23 +102,16 @@ export async function stopRemoteHost(ctx: ConnectCtx, runtime: HostRuntime): Pro
     const view = toErrorView(error)
     const phase = typeof runtime.phase === 'string' ? runtime.phase : previous.phase
     if (isLinkWorkCurrent(runtime, token)) {
-      // The rule restores the previous state itself; `unrestorable` is the design's "link went
-      // away while the stop was failing" branch, which publishes the coded failure instead.
       const restorable =
         previous.status === 'error' ||
         (runtime.desired === 'connected' && runtime.ssh?.connected === true && runtime.tunnel !== null)
+      // The rule restores the previous state itself; `unrestorable` is the "link went away while the
+      // stop was failing" branch, which publishes the coded failure instead.
       const refusal = {
         type: 'stop.refused' as const,
         view,
         phase,
-        previous: {
-          status: previous.status,
-          phase: previous.phase,
-          progress: previous.progress,
-          error: previous.error,
-          uiReady: previous.uiReady === true,
-          localPort: previous.localPort ?? null,
-        },
+        previous,
         ...(restorable ? {} : { unrestorable: true }),
       }
       await dispatch(createRuntimeEffects(ctx), runtime, refusal, scopeFactsFor(ctx, runtime, refusal), {
@@ -183,31 +138,24 @@ async function runStopRemote(
     'info',
     `stop remote requested (pid=${isPid(pid) ? pid : 'unknown'}, remote port=${isPid(port) ? port : 'unknown'})`,
   )
-  // `stop.requested` already disarmed the heartbeat/reconnect/idle timers and published the
-  // `start`/`stopping-remote` card.
-
   const verdict = await proveOwnership(ctx, runtime, { ...OWNERSHIP_OPTIONS.stop, pid, layout, profile })
   if (!isLinkWorkCurrent(runtime, token)) {
     log('debug', 'stop remote aborted: the link was replaced by a disconnect or reconnect')
     return { ok: true, pid: null }
   }
-  // A pid that is already gone is not a refusal for this action: there is nothing to signal, only
-  // a stale registry to clear. Every other refusal is the coded error the card explains.
+  // A pid that is already gone is not a refusal for this action: there is nothing to signal, only a
+  // stale registry to clear. Every other refusal is the coded error the card explains.
   const gone = verdict.ok !== true && verdict.reason === 'identity-missing'
   if (verdict.ok !== true && !gone) {
     throw errors.stopRemoteUnavailable(describeStopRefusal(verdict.reason, pid), {
       technical: `reason=${verdict.reason} pid=${isPid(pid) ? pid : 'unknown'}`,
     })
   }
-
   if (gone) {
-    // Nothing to signal: the process is already gone. Only its stale record remains, and it
-    // must go away or the next connect would try to stop/adopt a dead pid.
     log('info', `stop remote: the bound remote process pid=${pid} is already gone; clearing its run registry`)
     const cleared = await ctx.deps.clearRegistry(runtime.ssh, layout)
-    if (cleared?.ok !== true) {
+    if (cleared?.ok !== true)
       log('warn', 'stop remote: the stale run registry could not be cleared:', cleared?.output ?? 'no output')
-    }
   } else {
     const stopped = await ctx.deps.stopWeb(runtime.ssh, layout, { pid })
     if (stopped?.ok !== true) {
@@ -227,10 +175,9 @@ async function runStopRemote(
     return { ok: true, pid: isPid(pid) ? pid : null }
   }
   runtime.bound = null
-  // One transition ends the action: `stop.succeeded` is the explicit stop's disconnect (the
-  // `stopped:true` form keeps the idle policy from arming a second stop). The informational line
-  // today's `disconnectHost` wrote is part of the operator log, so it stays, in its old position.
   ctx.progress.log(runtime, 'info', `disconnect requested (keepAlive=${runtime.entry.keepAlive})`)
+  // One transition ends the action: `stop.succeeded` is the explicit stop's disconnect (the
+  // `stopped:true` form keeps the idle policy from arming a second stop).
   const done = { type: 'stop.succeeded' as const }
   await dispatch(createRuntimeEffects(ctx), runtime, done, scopeFactsFor(ctx, runtime, done), { caller: 'script' })
   runtime.bound = null

@@ -1,11 +1,7 @@
 // client/src/i18n-dict.ts - the STRINGS dictionary (zh/en pairs) and its two renderings; after constants.ts, before i18n.ts.
 // i18n-exempt: the visible copy lives here, one pair per key, and nowhere else in the client.
 //#region 2. i18n dictionaries
-
-/**
- * Every visible string, zh and en side by side. `status*` / `statusHint*` are read through
- * statusOf() in the constants region, which builds them from the HostStatus id.
- */
+/** Every visible string, zh and en side by side; `status*`/`statusHint*` are built by statusOf(). */
 const STRINGS = {
   panelSubtitle: [
     '管理远程主机，并把整个窗口交给其中一台的远端 DSH。',
@@ -73,8 +69,7 @@ const STRINGS = {
   cardReconnect: ['重连', 'Reconnect'],
   cardRestart: ['重启', 'Restart'],
   cardRestarting: ['正在重启…', 'Restarting…'],
-  // The visible action is short; the accessible name stays the full one, so a screen
-  // reader does not hear a bare "关闭" next to "断开" on the same card.
+  // The visible action is short; the accessible name stays full so a screen reader does not hear a bare "Stop".
   cardRestartName: ['重启远端 DSH', 'Restart the remote DSH'],
   remoteRestartBusy: [
     '远端链路正在重建隧道，请稍后再试。',
@@ -416,31 +411,19 @@ const STRINGS = {
   'settings.connectTimeoutHint': ['SSH 连接与远端就绪的整体超时', 'Overall timeout for SSH and remote readiness'],
   'error.actionFailed': ['操作失败', 'Action failed'],
 } as const satisfies Record<string, readonly [zh: string, en: string]>
-
-/**
- * Every key the dictionary defines. `keyof typeof STRINGS` and `keyof typeof zh` are the same union
- * (zh is declared over it below); the pairs are the source because a key exists once, not twice.
- */
+/** Every key the dictionary defines: the pairs are the source, so a key exists once, not twice. */
 type DictKey = keyof typeof STRINGS
 /** Interpolation parameters: `{name}` is replaced only when a value is present. */
 type DictParams = Record<string, string | number>
 /** The two languages the plugin ships; the Host's locale service selects one. */
 type DictLocale = 'zh' | 'en'
-/**
- * What every component calls. A literal key is checked against `DictKey` at compile time, so a
- * typo fails `pnpm run verify:types` instead of rendering the key at runtime.
- */
+/** What every component calls: a literal key is checked against `DictKey` at compile time. */
 type Translate = (key: DictKey, params?: DictParams) => string
 type Dictionaries = Record<DictLocale, Record<DictKey, string>>
 /** A language pack that may be incomplete, for the fallback path's own tests. */
 type PartialDictionaries = Partial<Record<DictLocale, Partial<Record<DictKey, string>>>>
 
-/**
- * One language's flat dictionary, built from the pairs. `Object.keys` widens the key set to
- * `string`, and `Object.fromEntries` keeps that widening, so the rebuilt record needs one
- * assertion to get the literal key union back. It is sound because the loop visits exactly the
- * keys the `satisfies` above accepted, and none of them can be missing.
- */
+/** One language's flat dictionary; the assertion holds: the loop visits exactly the keys `satisfies` accepted. */
 function dictionarySide(side: 0 | 1): Record<DictKey, string> {
   const out: Partial<Record<DictKey, string>> = {}
   for (const [key, pair] of Object.entries(STRINGS)) out[key as DictKey] = pair[side]

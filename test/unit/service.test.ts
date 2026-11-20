@@ -7,6 +7,61 @@ import { FakeSsh, createHost, makeFacts, makeTestService, managedNodeFixture, wa
 import { errors } from '../../dist/src/errors.js'
 import { describePreflightEvent } from '../../dist/src/service.js'
 import { LOG_TAIL_LIMIT } from '../../dist/src/connect-log.js'
+// The version `makeTestService` pins as the target of every connect.
+const TARGET = '0.2.2-rc.1'
+/** The `startWeb` reply the service persists; `overrides` move its pid, port or token. */
+const webReply = (overrides = {}) => ({
+  pid: 4242,
+  port: 38123,
+  token: 'tok_test_123',
+  url: 'http://127.0.0.1:38123/?token=tok_test_123',
+  logPath: '/tmp/web.log',
+  startedAt: new Date().toISOString(),
+  rawLine: '',
+  profile: 'web',
+  dshHome: '/home/ubuntu/.dsh',
+  ...overrides,
+})
+/** A `stopWeb` that records the pid it was asked to stop and always confirms. */
+const stopping = (stopped) => async (_ssh, _layout, options) => {
+  stopped.push(options?.pid)
+  return { ok: true, output: 'STOPPED' }
+}
+/** A transport whose connect reports `sha256` to the host-key prompt and obeys the answer. */
+const hostKeySsh =
+  (sha256, sink = {}) =>
+  (options) => {
+    const ssh = new FakeSsh({
+      options,
+      connect: async () => {
+        const accepted = await options.onHostKey({ sha256, keyType: 'ssh-ed25519', pinned: false })
+        if (!accepted) throw errors.hostKeyUnknown(sha256)
+        ssh.connected = true
+        return { fingerprint: sha256, keyType: 'ssh-ed25519', serverBanner: null }
+      },
+    })
+    ssh.onHostKeyProbe = options.onHostKey
+    sink.ssh = ssh
+    return ssh
+  }
+// One connect case: a fresh service with the `setup.service` overrides, one host, and the connect driven until the host
+// reaches `setup.status` (default `connected`); `body` gets the fixtures.
+const connectTest = (name, body, setup = {}) =>
+  test(name, async () => {
+    const { service, store, events } = await makeTestService(setup.service)
+    const host = await createHost(service, setup.host)
+    await service.connect(host.id)
+    await waitFor(() => service.snapshot().hosts[0].status === (setup.status ?? 'connected'))
+    try {
+      await body({ service, store, events, host })
+    } finally {
+      await service.shutdown()
+    }
+  })
+/** The log as a user reads it in the panel: localized text first, the raw line otherwise. */
+function logTextOf(view) {
+  return (view.logs ?? []).map((entry) => entry.text?.zh ?? entry.message).join('\n')
+}
 
 test('connect runs the full pipeline and opens a loopback URL', async () => {
   const { service, store } = await makeTestService()
@@ -22,7 +77,7 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
   const view = service.snapshot().hosts[0]
   assert.equal(view.phase, 'ready')
   assert.equal(view.remote.uiReady, true)
-  assert.equal(view.remote.version, '0.2.2-rc.1')
+  assert.equal(view.remote.version, TARGET)
   assert.equal(view.remote.localPort, 45123)
   assert.equal(view.remote.bootstrapLevel, 'npx')
   assert.equal(view.progress.code, 'ready')
@@ -49,33 +104,23 @@ test('connect runs the full pipeline and opens a loopback URL', async () => {
 })
 
 test('connect always launches on the plugin-managed Node', async () => {
-  const provisining = []
+  const provisioning = []
   const plans = []
   const { service } = await makeTestService({
     ensureNode: async (_ssh, options) => {
-      provisining.push({ facts: options.facts.nodeVersion, version: options.version })
+      provisioning.push({ facts: options.facts.nodeVersion, version: options.version })
       return managedNodeFixture(options.version)
     },
     startWeb: async (_ssh, options) => {
       plans.push(options.plan)
-      return {
-        pid: 4242,
-        port: 38123,
-        token: 'tok_test_123',
-        url: 'http://127.0.0.1:38123/?token=tok_test_123',
-        logPath: '/tmp/web.log',
-        startedAt: new Date().toISOString(),
-        rawLine: '',
-        profile: 'web',
-        dshHome: '/home/ubuntu/.dsh',
-      }
+      return webReply()
     },
   })
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
   const view = service.snapshot().hosts[0]
-  assert.deepEqual(provisining, [{ facts: '24.22.2', version: '24.9.0' }])
+  assert.deepEqual(provisioning, [{ facts: '24.22.2', version: '24.9.0' }])
   assert.equal(view.remote.nodeSource, 'managed')
   assert.equal(view.remote.nodeVersion, '24.9.0')
   assert.equal(plans.length, 1)
@@ -99,33 +144,35 @@ test('the managed Node version follows the local DSH engines.node', async () => 
   assert.deepEqual(versions, ['25.1.0'])
   await service.shutdown()
 })
-
-test('a failed managed install is fatal even when the system Node looks usable', async () => {
-  const { service } = await makeTestService({
-    facts: makeFacts({ nodeVersion: '24.22.2', npxPath: '/usr/bin/npx' }),
-    ensureNode: async () => {
-      throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'network blocked' })
+connectTest(
+  'a failed managed install is fatal even when the system Node looks usable',
+  async ({ service }) => {
+    assert.equal(service.snapshot().hosts[0].error.code, 'remote-node-install-failed')
+  },
+  {
+    status: 'error',
+    service: {
+      facts: makeFacts({ nodeVersion: '24.22.2', npxPath: '/usr/bin/npx' }),
+      ensureNode: async () => {
+        throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'network blocked' })
+      },
     },
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
-  const view = service.snapshot().hosts[0]
-  assert.equal(view.error.code, 'remote-node-install-failed')
-  await service.shutdown()
-})
+  },
+)
 
 test('describePreflightEvent turns npm output into localized progress codes', () => {
   assert.deepEqual(
     describePreflightEvent(
       '\u001B[33mnpm WARN exec The following package was not found and will be installed\u001B[39m',
-      '0.2.2-rc.1',
+      TARGET,
     ),
-    { code: 'bootstrap-first-run', params: { version: '0.2.2-rc.1' } },
+    { code: 'bootstrap-first-run', params: { version: TARGET } },
   )
   assert.deepEqual(
     describePreflightEvent('npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh', 'x'),
-    { code: 'bootstrap-fetching' },
+    {
+      code: 'bootstrap-fetching',
+    },
   )
   assert.deepEqual(describePreflightEvent('added 120 packages in 8s', 'x'), { code: 'bootstrap-installed' })
   assert.equal(describePreflightEvent('0.2.2-rc.1', 'x'), null)
@@ -182,27 +229,23 @@ test('the connect log streams to /state while connecting and stops once the host
   assert.deepEqual(service.snapshot().hosts[0].logs, [])
   await service.shutdown()
 })
-
-test('the connect log is capped while the ring keeps the newest lines', async () => {
-  const { service } = await makeTestService({
-    ensureNode: async () => {
-      throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'blocked' })
+connectTest(
+  'the connect log is capped while the ring keeps the newest lines',
+  async ({ service }) => {
+    const failed = service.snapshot().hosts[0]
+    assert.ok(failed.logs.length > 0)
+    assert.ok(failed.logs.length <= LOG_TAIL_LIMIT)
+    assert.match(failed.error.code, /node-install-failed/)
+  },
+  {
+    status: 'error',
+    service: {
+      ensureNode: async () => {
+        throw errors.nodeInstallFailed({ zh: '下载失败', en: 'download failed' }, { technical: 'blocked' })
+      },
     },
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
-  const failed = service.snapshot().hosts[0]
-  assert.ok(failed.logs.length > 0)
-  assert.ok(failed.logs.length <= LOG_TAIL_LIMIT)
-  assert.match(failed.error.code, /node-install-failed/)
-  await service.shutdown()
-})
-
-/** The log as a user reads it in the panel: localized text first, the raw line otherwise. */
-function logTextOf(view) {
-  return (view.logs ?? []).map((entry) => entry.text?.zh ?? entry.message).join('\n')
-}
+  },
+)
 
 test('a new connection replaces the previous attempt’s log instead of appending to it', async () => {
   let attempts = 0
@@ -219,7 +262,6 @@ test('a new connection replaces the previous attempt’s log instead of appendin
   assert.match(logTextOf(first), /^— 第 1 次连接 · /m)
   assert.match(logTextOf(first), /下载失败 1/)
   assert.equal(first.logs[0].seq, 1)
-
   // Reconnect without cleaning anything: attempt 2 must open on a clean log.
   await service.connect(host.id)
   const failedAgain = () =>
@@ -237,70 +279,70 @@ test('a new connection replaces the previous attempt’s log instead of appendin
   assert.match(logTextOf(second), /下载失败 2/)
   await service.shutdown()
 })
-
-test('a failed connection’s log explains itself: phase, code, reason and hints at error level', async () => {
-  const { service } = await makeTestService({ waitUi: async () => ({ ok: false, status: 502 }) })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
-  const view = service.snapshot().hosts[0]
-  assert.equal(view.error.code, 'remote-ui-unreachable')
-  const text = logTextOf(view)
-  assert.match(text, /连接失败于 verifying 阶段：remote-ui-unreachable/)
-  assert.match(text, /原因：远端 DSH 的本地 127\.0\.0\.1:38123 没有响应/)
-  assert.match(text, /建议：点「重连」重试一次/)
-  assert.match(text, /建议：查看诊断中的隧道与界面可达性检查/)
-  const failures = view.logs.filter((entry) => entry.level === 'error')
-  assert.ok(failures.length >= 4, 'the failure is written as several error lines, not one')
-  assert.ok(
-    failures.every((entry) => entry.phase === 'verifying'),
-    'every failure line names the phase it failed in',
-  )
-  const phases = new Set(view.logs.map((entry) => entry.phase))
-  for (const phase of ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying']) {
-    assert.ok(phases.has(phase), `the log must show the ${phase} phase ran`)
-  }
-  assert.equal(
-    view.logs.every((entry) => 'phase' in entry),
-    true,
-    'every /state log line carries its phase',
-  )
-  await service.shutdown()
-})
-
-test('a failed remote start prints the remote log tail line by line', async () => {
-  const { service } = await makeTestService({
-    startWeb: async () => {
-      throw errors.remoteDshStartFailed(
-        'EXITED:4242\n---LOG---\nError: Cannot find module @deepseek-ai/dsh\n  at Module._resolveFilename',
-      )
+connectTest(
+  'a failed connection’s log explains itself: phase, code, reason and hints at error level',
+  async ({ service }) => {
+    const view = service.snapshot().hosts[0]
+    assert.equal(view.error.code, 'remote-ui-unreachable')
+    const text = logTextOf(view)
+    assert.match(text, /连接失败于 verifying 阶段：remote-ui-unreachable/)
+    assert.match(text, /原因：远端 DSH 的本地 127\.0\.0\.1:38123 没有响应/)
+    assert.match(text, /建议：点「重连」重试一次/)
+    assert.match(text, /建议：查看诊断中的隧道与界面可达性检查/)
+    const failures = view.logs.filter((entry) => entry.level === 'error')
+    assert.ok(failures.length >= 4, 'the failure is written as several error lines, not one')
+    assert.ok(
+      failures.every((entry) => entry.phase === 'verifying'),
+      'every failure line names the phase it failed in',
+    )
+    const phases = new Set(view.logs.map((entry) => entry.phase))
+    for (const phase of ['ssh', 'probe', 'bootstrap', 'start', 'tunnel', 'verifying']) {
+      assert.ok(phases.has(phase), `the log must show the ${phase} phase ran`)
+    }
+    assert.equal(
+      view.logs.every((entry) => 'phase' in entry),
+      true,
+      'every /state log line carries its phase',
+    )
+  },
+  { status: 'error', service: { waitUi: async () => ({ ok: false, status: 502 }) } },
+)
+connectTest(
+  'a failed remote start prints the remote log tail line by line',
+  async ({ service }) => {
+    const view = service.snapshot().hosts[0]
+    const text = logTextOf(view)
+    assert.match(text, /连接失败于 start 阶段：remote-dsh-start-failed/)
+    assert.match(text, /远端日志尾部：/)
+    const header = view.logs.findIndex((entry) => entry.text?.zh === '远端日志尾部：')
+    assert.ok(header >= 0, 'the tail needs its own header line')
+    assert.deepEqual(
+      view.logs.slice(header + 1).map((entry) => entry.message),
+      ['EXITED:4242', '---LOG---', 'Error: Cannot find module @deepseek-ai/dsh', '  at Module._resolveFilename'],
+      'each remote log line is its own log line',
+    )
+    assert.equal(
+      view.logs.slice(header + 1).every((entry) => entry.level === 'error' && entry.phase === 'start'),
+      true,
+    )
+  },
+  {
+    status: 'error',
+    service: {
+      startWeb: async () => {
+        throw errors.remoteDshStartFailed(
+          'EXITED:4242\n---LOG---\nError: Cannot find module @deepseek-ai/dsh\n  at Module._resolveFilename',
+        )
+      },
     },
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'error', { label: 'error' })
-  const view = service.snapshot().hosts[0]
-  const text = logTextOf(view)
-  assert.match(text, /连接失败于 start 阶段：remote-dsh-start-failed/)
-  assert.match(text, /远端日志尾部：/)
-  const header = view.logs.findIndex((entry) => entry.text?.zh === '远端日志尾部：')
-  assert.ok(header >= 0, 'the tail needs its own header line')
-  assert.deepEqual(
-    view.logs.slice(header + 1).map((entry) => entry.message),
-    ['EXITED:4242', '---LOG---', 'Error: Cannot find module @deepseek-ai/dsh', '  at Module._resolveFilename'],
-    'each remote log line is its own log line',
-  )
-  assert.equal(
-    view.logs.slice(header + 1).every((entry) => entry.level === 'error' && entry.phase === 'start'),
-    true,
-  )
-  await service.shutdown()
-})
+  },
+)
+
 test('the npx preflight reports npm output as connect progress', async () => {
   const { service } = await makeTestService({
     preflight: async (_ssh, _plan, options) => {
       options.onStderr('npm http fetch GET 200 https://registry.npmjs.org/@deepseek-ai%2fdsh\n')
-      return '0.2.2-rc.1'
+      return TARGET
     },
   })
   const progress = []
@@ -324,7 +366,7 @@ test('a remote web instance from an older launch path is replaced before startin
       port: 39123,
       profile: 'web',
       dshHome: '/home/ubuntu/.dsh',
-      version: '0.2.2-rc.1',
+      version: TARGET,
     }),
     stopWeb: async (_ssh, _layout, options) => {
       stopped.push(options.pid)
@@ -339,25 +381,8 @@ test('a remote web instance from an older launch path is replaced before startin
 })
 
 test('connect pauses on the first host key and resumes after confirmation', async () => {
-  let sshInstance = null
-  let asked = null
-  const { service, store } = await makeTestService({
-    sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          const accepted = await options.onHostKey({ sha256: 'SHA256:abc123', keyType: 'ssh-ed25519', pinned: false })
-          if (!accepted) throw errors.hostKeyUnknown('SHA256:abc123')
-          ssh.connected = true
-          return { fingerprint: 'SHA256:abc123', keyType: 'ssh-ed25519', serverBanner: null }
-        },
-      })
-      ssh.onHostKeyProbe = options.onHostKey
-      sshInstance = ssh
-      asked = null
-      return ssh
-    },
-  })
+  const sink = {}
+  const { service, store } = await makeTestService({ sshFactory: hostKeySsh('SHA256:abc123', sink) })
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'fingerprint-pending', { label: 'fingerprint-pending' })
@@ -367,52 +392,28 @@ test('connect pauses on the first host key and resumes after confirmation', asyn
   await service.confirmFingerprint(host.id, { accept: true, remember: true, sha256: 'SHA256:abc123' })
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected after confirm' })
   assert.equal(store.getHost(host.id).pinnedFingerprint, 'SHA256:abc123')
-  assert.ok(sshInstance)
+  assert.ok(sink.ssh)
   await service.shutdown()
 })
-
-test('refusing the host key keeps the host in error state', async () => {
-  const { service } = await makeTestService({
-    sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          const accepted = await options.onHostKey({ sha256: 'SHA256:bad', keyType: 'ssh-ed25519', pinned: false })
-          if (!accepted) throw errors.hostKeyUnknown('SHA256:bad')
-          return { fingerprint: 'SHA256:bad', keyType: 'ssh-ed25519', serverBanner: null }
-        },
-      })
-      return ssh
-    },
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'fingerprint-pending')
-  await service.confirmFingerprint(host.id, { accept: false, remember: false })
-  await waitFor(() => service.snapshot().hosts[0].status === 'error')
-  assert.equal(service.snapshot().hosts[0].error.code, 'host-key-unknown')
-  await service.shutdown()
-})
+connectTest(
+  'refusing the host key keeps the host in error state',
+  async ({ service, host }) => {
+    await service.confirmFingerprint(host.id, { accept: false, remember: false })
+    await waitFor(() => service.snapshot().hosts[0].status === 'error')
+    assert.equal(service.snapshot().hosts[0].error.code, 'host-key-unknown')
+  },
+  { status: 'fingerprint-pending', service: { sshFactory: hostKeySsh('SHA256:bad') } },
+)
 
 test('the npx preflight refuses a different version before starting the remote', async () => {
   let started = 0
   const { service } = await makeTestService({
     preflight: async () => {
-      throw errors.versionMismatch('0.2.2-rc.1', '0.2.1')
+      throw errors.versionMismatch(TARGET, '0.2.1')
     },
     startWeb: async () => {
       started += 1
-      return {
-        pid: 1,
-        port: 1,
-        token: 't',
-        url: 'http://127.0.0.1:1/?token=t',
-        logPath: '/tmp/x',
-        startedAt: new Date().toISOString(),
-        rawLine: '',
-        profile: 'web',
-        dshHome: '/home/ubuntu/.dsh',
-      }
+      return webReply({ pid: 1, port: 1, token: 't', url: 'http://127.0.0.1:1/?token=t', logPath: '/tmp/x' })
     },
   })
   const host = await createHost(service)
@@ -436,16 +437,13 @@ test('a stale adopted instance is stopped before the pinned version starts', asy
       dshHome: '/home/ubuntu/.dsh',
       adopted: true,
     }),
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+    stopWeb: stopping(stopped),
   })
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.deepEqual(stopped, [77])
-  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  assert.equal(service.snapshot().hosts[0].remote.version, TARGET)
   await service.shutdown()
 })
 
@@ -491,7 +489,7 @@ test('a foreign remote DSH can be stopped and then the managed instance starts',
   await service.confirmConflict(host.id, { action: 'stop' })
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.deepEqual(stopped, [88])
-  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  assert.equal(service.snapshot().hosts[0].remote.version, TARGET)
   await service.shutdown()
 })
 
@@ -530,41 +528,37 @@ test('the conflict prompt ignores the plugin-owned registry pid', async () => {
   assert.deepEqual(scanned.ignorePids, [123])
   await service.shutdown()
 })
-
-test('an unreachable remote UI fails with a coded error and cleans the tunnel', async () => {
-  const { service } = await makeTestService({
-    waitUi: async () => ({ ok: false, status: null }),
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'error')
-  assert.equal(service.snapshot().hosts[0].error.code, 'remote-ui-unreachable')
-  await service.shutdown()
-})
-
-test('a page that refuses framing still connects cleanly and reports no warning', async () => {
-  const { service } = await makeTestService({
-    exchange: async () => ({
-      ok: true,
-      firstStatus: 302,
-      location: './',
-      status: 200,
-      title: 'DSH',
-      csp: null,
-      bodyLength: 100,
-    }),
-  })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
-  const view = service.snapshot().hosts[0]
-  assert.equal(view.warning, null, 'framing headers must not produce a warning any more')
-  assert.equal(view.remote.uiReady, true)
-  const report = await service.diagnose(host.id)
-  const remoteUi = report.checks.find((check) => check.id === 'remote-ui')
-  assert.equal(remoteUi.status, 'pass', 'a framing-refusing page is still a reachable remote UI')
-  await service.shutdown()
-})
+connectTest(
+  'an unreachable remote UI fails with a coded error and cleans the tunnel',
+  async ({ service }) => {
+    assert.equal(service.snapshot().hosts[0].error.code, 'remote-ui-unreachable')
+  },
+  { status: 'error', service: { waitUi: async () => ({ ok: false, status: null }) } },
+)
+connectTest(
+  'a page that refuses framing still connects cleanly and reports no warning',
+  async ({ service, host }) => {
+    const view = service.snapshot().hosts[0]
+    assert.equal(view.warning, null, 'framing headers must not produce a warning any more')
+    assert.equal(view.remote.uiReady, true)
+    const report = await service.diagnose(host.id)
+    const remoteUi = report.checks.find((check) => check.id === 'remote-ui')
+    assert.equal(remoteUi.status, 'pass', 'a framing-refusing page is still a reachable remote UI')
+  },
+  {
+    service: {
+      exchange: async () => ({
+        ok: true,
+        firstStatus: 302,
+        location: './',
+        status: 200,
+        title: 'DSH',
+        csp: null,
+        bodyLength: 100,
+      }),
+    },
+  },
+)
 
 test('auto-reconnect retries after an unexpected SSH close', async () => {
   const { service, events } = await makeTestService()
@@ -579,15 +573,12 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
   events[0].ssh.simulateClose()
   await waitFor(
     () => service.snapshot().hosts[0].status === 'disconnected' || service.snapshot().hosts[0].status === 'connecting',
-    {
-      label: 'disconnected',
-    },
+    { label: 'disconnected' },
   )
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { timeoutMs: 8000, label: 'reconnected' })
   service.off('state', onState)
   assert.ok(events.filter((event) => event.type === 'ssh').length >= 2)
-  // The retry is a new connection (#62): its first `connecting` frame carries only its own
-  // boundary line, so the panel never shows the log of the link that just dropped.
+  // The retry is a new connection (#62): its first `connecting` frame carries only its own line, never the old log.
   const firstConnecting = frames.find((state) => state.hosts[0]?.status === 'connecting')
   assert.ok(firstConnecting, 'the retry must publish a connecting frame')
   const retryLog = firstConnecting.hosts[0].logs
@@ -605,12 +596,7 @@ test('auto-reconnect retries after an unexpected SSH close', async () => {
 
 test('disconnect honors the stop keep-alive policy', async () => {
   const stopped = []
-  const { service } = await makeTestService({
-    stopWeb: async () => {
-      stopped.push(true)
-      return { ok: true, output: 'STOPPED' }
-    },
-  })
+  const { service } = await makeTestService({ stopWeb: stopping(stopped) })
   const host = await createHost(service, { keepAlive: 'stop' })
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
@@ -622,12 +608,7 @@ test('disconnect honors the stop keep-alive policy', async () => {
 
 test('shutdown stops the remote only under the stop policy', async () => {
   const stopped = []
-  const { service } = await makeTestService({
-    stopWeb: async () => {
-      stopped.push(true)
-      return { ok: true, output: 'STOPPED' }
-    },
-  })
+  const { service } = await makeTestService({ stopWeb: stopping(stopped) })
   const keep = await createHost(service, { name: 'keep-host', address: 'keep-host', keepAlive: 'keep' })
   const stop = await createHost(service, { name: 'stop-host', address: 'stop-host', keepAlive: 'stop' })
   await service.connect(keep.id)
@@ -637,12 +618,7 @@ test('shutdown stops the remote only under the stop policy', async () => {
   await service.shutdown()
   assert.equal(stopped.length, 1)
 })
-
-test('diagnose returns the documented checklist', async () => {
-  const { service } = await makeTestService()
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected')
+connectTest('diagnose returns the documented checklist', async ({ service, host }) => {
   const report = await service.diagnose(host.id)
   assert.equal(report.redacted, true)
   assert.deepEqual(
@@ -666,7 +642,6 @@ test('diagnose returns the documented checklist', async () => {
   assert.equal(report.checks.find((check) => check.id === 'model-credentials').status, 'pass')
   assert.equal(report.checks.find((check) => check.id === 'host-key').status, 'unknown')
   assert.equal(report.summary, 'warning')
-  await service.shutdown()
 })
 
 test('invalid host input is rejected as invalid-input', async () => {
@@ -704,8 +679,8 @@ test('a download is judged against the same home root the writer receives', asyn
     }
     const started = await service.startRemoteDownload(host.id, '/home/ubuntu/a.txt', { destination: base })
     assert.equal(started.id, 'dl_home')
-    // The pre-flight and the writer must agree on the root: a fallback to `os.homedir()` in the
-    // job would disagree whenever HOME/USERPROFILE is unset.
+    // The pre-flight and the writer must agree on the root: a
+    // fallback to `os.homedir()` would disagree when HOME is unset.
     assert.deepEqual(seen, [{ runtimeId: host.id, path: '/home/ubuntu/a.txt', home: base }])
     await assert.rejects(
       service.startRemoteDownload(host.id, '/home/ubuntu/a.txt', {
@@ -720,6 +695,7 @@ test('a download is judged against the same home root the writer receives', asyn
     await service.shutdown()
   }
 })
+
 test('setLocalVersion adopts a detected version and only backfills a missing one', async () => {
   const { service } = await makeTestService({ localVersion: null })
   assert.equal(service.snapshot().hostVersion, null)
@@ -768,16 +744,13 @@ test('a re-attached instance with another version is never stopped by the next c
       adopted: true,
       origin: 'reattach',
     }),
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+    stopWeb: stopping(stopped),
   })
   const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected')
   assert.deepEqual(stopped, [], 'an instance the plugin did not launch must not be killed')
-  assert.equal(service.snapshot().hosts[0].remote.version, '0.2.2-rc.1')
+  assert.equal(service.snapshot().hosts[0].remote.version, TARGET)
   await service.shutdown()
 })
 
@@ -790,15 +763,12 @@ test('a leftover registry record from a re-attach is left running by a new conne
       port: 4000,
       startedAt: '2026-11-16T00:00:00.000Z',
       profile: 'web',
-      version: '0.2.2-rc.1',
+      version: TARGET,
       dshHome: '/home/ubuntu/.dsh',
       launch: 'browser-carrier-v1',
       origin: 'reattach',
     }),
-    stopWeb: async (_ssh, _layout, options) => {
-      stopped.push(options?.pid)
-      return { ok: true, output: 'STOPPED' }
-    },
+    stopWeb: stopping(stopped),
   })
   const host = await createHost(service)
   await service.connect(host.id)
@@ -824,8 +794,7 @@ test('every emitted state frame carries a strictly increasing revision and a pub
   const before = service.snapshot().rev
   await createHost(service)
   assert.ok(service.snapshot().rev > before)
-  // A restart (or a plugin reload) starts a new instance: its rev may be lower, and the Client
-  // relies on the instance change to accept its frames instead of freezing on the old mark.
+  // A restart (or plugin reload) starts a new instance: its rev may be lower, and the Client accepts it on the change.
   const restarted = await makeTestService()
   assert.notEqual(restarted.service.snapshot().instance, service.snapshot().instance)
   assert.equal(typeof restarted.service.snapshot().rev, 'number')

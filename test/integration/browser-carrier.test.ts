@@ -1,18 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { readFileSync, rmSync } from 'node:fs'
+import { rmSync } from 'node:fs'
 import http from 'node:http'
-import path from 'node:path'
 import process from 'node:process'
-import { fileURLToPath } from 'node:url'
+import {
+  assertNoPageErrors,
+  buildReactBundle,
+  closeServer,
+  collectPageErrors,
+  listenOnFreePort,
+  openBrowserPage,
+  serveClientAsset,
+} from '../helpers/browser.ts'
 import { makeTempRoot, resolveBrowser, resolveDshCli, skipOrFail, stopChild, tail, waitFor } from './harness-support.ts'
 import { createRemoteProxy } from '../../dist/src/proxy/index.js'
-
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
-// The carrier serves the built artifact: `dist/client.js` (scripts/build-client.mjs).
-const CLIENT_PATH = path.join(ROOT, 'dist', 'client.js')
-
 const HARNESS_HTML = `<!doctype html>
 <html lang="en">
   <head><meta charset="utf-8" /><title>carrier harness</title></head>
@@ -62,7 +64,6 @@ const HARNESS_HTML = `<!doctype html>
     </script>
   </body>
 </html>`
-
 /** A second page that mounts the real overlay host (real React) over a stubbed plugin API. */
 function overlayHarness(openWebUrl) {
   return `<!doctype html>
@@ -175,14 +176,10 @@ function overlayHarness(openWebUrl) {
   </body>
 </html>`
 }
-
-/**
- * A page that stands in for the desktop shell's window, so the **desktop** carrier runs in a real
- * browser: the caption band and its menubar (the preload's fixed host reading
- * `--dsh-windows-menu-start`), the `window.dshDesktop` guest bridge, and a `<webview>` seat. The
- * seat is an iframe whose `executeJavaScript` evaluates in the guest, which is the one call the
- * plugin makes on it; events the plugin listens for are dispatched like the shell's own.
- */
+/* A page that stands in for the desktop shell's window, so the **desktop** carrier runs in a real browser: the caption
+ * band and its menubar (the preload's fixed host reading `--dsh-windows-menu-start`), the `window.dshDesktop` guest
+ * bridge, and a `<webview>` seat. The seat is an iframe whose `executeJavaScript` evaluates in the guest, the one call
+ * the plugin makes on it; the events it listens for are dispatched like the shell's own. */
 function desktopHarness(guestUrl) {
   return `<!doctype html>
 <html lang="zh" data-windows-titlebar style="--dsh-windows-titlebar-height:40px">
@@ -234,8 +231,7 @@ function desktopHarness(guestUrl) {
         seat.reload = () => {
           seat.src = seat.src
         }
-        // A webview fires dom-ready for its initial empty document too; an iframe does not fire
-        // load for about:blank, so the harness reports that first document itself.
+        // A webview fires dom-ready for its empty document; an iframe fires none for about:blank — the fake reports it.
         setTimeout(() => seat.dispatchEvent(new Event('dom-ready')), 0)
         return seat
       }
@@ -277,21 +273,6 @@ function desktopHarness(guestUrl) {
   </body>
 </html>`
 }
-
-function listen(server) {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => {
-      server.removeListener('error', reject)
-      resolve(server.address().port)
-    })
-  })
-}
-
-function close(server) {
-  return new Promise((resolve) => server.close(() => resolve(undefined)))
-}
-
 function fakeWebServer() {
   const routes = new Map()
   const upgrades = new Map()
@@ -308,7 +289,6 @@ function fakeWebServer() {
     },
   }
 }
-
 async function startDshWeb(cli, home) {
   const child = spawn(cli.command, [...cli.args, '--profile', 'web', '--no-open', '--port', '0'], {
     env: { ...process.env, DSH_HOME: home, ELECTRON_RUN_AS_NODE: '1' },
@@ -355,30 +335,12 @@ test(
     let dsh = null
     let server = null
     let proxy = null
-    let browser = null
+    let session = null
     try {
       dsh = await startDshWeb(cli, home)
       const viewPath = `/dsh-remote-go/remote/h_a/?token=${encodeURIComponent(dsh.token)}`
-      // The overlay page needs the real React runtime; bundle it once so hooks behave exactly as
-      // in the shell (the first harness page deliberately uses a stub React and never renders).
-      const esbuild = await import('esbuild')
-      const reactBundle = (
-        await esbuild.build({
-          stdin: {
-            contents: `import React from 'react'
-import { createRoot } from 'react-dom/client'
-window.React = React
-window.ReactDOM = { createRoot }`,
-            resolveDir: ROOT,
-            loader: 'js',
-          },
-          bundle: true,
-          write: false,
-          format: 'iife',
-          platform: 'browser',
-          logLevel: 'silent',
-        })
-      ).outputFiles[0].text
+      // The overlay needs the real React runtime; bundle it so hooks behave as in the shell (page one uses a stub).
+      const reactBundle = await buildReactBundle()
       const webServer = fakeWebServer()
       const upstream = { localPort: dsh.port, remotePort: dsh.port }
       let localPort = 0
@@ -389,6 +351,7 @@ window.ReactDOM = { createRoot }`,
           return
         }
         const pathname = new URL(req.url ?? '/', 'http://x').pathname
+        if (serveClientAsset(pathname, res, reactBundle)) return
         if (pathname === '/') {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
           res.end(HARNESS_HTML)
@@ -401,19 +364,8 @@ window.ReactDOM = { createRoot }`,
         }
         if (pathname === '/desktop') {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          // The desktop guest only accepts a loopback URL: the proxy path is served by this same
-          // origin, so the seat gets one and the remote UI still comes from the tunnel.
+          // The desktop guest needs a loopback URL: this origin serves the proxy path, the UI comes from the tunnel.
           res.end(desktopHarness(`http://127.0.0.1:${localPort}${viewPath}`))
-          return
-        }
-        if (pathname === '/react.js') {
-          res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-          res.end(reactBundle)
-          return
-        }
-        if (pathname === '/client.js') {
-          res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
-          res.end(readFileSync(CLIENT_PATH))
           return
         }
         for (const [prefix, route] of webServer.routes) {
@@ -438,7 +390,7 @@ window.ReactDOM = { createRoot }`,
         }
         route.handler(req, socket, head)
       })
-      localPort = await listen(server)
+      localPort = await listenOnFreePort(server)
       proxy = createRemoteProxy({
         webServer,
         getOrigin: () => `http://127.0.0.1:${localPort}`,
@@ -448,30 +400,14 @@ window.ReactDOM = { createRoot }`,
       webServer.register({ kind: 'prefix', path: proxy.routePath, handler: (req, res) => proxy.handle(req, res) })
       proxy.sync(['h_a'])
 
-      const puppeteer = (await import('puppeteer-core')).default
-      browser = await puppeteer.launch({
-        executablePath: browserPath,
-        headless: 'new',
-        args: [
-          '--no-first-run',
-          '--no-default-browser-check',
-          '--disable-gpu',
-          // Hosted Ubuntu runners restrict unprivileged user namespaces, so Chromium
-          // aborts with "No usable sandbox!" without this (web.e2e does the same).
-          ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
-        ],
-      })
-      // The carrier test reads the clipboard back to prove the write landed; headless Chromium
-      // grants that only through an explicit permission override.
+      session = await openBrowserPage(browserPath)
+      const browser = session.browser
+      // The test reads the clipboard back; headless Chromium grants that only through an explicit permission override.
       await browser
         .defaultBrowserContext()
         .overridePermissions(`http://127.0.0.1:${localPort}`, ['clipboard-read', 'clipboard-write'])
-      const page = await browser.newPage()
-      const errors = []
-      page.on('console', (message) => {
-        if (message.type() === 'error') errors.push(message.text())
-      })
-      page.on('pageerror', (error) => errors.push(String(error?.message ?? error)))
+      const page = session.page
+      const errors = collectPageErrors(page)
       await page.goto(`http://127.0.0.1:${localPort}/`, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       await waitFor(page, () => Boolean(window.__harness), { timeout: 15_000 })
       assert.equal(
@@ -535,8 +471,7 @@ window.ReactDOM = { createRoot }`,
       assert.equal(frameState.rowName, 'Test remote')
 
       // --- capability bridge, in a real browser against the real framed remote UI -------------
-      // The frame declares what the remote page may use itself, and the injected bridge put the
-      // capability shims and the per-host store in place.
+      // The frame declares what the remote page may use itself; the bridge injected the shims and the store.
       const capabilities = await page.evaluate(() => {
         const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
         const win = frame.contentWindow
@@ -623,8 +558,7 @@ window.ReactDOM = { createRoot }`,
       ])
       assert.match(afterLinkClick.href, /\/dsh-remote-go\/remote\/h_a\//, 'the frame must not navigate away')
 
-      // A modified click belongs to the browser (background tab / new window): it must keep its
-      // default and never become a bridge intent.
+      // A modified click belongs to the browser (background tab / new window): it keeps its default, never an intent.
       const modifiedClick = await page.evaluate(() => {
         const frame = document.querySelector('#dsh-remote-go-overlay-h_a iframe')
         const link = frame.contentDocument.getElementById('drg-e2e-link')
@@ -679,18 +613,12 @@ window.ReactDOM = { createRoot }`,
       })
       assert.deepEqual({ ...intent }, { kind: 'local' })
       assert.equal(await page.evaluate(() => window.__harness.plugin.carrier.shown()), null)
-      const carrierErrors = errors.filter((text) => !/Failed to load resource/.test(text))
-      assert.deepEqual(carrierErrors, [], `carrier page errors: ${carrierErrors.join(' | ')}`)
+      assertNoPageErrors(errors, { label: 'carrier page errors' })
       await page.close()
 
-      // Full overlay path: the real component sees a connected host, fetches `open`, and hands
-      // the browser carrier its `webUrl` — no direct `carrier.open` call in this page.
+      // Full overlay path: the real component sees a connected host, fetches `open` and hands the carrier its `webUrl`.
       const overlayPage = await browser.newPage()
-      const overlayErrors = []
-      overlayPage.on('console', (message) => {
-        if (message.type() === 'error') overlayErrors.push(message.text())
-      })
-      overlayPage.on('pageerror', (error) => overlayErrors.push(String(error?.message ?? error)))
+      const overlayErrors = collectPageErrors(overlayPage)
       await overlayPage.goto(`http://127.0.0.1:${localPort}/overlay`, {
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
@@ -741,23 +669,17 @@ window.ReactDOM = { createRoot }`,
       await waitFor(overlayPage, () => window.__overlay.plugin.carrier.shown() === null, {
         timeout: 10_000,
       })
-      const overlayErrorsFiltered = overlayErrors.filter((text) => !/Failed to load resource/.test(text))
-      assert.deepEqual(overlayErrorsFiltered, [], `overlay page errors: ${overlayErrorsFiltered.join(' | ')}`)
+      assertNoPageErrors(overlayErrors, { label: 'overlay page errors' })
       await overlayPage.close()
 
-      // Desktop guest (#63): the caption band belongs to the remote page, whose collapsed rail puts
-      // the new-session control at 48px — exactly where the shell's caption menubar starts unless
-      // the local page mirrors that state. A real remote UI, a real caption band, a seat that
-      // answers `executeJavaScript`; only the Electron <webview> is stood in for by an iframe.
+      // Desktop guest: the caption band belongs to the remote page, whose collapsed rail puts new-session at 48px —
+      // where the shell's caption menubar starts unless the local page mirrors that state. A real remote UI, a real
+      // caption band, a seat that answers `executeJavaScript`;
+      // only the Electron <webview> is stood in for by an iframe.
       const desktopPage = await browser.newPage()
-      // Wide enough that the remote UI opens with its sidebar expanded (it auto-collapses under
-      // 1024px), which is the state the caption band starts from.
+      // Wide enough that the remote UI opens with its sidebar expanded (it auto-collapses under 1024px): its start.
       await desktopPage.setViewport({ width: 1440, height: 900 })
-      const desktopErrors = []
-      desktopPage.on('console', (message) => {
-        if (message.type() === 'error') desktopErrors.push(message.text())
-      })
-      desktopPage.on('pageerror', (error) => desktopErrors.push(String(error?.message ?? error)))
+      const desktopErrors = collectPageErrors(desktopPage)
       await desktopPage.goto(`http://127.0.0.1:${localPort}/desktop`, {
         waitUntil: 'domcontentloaded',
         timeout: 30_000,
@@ -772,8 +694,7 @@ window.ReactDOM = { createRoot }`,
         window.__harness.plugin.carrier.open({ hostId: 'h_a', url: window.__guestUrl }),
       )
       assert.equal(desktopOpened.ok, true)
-      // The guest committed the remote document, the plugin taught it the desktop grid, and the
-      // remote sidebar rendered (the toggle survives the collapse this test drives).
+      // The guest committed the remote document, the plugin taught it the desktop grid, and the sidebar rendered.
       try {
         await waitFor(
           desktopPage,
@@ -786,8 +707,7 @@ window.ReactDOM = { createRoot }`,
               guest.querySelector('[data-sidebar-toggle]'),
             )
           },
-          // Timer polling: a backgrounded page throttles requestAnimationFrame, which made
-          // this wait time out even though the guest had already booted (CI flake).
+          // Timer polling: a backgrounded page throttles requestAnimationFrame, which timed this out on CI.
           { timeout: 60_000, polling: 100 },
         )
       } catch (error) {
@@ -842,8 +762,7 @@ window.ReactDOM = { createRoot }`,
         'an expanded rail keeps new-session inside the sidebar, out of the caption band',
       )
 
-      // Collapse the remote sidebar in the guest, exactly as the user does on the toggle: the
-      // new-session control now sits at 48px in the caption band, where the shell's default starts.
+      // Collapse the remote sidebar as the user does: the new-session control then sits at 48px, the shell's default.
       await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
         guest.querySelector('[data-sidebar-toggle]').click()
@@ -855,9 +774,8 @@ window.ReactDOM = { createRoot }`,
           null,
         { timeout: 10_000, polling: 100 },
       )
-      // The guest reports through the row's 400ms poll, so the host catches up within one cycle.
-      // The overlap during that cycle is the documented transient (docs/design.md §4.2): this
-      // measurement is after it, and asserting the transient itself would only add timing flakes.
+      // The guest reports through the row's 400ms poll, so the host catches up within one cycle; that overlap is the
+      // transient (docs/design.md §4.2), so this measurement is after it and asserting it would only add timing flakes.
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const collapsed = await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
@@ -895,8 +813,7 @@ window.ReactDOM = { createRoot }`,
         `the caption menus overlap new-session (${collapsed.menuLeft} < ${collapsed.newSession.right})`,
       )
 
-      // Expanding the rail again hands the 48px start back; leaving the guest returns the band to
-      // the local page, whose own sidebar rule takes the inset over again.
+      // Expanding the rail hands the 48px start back; leaving the guest returns the band to the local page's rule.
       await desktopPage.evaluate(() => {
         const guest = document.querySelector('[data-guest-seat]').contentDocument
         guest.querySelector('[data-sidebar-toggle]').click()
@@ -924,13 +841,12 @@ window.ReactDOM = { createRoot }`,
       assert.equal(afterLocal.captureLive, false, 'the local page owns the band again')
       assert.equal(afterLocal.menuStart, '', 'the inline override is gone, so the local rule decides')
       assert.equal(afterLocal.menuLeft, 48, 'with no local sidebar to collapse, that rule is the default')
-      const desktopErrorsFiltered = desktopErrors.filter((text) => !/Failed to load resource/.test(text))
-      assert.deepEqual(desktopErrorsFiltered, [], `desktop page errors: ${desktopErrorsFiltered.join(' | ')}`)
+      assertNoPageErrors(desktopErrors, { label: 'desktop page errors' })
       await desktopPage.close()
     } finally {
-      if (browser !== null) await browser.close()
+      if (session !== null) await session.close()
       proxy?.dispose()
-      if (server !== null) await close(server)
+      if (server !== null) await closeServer(server)
       if (dsh !== null) await stopChild(dsh.child)
       rmSync(home, { recursive: true, force: true })
     }

@@ -10,7 +10,6 @@ import { upgradePath } from '../../dist/src/proxy/routes.js'
 import { makeTempRoot, resolveDshCli, skipOrFail, sleep, stopChild, tail } from './harness-support.ts'
 
 const timeout = { timeout: 120_000 }
-
 function listen(server) {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
@@ -20,11 +19,9 @@ function listen(server) {
     })
   })
 }
-
 function close(server) {
   return new Promise((resolve) => server.close(() => resolve(undefined)))
 }
-
 function request(port, requestPath, options = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request(
@@ -51,7 +48,6 @@ function request(port, requestPath, options = {}) {
     req.end(options.body)
   })
 }
-
 function fakeWebServer() {
   const routes = new Map()
   const upgrades = new Map()
@@ -68,7 +64,6 @@ function fakeWebServer() {
     },
   }
 }
-
 /** Start the packaged DSH web in a throwaway home and return its loopback port and launch token. */
 async function startDshWeb(cli, home) {
   const child = spawn(cli.command, [...cli.args, '--profile', 'web', '--no-open', '--port', '0'], {

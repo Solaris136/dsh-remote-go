@@ -1,7 +1,4 @@
-/**
- * The two connect entries: a user connect (which owns the one-time inputs, the retry budget and
- * the log boundary) and the "Reconnect" button's drop-and-redial.
- */
+/** The two connect entries: a user connect (which owns the one-time inputs, the retry budget and the log boundary) and the "Reconnect" button's drop-and-redial. */
 import { beginConnectLog } from '../connect-log.js'
 import type { ConnectCtx } from '../context.js'
 import { runtimeOf } from '../host-registry.js'
@@ -10,32 +7,13 @@ import type { HostRuntime } from '../host-runtime.js'
 import { dispatch, scopeFactsFor } from '../runtime/dispatch.js'
 import { createRuntimeEffects } from '../runtime/effects.js'
 import { isRefusal } from '../runtime/fsm.js'
-import type { HostEntry } from '../settings.js'
 import { startConnectPromise } from './pipeline.js'
 
-/** The knobs of one connect request, as the API hands them over. */
-export interface StartConnectOptions {
-  /** A password the user typed for this attempt alone; it is only stored when allowed. */
-  password?: string
-  rememberPassword?: boolean
-}
+export type StartConnectOptions = { password?: string; rememberPassword?: boolean }
 
-/** The verdict the one-shot link actions report before they start running. */
-export interface AcceptedResult {
-  accepted: boolean
-  reason?: string
-}
+export type AcceptedResult = { accepted: boolean; reason?: string }
 
-function describeTarget(entry: HostEntry): string {
-  const user = entry.username ? `${entry.username}@` : ''
-  const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
-  return `${user}${entry.address || '?'}${port}`
-}
-
-/**
- * Accept a connect request: apply the one-time inputs, stop any pending retry,
- * and start the pipeline in the background. Progress travels on `state`.
- */
+/** Accept a connect request: apply the one-time inputs, stop any pending retry, and start the pipeline in the background. */
 export async function startConnect(
   ctx: ConnectCtx,
   id: string,
@@ -49,27 +27,22 @@ export async function startConnect(
   runtime.alongsidePids = []
   const typedPassword = typeof options.password === 'string' && options.password !== '' ? options.password : null
   if (typedPassword !== null) runtime.password = typedPassword
-  // Remembering is the default for a password the user just typed (`POST /hosts/:id/connect`
-  // treats an absent `rememberPassword` as true). An explicit false means "this connection
-  // only" and also forgets a previously saved record, so an unchecked box cannot leave a stale
-  // secret behind. A retry or auto-reconnect carries no password of its own and must not
-  // re-save what the store already holds.
+  // Remembering is the default for a typed password; an explicit false means "this connection only" and
+  // also forgets a previously saved record, while a retry carries no password and re-saves nothing.
   runtime.savePassword = typedPassword !== null && options.rememberPassword !== false
   runtime.forgetPassword = typedPassword !== null && options.rememberPassword === false
-  // This connection starts its own log: the previous attempt's lines are gone before the
-  // first line of this one, so the panel and a copied log only ever show the live attempt.
-  // The line keeps the previous attempt's `phase`, exactly as it did before the FSM owned it.
+  // This connection starts its own log, so the panel and a copied log only ever show the live attempt.
   beginConnectLog(runtime)
+  const { entry } = runtime
+  const user = entry.username ? `${entry.username}@` : ''
+  const port = entry.port && entry.port !== 22 ? `:${entry.port}` : ''
   ctx.progress.log(
     runtime,
     'info',
-    `connect: ${describeTarget(runtime.entry)} (auth=${runtime.entry.auth?.type ?? 'key'}${
-      runtime.entry.jumpHost ? `, jump=${runtime.entry.jumpHost}` : ''
+    `connect: ${user}${entry.address || '?'}${port} (auth=${entry.auth?.type ?? 'key'}${
+      entry.jumpHost ? `, jump=${entry.jumpHost}` : ''
     })`,
   )
-  // One transition owns the whole entry: the retry budget and prompt history reset (a *user*
-  // connect), the timer disarms, the desired flag and the pipeline start (`run`). The token
-  // invalidates any older one-shot action, the same way the old `cancelLinkWork` did.
   const token = (Number(runtime.linkToken) || 0) + 1
   const event = { type: 'connect.requested' as const, token }
   const result = await dispatch(createRuntimeEffects(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), {
@@ -88,8 +61,8 @@ export async function reconnectHost(ctx: ConnectCtx, runtime: HostRuntime): Prom
   await disconnectHost(ctx, runtime, { stopRemote: false })
   cancelIdleStop(runtime)
   await disposeSsh(runtime)
-  // A one-shot action cancelled by the disconnect resolves after its transport is gone; it
-  // can no longer write state, but letting it settle keeps the old code out of the new run.
+  // A one-shot action cancelled by the disconnect resolves after its transport is gone; letting it
+  // settle keeps the old code out of the new run.
   await Promise.allSettled(
     [runtime.restartPromise, runtime.reattachPromise].filter(
       (promise) => promise && typeof promise.then === 'function',

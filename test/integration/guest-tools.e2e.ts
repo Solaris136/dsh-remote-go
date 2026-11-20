@@ -1,22 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import path from 'node:path'
-import process from 'node:process'
-import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
-import puppeteer from 'puppeteer-core'
+import { openBrowserPage, readClientArtifact } from '../helpers/browser.ts'
 import { resolveBrowser, skipOrFail } from './harness-support.ts'
 
-const HERE = path.dirname(fileURLToPath(import.meta.url))
-const REPO_ROOT = path.resolve(HERE, '..', '..')
 const requireFromHere = createRequire(import.meta.url)
 const React = requireFromHere('react')
-
 /** Load the built client just far enough to read the scripts it injects into a guest. */
 function loadScripts() {
-  const source = readFileSync(path.join(REPO_ROOT, 'dist', 'client.js'), 'utf8')
+  const source = readClientArtifact().toString('utf8')
   const sandbox = {
     console,
     setTimeout,
@@ -50,18 +43,8 @@ test('the guest download bridge queues one intent and closes the menu', async (t
     return
   }
   const scripts = loadScripts()
-  const browser = await puppeteer.launch({
-    executablePath: browserPath,
-    headless: true,
-    args: [
-      '--disable-gpu',
-      // Hosted Ubuntu runners restrict unprivileged user namespaces; other platforms
-      // keep the sandbox (same policy as web.e2e / browser-carrier).
-      ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
-    ],
-  })
+  const { page, close } = await openBrowserPage(browserPath, { headless: true })
   try {
-    const page = await browser.newPage()
     await page.setContent(`<!doctype html><html lang="en"><body>
       <ul role="tree">
         <li data-files-entry="file" data-files-path="/home/ubuntu/report.md">
@@ -163,6 +146,6 @@ test('the guest download bridge queues one intent and closes the menu', async (t
     assert.equal(directory.queue.length, 3)
     assert.equal(directory.menuHidden, true)
   } finally {
-    await browser.close()
+    await close()
   }
 })

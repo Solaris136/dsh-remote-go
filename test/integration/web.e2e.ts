@@ -2,11 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import { mkdirSync } from 'node:fs'
-import { readFile, rm } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
-import { fileURLToPath } from 'node:url'
-import puppeteer from 'puppeteer-core'
+import {
+  REPO_ROOT,
+  assertNoPageErrors,
+  collectPageErrors,
+  openBrowserPage,
+  readClientArtifact,
+} from '../helpers/browser.ts'
 import { assertLightAndDark, assertMeasured, measureStable } from './browser-contrast.ts'
 import {
   assertPackedDependency,
@@ -26,10 +31,6 @@ import {
   writeFailureArtifacts,
 } from './harness-support.ts'
 import { dismissOpenDialog, openManageWindow } from './ui-steps.ts'
-
-const HERE = path.dirname(fileURLToPath(import.meta.url))
-const REPO_ROOT = path.resolve(HERE, '..', '..')
-
 /** One plain GET against the isolated server, without the browser's cookie/console side effects. */
 function httpRequest(origin, requestPath, onResponse, onError, headers = {}) {
   const url = new URL(requestPath, origin)
@@ -40,7 +41,6 @@ function httpRequest(origin, requestPath, onResponse, onError, headers = {}) {
     )
     .on('error', onError)
 }
-
 const DIALOG_DISMISS_LABELS = [
   '继续',
   'Continue',
@@ -52,7 +52,6 @@ const DIALOG_DISMISS_LABELS = [
   '稍后',
   'Later',
 ]
-
 async function startWeb(options) {
   const timeoutMs = options.timeoutMs ?? 180_000
   const { spawn } = await import('node:child_process')
@@ -78,9 +77,7 @@ async function startWeb(options) {
   })
   return { url, child, logs, stop: () => stopChild(child) }
 }
-
 const FIRST_RUN_SETTLE_MS = 800
-
 async function firstRunSettled(page, settleMs = FIRST_RUN_SETTLE_MS) {
   const deadline = Date.now() + settleMs
   do {
@@ -89,7 +86,6 @@ async function firstRunSettled(page, settleMs = FIRST_RUN_SETTLE_MS) {
   } while (Date.now() < deadline)
   return true
 }
-
 async function dismissFirstRunDialogs(page) {
   let dismissed = 0
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -135,7 +131,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
   if (harness.command.toLowerCase().endsWith('.exe')) childEnv.ELECTRON_RUN_AS_NODE = '1'
   else delete childEnv.ELECTRON_RUN_AS_NODE
   let server = null
-  let browser = null
+  let session = null
   let page = null
   let consoleErrors = []
   const onSignal = (signal) => {
@@ -174,25 +170,18 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       assert.match(server.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]{20,}$/)
       assert.ok(server.child.pid, 'the web process has no pid')
     })
-    browser = await puppeteer.launch({
-      executablePath: browserPath,
+    session = await openBrowserPage(browserPath, {
       headless: true,
       userDataDir,
       args: [
-        '--no-first-run',
-        '--no-default-browser-check',
         '--disable-extensions',
         '--disable-background-networking',
         `--lang=${process.env.DSH_E2E_LANG ?? 'en-US'}`,
-        ...(process.platform === 'linux' ? ['--no-sandbox', '--disable-dev-shm-usage'] : []),
       ],
     })
-    page = await browser.newPage()
+    page = session.page
     await page.setViewport({ width: 1400, height: 950 })
-    page.on('console', (message) => {
-      if (message.type() === 'error') consoleErrors.push(message.text())
-    })
-    page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
+    consoleErrors = collectPageErrors(page, { pageError: 'pageerror: ' })
     await page.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
     await t.test('the app shell loads and the launch token becomes a clean URL', async () => {
       await waitFor(page, () => !location.search.includes('token='), { timeout: 60_000 })
@@ -230,9 +219,9 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       const health = await probe('/dsh-remote-go/api/health')
       assert.equal(health.status, 200)
       assert.match(health.type, /application\/json/)
-      // Every other route passes DSH admission first: a bare local client has no session and is
-      // refused, while the GUI's own session reaches the proxy — which owns the prefix and 404s
-      // unknown hosts instead of falling through to the SPA.
+      // Every other route passes DSH admission first: a bare local client has no session and is refused, while the
+      // GUI's own session reaches the proxy — which owns the prefix
+      // and 404s unknown hosts instead of falling through to the SPA.
       const unauthenticated = await probe('/dsh-remote-go/remote/h_missing/')
       assert.equal(
         unauthenticated.status,
@@ -281,7 +270,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     })
     await t.test('every theme token the plugin reads is published by the host', async () => {
       // The built artifact: `exports["./client"]` names this file in the installed package too.
-      const source = await readFile(path.join(REPO_ROOT, 'dist', 'client.js'), 'utf8')
+      const source = readClientArtifact().toString('utf8')
       const tokens = [...new Set([...source.matchAll(/--dsw-[a-z0-9-]+/g)].map((found) => found[0]))]
       assert.ok(
         tokens.length >= 30,
@@ -372,7 +361,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       await assertMeasured(await measureStable(page, { scheme: 'dark' }), 'dark/restored')
     })
     await t.test('loading the app and the host-management window logged no console errors', async () => {
-      assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
+      assertNoPageErrors(consoleErrors, { label: 'console errors', includeResourceErrors: true })
     })
   } catch (error) {
     await writeFailureArtifacts({
@@ -385,7 +374,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     })
     throw error
   } finally {
-    if (browser) await browser.close().catch(() => {})
+    if (session) await session.close().catch(() => {})
     if (server) await server.stop()
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)

@@ -1,9 +1,5 @@
-/**
- * The artifact half of the managed Node install: the remote scripts that find the official
- * tarball's SHA-256, download it verified and unpack it under `$DSH_HOME/remote-go/node`, plus
- * the parsers for their stdout. Everything here is pure (no transport), so `node-runtime.ts`
- * runs these scripts and owns the install/reuse orchestration.
- */
+/** The artifact half of the managed Node install: remote scripts that find the official tarball's SHA-256, download it
+ * verified and unpack it, plus their stdout parsers. Pure; `node-runtime.ts` owns the install/reuse orchestration. */
 import type { RemoteLayout } from '../layout.js'
 import { shellQuote } from '../util.js'
 
@@ -20,10 +16,7 @@ export interface NodeRelease {
   file: string
 }
 
-/**
- * Pick the downloader both install scripts share: curl when present, else wget.
- * Exit 9 is the "neither tool" contract the caller maps to `no-fetch`.
- */
+/** The downloader both install scripts share: curl when present, else wget; exit 9 is the "neither tool" contract the caller maps to `no-fetch`. */
 const FETCH_PROLOGUE = `if command -v curl >/dev/null 2>&1; then
   FETCH=curl
 elif command -v wget >/dev/null 2>&1; then

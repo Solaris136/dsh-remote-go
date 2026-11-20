@@ -1,6 +1,5 @@
 // client/src/key-picker.ts - KeyFilePicker, the remote key-file chooser (region 9c); after carrier-overlay.ts, before wizard-draft.ts.
 //#region 9c. key-file picker
-
 /** The key chooser: it browses directories inside the user's home and returns one file path. */
 interface KeyFilePickerProps extends LocaleProps {
   initialDir?: string
@@ -26,6 +25,7 @@ function KeyFilePicker(props: KeyFilePickerProps) {
         setLoading(false)
       },
       (failure) => {
+        // A failed listing keeps the one that is already shown: the retry button still needs its path.
         if (cancelled) return
         setError(toErrorView(failure))
         setLoading(false)
@@ -44,6 +44,19 @@ function KeyFilePicker(props: KeyFilePickerProps) {
     ...entries.filter((entry: KeyFileEntry) => entry && entry.isDirectory),
     ...entries.filter((entry: KeyFileEntry) => entry && !entry.isDirectory),
   ]
+  const row = (entry: KeyFileEntry) =>
+    h(
+      'button',
+      {
+        key: entry.path,
+        type: 'button',
+        className: 'drg-keyfile-row',
+        'data-kind': entry.isDirectory ? 'directory' : 'file',
+        title: entry.isDirectory ? undefined : entry.path,
+        onClick: () => (entry.isDirectory ? load(entry.path) : props.onPick(entry.path)),
+      },
+      box('span', 'drg-keyfile-name', entry.isDirectory ? entry.name + '/' : entry.name),
+    )
 
   let body
   if (loading) {
@@ -58,24 +71,7 @@ function KeyFilePicker(props: KeyFilePickerProps) {
   } else if (entries.length === 0) {
     body = box('p', 'drg-field-hint', t('keyFile.empty'))
   } else {
-    body = h(
-      'div',
-      { className: 'drg-keyfile-list', 'data-testid': 'keyfile-list' },
-      sorted.map((entry) =>
-        h(
-          'button',
-          {
-            key: entry.path,
-            type: 'button',
-            className: 'drg-keyfile-row',
-            'data-kind': entry.isDirectory ? 'directory' : 'file',
-            title: entry.isDirectory ? undefined : entry.path,
-            onClick: () => (entry.isDirectory ? load(entry.path) : props.onPick(entry.path)),
-          },
-          box('span', 'drg-keyfile-name', entry.isDirectory ? entry.name + '/' : entry.name),
-        ),
-      ),
-    )
+    body = h('div', { className: 'drg-keyfile-list', 'data-testid': 'keyfile-list' }, sorted.map(row))
   }
 
   return h(

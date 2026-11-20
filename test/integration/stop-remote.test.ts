@@ -15,14 +15,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROOT = path.resolve(HERE, '..', '..')
 const SIM_SCRIPT = path.join(ROOT, 'e2e', 'sim', 'simulated-remote.mjs')
 const REGISTRY_PATH = '/home/sim/.dsh/remote-go/run/web.json'
-
 const QUIET = { warn() {}, info() {}, debug() {}, error() {} }
 const CREDENTIALS = { username: 'sim', password: 'sim' }
-
 function tail(lines) {
   return lines.slice(-15).join('')
 }
-
 function readState(file) {
   try {
     return JSON.parse(readFileSync(file, 'utf8'))
@@ -30,7 +27,6 @@ function readState(file) {
     return null
   }
 }
-
 async function waitForState(file, predicate, label, timeoutMs = 30_000) {
   const started = Date.now()
   while (Date.now() - started <= timeoutMs) {
@@ -40,7 +36,6 @@ async function waitForState(file, predicate, label, timeoutMs = 30_000) {
   }
   throw new Error(`${label} timed out after ${timeoutMs}ms`)
 }
-
 async function waitFor(predicate, options = {}) {
   const timeoutMs = options.timeoutMs ?? 10_000
   const started = Date.now()
@@ -50,7 +45,6 @@ async function waitFor(predicate, options = {}) {
   }
   throw new Error(`${options.label ?? 'condition'} timed out after ${timeoutMs}ms`)
 }
-
 async function startSimulator(stateFile) {
   const logs = []
   const child = spawn(process.execPath, [SIM_SCRIPT, '--serve', '--state-file', stateFile], {
@@ -73,7 +67,6 @@ async function startSimulator(stateFile) {
   )
   return { child, state, logs }
 }
-
 async function stopSimulator(child) {
   if (!child || child.exitCode !== null) return true
   const exited = new Promise((resolve) => child.once('exit', resolve))
@@ -91,7 +84,6 @@ async function stopSimulator(child) {
   }
   return true
 }
-
 function httpGet(port, pathname) {
   return new Promise((resolve, reject) => {
     const request = http.request({ host: '127.0.0.1', port, path: pathname, method: 'GET' }, (response) => {
@@ -104,7 +96,6 @@ function httpGet(port, pathname) {
     request.end()
   })
 }
-
 /** The plugin exactly as it runs locally, pointed at the simulated SSH endpoint. */
 async function startPlugin(state, dir) {
   const store = new HostStore({ dir: path.join(dir, 'state'), logger: QUIET })
@@ -145,7 +136,6 @@ async function startPlugin(state, dir) {
   })
   return { service, host }
 }
-
 /** Read one remote file over a fresh SSH session (the plugin's own transport is released). */
 async function readRemoteText(state, remotePath) {
   const ssh = new SshConnection({
@@ -209,8 +199,8 @@ test(
         assert.equal(service.snapshot().hosts.length, 1)
         assert.equal(service.runtimes.get(host.id).ssh, null, 'the SSH session is released')
 
-        // The simulated remote process is really gone: its pid stops answering, its listener is
-        // closed and the run registry no longer names an instance.
+        // The simulated remote process is really gone: its pid stops answering, its listener is closed and the run
+        // registry no longer names an instance.
         const stoppedState = await waitForState(stateFile, (value) => value.stops >= 1, 'remote stop')
         assert.equal(stoppedState.started, false)
         assert.equal(stoppedState.token, '')

@@ -1,16 +1,7 @@
-/**
- * Local download writer. Every download (single file or folder) is streamed from
- * SFTP directly to a user-selected local directory. Nothing is archived or held in
- * memory, and there is no byte or entry cap. Existing target names are renamed with
- * a ` (2)`, ` (3)` suffix so a download never overwrites local data.
- *
- * The destination is a **write primitive that a remote host chooses the contents of** (the
- * file or folder name comes from the remote tree), so it is fenced like one: only folders
- * under the local user's home, and never a system, autorun or credential folder. Without this
- * fence a compromised remote could ask the GUI to save its tree into
- * `…\Start Menu\Programs\Startup` (or `~/.ssh/authorized_keys`) and run code on this machine at
- * the next logon.
- */
+// Local download writer: streams one remote file or folder from SFTP into a user-selected local directory, never
+// overwriting (a taken name gets a ` (2)` suffix). The destination is a **write primitive whose contents a remote host
+// chooses**, so it is fenced to folders under the local user's home — otherwise a compromised remote could save into
+// `…\Start Menu\Programs\Startup` or `~/.ssh/authorized_keys` and run code at the next logon.
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { mkdir, open, rm, stat } from 'node:fs/promises'
@@ -19,15 +10,16 @@ import type { RemoteGoError } from './errors.js'
 import { remoteFileName, safeLocalSegment } from './remote-path.js'
 import type { SshPort, TransferInventory, TransferProgress } from './ssh-port.js'
 
-/**
- * Path segments that execute something when the user logs in, or that authorize a login.
- * Matched case-insensitively as a whole segment anywhere below the home directory, so both
- * `…\Start Menu\Programs\Startup` and `~/.config/autostart` are covered. Shell startup files
- * and the per-user containers that hold them (`~/.config`, `~/.local`, whose `bin` is on PATH in
- * many distributions) are refused for the same reason, as are the macOS login-item folders
- * (`~/Library/LaunchAgents`, `LaunchDaemons`, `StartupItems`) and the X session files.
- */
-const FORBIDDEN_SEGMENTS: Map<string, Exclude<DestinationRefusal, null>> = new Map([
+/** Why a local folder may not receive a remote download, or null when it is acceptable. */
+export type DestinationRefusal =
+  'invalid' | 'outside-home' | 'autorun' | 'credentials' | 'login' | 'system' | 'protected' | null
+
+type Refusal = Exclude<DestinationRefusal, null>
+
+// Segments that execute something at logon or authorize one, matched case-insensitively as a whole segment anywhere
+// below home (so `…\Start Menu\Programs\Startup` and `~/.config/autostart` hit). The login group covers the shell
+// startup files, `~/.config`/`~/.local` (whose `bin` is on PATH in many distributions), the macOS login items and X.
+const FORBIDDEN_SEGMENTS = new Map<string, Refusal>([
   ['startup', 'autorun'],
   ['startupfolder', 'autorun'],
   ['startupitems', 'autorun'],
@@ -61,7 +53,6 @@ const FORBIDDEN_SEGMENTS: Map<string, Exclude<DestinationRefusal, null>> = new M
 
 /** `shell:startup` / `shell:common startup` name an autorun folder without spelling a path. */
 const SHELL_FOLDER_RE = /^\s*shell\s*:/i
-
 /** Directories that belong to the OS; never a download target even if home somehow covers them. */
 const SYSTEM_ROOTS: readonly string[] = Object.freeze(
   process.platform === 'win32'
@@ -70,32 +61,77 @@ const SYSTEM_ROOTS: readonly string[] = Object.freeze(
 )
 
 /** A stronger reason wins when several segments of one path match (most specific first). */
-const REASON_PRIORITY: Array<Exclude<DestinationRefusal, null>> = ['autorun', 'credentials', 'login', 'system']
+const REASON_PRIORITY: Refusal[] = ['autorun', 'credentials', 'login', 'system']
+/** The client-facing text of each refusal; `invalid` also covers "no destination at all". */
+const REFUSAL_TEXT: Record<Refusal, { zh: string; en: string }> = {
+  invalid: { zh: '请选择本机的保存文件夹。', en: 'Choose a destination folder on this machine.' },
+  'outside-home': {
+    zh: '只能保存到本机用户主目录下的文件夹（防止写入系统或自启动位置）。',
+    en: 'Downloads must go to a folder under this machine’s home directory (system and autorun locations are refused).',
+  },
+  autorun: {
+    zh: '不能保存到自启动目录（例如 Startup / autostart / shell:startup）。',
+    en: 'An autorun folder (for example Startup / autostart / shell:startup) cannot be a download target.',
+  },
+  credentials: {
+    zh: '不能保存到 SSH / GPG 配置目录（例如 .ssh）。',
+    en: 'An SSH / GPG configuration folder (for example .ssh) cannot be a download target.',
+  },
+  login: {
+    zh: '不能保存到登录脚本或用户配置目录（例如 .bashrc / .profile / .config / .local）。',
+    en: 'A login script or user configuration folder (for example .bashrc / .profile / .config / .local) cannot be a download target.',
+  },
+  protected: {
+    zh: '不能保存到会在登录或启动时生效的位置（自启动、登录脚本或凭据目录及其上级目录）。',
+    en: 'A location that runs or authenticates at logon (autorun, login scripts, credentials, or one of their parent folders) cannot be a download target.',
+  },
+  system: {
+    zh: '不能保存到系统目录。',
+    en: 'A system directory cannot be a download target.',
+  },
+}
 
-/** Why a local folder may not receive a remote download, or null when it is acceptable. */
-export type DestinationRefusal =
-  'invalid' | 'outside-home' | 'autorun' | 'credentials' | 'login' | 'system' | 'protected' | null
+/** The remaining client-facing texts of this module. */
+const TEXT = {
+  notFolder: { zh: '选择的保存位置不是文件夹。', en: 'The selected destination is not a folder.' },
+  destinationUnusable: {
+    zh: '选择的保存文件夹不存在或不可写。',
+    en: 'The selected destination folder does not exist or cannot be written.',
+  },
+  tooManyFolders: {
+    zh: '目标目录里已经有太多同名文件夹，请换一个目录。',
+    en: 'The destination already contains too many folders with this name; choose another directory.',
+  },
+  tooManyFiles: {
+    zh: '目标目录里已经有太多同名文件，请换一个目录。',
+    en: 'The destination already contains too many files with this name; choose another directory.',
+  },
+  fileNotConnected: {
+    zh: '这台主机还没有连接，无法读取远端文件。',
+    en: 'This host is not connected, so the remote file cannot be read.',
+  },
+  folderNotConnected: {
+    zh: '这台主机还没有连接，无法读取远端文件夹。',
+    en: 'This host is not connected, so the remote folder cannot be read.',
+  },
+}
 
-/** The policy call's knobs: the local user's home (defaults to the OS home). */
 export interface DownloadDestinationOptions {
   home?: string
 }
 
-/** The host-runtime slice a download needs: an identity, a connected status and a transport. */
 export interface HostDownloadRuntime {
   readonly id: string
   readonly status: string
   readonly ssh: SshPort | null
 }
 
-/** What one single-file download reports while it streams. */
 export interface SaveHostFileOptions {
   onProgress?: (info: TransferProgress) => void
   isCancelled?: () => boolean
   home?: string
 }
 
-/** What one folder download reports while it walks, streams and skips names. */
 export interface SaveHostFolderOptions {
   onInventory?: (info: TransferInventory) => void
   onProgress?: (info: TransferProgress) => void
@@ -104,7 +140,6 @@ export interface SaveHostFolderOptions {
   home?: string
 }
 
-/** The result of one finished single-file download. */
 export interface SavedFile {
   path: string
   kind: 'file'
@@ -114,7 +149,6 @@ export interface SavedFile {
   files: number
 }
 
-/** The result of one finished folder download. */
 export interface SavedFolder {
   path: string
   kind: 'folder'
@@ -125,14 +159,9 @@ export interface SavedFolder {
   cancelled?: boolean
 }
 
-/** What one download resolved to, whichever kind it was. */
 export type SavedDownload = SavedFile | SavedFolder
 
-/**
- * One resolved path, comparable on this platform. Windows and macOS both have a
- * case-insensitive default filesystem, so a case-insensitive compare is the one the OS itself
- * would do (`C:\Users` vs `c:\users`, `/Users/Me` vs `/Users/me`).
- */
+// Windows and macOS default to a case-insensitive filesystem, so compare the way the OS does.
 function comparable(value: string): string {
   return process.platform === 'win32' || process.platform === 'darwin' ? value.toLowerCase() : value
 }
@@ -146,31 +175,18 @@ function isInside(root: string, target: string): boolean {
   return target === root || target.startsWith(base)
 }
 
-/**
- * Locations whose *contents* run or authenticate at logon. A download may neither land inside
- * one of them nor create one of their ancestors: a remote folder named `Microsoft` under
- * `~/AppData/Roaming` would otherwise put a whole `Windows\Start Menu\Programs\Startup` tree on
- * disk without any single path segment looking suspicious (macOS has the same shape under
- * `~/Library`).
- * @param home - resolved home directory.
- * @returns resolved sensitive roots that exist by definition (not on disk).
- */
+// Locations whose *contents* run or authenticate at logon: a download may neither land inside one nor create an
+// ancestor of one, or `~/AppData/Roaming` plus a remote folder named `Microsoft` would put a Startup tree on disk.
 function sensitiveRoots(home: string): string[] {
   const roots = ['.config', '.local', '.ssh', '.gnupg'].map((name) => path.join(home, name))
   roots.push(path.join(home, 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu'))
-  for (const name of ['LaunchAgents', 'LaunchDaemons', 'StartupItems']) {
-    roots.push(path.join(home, 'Library', name))
-  }
+  for (const name of ['LaunchAgents', 'LaunchDaemons', 'StartupItems']) roots.push(path.join(home, 'Library', name))
   const appData = typeof process.env.APPDATA === 'string' && process.env.APPDATA.trim() !== ''
   if (appData) roots.push(path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu'))
   return roots
 }
 
-/**
- * Whether a path is a sensitive location, inside one, or an ancestor of one.
- * @param target - resolved candidate path.
- * @param home - resolved home directory.
- */
+/** Whether a path is a sensitive location, inside one, or an ancestor of one. */
 function isProtectedLocation(target: string, home: string): boolean {
   const resolved = comparable(target)
   for (const root of sensitiveRoots(home)) {
@@ -180,18 +196,12 @@ function isProtectedLocation(target: string, home: string): boolean {
   return false
 }
 
-/** The concrete home directory a policy call is judged against. */
 function homeOf(options: DownloadDestinationOptions = {}): string {
   return path.resolve(options.home ?? homedir())
 }
 
-/**
- * Whether one local folder may receive a remote download.
- * @param destination - the folder the client asked to save into.
- * @param options - the local user's home (defaults to the OS home).
- * @returns a refusal reason, or null when the folder is acceptable. Pure: no filesystem
- *   access, so it is testable.
- */
+// Pure: no filesystem access, so a caller can ask before creating anything and a test can ask about
+// a folder that does not exist.
 export function destinationPolicy(destination: unknown, options: DownloadDestinationOptions = {}): DestinationRefusal {
   if (typeof destination !== 'string' || destination.trim() === '' || destination.includes('\0')) return 'invalid'
   if (SHELL_FOLDER_RE.test(destination)) return 'autorun'
@@ -199,7 +209,7 @@ export function destinationPolicy(destination: unknown, options: DownloadDestina
   const target = comparable(path.resolve(destination))
   if (!isInside(home, target)) return 'outside-home'
   const segments = segmentsOf(target)
-  const reasons = new Set<Exclude<DestinationRefusal, null>>()
+  const reasons = new Set<Refusal>()
   for (const segment of segments) {
     const reason = FORBIDDEN_SEGMENTS.get(segment.toLowerCase())
     if (reason !== undefined) reasons.add(reason)
@@ -217,93 +227,40 @@ export function destinationPolicy(destination: unknown, options: DownloadDestina
   return null
 }
 
-/** The client-facing refusal for one destination policy result. */
 function destinationRefusal(reason: DestinationRefusal): RemoteGoError {
-  if (reason === 'outside-home') {
-    return errors.invalidInput('destination', {
-      zh: '只能保存到本机用户主目录下的文件夹（防止写入系统或自启动位置）。',
-      en: 'Downloads must go to a folder under this machine’s home directory (system and autorun locations are refused).',
-    })
-  }
-  if (reason === 'autorun') {
-    return errors.invalidInput('destination', {
-      zh: '不能保存到自启动目录（例如 Startup / autostart / shell:startup）。',
-      en: 'An autorun folder (for example Startup / autostart / shell:startup) cannot be a download target.',
-    })
-  }
-  if (reason === 'credentials') {
-    return errors.invalidInput('destination', {
-      zh: '不能保存到 SSH / GPG 配置目录（例如 .ssh）。',
-      en: 'An SSH / GPG configuration folder (for example .ssh) cannot be a download target.',
-    })
-  }
-  if (reason === 'login') {
-    return errors.invalidInput('destination', {
-      zh: '不能保存到登录脚本或用户配置目录（例如 .bashrc / .profile / .config / .local）。',
-      en: 'A login script or user configuration folder (for example .bashrc / .profile / .config / .local) cannot be a download target.',
-    })
-  }
-  if (reason === 'protected') {
-    return errors.invalidInput('destination', {
-      zh: '不能保存到会在登录或启动时生效的位置（自启动、登录脚本或凭据目录及其上级目录）。',
-      en: 'A location that runs or authenticates at logon (autorun, login scripts, credentials, or one of their parent folders) cannot be a download target.',
-    })
-  }
-  if (reason === 'system') {
-    return errors.invalidInput('destination', {
-      zh: '不能保存到系统目录。',
-      en: 'A system directory cannot be a download target.',
-    })
-  }
-  return errors.invalidInput('destination', {
-    zh: '请选择本机的保存文件夹。',
-    en: 'Choose a destination folder on this machine.',
-  })
+  return errors.invalidInput('destination', REFUSAL_TEXT[reason ?? 'invalid'])
 }
 
-/**
- * Refuse a path the remote host named inside an already-accepted destination.
- *
- * The destination is chosen locally, but the *name* below it comes from the remote tree
- * (`~/Downloads/…`, `~/.config` + a remote folder called `autostart`, `~` + a remote file called
- * `.bash_login`). This is the check that turns those combinations into a refusal.
- * @param candidate - resolved folder or file path about to be created.
- * @throws `invalid-input` when the path is protected.
- */
+// The destination is chosen locally, but the *name* below it comes from the remote tree (`~/.config` + a remote folder
+// called `autostart`, `~` + a remote file called `.bash_login`); this refuses those combinations before any write.
 function assertCandidateAllowed(candidate: string, options: DownloadDestinationOptions = {}): void {
   const refusal = destinationPolicy(candidate, options)
   if (refusal !== null) throw destinationRefusal(refusal)
   if (isProtectedLocation(candidate, homeOf(options))) throw destinationRefusal('protected')
 }
 
-/**
- * Resolve and check one download destination.
- * @param destination - absolute local folder.
- * @param options - the local user's home, for tests.
- * @returns the resolved folder.
- */
-async function requireDestination(destination: unknown, options: DownloadDestinationOptions = {}): Promise<string> {
+export async function requireDestination(
+  destination: unknown,
+  options: DownloadDestinationOptions = {},
+): Promise<string> {
   const refusal = destinationPolicy(destination, options)
   if (refusal !== null) throw destinationRefusal(refusal)
-  // `destinationPolicy` accepts only a non-empty string path, so by here the unknown is a
-  // string; the `as` restates that narrowing instead of adding a second runtime check.
+  // `destinationPolicy` accepts only a non-empty string path, so by here the unknown is a string;
+  // the `as` restates that narrowing instead of adding a second runtime check.
   const base = path.resolve(destination as string)
   try {
     const info = await stat(base)
-    if (!info.isDirectory()) {
-      throw errors.invalidInput('destination', {
-        zh: '选择的保存位置不是文件夹。',
-        en: 'The selected destination is not a folder.',
-      })
-    }
+    if (!info.isDirectory()) throw errors.invalidInput('destination', TEXT.notFolder)
   } catch (error) {
     if (isRemoteGoError(error)) throw error
-    throw errors.invalidInput('destination', {
-      zh: '选择的保存文件夹不存在或不可写。',
-      en: 'The selected destination folder does not exist or cannot be written.',
-    })
+    throw errors.invalidInput('destination', TEXT.destinationUnusable)
   }
   return base
+}
+
+/** Only EEXIST means "this name is taken, try the next suffix"; every other code is a real failure. */
+function isTaken(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === 'EEXIST'
 }
 
 async function createUniqueFolder(
@@ -321,15 +278,10 @@ async function createUniqueFolder(
       await mkdir(candidate)
       return candidate
     } catch (error) {
-      // Only EEXIST means "this name is taken, try the next suffix"; a thrown value is
-      // `unknown`, and the `as` restates the one field this branch reads.
-      if ((error as { code?: unknown } | null)?.code !== 'EEXIST') throw error
+      if (!isTaken(error)) throw error
     }
   }
-  throw errors.invalidInput('destination', {
-    zh: '目标目录里已经有太多同名文件夹，请换一个目录。',
-    en: 'The destination already contains too many folders with this name; choose another directory.',
-  })
+  throw errors.invalidInput('destination', TEXT.tooManyFolders)
 }
 
 async function createUniqueFile(
@@ -350,14 +302,10 @@ async function createUniqueFile(
       await handle.close()
       return candidate
     } catch (error) {
-      // Same EEXIST-only contract as the folder name search above.
-      if ((error as { code?: unknown } | null)?.code !== 'EEXIST') throw error
+      if (!isTaken(error)) throw error
     }
   }
-  throw errors.invalidInput('destination', {
-    zh: '目标目录里已经有太多同名文件，请换一个目录。',
-    en: 'The destination already contains too many files with this name; choose another directory.',
-  })
+  throw errors.invalidInput('destination', TEXT.tooManyFiles)
 }
 
 function toDownloadError(error: unknown): RemoteGoError {
@@ -369,33 +317,28 @@ function toDownloadError(error: unknown): RemoteGoError {
   })
 }
 
-/**
- * Stream one remote file into `destination`, creating an auto-renamed local file.
- * @param runtime - connected host runtime.
- * @param remotePath - normalized absolute remote path.
- * @param destination - absolute local directory.
- */
+function requireTransport(
+  runtime: HostDownloadRuntime | null | undefined,
+  notConnected: { zh: string; en: string },
+): SshPort {
+  if (!runtime || runtime.status !== 'connected' || !runtime.ssh) throw errors.remoteFileUnavailable(notConnected)
+  return runtime.ssh
+}
+
 export async function saveHostFile(
   runtime: HostDownloadRuntime | null | undefined,
   remotePath: string,
   destination: unknown,
   options: SaveHostFileOptions = {},
 ): Promise<SavedFile> {
-  if (!runtime || runtime.status !== 'connected' || !runtime.ssh) {
-    throw errors.remoteFileUnavailable({
-      zh: '这台主机还没有连接，无法读取远端文件。',
-      en: 'This host is not connected, so the remote file cannot be read.',
-    })
-  }
-  if (typeof runtime.ssh.saveRemoteFile !== 'function') {
-    throw errors.internal('the SSH transport does not support file saves')
-  }
+  const ssh = requireTransport(runtime, TEXT.fileNotConnected)
+  if (typeof ssh.saveRemoteFile !== 'function') throw errors.internal('the SSH transport does not support file saves')
   const base = await requireDestination(destination, options)
   const name = remoteFileName(remotePath)
   let localPath: string | null = null
   try {
     localPath = await createUniqueFile(base, name, options)
-    const result = await runtime.ssh.saveRemoteFile(remotePath, localPath, options)
+    const result = await ssh.saveRemoteFile(remotePath, localPath, options)
     return {
       path: remotePath,
       kind: 'file',
@@ -410,33 +353,20 @@ export async function saveHostFile(
   }
 }
 
-/**
- * Copy one remote folder into `destination` as individual local files.
- * @param runtime - connected host runtime.
- * @param remotePath - normalized absolute remote folder path.
- * @param destination - absolute local directory.
- */
 export async function saveHostFolder(
   runtime: HostDownloadRuntime | null | undefined,
   remotePath: string,
   destination: unknown,
   options: SaveHostFolderOptions = {},
 ): Promise<SavedFolder> {
-  if (!runtime || runtime.status !== 'connected' || !runtime.ssh) {
-    throw errors.remoteFileUnavailable({
-      zh: '这台主机还没有连接，无法读取远端文件夹。',
-      en: 'This host is not connected, so the remote folder cannot be read.',
-    })
-  }
-  if (typeof runtime.ssh.saveRemoteTree !== 'function') {
-    throw errors.internal('the SSH transport does not support folder saves')
-  }
+  const ssh = requireTransport(runtime, TEXT.folderNotConnected)
+  if (typeof ssh.saveRemoteTree !== 'function') throw errors.internal('the SSH transport does not support folder saves')
   const base = await requireDestination(destination, options)
   const name = remoteFileName(remotePath)
   let root: string | null = null
   try {
     root = await createUniqueFolder(base, name, options)
-    const result = await runtime.ssh.saveRemoteTree(remotePath, root, options)
+    const result = await ssh.saveRemoteTree(remotePath, root, options)
     return {
       path: remotePath,
       kind: 'folder',
@@ -451,5 +381,3 @@ export async function saveHostFolder(
     throw toDownloadError(error)
   }
 }
-
-export { requireDestination }

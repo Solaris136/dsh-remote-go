@@ -7,10 +7,7 @@ function getFetch(): typeof fetch | null {
   return null
 }
 
-/**
- * One request's knobs. The caller builds one inline, `apiRequest` is its only reader, and every
- * member is optional: `GET` without a body is the common case.
- */
+/** One request's knobs: an inline object whose only reader is `apiRequest`, and `GET` carries no body. */
 interface ApiRequestOptions {
   method?: string
   body?: unknown
@@ -32,11 +29,8 @@ function apiError(view?: LocalErrorView, cause?: unknown): ApiFailure {
   return error
 }
 
-/**
- * The one runtime predicate on a response body: "it is an object". The old truthiness checks did
- * exactly that, so the artifact keeps them; `T` is the endpoint's frozen response shape from
- * docs/api.md, which the Host half of this same package is the only producer of.
- */
+/** The one runtime predicate on a response body: "it is an object", which is what the old truthiness checks did. */
+// `T` is the endpoint's frozen response shape from docs/api.md.
 function isApiEnvelope<T>(value: unknown): value is T & ApiEnvelope {
   return typeof value === 'object' && value !== null
 }
@@ -71,17 +65,23 @@ async function apiRequest<T = Record<string, unknown>>(
   }
   if (isApiEnvelope<T>(payload) && payload.ok === false) throw apiError(payload.error)
   if (!response || !response.ok) {
-    // DSH admission answers without this plugin's JSON envelope. A 401 means the browser
-    // session is gone and a 403 means Host/Origin was refused: neither is "internal", and
-    // repeating the same request cannot fix either one.
-    if (response && response.status === 401) throw apiError(localErrorView('session-expired', 'HTTP 401'))
-    if (response && response.status === 403) throw apiError(localErrorView('forbidden', 'HTTP 403'))
-    throw apiError(localErrorView('internal', 'HTTP ' + String(response && response.status)))
+    // DSH admission answers without this plugin's JSON envelope: 401 is a gone session, 403 a refused Host/Origin.
+    // Neither is "internal", and repeating the same request cannot fix either one.
+    const status = response && response.status
+    if (status === 401) throw apiError(localErrorView('session-expired', 'HTTP 401'))
+    if (status === 403) throw apiError(localErrorView('forbidden', 'HTTP 403'))
+    throw apiError(localErrorView('internal', 'HTTP ' + String(status)))
   }
   if (!isApiEnvelope<T>(payload) || payload.ok !== true)
     throw apiError(localErrorView('internal', 'malformed response'))
   return payload
 }
+
+/** A `/hosts/:id` route: the id is percent-encoded here, once per request. */
+const hostPath = (hostId: string, suffix = ''): string => '/hosts/' + encodeURIComponent(hostId) + suffix
+/** A POST whose body is never absent, so `apiRequest` always sends the JSON content-type. */
+const post = <T = Record<string, unknown>>(path: string, body: unknown = {}): Promise<T & ApiEnvelope> =>
+  apiRequest<T>(path, { method: 'POST', body })
 
 const api = {
   async getState(): Promise<StateView> {
@@ -91,54 +91,35 @@ const api = {
   async reportLocalVersion(version: unknown): Promise<void> {
     if (typeof version !== 'string' || version.length === 0) return
     try {
-      await apiRequest('/local-version', { method: 'POST', body: { version } })
+      await post('/local-version', { version })
     } catch (_error) {
       // swallow-ok: the local half only backfills the Host's version probe; a failed report changes no UI state
     }
   },
   async connect(hostId: string, options?: ConnectRequest) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/connect', {
-      method: 'POST',
-      body: options || {},
-    })
+    return post(hostPath(hostId, '/connect'), options || {})
   },
   async confirmConflict(hostId: string, action: string) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/conflict', {
-      method: 'POST',
-      body: { action },
-    })
+    return post(hostPath(hostId, '/conflict'), { action })
   },
   async disconnect(hostId: string, stopRemote: unknown) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/disconnect', {
-      method: 'POST',
-      body: { stopRemote: stopRemote === true },
-    })
+    return post(hostPath(hostId, '/disconnect'), { stopRemote: stopRemote === true })
   },
   async reconnect(hostId: string) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/reconnect', { method: 'POST', body: {} })
+    return post(hostPath(hostId, '/reconnect'))
   },
-  /**
-   * Restart the managed remote web on the same SSH session. The Host accepts and
-   * reports progress through `/state` (progress code `restarting-remote`); the old
-   * launch URL and its tunnel are gone once it finishes.
-   */
+  /** Restart the managed remote web on the same SSH session; `/state` reports `restarting-remote` and the old launch URL plus its tunnel are gone once it finishes. */
   async restart(hostId: string) {
-    return apiRequest<RestartResult>('/hosts/' + encodeURIComponent(hostId) + '/restart', { method: 'POST', body: {} })
+    return post<RestartResult>(hostPath(hostId, '/restart'))
   },
-  /**
-   * Stop the remote DSH this connection manages and release the link. The Host refuses
-   * with 409 `stop-unavailable` when the host is not stoppable or the bound pid cannot be
-   * proven to be this connection's own; `/state` carries `stopping-remote` while it works.
-   */
+  /** Stop the remote DSH this connection manages and release the link. */
+  // The Host answers 409 `stop-unavailable` unless the bound pid is provably this connection's own.
   async stopRemote(hostId: string) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/stop-remote', { method: 'POST', body: {} })
+    return post(hostPath(hostId, '/stop-remote'))
   },
   async openHost(hostId: string) {
-    const payload = await apiRequest<{ url: unknown; webUrl?: unknown }>(
-      '/hosts/' + encodeURIComponent(hostId) + '/open',
-    )
-    // The desktop carrier takes the loopback origin; the browser carrier takes the same-origin
-    // view path. Both are checked here, so neither backend can be handed anything else.
+    const payload = await apiRequest<{ url: unknown; webUrl?: unknown }>(hostPath(hostId, '/open'))
+    // Desktop loads the loopback origin, the browser the same-origin view path; both are checked, so neither gets more.
     if (!isValidLoopbackUrl(payload.url)) throw apiError(localErrorView('blocked-url'))
     const webUrl = typeof payload.webUrl === 'string' ? payload.webUrl : ''
     // A Host from before the web carrier has no webUrl; that must not block the desktop path.
@@ -146,45 +127,38 @@ const api = {
     return { url: payload.url, webUrl }
   },
   async acceptFingerprint(hostId: string, accept: boolean, remember: boolean, sha256: string) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/fingerprint', {
-      method: 'POST',
-      body: { accept: accept === true, remember: remember === true, sha256: sha256 || '' },
+    return post(hostPath(hostId, '/fingerprint'), {
+      accept: accept === true,
+      remember: remember === true,
+      sha256: sha256 || '',
     })
   },
   async saveHost(host: HostInputBody) {
-    const payload = await apiRequest<{ host: HostView }>('/hosts', { method: 'POST', body: { host } })
+    const payload = await post<{ host: HostView }>('/hosts', { host })
     return payload.host
   },
-  /**
-   * Remember (or forget) the SSH password without connecting. The Host keeps it in DSH's
-   * credential store, never in `hosts.json`; `available:false` means nothing can persist it.
-   */
+  /** Remember (or forget) the SSH password without connecting; it lives in DSH's credential store, not `hosts.json`. */
+  // `available: false` means nothing can persist it.
   async saveHostPassword(hostId: string, options?: SavePasswordRequest) {
     const body = options || {}
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/password', {
-      method: 'POST',
-      body: {
-        password: typeof body.password === 'string' ? body.password : undefined,
-        clear: body.clear === true,
-      },
+    return post(hostPath(hostId, '/password'), {
+      password: typeof body.password === 'string' ? body.password : undefined,
+      clear: body.clear === true,
     })
   },
   async deleteHost(hostId: string) {
     return apiRequest('/hosts/' + encodeURIComponent(hostId), { method: 'DELETE' })
   },
   async diagnose(hostId: string) {
-    const payload = await apiRequest<{ report: DiagnoseReport }>('/hosts/' + encodeURIComponent(hostId) + '/diagnose', {
-      method: 'POST',
-      body: {},
-    })
+    const payload = await post<{ report: DiagnoseReport }>(hostPath(hostId, '/diagnose'))
     return payload.report
   },
   async saveSettings(patch: SettingsPatch): Promise<SettingsView> {
-    const payload = await apiRequest<{ settings: SettingsView }>('/settings', { method: 'POST', body: { patch } })
+    const payload = await post<{ settings: SettingsView }>('/settings', { patch })
     return payload.settings
   },
   async activate(hostId: string) {
-    return apiRequest('/hosts/' + encodeURIComponent(hostId) + '/activate', { method: 'POST', body: {} })
+    return post(hostPath(hostId, '/activate'))
   },
   async clearActive() {
     return apiRequest('/active', { method: 'POST', body: { id: null } })
@@ -208,19 +182,9 @@ const api = {
       defaultDir: typeof payload.defaultDir === 'string' ? payload.defaultDir : '',
     }
   },
-  /**
-   * Start a Host-side download job for a remote file or folder.
-   * The Host streams the content straight into the selected local directory.
-   * @param {string} hostId - connected host.
-   * @param {string} remotePath - absolute file or folder path.
-   * @param {string} destination - local folder chosen by the user.
-   * @returns {Promise<object>} the initial job view.
-   */
+  /** Start a Host-side download job into the selected local folder; the Host streams the content. */
   async startDownload(hostId: string, remotePath: string, destination: string) {
-    const payload = await apiRequest<{ job?: DownloadJobView }>('/downloads', {
-      method: 'POST',
-      body: { hostId, path: remotePath, destination },
-    })
+    const payload = await post<{ job?: DownloadJobView }>('/downloads', { hostId, path: remotePath, destination })
     if (!payload.job || typeof payload.job !== 'object') {
       throw apiError(localErrorView('internal', 'malformed download job'))
     }
@@ -245,13 +209,9 @@ const api = {
   },
 }
 
-/**
- * The one `/state` feed for the whole plugin: SSE when it is available, a three-second poll
- * while the stream is down, and an exponential-backoff rebuild of the stream in the
- * background. A reconnected stream stops the poll and reports `live` again. Handlers:
- * `onState(frame)`, `onStatus('live' | 'polling')`, `onError(error)`, `onDownload(job)`.
- * The returned disposer also carries `reconnect()`, which the fallback banner uses.
- */
+/** The one `/state` feed: SSE, else a three-second poll, plus an exponential-backoff rebuild in the background. */
+// A reconnected stream stops the poll and reports `live`. Handlers: `onState`, `onStatus`, `onError`, `onDownload`;
+// the disposer also carries `reconnect()`, which the fallback banner uses.
 function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
   const onState: (state: StateView) => void = typeof handlers.onState === 'function' ? handlers.onState : () => {}
   const onStatus: (status: StreamMode) => void = typeof handlers.onStatus === 'function' ? handlers.onStatus : () => {}
@@ -265,13 +225,12 @@ function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
   let retryAttempt = 0
   let polling = false
   let mode: StreamMode = 'idle'
-  /** Every callback that settles a state frame, so a late frame can still land. */
+  /** The mode only reports a change, so a late frame after `dispose` stays silent. */
   const setMode = (next: StreamMode) => {
     if (mode === next) return
     mode = next
     if (!disposed) onStatus(next)
   }
-
   const deliver = (state: StateView) => {
     if (disposed || !state || typeof state !== 'object') return
     onState(state)
@@ -316,8 +275,7 @@ function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
   const scheduleStreamRetry = () => {
     if (disposed || retryTimer !== null) return
     if (retryAttempt >= STREAM_RETRY_MAX_ATTEMPTS) {
-      // The automatic chain stops here; polling continues and the banner offers a manual
-      // reconnect, which resets the counter. This is the cap the UI promises.
+      // The automatic chain stops here (the cap the UI promises); the banner offers a manual retry.
       setMode('polling')
       return
     }
@@ -333,8 +291,7 @@ function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
   }
   const onStreamOpen = () => {
     if (disposed) return
-    // The stream is alive again: polling and the retry chain stop, and the backoff resets so
-    // the next drop starts from the base delay.
+    // Alive again: polling and the retry chain stop, and the backoff resets to the base delay.
     retryAttempt = 0
     clearRetry()
     stopPolling()
@@ -384,33 +341,27 @@ function subscribeState(handlers: StateStreamHandlers): StateStreamDispose {
     })
     source.addEventListener('error', () => {
       if (disposed || source !== stream) return
-      // Never leave the panel without data: poll from now on and rebuild the stream with
-      // backoff. A successful frame (`onStreamOpen`) turns polling off again.
+      // Never leave the panel without data: poll from now on, rebuild the stream with backoff.
       startPolling()
       stopStream()
       scheduleStreamRetry()
     })
-    // Do not claim `live` here: until `open` (or the first frame/ping) arrives the banner
-    // must stay up. A manual or automatic reconnect used to clear it before the stream
-    // actually worked (review blocker 2).
+    // Not `live` yet: the banner stays up until `open` or the first frame; clearing it early was the old bug.
   }
   const reconnect = () => {
     if (disposed) return
     retryAttempt = 0
+    // A manual retry is a fresh attempt: `clearRetry` drops the scheduled one first.
     clearRetry()
-    // A manual retry is a fresh attempt even when a scheduled one is in flight.
-    if (retryTimer !== null && typeof clearTimeout === 'function') clearTimeout(retryTimer)
-    retryTimer = null
     startStream()
     if (mode !== 'live') {
       startPolling()
-      // `startPolling` sets `polling`; the retry attempt is the state that keeps the banner
-      // saying "reconnecting" until the stream actually opens.
+      // The retry attempt is the state that keeps the banner saying "reconnecting" until it opens.
       setMode('reconnecting')
     }
   }
 
-  // Initial read in parallel with opening the stream, so the panel can paint immediately even when SSE is slow.
+  // Initial read in parallel with the stream, so the panel paints immediately even when SSE is slow.
   fetchOnce()
   startStream()
 

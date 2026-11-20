@@ -4,12 +4,10 @@ import { REPORT_TOOL_NAME, reportTool } from '../../dist/src/tools-report.js'
 import { errors } from '../../dist/src/errors.js'
 
 // ---- fixtures ----------------------------------------------------------------------------------
-
 const SECRET = 'hunter2-do-not-leak'
 const TOKEN = 'tok_live_abcdef'
 const KEY_PATH = '/home/dev/.ssh/id_ed25519'
 const FINGERPRINT = 'SHA256:abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG='
-
 /** A HostView with credentials and fingerprints filled in: none of them may reach a result. */
 function hostView(overrides = {}) {
   return {
@@ -28,7 +26,6 @@ function hostView(overrides = {}) {
     ...overrides,
   }
 }
-
 /** `count` checklist rows; the first one fails so `summary`/`counts` have something to report. */
 function makeChecks(count) {
   return Array.from({ length: count }, (_unused, index) => ({
@@ -38,7 +35,6 @@ function makeChecks(count) {
     detail: { zh: `详情 ${index}`, en: `Detail ${index}` },
   }))
 }
-
 /** The runtime's restart trail: `fromPort`/`pid` are nullable and `source` is not contract. */
 function makeRestarts() {
   return [
@@ -54,7 +50,6 @@ function makeRestarts() {
     },
   ]
 }
-
 /** A `DiagnosticsReport` shaped like `diagnoseHost` builds it (already redacted upstream). */
 function makeReport(overrides = {}) {
   return {
@@ -67,7 +62,6 @@ function makeReport(overrides = {}) {
     ...overrides,
   }
 }
-
 /** `count` connect-log rows, oldest first, alternating `phase` so the projection has both. */
 function makeEntries(count) {
   return Array.from({ length: count }, (_unused, index) => ({
@@ -78,46 +72,29 @@ function makeEntries(count) {
     message: `line ${index + 1}`,
   }))
 }
-
 /** A `ConnectLogView` as `service.logView` answers it. */
 function makeLogView(entries) {
   return { hostId: 'h_prod', attempt: 2, visible: true, firstSeq: 1, seq: entries.length, entries }
 }
-
-/**
- * A fake Host composition plus the tool built on it. `calls` counts what the body actually read, so
- * a test can prove `parts` skips the half it did not ask for; `omit` removes a service member the
- * way a composition that never mounted it would.
- */
+// A fake Host composition plus the tool built on it. `calls` counts what the body actually read, so a test can prove
+// `parts` skips the half it did not ask for; `omit` removes a
+// service member the way a composition that never mounted it would.
 function makeService(options = {}) {
   const calls = { init: 0, diagnose: 0, logView: 0 }
+  const views = options.views ?? [hostView()]
   const service = {
     init: async () => {
       calls.init += 1
     },
-    snapshot: () => ({ hosts: options.views ?? [hostView()] }),
-    diagnose: async () => {
+    snapshot: () => ({ hosts: views }),
+    diagnose: async (id) => {
       calls.diagnose += 1
-      return options.report ?? makeReport()
+      return options.diagnose ? options.diagnose(id) : (options.report ?? makeReport())
     },
-    logView: () => {
+    logView: (id) => {
       calls.logView += 1
-      return options.view ?? makeLogView(options.entries ?? makeEntries(3))
+      return options.logView ? options.logView(id) : (options.view ?? makeLogView(options.entries ?? makeEntries(3)))
     },
-  }
-  if (options.diagnose) {
-    const diagnose = options.diagnose
-    service.diagnose = async (id) => {
-      calls.diagnose += 1
-      return diagnose(id)
-    }
-  }
-  if (options.logView) {
-    const logView = options.logView
-    service.logView = (id) => {
-      calls.logView += 1
-      return logView(id)
-    }
   }
   for (const name of options.omit ?? []) delete service[name]
   const logs = []
@@ -128,26 +105,17 @@ function makeService(options = {}) {
   }
   return { service, calls, logs, logger, tool: reportTool({ service, logger }) }
 }
-
-/**
- * Validate one result against the tool's declared `output.schema` the way the kernel does: required
- * fields present, declared types, no undeclared key and no `undefined` value. A mismatch here is a
- * runtime INVALID_TOOL_OUTPUT, so this catches it before a model ever sees a broken call.
- */
+/** The declared leaf types, checked the way the kernel checks them before a model sees a result. */
+const LEAVES = {
+  string: (value) => typeof value === 'string',
+  integer: (value) => Number.isInteger(value),
+  number: (value) => typeof value === 'number',
+  boolean: (value) => typeof value === 'boolean',
+}
+// Validate one result against the tool's declared `output.schema` the way the kernel does: required fields present,
+// declared types, no undeclared key and no `undefined` value. A mismatch is a runtime INVALID_TOOL_OUTPUT, so this
+// catches it before a model ever sees a broken call.
 function assertMatchesSchema(schema, value, path = 'value') {
-  if (schema.type === 'object') {
-    assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value), `${path} must be an object`)
-    for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), `${path}.${key} is required`)
-    for (const key of Object.keys(value)) {
-      assert.notEqual(value[key], undefined, `${path}.${key} is undefined`)
-      if (schema.additionalProperties === false) {
-        assert.ok(Object.hasOwn(schema.properties ?? {}, key), `${path}.${key} is not declared in the schema`)
-      }
-      const child = schema.properties?.[key]
-      if (child) assertMatchesSchema(child, value[key], `${path}.${key}`)
-    }
-    return
-  }
   if (schema.type === 'array') {
     assert.ok(Array.isArray(value), `${path} must be an array`)
     for (const [index, item] of value.entries()) {
@@ -155,15 +123,30 @@ function assertMatchesSchema(schema, value, path = 'value') {
     }
     return
   }
-  if (schema.type === 'string') assert.equal(typeof value, 'string', `${path} must be a string`)
-  else if (schema.type === 'integer') assert.ok(Number.isInteger(value), `${path} must be an integer`)
-  else if (schema.type === 'number') assert.equal(typeof value, 'number', `${path} must be a number`)
-  else if (schema.type === 'boolean') assert.equal(typeof value, 'boolean', `${path} must be a boolean`)
+  if (schema.type !== 'object') {
+    assert.ok(LEAVES[schema.type](value), `${path} must be a ${schema.type}`)
+    return
+  }
+  assert.ok(value !== null && typeof value === 'object' && !Array.isArray(value), `${path} must be an object`)
+  for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), `${path}.${key} is required`)
+  for (const key of Object.keys(value)) {
+    assert.notEqual(value[key], undefined, `${path}.${key} is undefined`)
+    if (schema.additionalProperties === false) {
+      assert.ok(Object.hasOwn(schema.properties ?? {}, key), `${path}.${key} is not declared in the schema`)
+    }
+    const child = schema.properties?.[key]
+    if (child) assertMatchesSchema(child, value[key], `${path}.${key}`)
+  }
 }
-
+/** Run the report tool once, validate the result against its schema and hand back what was read. */
+async function runReport(options = {}, input = {}) {
+  const made = makeService(options)
+  const result = await made.tool.execute(input, {})
+  assertMatchesSchema(made.tool.output.schema, result)
+  return { ...made, result }
+}
 /** The identifiers, credentials and key material that must never appear in a result. */
 const FORBIDDEN = [SECRET, TOKEN, KEY_PATH, FINGERPRINT, 'SHA256', '.ssh']
-
 function assertNoSecrets(value) {
   const serialized = JSON.stringify(value)
   for (const secret of FORBIDDEN) {
@@ -199,9 +182,7 @@ test('the report registers with a read-only contract and no declared timeout', (
 // ---- happy path --------------------------------------------------------------------------------
 
 test('the report projects the checklist, the restart trail and the log tail', async () => {
-  const { tool, calls } = makeService()
-  const result = await tool.execute({ id: 'h_prod' }, {})
-  assertMatchesSchema(tool.output.schema, result)
+  const { result, calls } = await runReport({}, { id: 'h_prod' })
   assert.equal(result.ok, true)
   assert.equal(calls.init, 1, 'the service is initialised before anything is read')
   assert.equal(result.summary, 'warning')
@@ -230,9 +211,7 @@ test('the report projects the checklist, the restart trail and the log tail', as
 })
 
 test('a host missing from the snapshot still gets a row, and its connected flag stays false', async () => {
-  const { tool } = makeService({ views: [] })
-  const result = await tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
-  assertMatchesSchema(tool.output.schema, result)
+  const { result } = await runReport({ views: [] }, { id: 'h_prod', parts: ['checks'] })
   assert.deepEqual(result.host, { id: 'h_prod', label: 'h_prod', state: 'unknown', connected: false })
 })
 
@@ -241,30 +220,31 @@ test('a host missing from the snapshot still gets a row, and its connected flag 
 test('the projection scrubs the fingerprint, the key path and the token', async () => {
   const detailZh = `已记录 ${FINGERPRINT}`
   const detailEn = `key ${KEY_PATH} token=${TOKEN}`
-  const { tool } = makeService({
-    report: makeReport({
-      checks: [
+  const { result } = await runReport(
+    {
+      report: makeReport({
+        checks: [
+          {
+            id: 'host-key',
+            title: { zh: '主机指纹', en: 'Host key' },
+            status: 'fail',
+            detail: { zh: detailZh, en: detailEn },
+          },
+        ],
+        restarts: [],
+      }),
+      view: makeLogView([
         {
-          id: 'host-key',
-          title: { zh: '主机指纹', en: 'Host key' },
-          status: 'fail',
-          detail: { zh: detailZh, en: detailEn },
+          seq: 1,
+          at: '2026-11-19T10:00:00.000Z',
+          level: 'error',
+          phase: 'ssh',
+          message: `connect failed: ${FINGERPRINT} at ${KEY_PATH} token=${TOKEN}`,
         },
-      ],
-      restarts: [],
-    }),
-    view: makeLogView([
-      {
-        seq: 1,
-        at: '2026-11-19T10:00:00.000Z',
-        level: 'error',
-        phase: 'ssh',
-        message: `connect failed: ${FINGERPRINT} at ${KEY_PATH} token=${TOKEN}`,
-      },
-    ]),
-  })
-  const result = await tool.execute({ id: 'h_prod' }, {})
-  assertMatchesSchema(tool.output.schema, result)
+      ]),
+    },
+    { id: 'h_prod' },
+  )
   const serialized = JSON.stringify(result)
   assert.equal(serialized.includes('SHA256'), false, 'no fingerprint material may survive')
   assert.equal(serialized.includes('.ssh'), false, 'no private-key path may survive')
@@ -279,10 +259,10 @@ test('the projection scrubs the fingerprint, the key path and the token', async 
 })
 
 test('a 50 KB detail is bounded and cannot stall the projection', async () => {
-  // A host field is caller- or remote-controlled and the projection is synchronous, so its cost
-  // must not scale with a field nobody will read past the first few hundred characters.
+  // A host field is caller- or remote-controlled and the projection
+  // is synchronous, so its cost must not scale with length.
   const long = `${FINGERPRINT} ${KEY_PATH} ${'a'.repeat(50_000)}`
-  const { tool } = makeService({
+  const made = makeService({
     report: makeReport({
       checks: [
         { id: 'ssh-reachable', title: { zh: 'SSH', en: 'SSH' }, status: 'pass', detail: { zh: long, en: long } },
@@ -291,10 +271,10 @@ test('a 50 KB detail is bounded and cannot stall the projection', async () => {
     }),
   })
   const started = performance.now()
-  const result = await tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
+  const result = await made.tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
   const elapsed = performance.now() - started
   assert.ok(elapsed < 100, `the projection took ${elapsed.toFixed(1)} ms for a 50 KB field`)
-  assertMatchesSchema(tool.output.schema, result)
+  assertMatchesSchema(made.tool.output.schema, result)
   const detail = result.checks[0].detail
   assert.ok(detail.length <= 400, `the detail is capped at TEXT_LIMIT (400), got ${detail.length}`)
   assert.match(detail, /^<fingerprint redacted> <private-key path>/, 'the identifiers are gone')
@@ -305,13 +285,14 @@ test('a 50 KB detail is bounded and cannot stall the projection', async () => {
 // ---- faults ------------------------------------------------------------------------------------
 
 test('a diagnose failure for an unknown host becomes a structured error', async () => {
-  const { tool, logs } = makeService({
-    diagnose: async () => {
-      throw errors.invalidInput('id', { zh: '找不到这台主机。', en: 'No such host.' })
+  const { result, logs } = await runReport(
+    {
+      diagnose: async () => {
+        throw errors.invalidInput('id', { zh: '找不到这台主机。', en: 'No such host.' })
+      },
     },
-  })
-  const result = await tool.execute({ id: 'h_missing' }, {})
-  assertMatchesSchema(tool.output.schema, result)
+    { id: 'h_missing' },
+  )
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'INVALID_INPUT')
   assert.match(result.error.message, /找不到这台主机/)
@@ -322,33 +303,30 @@ test('a diagnose failure for an unknown host becomes a structured error', async 
 })
 
 test('a null log view is HOST_NOT_FOUND, and the log half does not read the checklist', async () => {
-  const { tool, calls } = makeService({
-    logView: () => null,
-    diagnose: async () => {
-      throw new Error('the log half must not read the checklist')
+  const { result, calls } = await runReport(
+    {
+      logView: () => null,
+      diagnose: async () => {
+        throw new Error('the log half must not read the checklist')
+      },
     },
-  })
-  const result = await tool.execute({ id: 'h_missing', parts: ['logs'] }, {})
-  assertMatchesSchema(tool.output.schema, result)
+    { id: 'h_missing', parts: ['logs'] },
+  )
   assert.equal(result.ok, false)
   assert.equal(result.error.code, 'HOST_NOT_FOUND')
   assert.equal(calls.diagnose, 0, 'parts: [logs] must not call diagnose')
 })
 
 test('a composition without the method a part needs answers UNSUPPORTED', async () => {
-  const noChecks = makeService({ omit: ['diagnose'] })
-  const first = await noChecks.tool.execute({ id: 'h_prod' }, {})
-  assertMatchesSchema(noChecks.tool.output.schema, first)
-  assert.equal(first.ok, false)
-  assert.equal(first.error.code, 'UNSUPPORTED')
-  assert.match(first.error.message, /诊断/)
+  const noChecks = await runReport({ omit: ['diagnose'] }, { id: 'h_prod' })
+  assert.equal(noChecks.result.ok, false)
+  assert.equal(noChecks.result.error.code, 'UNSUPPORTED')
+  assert.match(noChecks.result.error.message, /诊断/)
 
-  const noLogs = makeService({ omit: ['logView'] })
-  const second = await noLogs.tool.execute({ id: 'h_prod' }, {})
-  assertMatchesSchema(noLogs.tool.output.schema, second)
-  assert.equal(second.ok, false)
-  assert.equal(second.error.code, 'UNSUPPORTED')
-  assert.match(second.error.message, /logs/)
+  const noLogs = await runReport({ omit: ['logView'] }, { id: 'h_prod' })
+  assert.equal(noLogs.result.ok, false)
+  assert.equal(noLogs.result.error.code, 'UNSUPPORTED')
+  assert.match(noLogs.result.error.message, /logs/)
 
   // The half that is still mounted keeps answering.
   const checksOnly = await noLogs.tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
@@ -430,9 +408,10 @@ test('the log tail keeps the newest rows, clamps limit and says when it dropped 
 })
 
 test('the checklist is capped at 20 rows and says so', async () => {
-  const { tool } = makeService({ report: makeReport({ checks: makeChecks(25) }) })
-  const result = await tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
-  assertMatchesSchema(tool.output.schema, result)
+  const { result } = await runReport(
+    { report: makeReport({ checks: makeChecks(25) }) },
+    { id: 'h_prod', parts: ['checks'] },
+  )
   assert.equal(result.checks.length, 20)
   assert.equal(result.truncated, true)
   assert.deepEqual(result.counts, { pass: 19, fail: 1, unknown: 0 }, 'counts cover the returned rows')
@@ -446,9 +425,10 @@ test('the restart trail keeps the newest 8 and never emits a null field', async 
     toPort: 41000 + index + 1,
     pid: index % 4 === 0 ? null : 9000 + index,
   }))
-  const { tool } = makeService({ report: makeReport({ checks: makeChecks(1), restarts }) })
-  const result = await tool.execute({ id: 'h_prod', parts: ['checks'] }, {})
-  assertMatchesSchema(tool.output.schema, result)
+  const { result } = await runReport(
+    { report: makeReport({ checks: makeChecks(1), restarts }) },
+    { id: 'h_prod', parts: ['checks'] },
+  )
   assert.equal(result.restarts.length, 8, 'only the newest 8 restarts survive')
   assert.equal(result.restarts[0].at, '2026-11-19T09:04:00.000Z')
   assert.equal(result.restarts.at(-1).at, '2026-11-19T09:11:00.000Z')
@@ -460,8 +440,7 @@ test('the restart trail keeps the newest 8 and never emits a null field', async 
 // ---- render ------------------------------------------------------------------------------------
 
 test('render never throws and always says who it is', () => {
-  const { tool } = makeService()
-  const render = tool.output.render
+  const render = makeService().tool.output.render
   const hostile = {
     ok: true,
     get checks() {
@@ -480,8 +459,7 @@ test('render never throws and always says who it is', () => {
 })
 
 test('render prints the header, one line per check and the log tail', async () => {
-  const { tool } = makeService()
-  const result = await tool.execute({ id: 'h_prod' }, {})
+  const { tool, result } = await runReport({}, { id: 'h_prod' })
   const [block] = tool.output.render({}, result)
   assert.match(block.text, /^\[dsh-remote-go\] prod · connected · 10 项检查/)
   assert.match(block.text, /10 checks/)

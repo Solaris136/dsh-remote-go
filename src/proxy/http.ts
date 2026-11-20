@@ -1,7 +1,5 @@
-/**
- * The HTTP half of the same-origin proxy: admission, the local same-origin fence, view-path
- * resolution, the upstream forward with its 30 s deadline, and the seven plain-text refusals.
- */
+/** The HTTP half of the same-origin proxy: admission, the local same-origin fence, view-path resolution, the upstream
+ * forward with its 30 s deadline, and the seven plain-text refusals. */
 import http from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Admission } from '../admission.js'
@@ -19,13 +17,8 @@ export interface ProxyLogger {
   error?: (...args: unknown[]) => void
 }
 
-/**
- * Everything the two request handlers need from the assembly.
- *
- * Explicitly injected rather than captured from `createRemoteProxy`'s closure: the assembly owns
- * the jars, the routes and the teardown, while a handler only calls the handful of operations
- * below, so the split is a real module boundary and a test can drive one handler on its own.
- */
+/** Everything the two request handlers need from the assembly, injected rather than captured from `createRemoteProxy`'s
+ * closure: the assembly owns jars/routes/teardown, a handler only calls these operations, and a test can drive one. */
 export interface ProxyRuntime {
   /** Whether the proxy was already torn down (`dispose`). */
   readonly disposed: () => boolean
@@ -59,33 +52,32 @@ function plain(res: ServerResponse, status: number, text: string): void {
   }
 }
 
-/**
- * Create the HTTP handler of one proxy activation.
- *
- * Every request under the view prefix is stripped of the prefix and forwarded to that host's
- * loopback tunnel; a host that is not currently connected is a 404, and DSH's own admission plus
- * the local same-origin fence decide whether the caller may use the seat at all.
- */
+/** A request's seat admission: the local origin it may use, or a refusal both halves render their own way (`text` is the HTTP body; `admission` is the one refusal the upgrade handshake answers with `status`). */
+export type Seat = { ok: true; origin: URL } | { ok: false; status: number; text: string; admission: boolean }
+
+/** The one gate both halves run before anything is proxied: teardown, DSH's own admission (first, because the proxy reaches a connected host's remote session), the local origin and then the same-origin fence. No refusal says whether a seat exists. */
+export function admitSeat(rt: ProxyRuntime, req: IncomingMessage): Seat {
+  if (rt.disposed()) return { ok: false, status: 503, text: 'proxy disposed', admission: false }
+  const rejection = rt.admit(req)
+  if (rejection !== undefined) {
+    return { ok: false, status: rejection, text: 'request rejected by DSH admission', admission: true }
+  }
+  const origin = rt.localOrigin()
+  if (origin === null) return { ok: false, status: 503, text: 'local origin is not ready', admission: false }
+  if (!trustedRequest(req, origin)) {
+    return { ok: false, status: 403, text: 'cross-site request rejected', admission: false }
+  }
+  return { ok: true, origin }
+}
+
+/** Create the HTTP handler of one proxy activation. Every request under the view prefix is stripped of the prefix and
+ * forwarded to that host's loopback tunnel; a host that is not currently connected is a 404, and DSH's own admission
+ * plus the local same-origin fence decide whether the caller may use the seat at all. */
 export function createHttpHandler(rt: ProxyRuntime): (req: IncomingMessage, res: ServerResponse) => void {
   return function handle(req: IncomingMessage, res: ServerResponse): void {
-    if (rt.disposed()) {
-      plain(res, 503, 'proxy disposed')
-      return
-    }
-    // DSH's own admission gate runs before anything this module decides: the proxy reaches a
-    // connected host's remote session (its cookie jar), so only an admitted caller may use it.
-    const rejection = rt.admit(req)
-    if (rejection !== undefined) {
-      plain(res, rejection, 'request rejected by DSH admission')
-      return
-    }
-    const origin = rt.localOrigin()
-    if (origin === null) {
-      plain(res, 503, 'local origin is not ready')
-      return
-    }
-    if (!trustedRequest(req, origin)) {
-      plain(res, 403, 'cross-site request rejected')
+    const seat = admitSeat(rt, req)
+    if (seat.ok === false) {
+      plain(res, seat.status, seat.text)
       return
     }
     let pathname: string
@@ -112,15 +104,15 @@ export function createHttpHandler(rt: ProxyRuntime): (req: IncomingMessage, res:
     const upstreamPath = parsed.path + search
     const headers = upstreamHeaders(req.rawHeaders, {
       target,
-      localOrigin: origin.origin,
+      localOrigin: seat.origin.origin,
       path: parsed.path,
       jar,
     })
-    // The remote is reached over a tunnel; a listener that accepts and never answers used to
-    // hang the local request forever. The deadline covers the wait for response headers only —
-    // once the response started, an idle stream (SSE, a large asset) is legitimate.
     let answered = false
     let failed = false
+    // The remote is reached over a tunnel; a listener that accepts and never answers used to hang the local request
+    // forever. The deadline covers the wait for response headers only — once the response started, an idle stream
+    // (SSE, a large asset) is legitimate.
     const upstream = http.request(
       {
         host: '127.0.0.1',
@@ -151,12 +143,9 @@ export function createHttpHandler(rt: ProxyRuntime): (req: IncomingMessage, res:
         response.pipe(res)
       },
     )
-    /**
-     * One failed upstream: report it once and answer 502 (or nothing, when the response has
-     * already started). Nothing from the failure reaches the log line: the emitter is
-     * request-driven, so CodeQL treats its error as user-controlled (log injection). The
-     * loopback port names the host to an operator, and the browser only ever sees the 502.
-     */
+    /** One failed upstream: report it once and answer 502 (or nothing, when the response has already started). Nothing
+     * from the failure reaches the log line: the emitter is request-driven, so CodeQL treats its error as
+     * user-controlled (log injection). The loopback port names the host to an operator; the browser sees the 502. */
     const upstreamFailed = (): void => {
       if (failed) return
       failed = true
@@ -171,8 +160,8 @@ export function createHttpHandler(rt: ProxyRuntime): (req: IncomingMessage, res:
       upstreamFailed()
     })
     upstream.on('error', () => {
-      // A failure after the response started is still worth reporting (the Host confirms it
-      // with probes); `plain` is a no-op once the headers are out.
+      // A failure after the response started is still worth reporting (the Host confirms it with probes); `plain`
+      // is a no-op once the headers are out.
       upstreamFailed()
     })
     req.once('aborted', () => upstream.destroy())

@@ -1,8 +1,5 @@
-/**
- * Host-side download jobs. Each job streams one remote file or folder directly into
- * the local directory the user chose; nothing is buffered in the Host. Jobs publish
- * progress and expire so a closed browser cannot pin job slots forever.
- */
+// Host-side download jobs: each job streams one remote file or folder straight to the chosen local
+// directory, publishing progress as it goes, and expires so a closed browser cannot pin a slot.
 import { randomUUID } from 'node:crypto'
 import { errors, toErrorView } from './errors.js'
 import type { ErrorView } from './errors.js'
@@ -22,7 +19,6 @@ const PROGRESS_INTERVAL_MS = 120
 
 /** Where one job stands: preparing, finished, or failed. */
 export type DownloadJobPhase = 'preparing' | 'ready' | 'error'
-
 /** One job as the API renders it. */
 export interface DownloadJobView {
   id: string
@@ -35,34 +31,17 @@ export interface DownloadJobView {
   doneBytes: number
   totalFiles: number
   doneFiles: number
-  /**
-   * Names a folder download deliberately skipped (Windows metadata / shell shortcuts on a
-   * Windows host). Surfaced so nothing disappears without the user seeing it.
-   */
+  /** Names a folder download deliberately skipped, surfaced so nothing disappears unseen. */
   ignoredNames: string[]
   destination: string | null
   startedAt: string
   error: ErrorView | null
 }
 
-/** The mutable job record behind one view; never leaves this module. */
-interface DownloadJob {
-  id: string
-  hostId: string
-  path: string
-  name: string
-  kind: string | null
-  phase: DownloadJobPhase
-  totalBytes: number
-  doneBytes: number
-  totalFiles: number
-  doneFiles: number
-  destination: string | null
+/** The mutable record behind one view; it never leaves this module. */
+interface DownloadJob extends DownloadJobView {
   /** The local home root the destination policy must judge against; not part of the view. */
   home: string | undefined
-  startedAt: string
-  error: ErrorView | null
-  ignoredNames: string[]
   timer: ReturnType<typeof setTimeout> | null
   lastEmit: number
   cancelled: boolean
@@ -70,7 +49,6 @@ interface DownloadJob {
 
 /** What one read produces; `size` is the older field name a caller may still supply. */
 export type DownloadReadResult = SavedDownload & { size?: number }
-
 /** The read function this registry calls; injectable for tests. */
 export type DownloadReader = (
   runtime: HostDownloadRuntime,
@@ -90,7 +68,6 @@ export interface DownloadJobsLogger {
   warn?: (...args: unknown[]) => void
   debug?: (...args: unknown[]) => void
 }
-
 /** Knobs for one registry; every field has a production default. */
 export interface DownloadJobOptions {
   emit?: (job: DownloadJobView) => void
@@ -101,13 +78,11 @@ export interface DownloadJobOptions {
   maxPreparing?: number
   now?: () => number
 }
-
 /** What a caller may pass when starting a job. */
 export interface StartDownloadOptions {
   destination?: string
   home?: string
 }
-
 /** The registry `service` owns: start/status/cancel plus its live size. */
 export interface DownloadJobs {
   start(runtime: HostDownloadRuntime, rawPath: unknown, options?: StartDownloadOptions): DownloadJobView
@@ -117,17 +92,19 @@ export interface DownloadJobs {
   dispose(): void
 }
 
+/** A positive safe integer override, or the production default. */
+function positiveInt(value: unknown, fallback: number): number {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : fallback
+}
+
 export function createDownloadJobs(options: DownloadJobOptions): DownloadJobs {
   const emit = typeof options.emit === 'function' ? options.emit : () => {}
   const logger = options.logger ?? console
   const readDownload: DownloadReader =
     typeof options.readDownload === 'function' ? options.readDownload : readHostDownload
-  const ttlMs = Number.isSafeInteger(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : DOWNLOAD_JOB_TTL_MS
-  const maxJobs = Number.isSafeInteger(options.maxJobs) && options.maxJobs > 0 ? options.maxJobs : MAX_DOWNLOAD_JOBS
-  const maxPreparing =
-    Number.isSafeInteger(options.maxPreparing) && options.maxPreparing > 0
-      ? options.maxPreparing
-      : MAX_PREPARING_DOWNLOADS
+  const ttlMs = positiveInt(options.ttlMs, DOWNLOAD_JOB_TTL_MS)
+  const maxJobs = positiveInt(options.maxJobs, MAX_DOWNLOAD_JOBS)
+  const maxPreparing = positiveInt(options.maxPreparing, MAX_PREPARING_DOWNLOADS)
   const now = typeof options.now === 'function' ? options.now : Date.now
   const jobs = new Map<string, DownloadJob>()
 
@@ -236,13 +213,7 @@ export function createDownloadJobs(options: DownloadJobOptions): DownloadJobs {
   }
 
   return {
-    /**
-     * Create and start a download job.
-     * @param runtime - connected host runtime.
-     * @param rawPath - absolute remote file or folder path.
-     * @param options - local destination for a folder job.
-     * @returns the initial job view (phase `preparing`).
-     */
+    /** Create and start a download job; returns the initial view (phase `preparing`). */
     start(runtime, rawPath, options = {}) {
       const path = normalizeRemoteFilePath(rawPath)
       if (jobs.size >= maxJobs) {
@@ -274,12 +245,11 @@ export function createDownloadJobs(options: DownloadJobOptions): DownloadJobs {
         doneBytes: 0,
         totalFiles: 0,
         doneFiles: 0,
+        ignoredNames: [],
         destination: typeof options.destination === 'string' && options.destination !== '' ? options.destination : null,
-        // The local home root the destination policy must judge against; not part of the view.
         home: typeof options.home === 'string' && options.home !== '' ? options.home : undefined,
         startedAt: new Date(now()).toISOString(),
         error: null,
-        ignoredNames: [],
         timer: null,
         lastEmit: 0,
         cancelled: false,
@@ -312,7 +282,6 @@ export function createDownloadJobs(options: DownloadJobOptions): DownloadJobs {
       return true
     },
 
-    /** Number of retained jobs, for tests/diagnostics. */
     get size() {
       return jobs.size
     },

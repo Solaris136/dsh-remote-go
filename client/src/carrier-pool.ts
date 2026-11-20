@@ -1,24 +1,12 @@
-// client/src/carrier-pool.ts - the guest pool, carrier surface, load guard, error layer, carrier timeouts and GUEST_PAINT_SCRIPT (9b 5/11); after guest-storage.ts, before carrier-install.ts.
-/**
- * The live guests, most recently shown first. A guest is hidden, never reloaded — that is what
- * makes switching instant — and is dropped only when its host goes away.
- */
-const carrierPool: CarrierPool = {
-  entries: [],
-  current: null,
-  wanted: null,
-  poll: null,
-}
-
+// client/src/carrier-pool.ts - the guest pool, carrier surface, the carrier shell, the guest eval channel, load guard, error layer, carrier timeouts and GUEST_PAINT_SCRIPT (9b 5/11); after guest-storage.ts, before carrier-install.ts.
+/** A carrier entry that may be absent: the parameter shape the carrier helpers take. */
+type MaybeCarrier = CarrierEntry | null | undefined
+/** Live guests, newest first: a hidden one is reused, not reloaded (switching stays instant); dropped with its host. */
+const carrierPool: CarrierPool = { entries: [], current: null, wanted: null, poll: null }
 /** Show/hide operations run one at a time: two overlapping opens must not build two guests. */
 let carrierQueue: Promise<unknown> = Promise.resolve()
-
 let captionStateWatcher: MutationObserver | null = null
-
-/**
- * Serialize one carrier operation behind the previous one and hand back its own result: the queue
- * keeps the *chain*, never the value, so a caller still receives what its task returned.
- */
+/** Run one operation behind the previous one, returning its own result: the queue holds the chain, never the value. */
 function whenCarrierIdle<T>(task: () => T | PromiseLike<T>): Promise<T> {
   const run = carrierQueue.then(task, task)
   carrierQueue = run.then(
@@ -27,53 +15,62 @@ function whenCarrierIdle<T>(task: () => T | PromiseLike<T>): Promise<T> {
   )
   return run
 }
-
 function carrierOf(hostId: unknown): CarrierEntry | null {
   if (typeof hostId !== 'string' || hostId === '') return null
   return carrierPool.entries.find((entry) => entry.hostId === hostId) || null
 }
-
 function shownCarrier(): CarrierEntry | null {
   return carrierPool.current === null ? null : carrierOf(carrierPool.current)
 }
-
 function carrierWarm(hostId: unknown): boolean {
   return carrierOf(hostId) !== null
 }
-
-/**
- * `window.dshDesktop`, narrowed to the browser half this module drives. Anything else (no bridge,
- * another protocol version, or a shell without guest support) answers `null` at the call site.
- */
+/** The guest eval channel: a `<webview>` offers it, an entry whose guest is gone (or is only a frame) does not. */
+function guestView(entry: MaybeCarrier): WebviewElement | null {
+  const view = entry && entry.view
+  return view && typeof view.executeJavaScript === 'function' ? view : null
+}
+/** Run one script inside the guest and take its answer; a detached guest or a refused call yields `fallback`. */
+async function runGuestScript<T>(entry: MaybeCarrier, script: string, fallback: T): Promise<T> {
+  const view = guestView(entry)
+  if (view === null) return fallback
+  try {
+    return await view.executeJavaScript<T>(script)
+  } catch (_error) {
+    return fallback
+  }
+}
+/** Post one script to the guest without waiting for it: the guest may navigate away before the answer lands. */
+function fireGuestScript(entry: MaybeCarrier, script: string) {
+  const view = guestView(entry)
+  if (view === null) return
+  try {
+    const answer = view.executeJavaScript(script)
+    if (answer && typeof answer.catch === 'function') answer.catch(() => {})
+  } catch (_error) {
+    // swallow-ok: the guest navigated away before the script landed
+  }
+}
+/** `dshDesktop` narrowed to what this module drives: a missing bridge, protocol or guest support gives `null`. */
 function desktopBrowserBridge(): DshDesktopBrowser | null {
   if (typeof window === 'undefined') return null
   const carrier = window.dshDesktop
   if (!carrier || carrier.protocolVersion !== DESKTOP_BRIDGE_VERSION) return null
   const browser = carrier.browser
-  if (!browser || typeof browser.acquire !== 'function' || typeof browser.release !== 'function') return null
-  return browser
+  return browser && typeof browser.acquire === 'function' && typeof browser.release === 'function' ? browser : null
 }
-
-/**
- * Where this page can put a remote window: the desktop shell's Chromium guest when its bridge
- * is present, otherwise a same-origin frame (the browser build's carrier). Both paths keep the
- * same pool, switching and teardown behaviour — only how a page is embedded differs.
- */
+/** Where the window goes: the desktop guest with a bridge, else a same-origin frame; only the embedding differs. */
 function carrierSurface(): 'desktop' | 'web' | null {
   if (desktopBrowserBridge() !== null) return 'desktop'
   if (typeof document === 'undefined' || typeof document.createElement !== 'function') return null
-  // A page loaded from file:// (an Electron build without the guest bridge) cannot host the
-  // same-origin view seat: there is no local HTTP origin to proxy through.
+  // A page loaded from file:// (an Electron build without the guest bridge) has no local HTTP origin to proxy through.
   const location = typeof window === 'undefined' ? null : window.location
   if (location && typeof location.protocol === 'string' && !/^https?:$/.test(location.protocol)) return null
   return 'web'
 }
-
-/** Each surface accepts a different kind of seat: a loopback origin, or a path on this origin. */
 function acceptsCarrierUrl(surface: string | null, value: unknown): boolean {
   return surface === 'desktop' ? isValidLoopbackUrl(value) : surface === 'web' ? isValidViewPath(value) : false
 }
-
 const CARRIER_CSS = `
       .drg-carrier-view{position:absolute;left:0;right:0;top:0;bottom:0;border:0;background:var(--dsw-alias-bg-base);pointer-events:auto}
       .drg-carrier-error{position:absolute;left:0;right:0;top:0;bottom:0;z-index:2;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-base);font:13px var(--dsw-font-family)}
@@ -82,19 +79,13 @@ const CARRIER_CSS = `
       .drg-carrier-error button:hover{background:var(--dsw-alias-interactive-bg-hover)}
       .drg-carrier-error button:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
     `
-
 /** A switched-to carrier waits this long for its guest document before showing anyway. */
 const CARRIER_READY_TIMEOUT_MS = 1200
 const CARRIER_PAINT_TIMEOUT_MS = 320
 /** A framed page that never fires `load` still needs a visible failure and a way out. */
 const CARRIER_LOAD_TIMEOUT_MS = 25000
-
-/**
- * The one-shot timer behind a carrier's load failure. A cold remote on a slow SSH tunnel can
- * take well over ten seconds for the whole document, so the timeout is deliberately generous;
- * the timer only fires when no committed document arrived and is cancelled by the first real
- * `load`. Exposed for the fake-clock test (`__test.createLoadGuard`).
- */
+/** The one-shot timer behind a carrier's load failure: a cold remote on a slow SSH tunnel can take well over ten
+ * seconds for the whole document, so it is deliberately generous and is cancelled by the first real `load`. */
 function createLoadGuard(timeoutMs: number, onTimeout?: () => void): CarrierLoadGuard {
   let timer: TimerHandle | null = null
   let disposed = false
@@ -120,25 +111,21 @@ function createLoadGuard(timeoutMs: number, onTimeout?: () => void): CarrierLoad
     },
   }
 }
-/** Installing the injected row can fail while the sidebar is still mounting: retry soon. */
+/** Installing the injected row can fail while the sidebar is still mounting, so it retries on a capped backoff. */
 const CARRIER_INSTALL_RETRY_MS = 1500
 const CARRIER_INSTALL_MAX_ATTEMPTS = 8
-
 /** Set by `apply` (the panel store lives there); a carrier's error layer asks for the local page. */
 let requestLocalPage: (() => void) | null = null
-
 /** The error layer's own handle on its text node, so a reload can rewrite the line in place. */
 interface CarrierErrorLayer extends HTMLDivElement {
   __drgText?: HTMLParagraphElement
 }
-
+/** A blank window is never left unexplained: one button hands it back; `role="alert"` keeps the line reachable. */
 function createCarrierErrorLayer(message: unknown, options: { localLabel?: unknown }): CarrierErrorLayer {
   const opts = options || {}
   const layer: CarrierErrorLayer = document.createElement('div')
   layer.className = 'drg-carrier-error'
   layer.setAttribute('data-testid', 'remote-overlay-error')
-  // A failure that fills the window is an alert: it appears without user action and the only
-  // useful move out of it is a button that must be reachable.
   layer.setAttribute('role', 'alert')
   const text = document.createElement('p')
   text.className = 'drg-carrier-error-text'
@@ -156,22 +143,39 @@ function createCarrierErrorLayer(message: unknown, options: { localLabel?: unkno
   layer.__drgText = text
   return layer
 }
-
 function showCarrierError(layer: CarrierErrorLayer | null | undefined, message?: string) {
   if (!layer) return
   if (layer.__drgText && typeof message === 'string' && message !== '') layer.__drgText.textContent = message
   layer.style.display = 'flex'
 }
-
 function hideCarrierError(layer: CarrierErrorLayer | null | undefined) {
   if (!layer) return
   layer.style.display = 'none'
 }
-/**
- * Resolves once the guest has painted frames of its own: a hidden `<webview>`'s guest does not
- * paint, so this is what tells a reveal that there is something to show instead of the empty
- * carrier. Two frames: one to produce content, one to hand it to the embedder.
- */
+/** The window every carrier lives in: the fixed root, the injected stylesheet and the failure layer above it. */
+// `geometry` is the one thing the two seats disagree on: a guest may start below a caption band it does not own.
+function createCarrierShell(hostId: string, geometry: string, message: unknown, localLabel: unknown) {
+  const root = document.createElement('div')
+  root.id = OVERLAY_ROOT_ID + '-' + (hostId || 'host')
+  root.setAttribute('data-testid', 'remote-overlay')
+  root.setAttribute('data-host-id', hostId)
+  root.style.cssText = [geometry, 'overflow:hidden;background:var(--dsw-alias-bg-base)'].join(';')
+  const style = document.createElement('style')
+  style.textContent = CARRIER_CSS
+  return { root, style, errorLayer: createCarrierErrorLayer(message, { localLabel }) }
+}
+/** A carrier's lifecycle starts idle in both seats: nothing loaded, no waiter, no reveal in flight, no timer. */
+function idleCarrierState() {
+  return {
+    rowInstalled: false,
+    ready: false,
+    readyWaiters: [] as ((value: boolean) => void)[],
+    revealToken: 0,
+    timer: null as TimerHandle | null,
+  }
+}
+/** Resolves once the guest painted a frame: a hidden `<webview>` does not paint, so a reveal waits for it. */
+// Two frames: one to produce content, one to hand it to the embedder.
 const GUEST_PAINT_SCRIPT =
   '(function(){return new Promise(function(resolve){' +
   'if(typeof requestAnimationFrame!=="function"){resolve("no-raf");return}' +

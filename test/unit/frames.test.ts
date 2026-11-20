@@ -1,39 +1,24 @@
 /**
- * The `/state` frame sequence of the five paths §6.2 (risks 1 and 3) names: connect success, a
- * host-key timeout, a transport that drops, a local restart and the explicit "stop remote DSH".
- *
- * The unit-level FSM golden test (`fsm.test.js`) proves the table; this one proves the *wiring*:
- * the frames a listening Client receives must carry the state machine's sequence and must never
- * resurrect a `connected` state after the user closed the link. It is the guard against
- * "state writes that bypass the FSM" and against an emit-count change that would flash a card.
- *
- * The helper collapses consecutive identical triples: the service legitimately publishes the same
- * state twice (the old catch/JSDoc emit points did, and they still do), and what the Client's
- * state machine must see is the *ordered distinct* sequence, not the duplicate count.
- */
+ * The `/state` frame sequence of the five connect paths: success, a host-key timeout, a dropped transport, a local
+ * restart and the explicit "stop remote DSH". `fsm.test.ts` proves the state table; this one proves the *wiring* — a
+ * listening Client must receive that sequence and must never see `connected` resurrected after the user closed the
+ * link. The recorder keeps the ordered distinct triples: the service legitimately publishes the same state twice. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { FakeSsh, FakeTunnel, createHost, makeTestService, waitFor } from '../helpers/fake-remote.ts'
+import { FakeSsh, FakeTunnel, createHost, makeFacts, makeTestService, waitFor } from '../helpers/fake-remote.ts'
 import { errors } from '../../dist/src/errors.js'
 
 /** The `status` / `phase` / `progress.code` triple every frame carries for one host. */
 function triple(view) {
-  return {
-    status: view?.status ?? null,
-    phase: view?.phase ?? null,
-    code: view?.progress?.code ?? null,
-  }
+  return { status: view?.status ?? null, phase: view?.phase ?? null, code: view?.progress?.code ?? null }
 }
 
-/** Record the distinct triples of one host for the duration of a test. */
+/** Record the distinct triples of one host for the rest of a test. */
 function frameRecorder(service, hostId) {
   const frames = []
   service.on('state', (state) => {
-    const view = state.hosts.find((host) => host.id === hostId)
-    // The host list can be empty after a removal; the removal paths assert on that separately.
-    const next = triple(view)
-    const last = frames[frames.length - 1]
-    if (!last || JSON.stringify(last) !== JSON.stringify(next)) frames.push(next)
+    const next = triple(state.hosts.find((host) => host.id === hostId))
+    if (JSON.stringify(frames.at(-1)) !== JSON.stringify(next)) frames.push(next)
   })
   return frames
 }
@@ -41,14 +26,43 @@ function frameRecorder(service, hostId) {
 /** `status/phase/code` strings, readable in an assertion diff. */
 const strings = (frames) => frames.map((frame) => `${frame.status}/${frame.phase}/${frame.code}`)
 
-test('golden frames: a successful connect walks connecting → ready and never regresses', async () => {
-  const { service } = await makeTestService()
+/** A transport whose host-key prompt is answered by the service, not by the test. */
+const pendingKeySsh =
+  (sha256 = 'SHA256:pending') =>
+  (options) => {
+    const ssh = new FakeSsh({
+      options,
+      connect: async () => {
+        const accepted = await options.onHostKey({ sha256, keyType: 'ssh-ed25519' })
+        if (accepted !== true) throw errors.hostKeyUnknown(sha256)
+        ssh.connected = true
+        return { fingerprint: sha256, keyType: 'ssh-ed25519' }
+      },
+    })
+    return ssh
+  }
+
+/** A saved host on a fresh service; the caller records frames before or after connecting. */
+async function hostService(options = {}) {
+  const { service } = await makeTestService(options)
   const host = await createHost(service)
+  return { service, host, runtime: service.runtimes.get(host.id) }
+}
+
+/** A saved host already connected, as most of these cases start out. */
+async function connectedService(options = {}) {
+  const context = await hostService(options)
+  await context.service.connect(context.host.id)
+  await waitFor(() => context.service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  return context
+}
+
+test('golden frames: a successful connect walks connecting → ready and never regresses', async () => {
+  const { service, host } = await hostService()
   const frames = frameRecorder(service, host.id)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-  const sequence = strings(frames)
-  assert.deepEqual(sequence, [
+  assert.deepEqual(strings(frames), [
     'connecting/null/null',
     'connecting/ssh/ssh-connecting',
     'connecting/probe/probing',
@@ -59,7 +73,7 @@ test('golden frames: a successful connect walks connecting → ready and never r
     'connecting/verifying/verifying',
     'connected/ready/ready',
   ])
-  // The last frame is the published connect state; nothing may follow it while the link is idle.
+  // Nothing may follow the ready frame while the link is idle.
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(service.snapshot().hosts[0].status, 'connected')
   assert.equal(strings(frames).at(-1), 'connected/ready/ready')
@@ -67,27 +81,11 @@ test('golden frames: a successful connect walks connecting → ready and never r
 })
 
 test('golden frames: a host-key timeout ends in error and disarms the prompt', async () => {
-  const { service } = await makeTestService({
-    hostKeyConfirmTimeoutMs: 60,
-    sshFactory: (options) => {
-      const ssh = new FakeSsh({
-        options,
-        connect: async () => {
-          const accepted = await options.onHostKey({ sha256: 'SHA256:pending', keyType: 'ssh-ed25519' })
-          if (accepted !== true) throw errors.hostKeyUnknown('SHA256:pending')
-          ssh.connected = true
-          return { fingerprint: 'SHA256:pending', keyType: 'ssh-ed25519' }
-        },
-      })
-      return ssh
-    },
-  })
-  const host = await createHost(service)
+  const { service, host } = await hostService({ hostKeyConfirmTimeoutMs: 60, sshFactory: pendingKeySsh() })
   const frames = frameRecorder(service, host.id)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'error', { timeoutMs: 5_000, label: 'timeout' })
-  const sequence = strings(frames)
-  assert.deepEqual(sequence, [
+  assert.deepEqual(strings(frames), [
     'connecting/null/null',
     'connecting/ssh/ssh-connecting',
     'fingerprint-pending/ssh/host-key-confirm',
@@ -99,46 +97,38 @@ test('golden frames: a host-key timeout ends in error and disarms the prompt', a
 })
 
 test('golden frames: a dropped transport leaves disconnected and reports the lost link', async () => {
-  const { service } = await makeTestService()
+  const { service, host, runtime } = await hostService()
   await service.saveSettings({ autoReconnect: { enabled: false, maxAttempts: 3, baseDelayMs: 10 } })
-  const host = await createHost(service)
   await service.connect(host.id)
   await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-  const runtime = service.runtimes.get(host.id)
   const frames = frameRecorder(service, host.id)
   // Auto-reconnect is off for this case: the drop is reported, not retried.
   runtime.ssh.simulateClose()
   await waitFor(() => runtime.status === 'disconnected', { label: 'dropped' })
-  const sequence = strings(frames)
-  // The `reconnecting` line is the one the drop published; today's policy-off path keeps it
-  // (it patched only the status), and `reconnect.skipped` reproduces that exactly.
-  assert.deepEqual(sequence, ['disconnected/null/reconnecting'])
+  // The drop published `reconnecting` and today's policy-off path keeps that code.
+  assert.deepEqual(strings(frames), ['disconnected/null/reconnecting'])
   assert.equal(runtime.transportLost, true)
   await service.shutdown()
 })
 
 test('golden frames: a local restart re-publishes connecting → ready on a new listener', async () => {
   const tunnels = []
-  const { service } = await makeTestService({
+  const { service, host, runtime } = await connectedService({
     tunnelFactory: async () => {
       const tunnel = new FakeTunnel(45123 + tunnels.length)
       tunnels.push(tunnel)
       return tunnel
     },
   })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
-  const runtime = service.runtimes.get(host.id)
   const frames = frameRecorder(service, host.id)
-  const accepted = await service.restart(host.id)
-  assert.equal(accepted.accepted, true)
+  assert.equal((await service.restart(host.id)).accepted, true)
   await waitFor(
     () => runtime.restartPromise === null && runtime.status === 'connected' && runtime.progress?.code === 'ready',
-    { label: 'restarted' },
+    {
+      label: 'restarted',
+    },
   )
-  const sequence = strings(frames)
-  assert.deepEqual(sequence, [
+  assert.deepEqual(strings(frames), [
     'connecting/start/restarting-remote',
     'connecting/tunnel/tunneling',
     'connecting/verifying/verifying',
@@ -149,7 +139,7 @@ test('golden frames: a local restart re-publishes connecting → ready on a new 
 
 test('golden frames: stopping the remote ends disconnected and never publishes connected again', async () => {
   // The explicit stop needs the run registry to name the bound pid (its ownership proof).
-  const { service } = await makeTestService({
+  const { service, host } = await connectedService({
     readRegistry: async () => ({
       pid: 4242,
       port: 38123,
@@ -160,19 +150,15 @@ test('golden frames: stopping the remote ends disconnected and never publishes c
       startedAt: new Date().toISOString(),
     }),
   })
-  const host = await createHost(service)
-  await service.connect(host.id)
-  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
   const frames = frameRecorder(service, host.id)
-  const stopped = await service.stopRemote(host.id)
-  assert.equal(stopped.ok, true)
+  assert.equal((await service.stopRemote(host.id)).ok, true)
   const sequence = strings(frames)
   assert.deepEqual(sequence, ['connecting/start/stopping-remote', 'disconnected/null/null'])
-  // §6.2 risk 3's explicit assertion: after the user closed the link no frame may say `connected`.
-  const connectedAt = sequence.findIndex((frame) => frame.startsWith('disconnected/'))
-  assert.ok(connectedAt >= 0)
+  // After the user closed the link no frame may say `connected`.
+  const disconnectedAt = sequence.findIndex((frame) => frame.startsWith('disconnected/'))
+  assert.ok(disconnectedAt >= 0)
   assert.equal(
-    sequence.slice(connectedAt).some((frame) => frame.startsWith('connected/')),
+    sequence.slice(disconnectedAt).some((frame) => frame.startsWith('connected/')),
     false,
     'a frame after the disconnect still reports a connected host',
   )
@@ -180,16 +166,13 @@ test('golden frames: stopping the remote ends disconnected and never publishes c
 })
 
 test('golden frames: disconnecting during a connect never publishes connected', async () => {
-  const { service } = await makeTestService({
+  const { service, host, runtime } = await hostService({
     probe: async () => {
       // The user disconnects while the probe step is in flight.
       await service.disconnect(host.id)
-      return facts
+      return makeFacts()
     },
   })
-  const facts = (await import('../helpers/fake-remote.ts')).makeFacts()
-  const host = await createHost(service)
-  const runtime = service.runtimes.get(host.id)
   const frames = frameRecorder(service, host.id)
   await service.connect(host.id)
   await waitFor(() => runtime.connectPromise === null, { timeoutMs: 5_000, label: 'settled' })

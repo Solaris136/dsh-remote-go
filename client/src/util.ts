@@ -17,12 +17,8 @@ function looksLikeWebAddress(address: string): boolean {
   return /^https?:\/\//i.test(value) || value.includes('://') || /[?&]token=/i.test(value)
 }
 
-/**
- * A launch URL may only point at this machine's loopback origin. `startsWith` is not an origin
- * check: `http://127.0.0.1:8080@evil.example/` starts with the prefix yet parses to a remote
- * host with `127.0.0.1:8080` as userinfo. The prefix is kept first so every shape the old check
- * refused stays refused, then the parsed URL must prove protocol, host, no credentials and port.
- */
+/** A launch URL may only point at this machine's loopback origin, and `startsWith` is not an origin check. */
+// Then the parsed URL must prove protocol, host, no credentials and a port; the old check's refusals all still hold.
 function isValidLoopbackUrl(url: unknown): url is string {
   if (typeof url !== 'string' || !url.startsWith(LOOPBACK_PREFIX)) return false
   let parsed
@@ -34,18 +30,14 @@ function isValidLoopbackUrl(url: unknown): url is string {
   // `URL` separates credentials from the host, so a disguised userinfo lands here, not in host.
   if (parsed.protocol !== 'http:' || parsed.hostname !== '127.0.0.1') return false
   if (parsed.username !== '' || parsed.password !== '') return false
-  // A missing port is an empty string; `URL` normalizes a default port away and rejects values
-  // above 65535 outright, but `:0` still parses, so the range is asserted here.
+  // Missing is an empty string; `URL` drops a default port and rejects >65535, but `:0` still parses.
   if (!/^[0-9]+$/.test(parsed.port)) return false
   const port = Number(parsed.port)
   return port >= 1 && port <= 65535
 }
 
-/**
- * A browser carrier URL is a path on this page's own origin, so it must be exactly the view
- * prefix plus one host id plus a slash (the one-shot token rides in the query string).
- * Anything absolute, encoded or traversing is refused before it can reach an iframe.
- */
+/** A browser carrier URL is a path on this page's own origin: the view prefix, one host id, a slash. */
+// Anything absolute, encoded or traversing is refused before it can reach an iframe.
 function isValidViewPath(value: unknown): value is string {
   if (typeof value !== 'string' || !value.startsWith(REMOTE_VIEW_PREFIX)) return false
   if (value.includes('://') || value.includes('\\')) return false
@@ -86,12 +78,8 @@ function displayAddress(host: AddressDisplay | null | undefined): string {
 }
 
 type TimerHandle = ReturnType<typeof setTimeout>
-
-/**
- * The one place the two timer shapes meet. A browser handle is a number and a Node `Timeout` is
- * an object, so the guard is the object shape: reading `.unref` off a number is a no-op there,
- * exactly as it was when the parameter was implicitly `any`.
- */
+/** The one place the two timer shapes meet: a browser handle is a number and a Node `Timeout` is an object. */
+// So the guard is the object shape; reading `.unref` off a number is a no-op there.
 function unrefTimer(timer: unknown): void {
   if (typeof timer === 'object' && timer !== null && 'unref' in timer && typeof timer.unref === 'function') {
     timer.unref()
@@ -199,11 +187,10 @@ function createPanelRequestStore(): PanelRequestStore {
       if (!intent || typeof intent !== 'object') return
       const kinds = ['open', 'disconnect', 'manage', 'local']
       if (!kinds.includes(intent.kind)) return
-      if ((intent.kind === 'open' || intent.kind === 'disconnect') && typeof intent.hostId !== 'string') return
-      pending =
-        intent.kind === 'open' || intent.kind === 'disconnect'
-          ? { kind: intent.kind, hostId: intent.hostId }
-          : { kind: intent.kind }
+      // Only these two name a host; anything else is a surface-wide request.
+      const namesHost = intent.kind === 'open' || intent.kind === 'disconnect'
+      if (namesHost && typeof intent.hostId !== 'string') return
+      pending = namesHost ? { kind: intent.kind, hostId: intent.hostId } : { kind: intent.kind }
       store.emit()
     },
     take() {
@@ -237,11 +224,7 @@ function createWizardStore(): WizardStore {
   }
 }
 
-/**
- * Command queue from the injected guest page (or the switcher row) to the
- * overlay: currently "download this remote file" plus the capability bridge's
- * toast requests. Consumed in order.
- */
+/** Command queue from a guest page or the switcher row to the overlay (a download, or a toast line). */
 function createToolRequestStore(): ToolRequestStore {
   let pending: ToolRequest[] = []
   const store = createStore()

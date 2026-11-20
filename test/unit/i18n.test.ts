@@ -1,9 +1,8 @@
-// Dictionary parity for the browser half (review #6). The dictionary is the single source of the
-// client's visible copy, so the two languages are checked against each other, against the source
-// literal it is written in, and against the ids the code derives keys from at runtime. The two
-// fallbacks `t()` owns (requested language missing, key missing everywhere) are driven through the
-// real factory with a deliberately incomplete pack: the shipped dictionary has no gaps, which is
-// exactly what the other assertions here keep true.
+/**
+ * Dictionary parity for the browser half. The dictionary is the single source of the client's visible copy, so the two
+ * languages are checked against each other, against the source literal, and against the ids the code derives keys from.
+ * The two fallbacks `t()` owns are driven through the real factory with a deliberately incomplete pack: the shipped
+ * dictionary has no gaps, which is exactly what the other assertions here keep true. */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
@@ -14,20 +13,14 @@ import { REPO_ROOT } from '../helpers/source-scan.ts'
 
 const requireFromHere = createRequire(import.meta.url)
 const React = requireFromHere('react')
-
-// `pnpm test` builds first (`pretest`), and `dist/client.js` is the one artifact the unit suite
-// loads by absolute path (client.test.ts does the same, so the file shows up in coverage).
+// `pnpm test` builds first (`pretest`), and `dist/client.js` is the one artifact the unit suite loads by absolute path.
 const CLIENT_PATH = path.join(REPO_ROOT, 'dist', 'client.js')
 const CLIENT_SOURCE = readFileSync(CLIENT_PATH, 'utf8')
 const read = (...parts) => readFileSync(path.join(REPO_ROOT, 'client', 'src', ...parts), 'utf8')
 const DICT_SOURCE = read('i18n-dict.ts')
 const CONSTANTS_SOURCE = read('constants.ts')
 const CONNECT_WINDOW_SOURCE = read('connect-window.ts')
-
-/**
- * The dictionary literal as written, from `const STRINGS = {` up to its `} as const satisfies`.
- * Anchored to that object so a later literal in the file cannot contribute keys.
- */
+/** The dictionary literal as written, from `const STRINGS = {` up to its `} as const satisfies`. */
 function stringsLiteral() {
   const start = DICT_SOURCE.indexOf('const STRINGS = {')
   assert.ok(start >= 0, 'i18n-dict.ts must open `const STRINGS = {`')
@@ -35,14 +28,9 @@ function stringsLiteral() {
   assert.ok(end > start, 'the dictionary literal must be followed by its `as const satisfies` clause')
   return DICT_SOURCE.slice(start, end)
 }
-
 // One top-level entry of the literal: an identifier or a quoted key, then its pair.
 const KEY_LINE = /^ {2}(?:'([^']+)'|([A-Za-z_$][\w$]*)):\s*\[/gm
-
-function sourceKeys() {
-  return [...stringsLiteral().matchAll(KEY_LINE)].map((match) => match[1] ?? match[2])
-}
-
+const sourceKeys = () => [...stringsLiteral().matchAll(KEY_LINE)].map((match) => match[1] ?? match[2])
 /** Load the built plugin and return its test seam plus the lines it warned about. */
 function loadClientSeam() {
   const warnings = []
@@ -83,9 +71,7 @@ function loadClientSeam() {
   assert.ok(plugin && plugin.__test, 'the plugin must expose its __test seam')
   return { seam: plugin.__test, warnings }
 }
-
 const client = loadClientSeam()
-
 /** `{name}` occurrences, sorted, so a localization may reorder them but not drop or rename one. */
 function placeholders(text) {
   return [...text.matchAll(/\{(\w+)\}/g)]
@@ -93,7 +79,6 @@ function placeholders(text) {
     .sort()
     .join(',')
 }
-
 const zhKeys = Object.keys(client.seam.zh)
 const enKeys = Object.keys(client.seam.en)
 
@@ -149,8 +134,8 @@ test('the dictionary source defines no duplicate keys', () => {
     seen.add(key)
     return false
   })
-  // A duplicate is invisible at runtime: the object literal keeps the last pair and the checker
-  // does not report a redeclaration, so only a source scan can catch it.
+  // A duplicate is invisible at runtime: the object literal keeps the last pair and nothing reports a redeclaration, so
+  // only a source scan can catch it.
   assert.deepEqual(duplicates, [], 'duplicate dictionary keys are silently overwritten: ' + duplicates.join(', '))
   assert.equal(seen.size, keys.length)
 })
@@ -210,23 +195,19 @@ test('every host status has its label, its hint and its action', () => {
   )
   assert.ok(ids.length >= 8, 'expected every HostStatus, found ' + ids.length)
   for (const id of ids) {
-    // `statusOf` builds the two names from the contract id; the transform is repeated here on
-    // purpose, so a rename on either side fails instead of rendering a key.
+    // `statusOf` builds the two names from the contract id; the transform is repeated so a rename on either side fails.
     const name = id.replace(/(?:^|-)([a-z])/g, (_all, letter) => letter.toUpperCase())
     assert.equal(typeof client.seam.zh['status' + name], 'string', 'missing status label for ' + id)
     assert.equal(typeof client.seam.en['statusHint' + name], 'string', 'missing status hint for ' + id)
   }
   const actions = [...statusBlock.matchAll(/action:\s*'([^']+)'/g)].map((match) => match[1])
   assert.ok(actions.length >= ids.length, 'every status must name a primary action')
-  for (const action of actions) {
+  for (const action of actions)
     assert.equal(typeof client.seam.zh[action], 'string', 'missing action label for ' + action)
-  }
 })
 
 test('every local error view is a complete bilingual pair', () => {
-  // `LOCAL_ERRORS` is the client's second bilingual table (design-contract §1.2: a failure the Host
-  // never sees still renders as an ErrorView). It is not dictionary copy, so the parity assertions
-  // above cannot reach it; this applies the same shape check to its own table.
+  // `LOCAL_ERRORS` is the client's second bilingual table; it is not dictionary copy, so the same shape check applies.
   const table = client.seam.LOCAL_ERRORS
   const codes = Object.keys(table)
   assert.ok(codes.length >= 5, 'expected the local ErrorView codes, found ' + codes.length)

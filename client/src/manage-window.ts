@@ -1,6 +1,4 @@
 // client/src/manage-window.ts - ManageWindow, the remote host manager dialog; after overlay-state.ts, before plugin-overlay.ts.
-
-/** The management window is a shell around two bodies: the host list and one host's connect view. */
 interface ManageWindowProps extends LocaleProps {
   open?: boolean
   view?: string
@@ -31,7 +29,6 @@ interface ManageWindowProps extends LocaleProps {
   onRetry?: (host: HostView) => void
   onDiagnose?: (host: HostView) => void
 }
-
 function ManageWindow(props: ManageWindowProps) {
   const t = translatorOf(props)
   const locale = localeOf(props)
@@ -44,6 +41,7 @@ function ManageWindow(props: ManageWindowProps) {
     h(
       Modal,
       { wide: true, onClose: props.onClose, closeLabel: t('cancel'), ariaLabel: t('hostsTitle') },
+      // The host list reads a subset under its own names; only `onStopRemote` is renamed, so the rest pass through.
       connecting
         ? h(ConnectWindow, {
             t,
@@ -52,33 +50,11 @@ function ManageWindow(props: ManageWindowProps) {
             fingerprintBusy: props.fingerprintBusy === true,
             onAcceptFingerprint: (remember: boolean) => props.onAcceptFingerprint(host, remember),
             onRejectFingerprint: () => props.onRejectFingerprint(host),
+            onBack: typeof props.onShowList === 'function' ? props.onShowList : props.onClose,
             onRetry: () => props.onRetry(host),
             onDiagnose: () => props.onDiagnose(host),
-            // Leaving a failure means going back to the list, inside the same window.
-            onBack: typeof props.onShowList === 'function' ? props.onShowList : props.onClose,
           })
-        : h(HostListView, {
-            t,
-            locale,
-            state: props.state,
-            loading: props.loading,
-            error: props.error,
-            busyHostId: props.busyHostId,
-            mode: props.mode,
-            onRetryLive: props.onRetryLive,
-            onAdd: props.onAdd,
-            onRefresh: props.onRefresh,
-            onOpenSettings: props.onOpenSettings,
-            onOpenHost: props.onOpenHost,
-            onViewProgress: props.onViewProgress,
-            onDisconnectHost: props.onDisconnectHost,
-            onReconnectHost: props.onReconnectHost,
-            onRestartHost: props.onRestartHost,
-            onStopRemote: props.onStopRemoteHost,
-            onEditHost: props.onEditHost,
-            onDeleteHost: props.onDeleteHost,
-            onDiagnoseHost: props.onDiagnoseHost,
-          }),
+        : h(HostListView, { ...props, onStopRemote: props.onStopRemoteHost }),
     ),
   )
 }

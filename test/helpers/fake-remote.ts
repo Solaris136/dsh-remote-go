@@ -5,19 +5,12 @@ import path from 'node:path'
 import { HostStore } from '../../dist/src/store.js'
 import { RemoteGoService } from '../../dist/src/service.js'
 import { FakeSshPort } from './fake-ssh-port.ts'
-
-// The service-level suites have always imported the double as `FakeSsh`; the implementation lives
-// in `fake-ssh-port.js` so the port conformance suite can share it (design-ssh §7).
+// The service-level suites import the double as `FakeSsh`; it lives in `fake-ssh-port.js` so the port suite shares it.
 export { FakeSshPort as FakeSsh }
-
-/**
- * Temporary service directories created by `makeTestService`. `node --test` runs every
- * file in its own child process, so one exit hook covers every suite: without it each
- * unit-test run leaked a `dsh-remote-go-test-*` directory (and its hosts.json) into the
- * OS temp directory.
- */
+/* Temporary service directories created by `makeTestService`. `node --test` runs every file in its own child process,
+ * so one exit hook covers every suite: without it each unit-test run leaked a `dsh-remote-go-test-*` directory
+ * (and its hosts.json) into the OS temp directory. */
 const tempDirs = new Set()
-
 process.once('exit', () => {
   for (const dir of tempDirs) {
     try {
@@ -26,14 +19,12 @@ process.once('exit', () => {
   }
   tempDirs.clear()
 })
-
 /** Remove one service directory eagerly; also exported for tests that assert cleanup. */
 export async function cleanupTestService(result) {
   if (!result?.dir || !tempDirs.has(result.dir)) return
   tempDirs.delete(result.dir)
   await rm(result.dir, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
 }
-
 export function makeFacts(overrides = {}) {
   return {
     os: 'Linux',
@@ -58,7 +49,6 @@ export function makeFacts(overrides = {}) {
     ...overrides,
   }
 }
-
 export class FakeTunnel {
   constructor(port = 41000) {
     this.localPort = port
@@ -68,7 +58,6 @@ export class FakeTunnel {
     this.closed = true
   }
 }
-
 export function managedNodeFixture(version = '24.9.0') {
   const dir = `/home/ubuntu/.dsh/remote-go/node/v${version}`
   return {
@@ -81,7 +70,6 @@ export function managedNodeFixture(version = '24.9.0') {
     installed: false,
   }
 }
-
 export async function makeTestService(overrides = {}) {
   const dir = overrides.dir ?? (await mkdtemp(path.join(tmpdir(), 'dsh-remote-go-test-')))
   tempDirs.add(dir)
@@ -96,8 +84,7 @@ export async function makeTestService(overrides = {}) {
       return ssh
     })
   const tunnelFactory = overrides.tunnelFactory ?? (async () => new FakeTunnel(45123))
-  // The fake tunnel is not a real listener: tests that want "the listener still answers"
-  // override this. Default false keeps the rebuild path exercised.
+  // The fake tunnel is not a real listener: tests that want "the listener still answers" override this. Default false.
   const tunnelProbe = overrides.tunnelProbe ?? (async () => false)
   const service = new RemoteGoService({
     store,
@@ -176,7 +163,6 @@ export async function makeTestService(overrides = {}) {
   result.cleanup = () => cleanupTestService(result)
   return result
 }
-
 export async function waitFor(predicate, options = {}) {
   const timeoutMs = options.timeoutMs ?? 4000
   const intervalMs = options.intervalMs ?? 10
@@ -188,7 +174,6 @@ export async function waitFor(predicate, options = {}) {
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
 }
-
 export async function createHost(service, overrides = {}) {
   return service.saveHost({
     name: 'Tencent VM',
@@ -200,12 +185,9 @@ export async function createHost(service, overrides = {}) {
     ...overrides,
   })
 }
-
-/**
- * An in-memory stand-in for `src/secrets.js` (same surface, no credential store), so tests can
- * assert exactly which password the pipeline and the wizard persist for a host.
- * @param {Record<string, string>} [initial] - records present before the service starts.
- */
+/* An in-memory stand-in for `src/secrets.js` (same surface, no credential store), so tests can assert exactly which
+ * password the pipeline and the wizard persist for a host.
+ * @param {Record<string, string>} [initial] - records present before the service starts. */
 export function fakeSecretStore(initial = {}) {
   const store = new Map(Object.entries(initial))
   return {

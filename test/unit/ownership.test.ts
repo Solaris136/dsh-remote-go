@@ -1,15 +1,6 @@
-/**
- * The ownership gate's cross matrix (design-arch §4.3 + §6.2 risk 4).
- *
- * Risk 4 of the P2 design is that merging the three authorization proofs into `proveOwnership`
- * could *loosen* one of them — the restart accepting a `bound` record (B1 regression), or the idle
- * policy reporting the stop-shaped `not-launched-by-this-connection` instead of `not-owned`. The
- * three call sites already have end-to-end tests for their own paths; what was missing is the
- * **cross**: one record shape judged by all three call sites. That is this table.
- *
- * Every row runs the real `proveOwnership` with the real option set each call site passes
- * (`OWNERSHIP_OPTIONS`), so a changed parameter shows up as a changed reason here.
- */
+/* The ownership gate's cross matrix: one record shape judged by all three call sites, so
+ * merging the three proofs into `proveOwnership` cannot loosen one of them (e.g. the restart accepting a `bound`
+ * record). */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
@@ -25,64 +16,38 @@ const DSH_HOME = '/home/ubuntu/.dsh'
 const LAYOUT = remoteLayout(REMOTE_HOME)
 const PROFILE = 'web'
 const COMMAND = 'node /home/ubuntu/.dsh/remote-go/node/v24.9.0/bin/npx -y @deepseek-ai/dsh@0.2.2-rc.1 --profile web'
-
+const SRC = path.join(REPO_ROOT, 'src')
 /** The `/proc` identity a live, matching instance has (what every row starts from). */
-function identity(overrides = {}) {
-  return { ok: true, startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME, ...overrides }
-}
-
+const LAUNCHED = { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME }
+const IDENTITY = { ok: true, ...LAUNCHED }
+const identity = (overrides = {}) => ({ ...IDENTITY, ...overrides })
 /** The run registry that names that instance. */
 const REGISTRY = { pid: PID, port: 38123, profile: PROFILE, dshHome: DSH_HOME, origin: 'launch' }
-
 /** One record shape: what the runtime remembers, and what `/proc` says now. */
 const SHAPES = [
+  // A process this connection launched itself (a plain connect / restart).
+  { name: 'launched', launched: LAUNCHED },
+  // A process this connection only took over (a re-attach): display rights, no restart kill right.
+  { name: 'bound', bound: { startTime: 'start-4242', origin: 'reattach' } },
+  // A process the user chose to keep alongside the managed instance.
+  { name: 'alongside', launched: LAUNCHED, alongside: true },
+  // The pid was recycled: the kernel start time moved.
+  { name: 'pid-reused', launched: { ...LAUNCHED, startTime: '1000' }, identity: identity({ startTime: '9999' }) },
+  // The process runs under another DSH home.
+  { name: 'dsh-home-mismatch', launched: LAUNCHED, identity: identity({ dshHome: '/srv/other/.dsh' }) },
+  // The process runs another profile (its command line says so).
   {
-    // A process this connection launched itself (a plain connect / restart).
-    name: 'launched',
-    launched: { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME },
-  },
-  {
-    // A process this connection only took over (a re-attach): display rights, no restart kill right.
-    name: 'bound',
-    bound: { startTime: 'start-4242', origin: 'reattach' },
-  },
-  {
-    // A process the user chose to keep alongside the managed instance.
-    name: 'alongside',
-    launched: { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME },
-    alongside: true,
-  },
-  {
-    // The pid was recycled: the kernel start time moved.
-    name: 'pid-reused',
-    launched: { startTime: '1000', command: COMMAND, dshHome: DSH_HOME },
-    identity: identity({ startTime: '9999' }),
-  },
-  {
-    // The process runs under another DSH home.
-    name: 'dsh-home-mismatch',
-    launched: { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME },
-    identity: identity({ dshHome: '/srv/other/.dsh' }),
-  },
-  {
-    // The process runs another profile (its command line says so).
     name: 'profile-mismatch',
-    launched: { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME },
+    launched: LAUNCHED,
     identity: identity({ command: 'node /opt/dsh/bin.js web --profile other --no-open' }),
   },
-  {
-    // No record at all: the reason each call site reports for "not mine" is its own wording.
-    name: 'no record',
-  },
+  // No record at all: the reason each call site reports for "not mine" is its own wording.
+  { name: 'no record' },
 ]
-
-/**
- * The expected verdict of each call site for each shape. `null` means "authorized".
- *
- * The `no record` row is why `noProofReason` exists: the stop/restart shape keeps
- * `not-launched-by-this-connection` (the `technical: reason=` payload and the restart log line are
- * frozen, DECISIONS H5), the idle policy keeps `not-owned` (`idle-stop.test.js` deep-equals it).
- */
+/* The expected verdict of each call site for each shape; `null` means "authorized". The `no record` row is why
+ * `noProofReason` exists: the stop/restart shape keeps `not-launched-by-this-connection` (the `technical: reason=`
+ * payload and the restart log line are frozen, DECISIONS H5), the idle
+ * policy keeps `not-owned` (`idle-stop.test.js` deep-equals it). */
 const EXPECTED = {
   restart: {
     launched: null,
@@ -105,8 +70,7 @@ const EXPECTED = {
   idle: {
     launched: null,
     bound: null,
-    // The idle policy never points at an alongside pid, so the shared gate's refusal is a no-op
-    // in practice; it is passed for every caller so none can be looser by omission (§4.2).
+    // The idle policy never points at an alongside pid, so the refusal is a no-op there; every caller passes it anyway.
     alongside: 'kept-alongside',
     'pid-reused': 'pid-reused',
     'dsh-home-mismatch': 'dsh-home-mismatch',
@@ -114,7 +78,6 @@ const EXPECTED = {
     'no record': 'not-owned',
   },
 }
-
 /** Run one row: the real service context, a real runtime, the call site's own option set. */
 async function verdictFor(callSite, shape, overrides = {}) {
   const { service } = await makeTestService({
@@ -143,7 +106,6 @@ async function verdictFor(callSite, shape, overrides = {}) {
     await service.shutdown()
   }
 }
-
 for (const callSite of Object.keys(EXPECTED)) {
   for (const shape of SHAPES) {
     const expected = EXPECTED[callSite][shape.name]
@@ -162,8 +124,7 @@ for (const callSite of Object.keys(EXPECTED)) {
 }
 
 test('an idle policy with no remembered profile skips the profile check instead of refusing', async () => {
-  // `teardownRuntime` keeps `remoteProfile`; when even that is unknown the timer has no profile to
-  // compare and must not turn "unknown" into a refusal (the pre-merge idle proof behaved the same).
+  // `teardownRuntime` keeps `remoteProfile`; an unknown profile mustn't turn "unknown" into a refusal.
   const { service } = await makeTestService({
     processIdentity: async () => identity({ command: 'node /opt/dsh/bin.js web' }),
     readRegistry: async () => REGISTRY,
@@ -173,7 +134,7 @@ test('an idle policy with no remembered profile skips the profile check instead 
   runtime.remote.pid = PID
   runtime.remote.profile = null
   runtime.remoteProfile = null
-  runtime.launched = new Map([[PID, { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME }]])
+  runtime.launched = new Map([[PID, LAUNCHED]])
   const verdict = await proveOwnership(service.ctx, runtime, {
     ...OWNERSHIP_OPTIONS.idle,
     pid: PID,
@@ -185,26 +146,24 @@ test('an idle policy with no remembered profile skips the profile check instead 
 })
 
 test('a restart reports not-launched-by-this-connection for a pid kept alongside but never launched', async () => {
-  // Both orders refuse, only the reason differs. The restart's pre-merge form (`killAuthorized`)
-  // proved the record before reading `alongsidePids`, so "no record" keeps its frozen wording here
-  // instead of becoming `kept-alongside` (DECISIONS H5, security review M-2).
+  // Both orders refuse, only the reason differs. The restart's pre-merge form (`killAuthorized`) proved the record
+  // before reading `alongsidePids`, so "no record" keeps its
+  // frozen wording instead of `kept-alongside` (H5, review M-2).
   const verdict = await verdictFor('restart', { alongside: true })
   assert.equal(verdict.ok, false)
   assert.equal(verdict.reason, 'not-launched-by-this-connection')
 })
 
 test('a stop keeps kept-alongside for that same pid kept alongside but never launched', async () => {
-  // The stop shape keeps the alongside-first order: the user asked to keep this pid, so that is
-  // the fact the stop card explains (security review M-2 must not change this side).
+  // The stop shape keeps the alongside-first order: the user asked to keep this pid, the fact the stop card explains.
   const verdict = await verdictFor('stop', { alongside: true })
   assert.equal(verdict.ok, false)
   assert.equal(verdict.reason, 'kept-alongside')
 })
 
 test('stop and restart refuse an empty profile, while the idle shape still allows one', async () => {
-  // A stop/restart always knows the profile it manages: an empty one is a bug or a corrupted
-  // record, and skipping the comparison would authorize any process on the matching home
-  // (security review L-2). `OWNERSHIP_OPTIONS.requireProfile` is what makes the difference.
+  // A stop/restart always knows the profile it manages: an empty one is a bug or a corrupted record, and skipping the
+  // comparison would authorize any process on the matching home (review L-2); `requireProfile` makes the difference.
   for (const callSite of ['restart', 'stop']) {
     const verdict = await verdictFor(callSite, SHAPES[0], { profile: '' })
     assert.equal(verdict.ok, false, `${callSite} must not authorize an empty profile`)
@@ -213,12 +172,9 @@ test('stop and restart refuse an empty profile, while the idle shape still allow
   const idle = await verdictFor('idle', SHAPES[0], { profile: '' })
   assert.equal(idle.ok, true, 'the idle timer may have forgotten the profile and must still stop its own pid')
 })
-
-/**
- * The reason table in `docs/invariants.md` B1 is the frozen vocabulary of stop cards, restart logs
- * and idle verdicts (DECISIONS H5). This test reaches every literal `OwnershipReason` declares, so
- * a removed or renamed code fails here instead of silently changing a user-facing message.
- */
+/* The reason table in `docs/invariants.md` B1 is the frozen vocabulary of stop cards, restart logs and idle verdicts
+ * (DECISIONS H5). This test reaches every literal `OwnershipReason` declares, so a removed or renamed code fails here
+ * instead of silently changing a user-facing message. */
 test('the gate still answers every OwnershipReason literal, so the frozen table stays real', async () => {
   const reasonFor = async (callSite, shape, overrides) => {
     const verdict = await verdictFor(callSite, shape, overrides)
@@ -248,8 +204,7 @@ test('the gate still answers every OwnershipReason literal, so the frozen table 
     'registry-mismatch': 'registry-mismatch',
     'identity-unreadable': 'identity-unreadable',
     'identity-missing': 'identity-missing',
-    // The template arm keeps `/proc`'s own suffix. `unreadable` is the suffix a live session can
-    // produce, and it collides with the literal above by design.
+    // The template arm keeps `/proc`'s own suffix; `unreadable` is what a live session produces and collides by design.
     'identity-<reason>': 'identity-unreadable',
     'pid-reused': 'pid-reused',
     'dsh-home-mismatch': 'dsh-home-mismatch',
@@ -270,7 +225,7 @@ test('only the stop shape reads the run registry', async () => {
     const host = await createHost(service)
     const runtime = service.runtimes.get(host.id)
     runtime.remote.pid = PID
-    runtime.launched = new Map([[PID, { startTime: 'start-4242', command: COMMAND, dshHome: DSH_HOME }]])
+    runtime.launched = new Map([[PID, LAUNCHED]])
     await proveOwnership(service.ctx, runtime, {
       ...OWNERSHIP_OPTIONS[callSite],
       pid: PID,
@@ -279,23 +234,16 @@ test('only the stop shape reads the run registry', async () => {
     })
     await service.shutdown()
   }
-  // The restart's registry check is the caller's (`runRestart` needs a mismatch to become a
-  // conflict prompt, not a refusal); the idle policy must survive a stale registry (§4.3).
+  // The restart's registry check is the caller's (`runRestart`
+  // wants a prompt, not a refusal); idle survives a stale registry.
   assert.deepEqual(reads, { restart: 0, stop: 1, idle: 0 })
 })
-
-/**
- * The matrix above proves the *options*; this proves the call sites pass *their own* options.
- * A copy-pasted `OWNERSHIP_OPTIONS.stop` in `restart.ts` would keep every row above green.
- */
+/* The matrix above proves the *options*; this proves the call sites pass *their own* options. A copy-pasted
+ * `OWNERSHIP_OPTIONS.stop` in `restart.ts` would keep every row above green. */
 test('each call site passes its own ownership option set', async () => {
-  const expected = {
-    'connect/restart.ts': 'restart',
-    'connect/stop.ts': 'stop',
-    'host-lifecycle.ts': 'idle',
-  }
+  const expected = { 'connect/restart.ts': 'restart', 'connect/stop.ts': 'stop', 'host-lifecycle.ts': 'idle' }
   for (const [file, callSite] of Object.entries(expected)) {
-    const source = await readFile(path.join(REPO_ROOT, 'src', file), 'utf8')
+    const source = await readFile(path.join(SRC, file), 'utf8')
     assert.match(
       source,
       new RegExp(`\\.\\.\\.OWNERSHIP_OPTIONS\\.${callSite}\\b`),
@@ -308,8 +256,9 @@ test('each call site passes its own ownership option set', async () => {
 test('proveOwnership has exactly one implementation and three call sites', async () => {
   const definers = []
   const importers = []
-  for (const file of await walkFiles(path.join(REPO_ROOT, 'src'), { extensions: /\.ts$/ })) {
-    const relative = path.relative(path.join(REPO_ROOT, 'src'), file).split(path.sep).join('/')
+  const files = await walkFiles(SRC, { extensions: /\.ts$/ })
+  for (const file of files) {
+    const relative = path.relative(SRC, file).split(path.sep).join('/')
     const source = await readFile(file, 'utf8')
     if (/export async function proveOwnership\s*\(/.test(source)) definers.push(relative)
     if (/import\s*\{[^}]*\bproveOwnership\b[^}]*\}/.test(source)) importers.push(relative)
@@ -317,14 +266,13 @@ test('proveOwnership has exactly one implementation and three call sites', async
   assert.deepEqual(definers, ['connect/ownership.ts'], 'the gate must stay one implementation')
   assert.deepEqual(importers.sort(), ['connect/restart.ts', 'connect/stop.ts', 'host-lifecycle.ts'])
   // The three literals this merge must not resurrect (§4.1).
-  for (const file of await walkFiles(path.join(REPO_ROOT, 'src'), { extensions: /\.ts$/ })) {
+  for (const file of files) {
     const source = await readFile(file, 'utf8')
     for (const gone of ['killAuthorized', 'closeAuthorized', 'proveIdleStopTarget']) {
       assert.equal(source.includes(gone), false, `${path.basename(file)} still names ${gone}`)
     }
   }
 })
-
 /** The top-level function that encloses `lineIndex` (0-based): its name and its source range. */
 function enclosingFunction(lines, lineIndex) {
   let start = 0
@@ -346,18 +294,14 @@ function enclosingFunction(lines, lineIndex) {
   }
   return { name, body: lines.slice(start, end).join('\n') }
 }
-
-/**
- * The M-3 known gap, frozen (docs/invariants.md B1): three `stopWeb` calls do not pass through
- * `proveOwnership` — the adopt/stale-version stops inside `connectPipeline` and teardown's
- * `stopRemote`. A fourth ungated call would widen the window in which a reused pid can be killed,
- * so the census is locked here: every call site must be one of the registered functions, and
- * exactly the three known sites may skip the gate.
- */
+/* The M-3 known gap, frozen (docs/invariants.md B1): three `stopWeb` calls do not pass through `proveOwnership` — the
+ * adopt/stale-version stops inside `connectPipeline` and teardown's `stopRemote`. A fourth ungated call would widen the
+ * window in which a reused pid can be killed, so the census is locked here: every call site must be one of the
+ * registered functions, and exactly the three known sites may skip the gate. */
 test('every stopWeb call site is registered, and exactly three skip the ownership gate', async () => {
   const census = new Map()
-  for (const file of await walkFiles(path.join(REPO_ROOT, 'src'), { extensions: /\.ts$/ })) {
-    const relative = path.relative(path.join(REPO_ROOT, 'src'), file).split(path.sep).join('/')
+  for (const file of await walkFiles(SRC, { extensions: /\.ts$/ })) {
+    const relative = path.relative(SRC, file).split(path.sep).join('/')
     const lines = (await readFile(file, 'utf8')).split('\n')
     lines.forEach((line, index) => {
       if (!/\.stopWeb\(/.test(line)) return

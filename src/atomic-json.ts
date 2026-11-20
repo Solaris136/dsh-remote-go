@@ -1,6 +1,4 @@
-/**
- * Atomic JSON persistence: 0700 dir, 0600 file, fsynced temp, rename retry and a cross-process lock; a bad file is reported, never thrown.
- */
+/** Atomic JSON persistence: 0700 dir, 0600 file, fsynced temp, rename retry and a cross-process lock; a bad file is reported, never thrown. */
 import { promises as fs } from 'node:fs'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -17,14 +15,12 @@ export interface JsonFileSystem {
   unlink(file: string): Promise<void>
   mkdir(dir: string, options: { recursive: boolean; mode: number }): Promise<unknown>
 }
-
 /** The open handle surface used here: write a whole document, fsync, close. */
 export interface JsonFileHandle {
   writeFile(data: string, encoding: 'utf8'): Promise<void>
   sync(): Promise<void>
   close(): Promise<void>
 }
-
 /** Knobs for one cross-process lock acquisition. */
 export interface LockOptions {
   fs?: JsonFileSystem
@@ -33,7 +29,6 @@ export interface LockOptions {
   waitMs?: number
   retryMs?: number
 }
-
 /** Knobs for one atomic write; a caller may redirect the fs, the logger or the modes. */
 export interface WriteJsonOptions {
   fs?: JsonFileSystem
@@ -42,19 +37,12 @@ export interface WriteJsonOptions {
   dirMode?: number
   fileMode?: number
 }
-
 /** Knobs for one atomic read. */
 export interface ReadJsonOptions {
   fs?: JsonFileSystem
   logger?: Logger
 }
-
-/**
- * The three outcomes are deliberately distinct, so they stay a discriminated union rather
- * than a nullable value.
- * `value` stays `unknown`: a parsed JSON document has no static shape until one of the
- * `sanitize*` functions has narrowed it, so the caller — not this reader — owns the shape.
- */
+/** The three read outcomes; `value` stays `unknown` because the caller owns the parsed shape. */
 export type JsonReadResult =
   { status: 'ok'; value: unknown } | { status: 'missing' | 'corrupt' | 'unreadable'; value: null }
 
@@ -63,49 +51,34 @@ const RENAME_RETRY_BASE_MS = 20
 const LOCK_STALE_MS = 10_000
 const LOCK_WAIT_MS = 20_000
 const LOCK_RETRY_MS = 10
-/**
- * How long a non-`EEXIST` lock error counts as contention without the lock present.
- * Windows reports mid-create/mid-delete races as EPERM/EACCES, but those codes also
- * mean a lock that can never be created (ACL denial, read-only mount); past this
- * window the original error is surfaced instead of a misleading timeout.
- */
+/** How long a non-`EEXIST` lock error counts as contention with no lock present: Windows reports mid-create races as
+ * EPERM/EACCES, but those codes also mean an impossible lock (ACL denial, read-only mount); past this it surfaces. */
 const LOCK_TRANSIENT_MS = 250
 const LOCK_UNLINK_ATTEMPTS = 3
-
-/**
- * In-process chains keyed by lock path; the value is the always-settled tail so a
- * rejected write never poisons the next waiter.
- */
+/** In-process chains keyed by lock path; the value is the always-settled tail so a rejected write never poisons the next waiter. */
 const LOCAL_CHAINS = new Map<string, Promise<unknown>>()
 
-/**
- * Run `task` under the cross-process lock, serialized with every in-process holder
- * of the same lock path.
- */
+/** Run `task` under the cross-process lock, serialized with every in-process holder of the same lock path. */
 export function withProcessLock<T>(
   lockFile: string,
   options: LockOptions | undefined,
   task: () => Promise<T>,
 ): Promise<T> {
+  const start = async (): Promise<T> => {
+    const release = await acquireLock(lockFile, options ?? {})
+    try {
+      return await task()
+    } finally {
+      await release()
+    }
+  }
   const previous = LOCAL_CHAINS.get(lockFile) ?? Promise.resolve()
-  const run = previous.then(
-    () => runExclusive(lockFile, options ?? {}, task),
-    () => runExclusive(lockFile, options ?? {}, task),
-  )
+  const run = previous.then(start, start)
   LOCAL_CHAINS.set(
     lockFile,
     run.catch((): undefined => undefined),
   )
   return run
-}
-
-async function runExclusive<T>(lockFile: string, options: LockOptions, task: () => Promise<T>): Promise<T> {
-  const release = await acquireLock(lockFile, options)
-  try {
-    return await task()
-  } finally {
-    await release()
-  }
 }
 
 async function acquireLock(lockFile: string, options: LockOptions): Promise<() => Promise<void>> {
@@ -114,35 +87,31 @@ async function acquireLock(lockFile: string, options: LockOptions): Promise<() =
   const waitMs = options.waitMs ?? LOCK_WAIT_MS
   const retryMs = options.retryMs ?? LOCK_RETRY_MS
   const started = Date.now()
-  // Only a lock we never once observed can be a permanent permission error: under
-  // real contention the lock is created and unlinked constantly.
+  // Only a lock we never once observed can be a permanent permission error: under real contention
+  // the lock is created and unlinked constantly.
   let sawLock = false
   while (true) {
     try {
       const handle = await fsImpl.open(lockFile, 'wx', 0o600)
       return async (): Promise<void> => {
-        try {
-          await handle.close()
-        } catch {
-          // swallow-ok: a failed close on a released lock handle is not actionable here
-        }
-        // A leaked lock costs the next writer a full stale wait, so retry the unlink
-        // (Windows can hold it briefly after close).
+        // A failed close on a released lock handle is not actionable here.
+        await handle.close().catch(() => {})
+        // A leaked lock costs the next writer a full stale wait, so retry the unlink (Windows can
+        // hold it briefly after close).
         for (let attempt = 0; attempt < LOCK_UNLINK_ATTEMPTS; attempt += 1) {
           try {
             await fsImpl.unlink(lockFile)
             return
           } catch (unlinkError) {
             const unlinkCode = unlinkError?.code
-            if (unlinkCode === 'ENOENT') return
-            if (attempt === LOCK_UNLINK_ATTEMPTS - 1) return
+            if (unlinkCode === 'ENOENT' || attempt === LOCK_UNLINK_ATTEMPTS - 1) return
             await sleep(retryMs)
           }
         }
       }
     } catch (error) {
-      // Windows reports contention on an exclusive create as EPERM/EACCES/EBUSY
-      // rather than EEXIST when the other process is mid-create or mid-delete.
+      // Windows reports contention on an exclusive create as EPERM/EACCES/EBUSY rather than EEXIST
+      // when the other process is mid-create or mid-delete.
       const code = error?.code
       if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error
       if (code !== 'EEXIST' && !sawLock && Date.now() - started > LOCK_TRANSIENT_MS) {
@@ -192,13 +161,8 @@ export async function writeJsonAtomic(file: string, value: unknown, options: Wri
     await handle.close()
     handle = null
   } catch (error) {
-    if (handle) {
-      try {
-        await handle.close()
-      } catch {
-        // swallow-ok: the temp file is removed right below; a close error is not fixable
-      }
-    }
+    // The temp file is removed right below, so a close error here is not fixable.
+    if (handle) await handle.close().catch(() => {})
     await removeQuietly(fsImpl, tmp)
     throw error
   }
@@ -232,24 +196,12 @@ async function syncDir(fsImpl: JsonFileSystem, dir: string): Promise<void> {
   } catch {
     // swallow-ok: directory fsync is not supported on every platform or filesystem
   } finally {
-    if (handle) {
-      try {
-        await handle.close()
-      } catch {
-        // swallow-ok: the directory handle is best effort, like the fsync above
-      }
-    }
+    if (handle) await handle.close().catch(() => {})
   }
 }
 
-/**
- * Read one JSON state file.
- *
- * The three outcomes are deliberately distinct: `missing` (never written), `corrupt` (the bytes
- * are not JSON — the caller may quarantine them and recover) and `unreadable` (the file exists
- * but could not be read: EACCES/EPERM/EISDIR/IO). A merely unreadable file must not be renamed
- * away: that would turn a transient permission problem into a lost host list.
- */
+/** Read one JSON state file. The outcomes are distinct: `missing` (never written), `corrupt` (not JSON — the caller
+ * may quarantine and recover) and `unreadable` (EACCES/EPERM/EISDIR/IO); that one is never renamed away. */
 export async function readJsonFile(file: string, options: ReadJsonOptions = {}): Promise<JsonReadResult> {
   const fsImpl = options.fs ?? fs
   const logger = options.logger ?? console
@@ -282,6 +234,7 @@ async function lockExists(fsImpl: JsonFileSystem, lockFile: string): Promise<boo
     await fsImpl.stat(lockFile)
     return true
   } catch {
+    // swallow-ok: a lock that cannot be inspected is treated as absent
     return false
   }
 }

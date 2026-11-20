@@ -1,26 +1,12 @@
-/**
- * Read-only `~/.ssh/config` parsing and alias discovery for the subset `ssh_config(5)` defines; `Include`, `Match` and `ProxyCommand` are reported, not guessed.
- */
+/** Read-only `~/.ssh/config` parsing and alias discovery for the `ssh_config(5)` subset; `Include`, `Match` and
+ * `ProxyCommand` are reported, never guessed. */
 
 /** One `Host` (or `Match`) block and the options that follow it. */
-export interface SshConfigEntry {
-  patterns: string[]
-  negated: string[]
-  options: Record<string, string[]>
-  line: number
-}
-
+export type SshConfigEntry = { patterns: string[]; negated: string[]; options: Record<string, string[]>; line: number }
 /** One keyword the parser deliberately does not act on. */
-export interface UnsupportedLine {
-  line: number
-  keyword: string
-}
-
+export type UnsupportedLine = { line: number; keyword: string }
 /** One line the parser could not use. */
-export interface MalformedLine {
-  line: number
-  text: string
-}
+export type MalformedLine = { line: number; text: string }
 
 export interface SshConfigParseResult {
   entries: SshConfigEntry[]
@@ -30,14 +16,7 @@ export interface SshConfigParseResult {
 }
 
 /** One concrete alias listed for the host picker. */
-export interface DiscoveredAlias {
-  alias: string
-  host: string
-  user: string | null
-  port: number
-  source: 'config'
-}
-
+export type DiscoveredAlias = { alias: string; host: string; user: string | null; port: number; source: 'config' }
 /** A fully resolved destination, whether it came from an alias or was typed literally. */
 export interface ResolvedDestination {
   input: string
@@ -62,20 +41,11 @@ export interface ResolvedSshAlias {
 }
 
 /** One parsed `keyword value` line. */
-interface ConfigLine {
-  keyword: string
-  value: string
-}
-
+type ConfigLine = { keyword: string; value: string }
 /** Options accepted by the resolution helpers. */
-export interface SshResolveOptions {
-  home?: string
-}
-
+export type SshResolveOptions = { home?: string }
 /** Options accepted by `resolveDestination`. */
-export interface SshDestinationOptions extends SshResolveOptions {
-  configText?: string
-}
+export type SshDestinationOptions = SshResolveOptions & { configText?: string }
 
 const KNOWN_OPTIONS = new Set([
   'hostname',
@@ -92,13 +62,14 @@ const KNOWN_OPTIONS = new Set([
   'preferredauthentications',
 ])
 
+// `Host = x` keeps `= x` as its value: the first whitespace wins unless `=` comes before it.
 function parseLine(line: string): ConfigLine | null {
   const trimmed = line.trim()
   if (trimmed === '' || trimmed.startsWith('#')) return null
   const eq = trimmed.indexOf('=')
   const space = trimmed.search(/\s/)
-  let keyword
-  let value
+  let keyword: string
+  let value: string
   if (eq >= 0 && (space < 0 || eq < space)) {
     keyword = trimmed.slice(0, eq)
     value = trimmed.slice(eq + 1)
@@ -135,6 +106,11 @@ export function parseSshConfig(text: unknown): SshConfigParseResult {
   const globals: Record<string, string[]> = {}
   const unsupported: UnsupportedLine[] = []
   const malformed: MalformedLine[] = []
+  // A repeated keyword appends: `IdentityFile` may legitimately appear several times in one block.
+  const appendOption = (target: Record<string, string[]>, key: string, value: string) => {
+    target[key] ??= []
+    target[key].push(value)
+  }
   let current: SshConfigEntry | null = null
 
   const lines = String(text ?? '').split(/\r?\n/)
@@ -152,8 +128,7 @@ export function parseSshConfig(text: unknown): SshConfigParseResult {
     }
     if (keyword === 'match') {
       unsupported.push({ line: lineNo, keyword: 'Match' })
-      // Options inside a Match block only apply under conditions we cannot
-      // evaluate; skip them until the next Host block.
+      // Options inside a Match block only apply under conditions we cannot evaluate; skip to the next Host.
       current = { patterns: ['__dsh_remote_go_match_block__'], negated: [], options: {}, line: lineNo }
       entries.push(current)
       continue
@@ -163,8 +138,7 @@ export function parseSshConfig(text: unknown): SshConfigParseResult {
       continue
     }
     if (!KNOWN_OPTIONS.has(keyword)) {
-      // Unknown-but-harmless options are ignored; only flag keywords that would
-      // change meaning if misread.
+      // Unknown-but-harmless options are ignored; only flag keywords that would change meaning if misread.
       if (keyword === 'proxycommand' || keyword === 'certificatefile')
         unsupported.push({ line: lineNo, keyword: parsed.keyword })
       continue
@@ -173,13 +147,7 @@ export function parseSshConfig(text: unknown): SshConfigParseResult {
       malformed.push({ line: lineNo, text: lines[index] })
       continue
     }
-    if (current) {
-      current.options[keyword] = current.options[keyword] ?? []
-      current.options[keyword].push(parsed.value)
-    } else {
-      globals[keyword] = globals[keyword] ?? []
-      globals[keyword].push(parsed.value)
-    }
+    appendOption(current ? current.options : globals, keyword, parsed.value)
   }
   return { entries, globals, unsupported, malformed }
 }
@@ -195,8 +163,7 @@ export function matchHostPattern(pattern: string, value: string): boolean {
 
 export function entryMatches(entry: SshConfigEntry, alias: string): boolean {
   if (entry.patterns.includes('__dsh_remote_go_match_block__')) return false
-  const positive = entry.patterns.some((pattern) => matchHostPattern(pattern, alias))
-  if (!positive) return false
+  if (!entry.patterns.some((pattern) => matchHostPattern(pattern, alias))) return false
   return !entry.negated.some((pattern) => matchHostPattern(pattern, alias))
 }
 
@@ -212,12 +179,8 @@ function effectiveOptions(
   const apply = (options: Record<string, string[]>) => {
     for (const [key, values] of Object.entries(options)) {
       const expanded = values.map((value) => expandTokens(value, tokens))
-      if (ADDITIVE_OPTIONS.has(key)) {
-        out[key] = [...(out[key] ?? []), ...expanded]
-        continue
-      }
-      if (out[key] !== undefined) continue
-      out[key] = expanded
+      if (ADDITIVE_OPTIONS.has(key)) out[key] = [...(out[key] ?? []), ...expanded]
+      else if (out[key] === undefined) out[key] = expanded
     }
   }
   apply(globals)
@@ -252,26 +215,15 @@ export function resolveSshAlias(
   const user = firstPass.user?.[0] ?? null
   const rawPort = firstPass.port?.[0] ?? '22'
   const port = /^\d+$/.test(rawPort) ? Number(rawPort) : 22
+  // Second pass: `%h`/`%p` now resolve to the values the first pass found.
   const tokens = { h: host, r: user ?? '~', p: String(port), d: home }
   const resolved = effectiveOptions(parsed.globals, parsed.entries, alias, tokens)
   const identityFiles = (resolved.identityfile ?? []).map((value) => expandTilde(value, home))
   const proxyJump = resolved.proxyjump?.[0] ?? null
-  return {
-    alias,
-    host,
-    user,
-    port,
-    identityFiles,
-    proxyJump,
-    source: 'config',
-  }
+  return { alias, host, user, port, identityFiles, proxyJump, source: 'config' }
 }
 
-/**
- * List concrete, manually-dialable aliases from the config. Wildcard patterns
- * (`*`, `?`) and negations are skipped because they cannot be resolved without
- * a concrete target.
- */
+/** List concrete, manually-dialable aliases: a wildcard or negated pattern cannot resolve without a real target. */
 export function discoverSshAliases(parsed: SshConfigParseResult, options: SshResolveOptions = {}): DiscoveredAlias[] {
   const out: DiscoveredAlias[] = []
   const seen = new Set<string>()
@@ -292,8 +244,7 @@ export function resolveDestination(destination: unknown, options: SshDestination
   const literal = parseDestinationLiteral(text)
   const parsed = parseSshConfig(options.configText ?? '')
   const home = options.home ?? '~'
-  const aliases = discoverSshAliases(parsed, { home })
-  const alias = aliases.find((item) => item.alias === text)
+  const alias = discoverSshAliases(parsed, { home }).find((item) => item.alias === text)
   if (alias) {
     const resolved = resolveSshAlias(parsed, text, { home })
     return {
@@ -307,8 +258,8 @@ export function resolveDestination(destination: unknown, options: SshDestination
       source: 'config',
     }
   }
-  // Literal destination: inherit globals (e.g. a global IdentityFile) but not
-  // Host blocks that do not match the literal text.
+  // Literal destination: inherit globals (e.g. a global IdentityFile) but not Host blocks that do not match
+  // the literal text, which is why the entries list passed below is empty.
   const tokens = { h: literal.host, r: literal.user ?? '~', p: String(literal.port ?? 22), d: home }
   const globals = effectiveOptions(parsed.globals, [], text, tokens)
   const identityFiles = (globals.identityfile ?? []).map((value) => expandTilde(value, home))
@@ -325,7 +276,7 @@ export function resolveDestination(destination: unknown, options: SshDestination
 }
 
 function parseDestinationLiteral(text: string): { user: string | null; host: string; port: number | null } {
-  let user = null
+  let user: string | null = null
   let rest = text
   const at = rest.lastIndexOf('@')
   if (at >= 0) {
@@ -333,7 +284,7 @@ function parseDestinationLiteral(text: string): { user: string | null; host: str
     rest = rest.slice(at + 1)
   }
   let host = rest
-  let port = null
+  let port: number | null = null
   if (rest.startsWith('[')) {
     const close = rest.indexOf(']')
     if (close > 0) {
@@ -343,6 +294,7 @@ function parseDestinationLiteral(text: string): { user: string | null; host: str
     }
   } else {
     const colon = rest.lastIndexOf(':')
+    // Only an unbracketed `host:port`: a bare IPv6 literal keeps every colon.
     if (colon > 0 && rest.indexOf(':') === colon) {
       const maybePort = rest.slice(colon + 1)
       if (/^\d{1,5}$/.test(maybePort)) {
