@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-go",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DSH 插件：在本地 DSH 里通过 SSH 使用远端 DSH（主机条切换、整窗接管、连接进度与日志、重启/关闭远端、远端文件下载、给本地 AI 会话的主机清单 / 体检报告 / 受控远端命令，三者默认隐藏按需解锁；插件自带 Node + npx，数据留在远端 ~/.dsh） | DSH plugin: use a remote DSH over SSH inside your local DSH (host switcher, full-window UI, connect progress and log, remote restart/stop, remote file downloads, and a host list / diagnosis report / guarded remote command for local AI sessions — hidden until the session unlocks them; plugin-managed Node + npx, data stays in the remote ~/.dsh)",
   "keywords": [
     "deepseek",
