@@ -375,6 +375,17 @@ function clickInside(row, target) {
 }
 const CARRIER_URL = 'http://127.0.0.1:43210/?token=abc'
 const settle = (ms = 25) => new Promise((resolve) => setTimeout(resolve, ms))
+/* Poll a predicate instead of racing it with one sleep: the carrier reveal waits for two display frames (`nextLocalFrame`
+ * gives each 60 ms when no `requestAnimationFrame` exists), so a fixed 140 ms wait lost on a slow runner and the suite
+ * failed one run in three under coverage instrumentation. */
+async function eventually(check, timeoutMs = 2_000, intervalMs = 20) {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) return false
+    await settle(intervalMs)
+  }
+  return true
+}
 /** The shell's browser bridge: it hands out a lease per seat and records the leases it gets back. */
 function desktopBridge(leases, released) {
   return {
@@ -1815,7 +1826,7 @@ test('a carrier is revealed only after its guest has painted', async () => {
     const view = carrierView(root)
     const calls = guestScripts(view, (code) => (code.includes('requestAnimationFrame') ? 'ok' : 'installed'))
     fire(view, 'did-stop-loading')
-    await settle(140)
+    await eventually(() => root.style.opacity === '')
     assert.ok(ranScript(calls, 'requestAnimationFrame'), 'the reveal must wait for a frame of the guest')
     assert.equal(root.style.opacity, '', 'a painted guest lets the carrier become opaque')
     assert.equal(root.style.pointerEvents, '')
@@ -2638,14 +2649,14 @@ test('the dialog stack cycles Tab inside the top dialog', () => {
 })
 
 test('the modal renders aria-labelledby and a focusable dialog element', () => {
-  const html = renderOf(C.Modal, { title: '标题', onClose: noop }, 'body')
+  const html = renderOf(C.Modal, { title: '标题', onClose: noop })
   assert.match(html, /role="dialog"/)
   assert.match(html, /aria-labelledby="drg-dialog-title-\d+"/)
   assert.match(html, /<h2[^>]*id="drg-dialog-title-\d+"/)
   assert.match(html, /tabindex="-1"/)
   assert.doesNotMatch(html, /aria-modal="true"/, 'the stack marks only the top dialog at mount')
   // A non-dismissible dialog also disables its header ×: the button was the remaining way to close it under a request.
-  const busy = renderOf(C.Modal, { title: '标题', onClose: noop, dismissible: false, busy: true }, 'body')
+  const busy = renderOf(C.Modal, { title: '标题', onClose: noop, dismissible: false, busy: true })
   const close = /<button[^>]*aria-label="Close"[^>]*>/.exec(busy)
   assert.ok(close)
   assert.match(close[0], /disabled=""/)

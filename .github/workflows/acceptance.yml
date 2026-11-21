@@ -30,8 +30,6 @@ permissions:
 env:
   # Nightly runs are still strict: a missing prerequisite must fail, never skip.
   DSH_E2E_STRICT: '1'
-  # ~280 MB per run; the key is bumped manually when a new build is needed.
-  DSH_DESKTOP_INSTALLER_URL: https://download.deepseek.com/desktop/dsh-latest-windows-x64.exe
 
 jobs:
   web:
@@ -53,6 +51,12 @@ jobs:
 
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The suites import `dist/`, which is Git-ignored. `pnpm test:*` builds through its `pretest` hook, but this
+      # workflow drives `node --test` itself: without this step browser-carrier.test.ts dies on
+      # `ERR_MODULE_NOT_FOUND dist/src/proxy/index.js` while web.e2e.ts still passes.
+      - name: Build the plugin
+        run: pnpm run build
 
       - name: Resolve the DSH harness version
         id: harness-version
@@ -143,12 +147,25 @@ jobs:
       - name: Install dependencies (no lifecycle scripts)
         run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # desktop.e2e.ts imports `dist/` (Git-ignored) for the version floor; the tarball the suite installs is built by
+      # `prepack` during `pnpm pack`, but the suite's own imports are resolved before any test runs.
+      - name: Build the plugin
+        run: pnpm run build
+
+      # The app is one shell around the harness this plugin runs in, so the leg must install an app at or above
+      # `engines.dsh`; `desktop-installer.mjs` reads the app's own update feed and refuses an older one. The cache key
+      # carries the resolved version instead of a hand-bumped literal: a frozen cache served 0.2.2-rc.1 for a week
+      # while the floor moved to 0.2.2-rc.3, and the nightly failed on a 120 s selector timeout that blamed the plugin.
+      - name: Resolve the desktop installer
+        id: installer
+        run: node scripts/desktop-installer.mjs >> $env:GITHUB_OUTPUT
+
       - name: Cache the desktop installer
-        # ~280 MB per run; the key is bumped manually when a new build is needed.
+        # ~280 MB per run; the version in the key is what makes a new build invalidate it.
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\dsh-desktop-installer.exe
-          key: dsh-desktop-installer-v1
+          key: dsh-desktop-installer-v1-${{ steps.installer.outputs.version }}
 
       - name: Refuse to test a machine with a running instance
         shell: pwsh
@@ -173,9 +190,9 @@ jobs:
             }
             Remove-Item $target -Force
           }
-          Write-Host "downloading $env:DSH_DESKTOP_INSTALLER_URL"
+          Write-Host "downloading ${{ steps.installer.outputs.url }} (${{ steps.installer.outputs.version }})"
           $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri $env:DSH_DESKTOP_INSTALLER_URL -OutFile $target -TimeoutSec 900
+          Invoke-WebRequest -Uri '${{ steps.installer.outputs.url }}' -OutFile $target -TimeoutSec 900
           $size = (Get-Item $target).Length
           if ($size -lt 100MB) { Write-Error "installer is suspiciously small: $size bytes"; exit 1 }
           Write-Host "downloaded $target ($([math]::Round($size / 1MB)) MB)"
@@ -256,6 +273,19 @@ jobs:
           Write-Host "file version: $version"
           Write-Host "installer stalled: $($result.stalled)"
           "DSH_DESKTOP_EXE=$($result.exe)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Require the installed app to match the resolved installer
+        shell: pwsh
+        # A silent install can settle on a payload the runner already had, and testing that would repeat the stale-app
+        # failure the versioned cache key exists to end: assert the app the leg is about to drive.
+        run: |
+          $expected = '${{ steps.installer.outputs.version }}'
+          $actual = (Get-Item -LiteralPath $env:DSH_DESKTOP_EXE).VersionInfo.FileVersion
+          Write-Host "resolved=$expected installed=$actual"
+          if ($actual -ne $expected) {
+            Write-Error "the installed app ($actual) does not match the resolved installer ($expected)"
+            exit 1
+          }
 
       - name: Report tool versions
         shell: pwsh

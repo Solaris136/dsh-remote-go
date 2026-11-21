@@ -473,7 +473,7 @@ test('two consecutive failed probes re-attach to the restarted remote without a 
 test('one failed probe followed by a healthy one is not a restart', async () => {
   let probes = 0
   let resolutions = 0
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     remoteStatus: async () => {
       probes += 1
       return probes === 1 ? null : 200
@@ -498,7 +498,7 @@ test('one failed probe followed by a healthy one is not a restart', async () => 
 test('a proxy failure alone does not judge a restart and repeated reports are coalesced', async () => {
   let probes = 0
   let resolutions = 0
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     remoteStatus: async () => {
       probes += 1
       return 200
@@ -585,7 +585,7 @@ test('the heartbeat follows the service settings', async () => {
       },
     ],
   ]
-  for (const [name, check] of cases) {
+  for (const [, check] of cases) {
     const { service, host, runtime } = await connectedService({
       remoteStatus: async () => {
         return 200
@@ -1051,7 +1051,7 @@ test('teardown does not wait forever for a stuck tunnel rebuild', async () => {
 
 test('a tunnel rebuild bumps the view revision and replaces the listener', async () => {
   const { tunnels, factory } = tunnelRecorder()
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     tunnelFactory: factory,
     tunnelProbe: async () => false,
     remoteStatus: async () => 200,
@@ -1074,7 +1074,7 @@ test('a tunnel rebuild bumps the view revision and replaces the listener', async
 test('a healthy local listener is not rebuilt for one failed request', async () => {
   const { tunnels, factory } = tunnelRecorder()
   let probes = 0
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     tunnelFactory: factory,
     tunnelProbe: async () => true,
     remoteStatus: async () => {
@@ -1096,7 +1096,7 @@ test('a healthy local listener is not rebuilt for one failed request', async () 
 test('a broken tunnel under a healthy remote is rebuilt once instead of flapping', async () => {
   const { tunnels, factory } = tunnelRecorder()
   let probes = 0
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     tunnelFactory: factory,
     remoteStatus: async () => {
       probes += 1
@@ -1123,7 +1123,7 @@ test('a broken tunnel under a healthy remote is rebuilt once instead of flapping
 
 test('a failed tunnel rebuild backs off instead of rebuilding in a storm', async () => {
   let calls = 0
-  const { service, host, runtime } = await connectedService({
+  const { service, runtime } = await connectedService({
     tunnelProbe: async () => false,
     tunnelFactory: async () => {
       calls += 1

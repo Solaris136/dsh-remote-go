@@ -8,6 +8,8 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import puppeteer from 'puppeteer-core'
+import { MIN_DSH_VERSION } from '../../dist/src/constants.js'
+import { compareVersions } from '../../dist/src/version.js'
 import { assertLightAndDark } from './browser-contrast.ts'
 import {
   isWindows,
@@ -17,6 +19,7 @@ import {
   resolveDesktopApp,
   resolvePnpm,
   runCommand,
+  runStep,
   seedFixtureHost,
   skipOrFail,
   stopChild,
@@ -210,6 +213,10 @@ test('the desktop shell renders the host-management window with legible buttons'
   let browser = null
   let page = null
   const consoleErrors = []
+  // Node records a failed subtest on the parent instead of rejecting `t.test()`, so the failures are collected for the
+  // artifacts below; `fatal` holds an error thrown outside any subtest (packing, CDP, the renderer never appearing).
+  const failures = []
+  let fatal = null
   const onSignal = (signal) => {
     void stopChild(app?.child).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143))
   }
@@ -224,7 +231,15 @@ test('the desktop shell renders the host-management window with legible buttons'
     })
     const appVersion = desktopAppVersion(exe) ?? 'unknown'
     console.log(`[desktop-e2e] app=${exe} appVersion=${appVersion} plugin=${path.basename(tarball)}`)
-    await t.test('the desktop profile installs the packed plugin by hand', async () => {
+    // An app older than the floor cannot load this plugin, and the symptom is a 120 s timeout on `#drg-host-row` that
+    // reads like a plugin defect: a cached 0.2.2-rc.1 installer kept the nightly red for a week that way. Say it here.
+    if (compareVersions(appVersion, MIN_DSH_VERSION) < 0) {
+      throw new Error(
+        `the installed desktop app is ${appVersion}, older than the supported floor ${MIN_DSH_VERSION}: ` +
+          'install a current build (acceptance.yml resolves one from the update feed)',
+      )
+    }
+    await runStep(t, failures, 'the desktop profile installs the packed plugin by hand', async () => {
       const profileDir = await installDesktopProfile({
         dshHome,
         tarball,
@@ -239,67 +254,75 @@ test('the desktop shell renders the host-management window with legible buttons'
     const connected = await connectOverCdp({ port })
     browser = connected.browser
     console.log(`[desktop-e2e] chromium=${connected.version?.Browser ?? 'unknown'} cdpPort=${port}`)
-    await t.test('the renderer runs the plugin and opens host management from the switcher row', async () => {
-      const skipped = await dismissOnboarding(browser, consoleErrors)
-      console.log(`[desktop-e2e] onboarding ${skipped ? `dismissed via "${skipped}"` : 'not shown'}`)
-      page = await findPage(browser, isAppUrl, 180_000)
-      page.on('console', (message) => {
-        if (message.type() === 'error') consoleErrors.push(message.text())
-      })
-      page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
-      await page.setViewport({ width: 1400, height: 950 }).catch(() => {})
-      // An occluded desktop window pauses the dialog fade-in at opacity 0, which would make the contrast measurement
-      // depend on window focus.
-      await emulateReducedMotion(page)
-      console.log(
-        `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,
-      )
-      await openManageWindow(page)
-      await closeManageWindow(page)
-      await openManageWindow(page)
-      assert.equal(
-        await page.$('[data-testid="settings-remote-section"]'),
-        null,
-        'the plugin must not register a settings section',
-      )
-      const applied = await page.evaluate(() => {
-        const win = document.querySelector('[data-testid="manage-window"]')
-        if (!win) return { present: false }
-        const style = getComputedStyle(win)
-        return {
-          present: true,
-          hasPluginClass: win.closest('.drg-root.drg-overlay') !== null,
-          primary: style.getPropertyValue('--dsw-alias-button-primary-fill').trim(),
-        }
-      })
-      assert.equal(applied.present, true, 'the host-management window did not mount in the desktop shell')
-      assert.equal(applied.hasPluginClass, true, 'the plugin root class is missing around the desktop window')
-      assert.ok(
-        applied.primary !== '',
-        'the host button-primary token did not resolve in the desktop shell (stylesheet missing or the shell dropped the token)',
-      )
-    })
-    await t.test('every button label is legible in light and dark mode', async () => {
+    await runStep(
+      t,
+      failures,
+      'the renderer runs the plugin and opens host management from the switcher row',
+      async () => {
+        const skipped = await dismissOnboarding(browser, consoleErrors)
+        console.log(`[desktop-e2e] onboarding ${skipped ? `dismissed via "${skipped}"` : 'not shown'}`)
+        page = await findPage(browser, isAppUrl, 180_000)
+        page.on('console', (message) => {
+          if (message.type() === 'error') consoleErrors.push(message.text())
+        })
+        page.on('pageerror', (error) => consoleErrors.push(`pageerror: ${error.message}`))
+        await page.setViewport({ width: 1400, height: 950 }).catch(() => {})
+        // An occluded desktop window pauses the dialog fade-in at opacity 0, which would make the contrast measurement
+        // depend on window focus.
+        await emulateReducedMotion(page)
+        console.log(
+          `[desktop-e2e] renderer locale=${JSON.stringify(await page.evaluate(() => [navigator.language, navigator.languages]))}`,
+        )
+        await openManageWindow(page)
+        await closeManageWindow(page)
+        await openManageWindow(page)
+        assert.equal(
+          await page.$('[data-testid="settings-remote-section"]'),
+          null,
+          'the plugin must not register a settings section',
+        )
+        const applied = await page.evaluate(() => {
+          const win = document.querySelector('[data-testid="manage-window"]')
+          if (!win) return { present: false }
+          const style = getComputedStyle(win)
+          return {
+            present: true,
+            hasPluginClass: win.closest('.drg-root.drg-overlay') !== null,
+            primary: style.getPropertyValue('--dsw-alias-button-primary-fill').trim(),
+          }
+        })
+        assert.equal(applied.present, true, 'the host-management window did not mount in the desktop shell')
+        assert.equal(applied.hasPluginClass, true, 'the plugin root class is missing around the desktop window')
+        assert.ok(
+          applied.primary !== '',
+          'the host button-primary token did not resolve in the desktop shell (stylesheet missing or the shell dropped the token)',
+        )
+      },
+    )
+    await runStep(t, failures, 'every button label is legible in light and dark mode', async () => {
       await assertLightAndDark(page, 'desktop')
     })
-    await t.test('the shell logged no console errors while rendering the window', async () => {
+    await runStep(t, failures, 'the shell logged no console errors while rendering the window', async () => {
       assert.deepEqual(consoleErrors, [], `console errors:\n${consoleErrors.join('\n')}`)
     })
   } catch (error) {
-    await writeFailureArtifacts({
-      dir: process.env.DSH_DESKTOP_E2E_ARTIFACTS ?? null,
-      page,
-      logs: app?.logs ?? [],
-      consoleErrors,
-      error,
-      name: 'desktop-e2e',
-    })
-    throw error
+    fatal = error
   } finally {
+    if (fatal || failures.length > 0) {
+      await writeFailureArtifacts({
+        dir: process.env.DSH_DESKTOP_E2E_ARTIFACTS ?? null,
+        page,
+        logs: app?.logs ?? [],
+        consoleErrors,
+        error: fatal ?? failures[0],
+        name: 'desktop-e2e',
+      })
+    }
     if (browser) await browser.disconnect().catch(() => {})
     if (app) await app.stop()
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
     await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
   }
+  if (fatal) throw fatal
 })
