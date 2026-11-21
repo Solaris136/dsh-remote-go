@@ -23,6 +23,7 @@ import {
   resolveDshCli,
   resolvePnpm,
   runCommand,
+  runStep,
   seedFixtureHost,
   skipOrFail,
   stopChild,
@@ -134,6 +135,8 @@ test('dsh web renders the host-management window with legible buttons', { timeou
   let session = null
   let page = null
   let consoleErrors = []
+  const failures = []
+  let fatal = null
   const onSignal = (signal) => {
     void stopChild(server?.child).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143))
   }
@@ -160,13 +163,13 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     console.log(
       `[web-e2e] harness=${harness.kind} plugin=${path.basename(tarball)} dependency=${dependency} dsh=${process.env.DSH_VERSION ?? 'unknown'}`,
     )
-    await t.test('the plugin is installed from the packed tarball, not a link', async () => {
+    await runStep(t, failures, 'the plugin is installed from the packed tarball, not a link', async () => {
       assert.match(path.basename(tarball), /^dsh-remote-go-\d+\.\d+\.\d+.*\.tgz$/)
       assert.match(dependency, /^file:.*\.tgz$/)
       assert.equal(dependency.startsWith('link:'), false)
     })
     server = await startWeb({ harness, env: childEnv })
-    await t.test('the isolated dsh web serves a token URL', async () => {
+    await runStep(t, failures, 'the isolated dsh web serves a token URL', async () => {
       assert.match(server.url, /^http:\/\/127\.0\.0\.1:\d+\/\?token=[A-Za-z0-9_-]{20,}$/)
       assert.ok(server.child.pid, 'the web process has no pid')
     })
@@ -183,7 +186,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
     await page.setViewport({ width: 1400, height: 950 })
     consoleErrors = collectPageErrors(page, { pageError: 'pageerror: ' })
     await page.goto(server.url, { waitUntil: 'networkidle2', timeout: 120_000 })
-    await t.test('the app shell loads and the launch token becomes a clean URL', async () => {
+    await runStep(t, failures, 'the app shell loads and the launch token becomes a clean URL', async () => {
       await waitFor(page, () => !location.search.includes('token='), { timeout: 60_000 })
       assert.equal(new URL(page.url()).search, '')
       await waitFor(
@@ -192,7 +195,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
         { timeout: 60_000 },
       )
     })
-    await t.test('the host API and the same-origin remote view seat are mounted', async () => {
+    await runStep(t, failures, 'the host API and the same-origin remote view seat are mounted', async () => {
       const origin = new URL(server.url).origin
       const probe = (requestPath, headers = {}) =>
         new Promise((resolve, reject) => {
@@ -234,7 +237,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       assert.match(view.type, /text\/plain/)
       assert.doesNotMatch(view.body, /DeepSeek Harness/)
     })
-    await t.test('the host-management window mounts from the switcher row', async () => {
+    await runStep(t, failures, 'the host-management window mounts from the switcher row', async () => {
       await dismissFirstRunDialogs(page)
       try {
         await openManageWindow(page)
@@ -265,10 +268,10 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       assert.ok(applied.radius !== '', 'the host panel radius token did not resolve (stylesheet missing)')
       assert.equal(applied.dialogRadius, applied.radius, 'the host-management dialog must use the host panel radius')
     })
-    await t.test('every button label is legible in light and dark mode', async () => {
+    await runStep(t, failures, 'every button label is legible in light and dark mode', async () => {
       await assertLightAndDark(page, 'web')
     })
-    await t.test('every theme token the plugin reads is published by the host', async () => {
+    await runStep(t, failures, 'every theme token the plugin reads is published by the host', async () => {
       // The built artifact: `exports["./client"]` names this file in the installed package too.
       const source = readClientArtifact().toString('utf8')
       const tokens = [...new Set([...source.matchAll(/--dsw-[a-z0-9-]+/g)].map((found) => found[0]))]
@@ -287,7 +290,7 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       )
       assert.deepEqual(missing, [], `unresolved theme token(s): ${missing.join(', ')}`)
     })
-    await t.test('a third-party theme’s token overrides reach the window and stay legible', async () => {
+    await runStep(t, failures, 'a third-party theme’s token overrides reach the window and stay legible', async () => {
       const overrides = {
         '--dsw-alias-bg-base': '#1e2430',
         '--dsw-alias-bg-layer-1': '#242c3b',
@@ -360,24 +363,27 @@ test('dsh web renders the host-management window with legible buttons', { timeou
       )
       await assertMeasured(await measureStable(page, { scheme: 'dark' }), 'dark/restored')
     })
-    await t.test('loading the app and the host-management window logged no console errors', async () => {
+    await runStep(t, failures, 'loading the app and the host-management window logged no console errors', async () => {
       assertNoPageErrors(consoleErrors, { label: 'console errors', includeResourceErrors: true })
     })
   } catch (error) {
-    await writeFailureArtifacts({
-      dir: process.env.DSH_WEB_E2E_ARTIFACTS ?? null,
-      page,
-      logs: server?.logs ?? [],
-      consoleErrors,
-      error,
-      name: 'web-e2e',
-    })
-    throw error
+    fatal = error
   } finally {
+    if (fatal || failures.length > 0) {
+      await writeFailureArtifacts({
+        dir: process.env.DSH_WEB_E2E_ARTIFACTS ?? null,
+        page,
+        logs: server?.logs ?? [],
+        consoleErrors,
+        error: fatal ?? failures[0],
+        name: 'web-e2e',
+      })
+    }
     if (session) await session.close().catch(() => {})
     if (server) await server.stop()
     process.removeListener('SIGINT', onSignal)
     process.removeListener('SIGTERM', onSignal)
     await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
   }
+  if (fatal) throw fatal
 })

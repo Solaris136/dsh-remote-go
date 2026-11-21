@@ -10,6 +10,19 @@ export function skipOrFail(t, reason) {
   if (STRICT) throw new Error(`E2E prerequisite missing (DSH_E2E_STRICT=1): ${reason}`)
   t.skip(reason)
 }
+/* node:test records a failed subtest on its parent instead of rejecting the awaited `t.test()` promise, so a subtest
+ * inside a try/catch never reaches the catch — which is why a failing desktop run uploaded no failure artifacts.
+ * Failures are collected here so the E2E's `finally` can still write them before the page and the app go away. */
+export async function runStep(t, failures, name, body) {
+  await t.test(name, async () => {
+    try {
+      await body()
+    } catch (error) {
+      failures.push(error)
+      throw error
+    }
+  })
+}
 // Puppeteer's waitForFunction polls with requestAnimationFrame, and Chromium pauses rAF for background pages: a guest
 // that had already booted could sit out the timeout. Timer polling is throttled but never stopped, so every E2E
 // readiness check goes through this helper instead of rAF.
