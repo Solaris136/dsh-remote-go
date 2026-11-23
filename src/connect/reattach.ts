@@ -17,6 +17,7 @@ import { LinkCancelled, linkActionState } from './guards.js'
 import type { ConnectLogWriter, PhaseWriter } from './guards.js'
 import type { AcceptedResult } from './links.js'
 import { rememberBound } from './ownership.js'
+import { scheduleConnectRetry } from './pipeline.js'
 import { openTunnelFor } from './transport.js'
 import { verifyRemoteUi } from './verify.js'
 
@@ -192,6 +193,10 @@ async function runReattach(ctx: ConnectCtx, runtime: HostRuntime, info: Reattach
       caller: 'script',
       emit: false,
     })
+    // A re-attach that lost the transport (the stall the probe saw first) leaves no usable link: hand it back to the
+    // retry loop, otherwise the error card would wait for a click while the network has already recovered. A policy
+    // failure (no launch token, version mismatch) stays terminal — reconnecting cannot fix it.
+    if (runtime.ssh?.connected !== true || view.code === 'network') scheduleConnectRetry(ctx, runtime)
     ctx.emitState()
   } finally {
     // A listener this action created must never outlive the action (see `runRestart`).

@@ -470,7 +470,15 @@ export const TABLE: RuleTable = {
     apply: (state, event) =>
       move(state, {
         reconnectAttempts: event.attempt,
-        progress: progressOf('reconnecting', { attempt: event.attempt, max: event.max }),
+        // A slow retry says when it comes back rather than how many quick attempts were spent: after the fast budget
+        // the attempt count alone would read as "the 7th of 5 tries".
+        progress:
+          event.slow === true
+            ? progressOf('reconnect-waiting', {
+                attempt: event.attempt,
+                retryInSec: Math.round(event.delayMs / 100) / 10,
+              })
+            : progressOf('reconnecting', { attempt: event.attempt, max: event.max }),
       }),
     effects: (_state, event) => [arm('reconnect', event.delayMs), emit()],
   },

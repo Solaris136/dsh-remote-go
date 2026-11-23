@@ -82,24 +82,55 @@ export function scheduleReconnect(ctx: WatchdogCtx, runtime: HostRuntime, onDue:
   const settings = ctx.settings()
 
   if (!runtime.entry.autoReconnect || !settings.autoReconnect.enabled) return skip()
-  const maxAttempts = settings.autoReconnect.maxAttempts
-  if (runtime.reconnectAttempts >= maxAttempts) {
+  // `maxAttempts` bounds the fast, exponential phase; the patience window then adds slow attempts on top, so a
+  // multi-minute outage (reboot, VPN re-dial, carrier handoff) still recovers instead of parking at an error card.
+  // `maxAttempts: 0` and a spent patience window both stay "no retry", exactly as before.
+  const fastAttempts = Math.max(0, Number(settings.autoReconnect.maxAttempts) || 0)
+  const slowDelayMs = Math.max(0, Number(ctx.timers.reconnectSlowDelayMs) || 0)
+  const patienceMs = Math.max(0, Number(ctx.timers.reconnectPatienceMs) || 0)
+  const slowAttempts = fastAttempts > 0 && slowDelayMs > 0 ? Math.floor(patienceMs / slowDelayMs) : 0
+  const totalAttempts = fastAttempts + slowAttempts
+  if (totalAttempts <= 0 || runtime.reconnectAttempts >= totalAttempts) {
+    if (slowAttempts > 0) {
+      ctx.progress.log(
+        runtime,
+        'warn',
+        `auto reconnect gave up after ${totalAttempts} attempts (${fastAttempts} fast + ${slowAttempts} slow, about ${Math.round(patienceMs / 60_000)} min)`,
+      )
+    }
     const view = toErrorView(
       errors.network({
-        zh: `连接已断开，自动重连 ${maxAttempts} 次均失败。远端任务可能仍在运行。`,
-        en: `The connection dropped and ${maxAttempts} automatic retries failed. Remote tasks may still be running.`,
+        zh: `连接已断开，自动重连 ${totalAttempts} 次均失败。远端任务可能仍在运行。`,
+        en: `The connection dropped and ${totalAttempts} automatic retries failed. Remote tasks may still be running.`,
       }),
     )
-    const event = { type: 'reconnect.gaveup' as const, maxAttempts, view }
+    const event = { type: 'reconnect.gaveup' as const, maxAttempts: totalAttempts, view }
     void dispatch(effectsOf(ctx), runtime, event, scopeFactsFor(ctx, runtime, event), { caller: 'timer' })
     return
   }
   const attempt = runtime.reconnectAttempts + 1
+  const slow = attempt > fastAttempts
   const baseDelayMs = settings.autoReconnect.baseDelayMs
-  const delay = randomDelay(baseDelayMs, baseDelayMs * 2 ** Math.min(attempt, 4))
+  const delay = slow
+    ? randomDelay(slowDelayMs * 0.85, slowDelayMs * 1.15)
+    : randomDelay(baseDelayMs, baseDelayMs * 2 ** Math.min(attempt, 4))
   const seconds = Math.round(delay / 100) / 10
-  ctx.progress.log(runtime, 'warn', `link lost; retrying in ${seconds}s (attempt ${attempt}/${maxAttempts})`)
-  const scheduled = { type: 'reconnect.scheduled' as const, attempt, max: maxAttempts, delayMs: delay }
+  if (slow) {
+    // The slow phase is long by design: one line when it starts and every fifth attempt after it, the rest at debug.
+    const slowIndex = attempt - fastAttempts
+    const level = slowIndex === 1 || slowIndex % 5 === 0 ? 'info' : 'debug'
+    ctx.progress.log(runtime, level, `still offline; retrying in ${seconds}s (slow retry ${slowIndex}/${slowAttempts})`)
+  } else {
+    ctx.progress.log(runtime, 'warn', `link lost; retrying in ${seconds}s (attempt ${attempt}/${fastAttempts})`)
+  }
+  // `max` stays the fast budget the setting names; a slow retry reports its own count on the card instead.
+  const scheduled = {
+    type: 'reconnect.scheduled' as const,
+    attempt,
+    max: fastAttempts,
+    delayMs: delay,
+    ...(slow ? { slow: true } : {}),
+  }
   void dispatch(effectsOf(ctx), runtime, scheduled, scopeFactsFor(ctx, runtime, scheduled), {
     caller: 'timer',
     armReconnect: (ms) => {

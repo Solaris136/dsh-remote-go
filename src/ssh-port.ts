@@ -42,6 +42,8 @@ export interface SshConnectOptions {
   acceptUnknownHostKey?: boolean
   readyTimeoutMs?: number
   keepaliveIntervalMs?: number
+  /** Unanswered keepalives before the adapter declares the transport dead; the adapter default rides out a stall. */
+  keepaliveCountMax?: number
   /** First-use confirmation; returning `true` continues the handshake. */
   onHostKey?: (info: HostKeyInfo) => boolean | Promise<boolean>
   sock?: Duplex

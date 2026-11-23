@@ -172,6 +172,10 @@ const STRINGS = {
   'progress.verifying': ['正在验证远端界面…', 'Verifying the remote UI…'],
   'progress.ready': ['就绪', 'Ready'],
   'progress.reconnecting': ['断线重连中（第 {attempt}/{max} 次）…', 'Reconnecting ({attempt}/{max})…'],
+  'progress.reconnect-waiting': [
+    '链路仍未恢复，{retryInSec} 秒后继续重试（第 {attempt} 次）…',
+    'The link is still down; retrying in {retryInSec}s (attempt {attempt})…',
+  ],
   'progress.restarting-remote': [
     '远端 DSH 正在重启，正在重新挂载界面…',
     'The remote DSH is restarting; re-attaching the remote UI…',

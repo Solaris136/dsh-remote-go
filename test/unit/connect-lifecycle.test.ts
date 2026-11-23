@@ -12,6 +12,7 @@ import {
 } from '../helpers/fake-remote.ts'
 import { errors } from '../../dist/src/errors.js'
 import { SshConnection } from '../../dist/src/ssh.js'
+import { remoteHeartbeatTick } from '../../dist/src/watchdog.js'
 const WEB_INFO = {
   pid: 4242,
   port: 38123,
@@ -490,5 +491,83 @@ test('a first connect that fails with error+close synchronously is not retried',
   assert.equal(runtime.reconnectTimer, null)
   assert.equal(service.snapshot().hosts[0].error.code, 'network')
   assert.doesNotMatch(JSON.stringify(frames), /"code":"reconnecting"/)
+  await service.shutdown()
+})
+
+test('the patience window keeps retrying after the fast budget is spent, then gives up', async () => {
+  let failing = false
+  let dials = 0
+  const { service } = await makeTestService({
+    sshFactory: (options) => {
+      dials += 1
+      const ssh = new FakeSsh({ options })
+      if (failing) ssh.connect = async () => Promise.reject(linkDown())
+      return ssh
+    },
+    // Two fast attempts, then floor(90 / 15) = six slow ones: the budget is a count either way, so this is exact.
+    reconnectSlowDelayMs: 15,
+    reconnectPatienceMs: 90,
+  })
+  await service.saveSettings({ autoReconnect: { enabled: true, maxAttempts: 2, baseDelayMs: 10 } })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  const frames = []
+  service.on('state', (state) => {
+    const code = state.hosts[0]?.progress?.code
+    if (code) frames.push(code)
+  })
+
+  failing = true
+  runtime.ssh.simulateClose()
+  await waitFor(() => runtime.status === 'error' && runtime.progress === null, {
+    timeoutMs: 20_000,
+    label: 'patience spent',
+  })
+  assert.equal(dials, 1 + 8, 'the fast budget plus the patience window decides the dial count')
+  assert.equal(runtime.reconnectAttempts, 8)
+  assert.equal(frames.includes('reconnect-waiting'), true, 'the slow phase names its wait instead of a retry count')
+  assert.equal(frames.includes('reconnecting'), true, 'the fast phase keeps its own wording')
+  assert.match(JSON.stringify(service.snapshot().hosts[0].logs), /auto reconnect gave up after 8 attempts/)
+  await service.shutdown()
+})
+
+test('a re-attach that fails with a network error re-enters the retry loop instead of parking', async () => {
+  let failing = false
+  let dials = 0
+  const { service } = await makeTestService({
+    sshFactory: (options) => {
+      dials += 1
+      const ssh = new FakeSsh({ options })
+      if (failing) ssh.connect = async () => Promise.reject(linkDown())
+      return ssh
+    },
+    // The remote stops answering, and the re-attach then fails while the transport still reports "connected".
+    remoteStatus: async () => null,
+    resolveRemote: async () => {
+      failing = true
+      throw linkDown()
+    },
+  })
+  await service.saveSettings({ autoReconnect: { enabled: true, maxAttempts: 1, baseDelayMs: 10 } })
+  const host = await createHost(service)
+  await service.connect(host.id)
+  await waitFor(() => service.snapshot().hosts[0].status === 'connected', { label: 'connected' })
+  const runtime = service.runtimes.get(host.id)
+  const frames = []
+  service.on('state', (state) => {
+    const code = state.hosts[0]?.progress?.code
+    if (code) frames.push(code)
+  })
+
+  await remoteHeartbeatTick(service.ctx, runtime)
+  await waitFor(() => runtime.status === 'error' && runtime.progress === null, {
+    timeoutMs: 20_000,
+    label: 'retry budget spent',
+  })
+  assert.equal(frames.includes('reconnecting'), true, 'the failed re-attach arms a full reconnect')
+  assert.ok(dials >= 2, 'the retry loop actually dialled again after the re-attach failed')
+  assert.doesNotMatch(JSON.stringify(service.snapshot().hosts[0].logs), /internal/)
   await service.shutdown()
 })

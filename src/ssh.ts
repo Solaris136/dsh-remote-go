@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import ssh2 from '../vendor/ssh2.bundle.cjs'
 import type { Client as Ssh2Client, ClientChannel, SftpSession } from '../vendor/ssh2.bundle.cjs'
+import { SSH_KEEPALIVE_COUNT_MAX, SSH_KEEPALIVE_INTERVAL_MS } from './constants.js'
 import { errors } from './errors.js'
 import { fingerprintFromBlob } from './known-hosts.js'
 import { classifySshFailure, closedError, isHostKeyError } from './ssh-failures.js'
@@ -39,6 +40,7 @@ interface SshResolvedOptions extends SshConnectOptions {
   knownHostFingerprints: string[]
   readyTimeoutMs: number
   keepaliveIntervalMs: number
+  keepaliveCountMax: number
   home: string
   identityFiles: string[]
 }
@@ -89,7 +91,8 @@ export class SshConnection extends EventEmitter implements SshPort {
       pinnedFingerprint: null,
       knownHostFingerprints: [],
       readyTimeoutMs: 20_000,
-      keepaliveIntervalMs: 15_000,
+      keepaliveIntervalMs: SSH_KEEPALIVE_INTERVAL_MS,
+      keepaliveCountMax: SSH_KEEPALIVE_COUNT_MAX,
       home: homedir(),
       ...options,
       identityFiles: options.identityFiles ?? [],
@@ -166,7 +169,7 @@ export class SshConnection extends EventEmitter implements SshPort {
         username: this.options.username ?? undefined,
         readyTimeout: this.options.readyTimeoutMs,
         keepaliveInterval: this.options.keepaliveIntervalMs,
-        keepaliveCountMax: 3,
+        keepaliveCountMax: this.options.keepaliveCountMax,
         tryKeyboard: false,
         ...(this.options.sock ? { sock: this.options.sock } : {}),
         ...authConfig,

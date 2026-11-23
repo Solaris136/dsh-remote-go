@@ -280,7 +280,7 @@ interface SettingsView {
   connectTimeoutSec: number
   autoReconnect: { enabled: boolean; maxAttempts: number; baseDelayMs: number }
   /**
-   * 已连接主机的轻量探活。连续两次失败才会触发远端重挂（§5.6）；默认开启、30s。
+   * 已连接主机的轻量探活。连续三次失败才会触发远端重挂（§5.6）；默认开启、30s。
    */
   remoteHeartbeat: { enabled: boolean; intervalSec: number }  // intervalSec 5–600
   hostKeyPolicy: 'first-use' | 'strict'
@@ -388,7 +388,7 @@ data: {}
 ```
 
 `download` 只在下载任务启动、进度变化、完成或失败时推送；客户端仍应在收到 `POST /downloads` 后轮询 `/status` 一次，避免 EventSource 尚未订阅时漏帧。
-`remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续两次探活失败，开始重挂）、`recovered`（探活恢复）。若故障来源是代理/隧道，同一个 recovered 之前会先问本地监听器：能应答就不动；不应答才重建 listener（先建新、再关旧，失败按 30s→120s 退避）。重建会把 `RemoteView.viewRev` 自增（本地回环端口变了），承载方据此重新 `GET /hosts/:id/open` 并导航；关闭旧 listener 会短暂断开现有 WebSocket 与下载，属预期。同一类疑似上报在 recovered 后 15s 内不重复开新事件。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。拿不到新 launch token 的远端（例如日志被 supervisor 重定向）不会被接管，而是以 `remote-unreachable` 结束并保留主机、配置与 SSH。
+`remote-unreachable` 只在远端自重启的**一次**事件里推送最多三帧：`suspected`（第一次失败 / 代理故障，尚在确认）、`confirmed`（连续三次探活失败，开始重挂）、`recovered`（探活恢复）。若故障来源是代理/隧道，同一个 recovered 之前会先问本地监听器：能应答就不动；不应答才重建 listener（先建新、再关旧，失败按 30s→120s 退避）。重建会把 `RemoteView.viewRev` 自增（本地回环端口变了），承载方据此重新 `GET /hosts/:id/open` 并导航；关闭旧 listener 会短暂断开现有 WebSocket 与下载，属预期。同一类疑似上报在 recovered 后 15s 内不重复开新事件。重挂过程本身通过 `state` 的 `restarting-remote` 进度表达，客户端不需要依赖该事件才能恢复。拿不到新 launch token 的远端（例如日志被 supervisor 重定向）不会被接管，而是以 `remote-unreachable` 结束并保留主机、配置与 SSH。
 
 ### `GET /events/logs`（SSE，连接日志通道；同一套准入与栅栏）
 新增于 v2.12。`text/event-stream`：**一条流多路复用**所有「日志可见」的主机（`status` ∈ `connecting` /
@@ -741,6 +741,8 @@ patch 与**当前生效值**深合并（不是与默认值合并），因此 `{ 
 - `remote-dsh-running`（`count`）、`downloading-node`（`version` / `mb`）、`installing-node`（`version`）、`bootstrapping`（`level`，恒为 `npx`）
 - `bootstrap-first-run`（`version`）、`bootstrap-fetching`、`bootstrap-installed`、`bootstrap-progress`（`detail`）
 - `starting-remote`（`level`）、`tunneling`、`verifying`、`ready`、`reconnecting`（`attempt` / `max`）
+- `reconnect-waiting`（`attempt` / `retryInSec`）：自动重连的慢速阶段（快速预算用尽后每约 30s 一次，最长 10 分钟），
+  文案是「链路仍未恢复，{retryInSec} 秒后继续重试」，不显示次数分母
 - `restarting-remote`（`reason`，可选 `pid` / `port` / `level`）：本地重启远端或远端自重启后的重挂；状态保持
   `connecting`，阶段只走 `start` → `tunnel` → `verifying`
 - `stopping-remote`（可选 `pid` / `port`）：显式关闭远端 DSH；状态保持 `connecting`，只走 `start` 阶段，

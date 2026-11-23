@@ -21,6 +21,13 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # TypeScript 7 is the native compiler: its npm package no longer ships the JavaScript compiler API that
+      # scripts/build.mjs and scripts/check-architecture.mjs import (`ts.ScriptTarget`, `ts.createSourceFile`). Moving
+      # the build to TypeScript 7 is a tooling migration of its own, so major updates stay parked (patches still flow).
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
 
   # GitHub Actions used by .github/workflows.
   - package-ecosystem: github-actions

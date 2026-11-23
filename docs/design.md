@@ -234,6 +234,14 @@ connect(id)：解析目标 address → ~/.ssh/config 别名 → host/user/port/i
 - SSH 连接 `close` 且用户期望保持连接时：状态转 `disconnected`，按设置做指数退避重连（`autoReconnect.maxAttempts`）。
   预算只在**成功**（`markConnected`）与**用户手动连接**（`startConnect`）时归零；失败继续排下一次，用户在提示框点「取消 / 拒绝」或提示超时则不自动重试。
   连接期间（含 `[probe]` / `[bootstrap]` / 指纹提示）的断线同样按 `network`（`reason=ssh-closed`）处理并进入重连。
+- **弱网下的两段式重试**：`autoReconnect.maxAttempts` 只定义快速阶段（指数退避 + 抖动）。快速预算用尽后进入慢速
+  阶段：每约 30s 重试一次，最长 10 分钟（`REMOTE_RECONNECT_SLOW_DELAY_MS` / `REMOTE_RECONNECT_PATIENCE_MS`），
+  该阶段卡片显示 `reconnect-waiting`（「链路仍未恢复，N 秒后继续重试」），日志只在慢速阶段的第 1 次与每第 5 次
+  落 info、其余 debug。两段预算仍**只由 `scheduleReconnect` 决定**、只由成功 attach 或用户 connect 归零；
+  `maxAttempts: 0` 与关闭自动重连仍然完全不重试。这样一次多分钟的断网（远端起不来、VPN 重拨、移动网络切换）
+  能自己恢复，而不会在 20 多秒后停在错误卡片等一次点击。
+- **传输层容忍一次停顿**：SSH keepalive 每 15s 一次，容忍 4 次未应答（约 60s）才判死（`SSH_KEEPALIVE_COUNT_MAX`）；
+  移动网络切换、VPN 重协商或拥塞造成的短暂停顿不再直接断链（原为 3 次 / 约 45s）。
 - 手动断开：关隧道；`keepAlive=stop` 同时停远端，`idle` 延迟停止，`keep` 保留远端。
 - **空闲计时器只是「空闲主机」的策略**：任何一次新的连接（`startConnect`）与每次成功挂载（`markConnected`）都会取消它；计时器触发时若
   `desired==='connected'` / `status==='connected'` / 仍有隧道，直接返回 `still-wanted` 且**不释放** SSH（旧实现会把用户刚接回来的链路杀掉并留下
@@ -270,7 +278,7 @@ restart(id)（同一条 SSH 会话）
 远端 DSH 可能自己重启（插件市场更新、supervisor、远端重启），而启动命令固定 `--port 0`，所以**重启后端口一定变化**，且市场发起的重启不会写插件的 `run/web.json`。处理分三层：
 
 1. **故障上报**：同源代理或隧道的 `ECONNREFUSED` / `ECONNRESET` 只上报一次 `remote-unreachable` 疑似事件（SSE 同名事件带 `phase: suspected`），由探活确认，不把一次请求失败当成进程重启。同一类上报在 recovered 后有 15s 冷却窗口，避免「隧道坏、远端健康」时反复抖动。
-2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭并即时生效）用 `remoteHttpStatus` 探一次远端端口。只有**连续两次**探活失败才判定远端不可用；两次之间有一次成功就清零。疑似事件触发的确认同样要两次探活，间隔约 0.75–1.2s。若远端健康但页面请求失败（典型是隧道坏了），恢复阶段先**问本地监听器**：能应答（任何 HTTP 状态都算）就保持不动；本地不应答才重建监听器（同一远端端口、token 不变），而不是把远端判成重启。重建是**先建新 listener、再关旧的**（避免无监听窗口），失败时保留旧 listener 并按 30s→120s 退避，不会因单个 `forwardOut` 失败或坏 listener 反复重建。
+2. **轻量心跳**：连接成功后每 `remoteHeartbeat.intervalSec`（默认 30s，可在设置里关闭并即时生效）用 `remoteHttpStatus` 探一次远端端口。只有**连续三次**探活失败才判定远端不可用；三次之间只要有一次成功就清零。疑似事件触发的确认同样要三次探活，间隔约 2.5–3.5s（`REMOTE_UNREACHABLE_CONFIRM_DELAY_MS` / `REMOTE_UNREACHABLE_RECHECK_DELAY_MS`）。判定次数与间隔按弱网取值：慢链路上一次探活超时很常见，而真重启仍会在第一次失败后的数秒内被确认并开始重挂。若远端健康但页面请求失败（典型是隧道坏了），恢复阶段先**问本地监听器**：能应答（任何 HTTP 状态都算）就保持不动；本地不应答才重建监听器（同一远端端口、token 不变），而不是把远端判成重启。重建是**先建新 listener、再关旧的**（避免无监听窗口），失败时保留旧 listener 并按 30s→120s 退避，不会因单个 `forwardOut` 失败或坏 listener 反复重建。
    - 新 listener 的本地端口是新的随机端口，因此重建成功后 `remote.viewRev` +1：承载方重新 `GET /hosts/:id/open` 并导航（桌面 guest 的地址就是回环 `localPort`，不 bump 会停在已关闭端口）。重建关闭旧 listener 会**短暂断开现有 WebSocket 与下载**，这是预期行为（文档与 CHANGELOG 已写明）；浏览器 iframe 会随 `viewRev` 重新加载同一路径。
    - 重建本身也是一次一次性动作：持 link-work 令牌，`finally` 在令牌失效时关闭自己创建的 listener 并清 `remote.localPort`/`tunnel`；`disconnect` / `removeHost` / `shutdown` 会先取消再 **await** `runtime.tunnelRepair`，因此不会在 teardown 之后才发布 listener。
 3. **重挂而不是全量重连**（`reattachRemote`，状态 `connecting` + 进度码 `restarting-remote`）：
@@ -288,6 +296,8 @@ restart(id)（同一条 SSH 会话）
             用户可点「重启」或「重连」（进程扫描只用于解释 `no-token`，不产生接管）
    ```
    运行期发现的新实例属于这条 `keepAlive` 连接对应的主机（同一 `~/.dsh`、同一 profile）时**静默重挂**；重挂发现的 pid 只有显示/承载权，**没有 kill 权**（`run/web.json` 记 `origin: "reattach"`，下一次连接 adoption 也只接管不授权）。重挂成功后 `launched` 只保留与当前监听 pid 相同的条目（包装进程的旧 pid 被清理），所以真实 npx 形态下重启会走 §5.5 的冲突提示而不是静默双实例。远端若将来提供重启广播（SSE / 关闭码），接进同一个 `noteRemoteUnreachable` 入口即可，当前不依赖它。
+
+   重挂失败分两类：**传输问题**（网络类错误，或 SSH 已不可用）说明链路本身已经坏了，失败后立即交回 §5.4 的重试预算自动重拨，不停在错误卡片等用户点击；**策略问题**（拿不到 launch token、版本不符）重连也修不好，保持原有终态与说明。这两类都由 `reattach.ts` 的 `catch` 判断，错误码仍走同一套 `ErrorView`。
 
 ### 5.7 关闭远端 DSH（显式停止）
 `POST /hosts/:id/stop-remote`，管理界面卡片上的「关闭」：这是**显式、破坏性**的一次性动作，
