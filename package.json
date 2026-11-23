@@ -65,7 +65,7 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "@types/node": "^24.19.2",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "esbuild": "0.28.2",
     "js-yaml": "^5.5.0",
