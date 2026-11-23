@@ -157,6 +157,10 @@ export async function makeTestService(overrides = {}) {
     reattachAttempts: overrides.reattachAttempts ?? 2,
     reattachIntervalMs: overrides.reattachIntervalMs ?? 0,
     tunnelRepairSettleMs: overrides.tunnelRepairSettleMs ?? 1000,
+    // The weak-network patience phase is opt-in here: a suite that asserts a spent retry budget must reach it in
+    // milliseconds, so the default stays attempt-only and the patience tests set both values themselves.
+    reconnectSlowDelayMs: overrides.reconnectSlowDelayMs ?? 20,
+    reconnectPatienceMs: overrides.reconnectPatienceMs ?? 0,
   })
   await service.init()
   const result = { service, store, dir, events, facts }

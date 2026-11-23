@@ -722,6 +722,18 @@ describe('fsm: golden event sequences (§6.2 risk 1)', () => {
     assert.deepEqual(scheduled.state.progress, { code: 'reconnecting', params: { attempt: 3, max: 5 } })
     assert.deepEqual(effectOf(scheduled, 'arm'), { type: 'arm', timer: 'reconnect', ms: 4000 })
 
+    // The patience phase retries on a slow cadence: the card says when the next try comes, not "attempt 7 of 25".
+    const slow = transition(
+      stateOf({ status: 'disconnected', desired: 'connected', reconnectAttempts: 6 }),
+      { type: 'reconnect.scheduled', attempt: 7, max: 12, delayMs: 30_000, slow: true },
+      scopeOf(),
+    )
+    assert.deepEqual(slow.state.progress, {
+      code: 'reconnect-waiting',
+      params: { attempt: 7, retryInSec: 30 },
+    })
+    assert.deepEqual(effectOf(slow, 'arm'), { type: 'arm', timer: 'reconnect', ms: 30_000 })
+
     const gaveUp = next(retrying, 'reconnect.gaveup')
     assert.equal(gaveUp.state.status, 'error')
     assert.equal(gaveUp.state.error, ERROR_VIEW)

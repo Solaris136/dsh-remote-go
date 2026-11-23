@@ -7,6 +7,27 @@
 本文件记录用户可感知的变更，格式遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)，日期为 `YYYY-MM-DD`。
 
+## [0.3.2] - 2026-11-23
+
+弱网稳定性补丁：不新增设置项，也不改协议（`API_VERSION` 仍为 `2.12`）。这一版让连接在丢包、高延迟和短暂中断的
+链路上尽量自己恢复，而不是把一次抖动当成断线的终点。
+
+### 修复
+
+- **一次停顿不再算断链**：SSH keepalive 的容忍度从 3 次未应答（约 45s）提高到 4 次（约 60s），移动网络切换、
+  VPN 重协商或拥塞造成的短暂停顿不再被判定为传输死亡。
+- **探活更宽容**：远端界面要**连续三次**探活失败才判定远端不可用（原为两次），失败后的确认与复查间隔从
+  0.75s / 1.2s 放宽到 2.5s / 3.5s，慢链路上的一次超时不会触发不必要的重挂；真重启仍会在数秒内被确认并重挂。
+- **重连不再早退**：`autoReconnect.maxAttempts` 只约束快速指数退避阶段；预算用尽后按约 30s 的慢速节奏继续重试
+  最长 10 分钟，然后才落错误卡片。期间连接窗口显示「链路仍未恢复，N 秒后继续重试」，不再出现偶数次数的倒计时。
+- **重挂失败自动交回重连**：远端自重启的重挂若因传输问题失败（网络类错误，或 SSH 已不可用），不再停在错误卡片
+  等用户点「重连」，而是按同一套重试预算自动重拨；拿不到 launch token、版本不符这类策略性失败仍保持终态。
+
+### 变更
+
+- 自动重连的行为边界不变：`autoReconnect.maxAttempts: 0` 与关闭自动重连仍然完全不重试；预算只在成功挂载或
+  用户手动连接时归零。
+
 ## [0.3.1] - 2026-11-22
 
 维护性补丁：插件行为与协议没有变化（`API_VERSION` 仍是 `2.12`），这一版修的是发布前的验收链路——它决定了 0.3.0
@@ -403,7 +424,9 @@
   命令模板，下载校验 SHA-256。
 - **脱敏**：诊断导出默认屏蔽 token、密码、私钥与家目录。
 
-[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Solaris136/dsh-remote-go/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.3.2
+[0.3.1]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Solaris136/dsh-remote-go/releases/tag/v0.1.0

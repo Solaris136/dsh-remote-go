@@ -110,7 +110,8 @@ export interface EventPayloads {
   'stop.succeeded': NoPayload
   'reattach.requested': { token: number; reason: string }
   'reattach.failed': { view: ErrorView }
-  'reconnect.scheduled': { attempt: number; max: number; delayMs: number }
+  // `slow` marks a patience-phase retry: the fast budget is spent and the link is retried at a fixed slow cadence.
+  'reconnect.scheduled': { attempt: number; max: number; delayMs: number; slow?: boolean }
   'reconnect.gaveup': { maxAttempts: number; view: ErrorView }
   'reconnect.skipped': NoPayload
   'link.cancelled': NoPayload

@@ -390,8 +390,8 @@ async function connectPipeline(ctx: ConnectCtx, runtime: HostRuntime): Promise<v
   }
 }
 
-/** Arm the next automatic attempt; `scheduleReconnect` owns the settings gate and the budget, so a spent budget is reported once. */
-function scheduleConnectRetry(ctx: ConnectCtx, runtime: HostRuntime): void {
+/** Arm the next automatic attempt; `scheduleReconnect` owns the settings gate and the budget, so a spent budget is reported once. Exported for the one-shot actions whose failure leaves no usable transport (`reattach.ts`): they must hand the link back to the same retry loop instead of parking at an error card. */
+export function scheduleConnectRetry(ctx: ConnectCtx, runtime: HostRuntime): void {
   if (ctx.state.disposed === true || runtime.desired !== 'connected') return
   if (!runtime.entry.autoReconnect || !ctx.settings().autoReconnect.enabled) return
   scheduleReconnect(ctx, runtime, () => retryNow(ctx, runtime))

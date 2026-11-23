@@ -26,7 +26,7 @@ dsh-remote-go
 │  ├─ service.ts            公共 facade：装配 ctx（依赖 + 可变状态）并委托给下面 6 个协作者
 │  ├─ connect/              连接管线：目标解析 → transport → probe → 托管 Node → 启动/收养 → 隧道 → 校验；本地重启与远端重挂也在这里
 │  ├─ host-registry.ts      主机 CRUD、设置、快照、key-file 浏览与 ssh 别名发现
-│  ├─ host-lifecycle.ts     重连/空闲计时器、轻量心跳与「连续两次失败」确认、一次性动作令牌、唯一 teardown 路径、shutdown
+│  ├─ host-lifecycle.ts     重连（快速 + 弱网慢速两段）/空闲计时器、轻量心跳与「连续三次失败」确认、一次性动作令牌、唯一 teardown 路径、shutdown
 │  ├─ connect-progress.ts   日志环、日志通道的合帧入口（150ms）、进度码与 npx 行解析
 │  ├─ prompts.ts            指纹确认与远端冲突的用户决定 rendezvous
 │  ├─ host-runtime.ts       每主机 runtime 对象的唯一形状（建/用分开）
@@ -125,7 +125,7 @@ teardown（`host-lifecycle.js#teardownRuntime`）是唯一收尾路径：取消�
   `alongsidePids` 永不 kill。动作内创建的隧道由 `finally` 收尾（令牌失效则关闭并清 `remote.localPort`），
   `openTunnelFor` 在 ssh 已释放时直接抛错，不会把 null 传输交给监听器。取消冲突且未停过任何进程时
   `resumeConnected` 回到原连接。
-- `reattachHost`：由 watchdog 的「连续两次探活失败」调用。`ctx.deps.resolveRemote`（`remote-web.js#resolveRemoteWeb`）
+- `reattachHost`：由 watchdog 的「连续三次探活失败」调用；重挂因传输问题失败时交回重连预算自动重拨。`ctx.deps.resolveRemote`（`remote-web.js#resolveRemoteWeb`）
   只接受同时满足「端口属于该 pid」「cmdline 是同一 profile」「environ 的 DSH_HOME 是同一 home」「最新就绪行命中
   同一端口（有 launch token）」的候选；进程扫描路径只用于给出 `no-token` 解释，不产生接管；版本来自 npx pin 或
   被加载包的 `package.json`，证明不了就保持未知且不写进 registry。通过后 `writeRunRegistry(origin:"reattach")`、

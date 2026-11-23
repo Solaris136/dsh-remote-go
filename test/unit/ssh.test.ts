@@ -45,6 +45,30 @@ test('parseSshKeyType reads the SSH wire key type', () => {
   assert.equal(parseSshKeyType(Buffer.from([0, 0, 0, 99, 1, 2])), 'unknown')
 })
 
+test('the adapter hands ssh2 the keepalive tolerance that rides out a stalled link', async () => {
+  /** One client double that records the config `connect()` received and then reports a completed handshake. */
+  const recording = () => {
+    const client = new EventEmitter()
+    client.config = null
+    client.connect = (config) => {
+      client.config = config
+      queueMicrotask(() => client.emit('ready'))
+    }
+    client.end = () => {}
+    return client
+  }
+  const plain = recording()
+  await sshWith(() => plain).connect()
+  assert.equal(plain.config.keepaliveInterval, 15_000)
+  assert.equal(plain.config.keepaliveCountMax, 4, 'four missed keepalives ride out a ~60s stall')
+  assert.equal(plain.config.readyTimeout, 20_000)
+
+  const tuned = recording()
+  await sshWith(() => tuned, { keepaliveIntervalMs: 5_000, keepaliveCountMax: 6 }).connect()
+  assert.equal(tuned.config.keepaliveInterval, 5_000)
+  assert.equal(tuned.config.keepaliveCountMax, 6, 'an adapter option overrides the tolerant default')
+})
+
 test('toSshError classifies auth, network and host-key failures', () => {
   assert.equal(toSshError(new Error('All configured authentication methods failed'), 'h', 22).code, 'auth')
   assert.equal(toSshError(new Error('connect ECONNREFUSED 1.2.3.4:22'), 'h', 22).code, 'network')

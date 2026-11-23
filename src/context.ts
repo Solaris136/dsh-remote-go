@@ -6,6 +6,8 @@ import {
   REMOTE_CONFLICT_TIMEOUT_MS,
   REMOTE_REATTACH_ATTEMPTS,
   REMOTE_REATTACH_INTERVAL_MS,
+  REMOTE_RECONNECT_PATIENCE_MS,
+  REMOTE_RECONNECT_SLOW_DELAY_MS,
   REMOTE_TUNNEL_REPAIR_SETTLE_MS,
   REMOTE_UNREACHABLE_CONFIRM_DELAY_MS,
   REMOTE_UNREACHABLE_RECHECK_DELAY_MS,
@@ -72,6 +74,10 @@ export interface ServiceTimers {
   reattachAttempts: number
   reattachIntervalMs: number
   tunnelRepairSettleMs: number
+  /** Spacing of the slow retries after the fast reconnect budget (`autoReconnect.maxAttempts`) is spent. */
+  reconnectSlowDelayMs: number
+  /** How long those slow retries keep going before auto-reconnect gives up; 0 keeps the old attempt-only budget. */
+  reconnectPatienceMs: number
 }
 
 export interface ServiceState {
@@ -185,6 +191,8 @@ export interface ServiceOptions extends Partial<ServiceDeps> {
   reattachAttempts?: number
   reattachIntervalMs?: number
   tunnelRepairSettleMs?: number
+  reconnectSlowDelayMs?: number
+  reconnectPatienceMs?: number
 }
 /** What only the facade can supply: `localVersion`/`engineNodeRange` are read live, because the facade can adopt a
  * version mid-connect. */
@@ -212,6 +220,8 @@ export function createCtx(options: ServiceOptions, hooks: ServiceHooks): Ctx {
     reattachAttempts: options.reattachAttempts ?? REMOTE_REATTACH_ATTEMPTS,
     reattachIntervalMs: options.reattachIntervalMs ?? REMOTE_REATTACH_INTERVAL_MS,
     tunnelRepairSettleMs: options.tunnelRepairSettleMs ?? REMOTE_TUNNEL_REPAIR_SETTLE_MS,
+    reconnectSlowDelayMs: options.reconnectSlowDelayMs ?? REMOTE_RECONNECT_SLOW_DELAY_MS,
+    reconnectPatienceMs: options.reconnectPatienceMs ?? REMOTE_RECONNECT_PATIENCE_MS,
   }
   const deps: ServiceDeps = {
     sshFactory: options.sshFactory ?? ((sshOptions) => createSsh2Port(sshOptions)),

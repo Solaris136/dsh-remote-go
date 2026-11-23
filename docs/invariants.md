@@ -146,16 +146,21 @@
 
 ### H2 — 自动重试预算只有一处决定
 
-- **不变量**：重试预算只由 `scheduleReconnect` 决定；用户主动 connect 重置、失败消耗、用户的"否"是终局；
-  定时重试不重置预算，只有成功 attach 才把预算清零。
+- **不变量**：重试预算只由 `scheduleReconnect` 决定；预算是**快速阶段（`autoReconnect.maxAttempts` 次指数退避）+
+  弱网慢速阶段（每约 30s 一次，最长 10 分钟）**两段之和，两段的次数都在这一个函数里算。用户主动 connect 重置、
+  失败消耗、用户的"否"是终局；定时重试不重置预算，只有成功 attach 才把预算清零；`maxAttempts: 0` 与关闭自动
+  重连仍然完全不重试。
 - **为什么**：预算若散落在多个模块，就会出现两条重试循环（或永远不重试）；用户的"否"若再问一次，
-  既是骚扰，也可能被误当成接受，而首次手动连接失败就无限重试会把错误变成不可见的后台循环。
+  既是骚扰，也可能被误当成接受，而首次手动连接失败就无限重试会把错误变成不可见的后台循环。慢速阶段加在这里
+  而不是另一个定时器里，就是为了让"最多试多久"仍然只有一个答案。
 - **由谁保护**：`autoReconnect.maxAttempts is the real retry budget, not one attempt`；
+  `the patience window keeps retrying after the fast budget is spent, then gives up`；
   `a first connect that fails with error+close synchronously is not retried`；
   `a transport that closes while a host-key prompt is open is a dropped link and is retried`；
   `connect.failed only arms a retry while the user still wants the link (H2)`；
   `a successful attach resets the retry budget exactly once`（T-d）。
-- **代码位置**：`src/host-runtime.ts:216`、`src/connect/pipeline.ts:95`、`:515`、`:518`、`src/runtime/fsm.ts:70`、`:74`
+- **代码位置**：`src/host-runtime.ts:216`、`src/host-lifecycle.ts:72`、`src/connect/pipeline.ts:95`、`:515`、`:518`、
+  `src/runtime/fsm.ts:70`、`:74`
   （两处重置点：`src/runtime/rules.ts:114` 用户 connect 重置、`src/runtime/rules.ts:258` 成功 attach 清零）
 - **状态**：COVERED（原 PARTIAL：#14 由 T-d 补齐）
 
@@ -280,8 +285,8 @@
 | 7 | B4 | `src/connect-pipeline.js:1782` | `src/connect/reattach.ts:124`、`:125` | 空 token 直接判失败 | `a re-attach that returns an empty token is an explicit failure`；`resolveRemoteWeb reports no-token instead of accepting an empty token` | COVERED |
 | 8 | B8 | `src/service.js:173` | `src/connect/repair.ts:3`、`src/connect/watchdog.ts:42` | `repairTunnel` 只重建 listener | `a broken tunnel under a healthy remote is rebuilt once instead of flapping`；`a healthy local listener is not rebuilt for one failed request` | COVERED |
 | 9 | H1 | `src/connect-pipeline.js:912` | `src/connect/pipeline.ts:312`、`:313` | 探测没给 `$HOME` 时 `layoutForRuntime` 抛错，而不是造出 `~/.dsh` | `a remote layout refuses an unknown home instead of building a literal-tilde path` | COVERED |
-| 10 | H1 | `src/host-lifecycle.js:320` | `src/host-lifecycle.ts:198`、`src/runtime/rules.ts:340` | 空闲停止用"记住的 home/pid"，不用被清空后的 `facts` | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
-| 11 | H1 | `src/host-lifecycle.js:509` | `src/host-lifecycle.ts:381` | teardown 前把 `remoteHome` 存下来 | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
+| 10 | H1 | `src/host-lifecycle.js:320` | `src/host-lifecycle.ts:185`、`src/runtime/rules.ts:340` | 空闲停止用"记住的 home/pid"，不用被清空后的 `facts` | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
+| 11 | H1 | `src/host-lifecycle.js:509` | `src/host-lifecycle.ts:303` | teardown 前把 `remoteHome` 存下来 | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
 | 12 | H1 | `src/host-runtime.js:63` | `src/host-runtime.ts:297`、`:299`、`:301` | `remoteHome`/`remotePid`/`remoteProfile` 三字段存在 | `the idle policy remembers the real remote home and pid across the teardown` | COVERED |
 | 13 | H2 | `src/connect-pipeline.js:157` | `src/runtime/fsm.ts:74`、`src/runtime/rules.ts:114` | 用户主动 connect 重置预算，定时重试保留已花掉的预算 | `autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |
 | 14 | H2 | `src/connect-pipeline.js:776` | `src/runtime/rules.ts:258` | 只有成功 attach 才重置预算，失败一律消耗 | `a successful attach resets the retry budget exactly once`（T-d）；`autoReconnect.maxAttempts is the real retry budget, not one attempt` | COVERED |

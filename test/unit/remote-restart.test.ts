@@ -405,7 +405,7 @@ test('a restart during a connect and a connect during a restart are refused, not
   await service.shutdown()
 })
 
-test('two consecutive failed probes re-attach to the restarted remote without a conflict prompt', async () => {
+test('three consecutive failed probes re-attach to the restarted remote without a conflict prompt', async () => {
   const resolutions = []
   const { tunnels, factory } = tunnelRecorder()
   const writes = []
@@ -443,7 +443,7 @@ test('two consecutive failed probes re-attach to the restarted remote without a 
   )
 
   assert.deepEqual(phases, ['suspected', 'confirmed'])
-  assert.equal(probes.length >= 2, true, 'two probes are needed before the re-attach')
+  assert.equal(probes.length >= 3, true, 'three probes are needed before the re-attach')
   assert.equal(resolutions.length, 1)
   assert.deepEqual(
     seen.filter((status) => status === 'conflict-pending'),
@@ -463,7 +463,7 @@ test('two consecutive failed probes re-attach to the restarted remote without a 
   assert.equal(runtime.restarts[0].fromPort, 38123)
   assert.equal(runtime.restarts[0].toPort, 38210)
   const messages = messagesOf(service, host.id)
-  assert.match(messages, /remote restart suspected: probe-failed-2/)
+  assert.match(messages, /remote restart suspected: probe-failed-3/)
   assert.match(messages, /re-attach: found remote web pid=4242 port=38210/)
   assert.match(messages, /re-attach: run registry refreshed/)
   assert.match(messages, /re-attached: remote 0.2.2-rc.1/)
